@@ -67,6 +67,7 @@ os.makedirs(os.path.join(root, "blobs"), exist_ok=True)
 plan = {
   "conversation-blobs.db": (${JSON.stringify(LIVE_DB)}, ${JSON.stringify(STORE_DB)}),
   "store.db":              (${JSON.stringify(LIVE_DB)}, ${JSON.stringify(STORE_DB)}),
+  "search-index.db":       (${JSON.stringify(LIVE_DB)}, ${JSON.stringify(STORE_DB)}),
   "marker.json":           (${JSON.stringify(LIVE_CTL)}, ${JSON.stringify(STORE_CTL)}),
 }
 m = json.load(open(mpath))
@@ -87,7 +88,7 @@ const read = `
 import json, os
 live_root = "/home/box/sand-data/${dir}"
 out = {}
-for name in ("conversation-blobs.db", "store.db", "marker.json"):
+for name in ("conversation-blobs.db", "store.db", "search-index.db", "marker.json"):
     p = os.path.join(live_root, name)
     out[name] = open(p).read() if os.path.exists(p) else None
 print(json.dumps(out))
@@ -162,10 +163,12 @@ try {
     say(resultLine.trim());
   }
 
-  step("read the three files back");
+  step("read the four files back");
   const after = JSON.parse(inBox(read).trim().split("\n").pop());
 
-  for (const name of ["conversation-blobs.db", "store.db"]) {
+  // All three agent databases, not the two the first pass named. search-index.db is the one
+  // sand_global_search builds and it lives on the same mount as the other two.
+  for (const name of ["conversation-blobs.db", "store.db", "search-index.db"]) {
     if (after[name] === LIVE_DB) ok(`${name} still holds what the live box wrote`);
     else if (after[name] === STORE_DB) bad(`${name} was overwritten with the store's stale copy -- BOX-6 is back`);
     else bad(`${name} holds neither the live nor the stored content (${JSON.stringify(after[name])})`);

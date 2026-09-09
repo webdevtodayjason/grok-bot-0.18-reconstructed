@@ -300,6 +300,38 @@ let isolationOutput = "";
   }
 }
 
+// ---- TENANT-4: which boxes actually carry the start-window repair -----------------------------
+//
+// The repair is real in the repo and shipped to the host, and it was measured on grok-bot-local-vm.
+// That measurement said nothing about the R750, and on the R750 it was not in effect: read
+// read-only 2026-09-08, /usr/local/bin/start-window was stock (md5 d69219af..., 0 hits for
+// session_alive) on BOTH the demo box and Richard's, because the mechanism runs from the box
+// entrypoint and every running box was started before that entrypoint existed. Only the operator's
+// box carried it, from the old docker-socket run.
+//
+// So the gate names the boxes rather than the code. `session_alive` is the marker the patch writes
+// and is what the patch itself tests for before doing anything, so it is the same predicate on both
+// sides. An operator reading a red leg is told which box is running the stock file, which is the
+// thing they can act on.
+{
+  const LABEL = "every box is running the repaired start-window, not the stock one";
+  const names = (await ssh(`docker ps --filter label=com.titanbot.role=box --format '{{.Names}}'`).catch(() => "")).split("\n").map((n) => n.trim()).filter(Boolean);
+  if (names.length === 0) {
+    unresolved(LABEL, "docker named no running box on this host, so this was not measured");
+  } else {
+    const rows = [];
+    for (const box of names) {
+      const out = (await ssh(`docker exec ${box} sh -c 'md5sum /usr/local/bin/start-window 2>/dev/null | cut -c1-32; grep -c session_alive /usr/local/bin/start-window 2>/dev/null || echo 0' 2>/dev/null || true`).catch(() => "")).split("\n").map((l) => l.trim()).filter(Boolean);
+      rows.push({ box, md5: out[0] ?? "?", hits: Number(out[1] ?? 0) });
+    }
+    const stock = rows.filter((r) => !(r.hits > 0));
+    const detail = rows.map((r) => `${r.box} md5 ${r.md5.slice(0, 8)} ${r.hits > 0 ? "repaired" : "STOCK"}`).join("; ");
+    check(stock.length === 0, LABEL, stock.length === 0
+      ? detail
+      : `${stock.length} of ${rows.length} box(es) run the stock start-window, so a forked agent there meets a black screen: ${detail}`);
+  }
+}
+
 // ---- the four data mounts, which is the one thing that fails silently ------------------------
 // Every agent, transcript and workspace on this box lives in four docker volumes. The hand install
 // mounts them by name; the Coolify stack cannot, because Coolify's compose parser renames a named

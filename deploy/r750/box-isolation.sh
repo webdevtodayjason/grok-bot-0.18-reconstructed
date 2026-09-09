@@ -130,6 +130,9 @@
 #                                  default /etc/titanbot/host-guard.mode
 #   TITANBOT_HOST_GUARD_DROP_PORTS    dropped in drop mode, default 22,47291,8000
 #   TITANBOT_HOST_GUARD_WATCH_PORTS   counted but never dropped, default 2049,445,11434,5000,80,443
+#   TITANBOT_HOST_GUARD_BOX_DROP_PORTS  dropped for BOX SOURCES ONLY, default 2049,445 (the host's
+#                                  NFS and SMB: a customer's sandbox has no business reaching them,
+#                                  and other containers on this shared host do, so it is scoped)
 #   TITANBOT_HOST_TABLE       the nft table, default titanbot_host
 set -uo pipefail
 
@@ -189,6 +192,9 @@ case "$HOST_GUARD" in off|shadow|drop) ;; *) echo "TITANBOT_HOST_GUARD must be o
 # is.
 DROP_PORTS="${TITANBOT_HOST_GUARD_DROP_PORTS:-22,47291,8000}"
 WATCH_PORTS="${TITANBOT_HOST_GUARD_WATCH_PORTS:-2049,445,11434,5000,80,443}"
+# Dropped for BOXES ONLY, whatever the counters say for the rest of the host. See the box-scoped
+# rule below for why these two are decidable today and 11434 and 5000 are not.
+BOX_DROP_PORTS="${TITANBOT_HOST_GUARD_BOX_DROP_PORTS:-2049,445}"
 
 MODE=apply
 case "${1:-}" in
@@ -225,11 +231,68 @@ mapfile -t ON_NET < <(docker network inspect "$NET" \
 
 address_of() { printf '%s\n' "${ON_NET[@]}" | awk -v n="$1" '$1 == n { print $2 }' | head -n 1; }
 
+# Every IPv4 address a container holds, across every network it is on.
+addrs_of_container() {
+  docker inspect "$1" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$v.IPAddress}}{{println}}{{end}}' 2>/dev/null \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u
+}
+
+# The same, but paired with the BRIDGE each address actually lives on. This is what turns an
+# exemption from "anyone claiming this source address" into "this address, arriving on the interface
+# it belongs to".
+#
+# WHY IT MATTERS: coolify-proxy holds 192.168.32.3, and the demo box is 192.168.32.2 on that same
+# bridge. The exemptions accepted on `ip saddr` alone with no input interface, so a tenant with root
+# in its own box -- docker grants NET_RAW by default and these boxes drop no capabilities -- could
+# forge that source from the segment it already shares and be accepted for the whole drop set.
+# Binding each exemption to its own bridge costs the control plane nothing: its default route is
+# 192.168.16.1, not titanbot-net.
+bridge_of_network() {
+  name="$(docker network inspect "$1" --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null)"
+  if [ -n "$name" ] && [ "$name" != "<no value>" ]; then printf '%s\n' "$name"; else printf 'br-%s\n' "$(printf '%s' "$1" | cut -c1-12)"; fi
+}
+
+# "<bridge> <address>" per network the container is on, for each family.
+pairs_of_container() {
+  docker inspect "$1" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$v.NetworkID}} {{$v.IPAddress}} {{$v.GlobalIPv6Address}}{{println}}{{end}}' 2>/dev/null \
+    | while read -r netid v4 v6; do
+        [ -n "$netid" ] || continue
+        br="$(bridge_of_network "$netid")"
+        [ -n "$br" ] || continue
+        case "$v4" in [0-9]*.[0-9]*.[0-9]*.[0-9]*) printf '4 %s %s\n' "$br" "$v4" ;; esac
+        case "$v6" in *:*) printf '6 %s %s\n' "$br" "$v6" ;; esac
+      done | sort -u
+}
+
+# And every GLOBAL IPv6 address, the same way. This is not decoration and it is not symmetry for its
+# own sake: `ip saddr` in an inet table matches IPv4 ONLY, while the two drop lines below match on
+# iifname and so cover both families. An exemption written only as `ip saddr` therefore lets an
+# exempt container past on IPv4 and drops it on IPv6 -- the one asymmetry that can take away the
+# panel this machine is administered from, with the way back in being the panel that just stopped
+# working. Measured on the R750 2026-09-09 while the guard was already in drop mode: the coolify
+# bridge carries a global IPv6 prefix, its own gateway address on that bridge is `fib daddr type
+# local`, sshd listens on [::]:22 and [::]:47291 and docker-proxy on [::]:8000, and five coolify
+# containers hold global IPv6 addresses there. Nothing had hit it yet only because Coolify happens
+# to address this host by its IPv4 address today; one AAAA answer would have changed that.
+# A container with no IPv6 gets no IPv6 line: docker prints an absent address as Go's "invalid IP",
+# and a rule built out of that would match nothing while looking like it worked. The grep for a
+# colon is what keeps that string out.
+addrs6_of_container() {
+  docker inspect "$1" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$v.GlobalIPv6Address}}{{println}}{{end}}' 2>/dev/null \
+    | grep -E '^[0-9a-fA-F:]+:[0-9a-fA-F:]*$' | sort -u
+}
+
 # The boxes, by the label every install carries, intersected with what is actually on this network.
 mapfile -t BOX_NAMES < <(docker ps --filter label=com.titanbot.role=box --format '{{.Names}}' | sort)
 BOX_ADDRS=()
 BOX_LIST=()
+# EVERY address a box holds, not only its address on this network. The bridge table below is about
+# this network, so BOX_ADDRS stays as it was; the host guard's box-scoped drop is about the host,
+# which a box reaches from whichever of its addresses it likes, so that one needs all of them.
+BOX_ALL_ADDRS=()
 for name in "${BOX_NAMES[@]}"; do
+  mapfile -t box_every < <(addrs_of_container "$name")
+  for a in "${box_every[@]}"; do [ -n "$a" ] && BOX_ALL_ADDRS+=("$a"); done
   addr="$(address_of "$name")"
   [ -n "$addr" ] || continue
   BOX_ADDRS+=("$addr")
@@ -260,30 +323,9 @@ PROXY_ADDR="$(address_of "$PROXY_NAME")"
 HOST_GUARD_BLOCKED=""
 EXEMPT_ADDRS=()
 EXEMPT_ADDRS6=()
+EXEMPT_PAIRS=()
+EXEMPT_PAIRS6=()
 
-# Every IPv4 address a container holds, across every network it is on.
-addrs_of_container() {
-  docker inspect "$1" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$v.IPAddress}}{{println}}{{end}}' 2>/dev/null \
-    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u
-}
-
-# And every GLOBAL IPv6 address, the same way. This is not decoration and it is not symmetry for its
-# own sake: `ip saddr` in an inet table matches IPv4 ONLY, while the two drop lines below match on
-# iifname and so cover both families. An exemption written only as `ip saddr` therefore lets an
-# exempt container past on IPv4 and drops it on IPv6 -- the one asymmetry that can take away the
-# panel this machine is administered from, with the way back in being the panel that just stopped
-# working. Measured on the R750 2026-09-09 while the guard was already in drop mode: the coolify
-# bridge carries a global IPv6 prefix, its own gateway address on that bridge is `fib daddr type
-# local`, sshd listens on [::]:22 and [::]:47291 and docker-proxy on [::]:8000, and five coolify
-# containers hold global IPv6 addresses there. Nothing had hit it yet only because Coolify happens
-# to address this host by its IPv4 address today; one AAAA answer would have changed that.
-# A container with no IPv6 gets no IPv6 line: docker prints an absent address as Go's "invalid IP",
-# and a rule built out of that would match nothing while looking like it worked. The grep for a
-# colon is what keeps that string out.
-addrs6_of_container() {
-  docker inspect "$1" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$v.GlobalIPv6Address}}{{println}}{{end}}' 2>/dev/null \
-    | grep -E '^[0-9a-fA-F:]+:[0-9a-fA-F:]*$' | sort -u
-}
 
 exempt_container() {
   name="$1"; why="$2"
@@ -293,13 +335,26 @@ exempt_container() {
     HOST_GUARD_BLOCKED="$why: the container $name is running and docker would not tell me its addresses"
     return 0
   fi
-  for a in "${found[@]}"; do EXEMPT_ADDRS+=("$a"); say "exempt $a ($why, $name)"; done
+  for a in "${found[@]}"; do EXEMPT_ADDRS+=("$a"); done
+  # And the bridge each of them arrives on. A bridge name that is not an interface on this host is
+  # the fail-closed case: installing an exemption that cannot match is how the hosting panel this
+  # machine is administered from goes away sixty seconds later.
+  mapfile -t pairs < <(pairs_of_container "$name")
+  for pair in "${pairs[@]}"; do
+    fam="${pair%% *}"; rest="${pair#* }"; br="${rest%% *}"; addr="${rest#* }"
+    if ! ip link show "$br" >/dev/null 2>&1; then
+      HOST_GUARD_BLOCKED="$why: $name holds $addr on a network whose bridge I read as $br, and there is no such interface"
+      continue
+    fi
+    if [ "$fam" = 4 ]; then EXEMPT_PAIRS+=("$br $addr"); say "exempt $addr on $br ($why, $name)"
+    else EXEMPT_PAIRS6+=("$br $addr"); say "exempt $addr on $br ($why, $name, IPv6)"; fi
+  done
   # An absent IPv6 address is not a failure and must never trip the fail-closed latch: most
   # containers on this host have none, and refusing to install the guard because a container is
   # IPv4-only would take the boundary away for a reason that is not a fault.
   mapfile -t found6 < <(addrs6_of_container "$name")
   if [ "${#found6[@]}" -gt 0 ]; then
-    for a in "${found6[@]}"; do EXEMPT_ADDRS6+=("$a"); say "exempt $a ($why, $name, IPv6)"; done
+    for a in "${found6[@]}"; do EXEMPT_ADDRS6+=("$a"); done
   fi
 }
 
@@ -471,6 +526,24 @@ if [ "$MODE" = verify ]; then
         printf "%s\n" "${net%%/*}" | awk -F. "{print \$1\".\"\$2\".\"\$3\".1\"}"
       done' 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u)
     for extra in ${TITANBOT_HOST_ADDRS:-}; do host_addrs+=("$extra"); done
+    # AND THE HOST'S OWN ADDRESSES, discovered on the host side, where this script already runs as
+    # root. Everything the box can work out from inside itself is a bridge gateway -- its default
+    # gateway and each attached subnet's .1 -- so until this line the leg knocked on four doors and
+    # called the house locked. The rule is written on `fib daddr type local`, which covers every
+    # address this machine answers on: the tailnet address and the LAN addresses are doors too, and
+    # if the rule were ever narrowed to a bridge gateway this leg would still have printed PASS.
+    # Measured on the R750 2026-09-08: --verify named 192.168.32.1, 192.168.48.1, 172.31.0.1 and
+    # 192.168.64.1 and never touched 100.110.83.82 or 192.168.0.9/.12/.98, all four of which had to
+    # be probed by hand to establish the drop set actually holds.
+    #
+    # Bridges and veths are left out: a br-* gateway is already in the box-derived list above, and a
+    # veth address is one end of a pair rather than a door. That also keeps the probe inside the
+    # gate's time budget on a host with sixty containers on it.
+    mapfile -t host_own < <(ip -o -4 addr show 2>/dev/null \
+      | awk '$2 !~ /^(br-|veth|docker0|lo)/ { print $4 }' | cut -d/ -f1 \
+      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort -u)
+    for extra in "${host_own[@]}"; do [ -n "$extra" ] && host_addrs+=("$extra"); done
+    mapfile -t host_addrs < <(printf '%s\n' "${host_addrs[@]}" | grep -v '^$' | sort -u)
     if [ "${#host_addrs[@]}" -eq 0 ]; then
       say "BROKEN could not work out any host address from inside $from_name, so this leg proved nothing"
       bad=$((bad + 1))
@@ -491,9 +564,12 @@ if [ "$MODE" = verify ]; then
       if [ -n "$open" ]; then
         # A drop-set port open is the finding. A watch-only port open is what the shadow pass is
         # for, so it is said plainly and does not fail the run until it joins the drop set.
+        # A box-scoped drop port counts as hard here too: this leg probes FROM A BOX, which is
+        # exactly the source that rule drops, so an open 2049 or 445 from a box is a finding and
+        # not a shadow counter.
         hard=""; watched=""
         for p in $open; do
-          case ",$DROP_PORTS," in
+          case ",$DROP_PORTS,$BOX_DROP_PORTS," in
             *",$p,"*) hard="$hard $p" ;;
             *) watched="$watched $p" ;;
           esac
@@ -617,14 +693,37 @@ else
     # entry chain decides "did this arrive on a docker bridge and is it a new TCP connection to this
     # machine", and jumps; the guarded chain holds the exemptions and the ports.
     printf '  chain guarded {\n'
-    if [ "${#EXEMPT_ADDRS[@]}" -gt 0 ]; then
-      EXEMPT_SET="$(IFS=, ; printf '%s' "${EXEMPT_ADDRS[*]}")"
-      printf '    ip saddr { %s } counter accept comment "the hosting panel and the control plane keep their way in"\n' "$EXEMPT_SET"
+    # One accept per bridge, not one flat address set. See pairs_of_container: an exemption matched
+    # on source address alone is claimable by any container that shares that address's L2 segment,
+    # and a box does share one with coolify-proxy.
+    if [ "${#EXEMPT_PAIRS[@]}" -gt 0 ]; then
+      for br in $(printf '%s\n' "${EXEMPT_PAIRS[@]}" | awk '{print $1}' | sort -u); do
+        set4="$(printf '%s\n' "${EXEMPT_PAIRS[@]}" | awk -v b="$br" '$1 == b { print $2 }' | sort -u | tr '\n' ',' | sed 's/,$//')"
+        [ -n "$set4" ] || continue
+        printf '    iifname "%s" ip saddr { %s } counter accept comment "the hosting panel and the control plane keep their way in, on the bridge that address lives on"\n' "$br" "$set4"
+      done
     fi
     # One line per address family, because one line cannot cover both. See addrs6_of_container.
-    if [ "${#EXEMPT_ADDRS6[@]}" -gt 0 ]; then
-      EXEMPT_SET6="$(IFS=, ; printf '%s' "${EXEMPT_ADDRS6[*]}")"
-      printf '    ip6 saddr { %s } counter accept comment "the same containers, over IPv6"\n' "$EXEMPT_SET6"
+    if [ "${#EXEMPT_PAIRS6[@]}" -gt 0 ]; then
+      for br in $(printf '%s\n' "${EXEMPT_PAIRS6[@]}" | awk '{print $1}' | sort -u); do
+        set6="$(printf '%s\n' "${EXEMPT_PAIRS6[@]}" | awk -v b="$br" '$1 == b { print $2 }' | sort -u | tr '\n' ',' | sed 's/,$//')"
+        [ -n "$set6" ] || continue
+        printf '    iifname "%s" ip6 saddr { %s } counter accept comment "the same containers, over IPv6, on their own bridge"\n' "$br" "$set6"
+      done
+    fi
+    # THE BOX-SCOPED DROP. Measured from inside the demo box on the R750 2026-09-08: the host
+    # answers a customer's sandbox on 2049 (NFS) and 445 (SMB) on all seven of its addresses. Those
+    # two cannot join DROP_PORTS, because the counters on this host are NOT zero -- other containers
+    # among the ~60 sharing this machine really do use them -- and a blanket drop would take file
+    # sharing away from somebody else's service. Scoped to the box addresses it costs nobody else
+    # anything: a customer's agent has no business reaching the host's file exports, and every box
+    # address is already enumerated here. 11434 (the machine's model server) and 5000 (an
+    # unidentified python service) stay watch-only until 5000 is identified.
+    if [ "${#BOX_ALL_ADDRS[@]}" -gt 0 ] && [ -n "$BOX_DROP_PORTS" ]; then
+      BOX_SET="$(printf '%s\n' "${BOX_ALL_ADDRS[@]}" | sort -u | tr '\n' ',' | sed 's/,$//')"
+      for port in $(printf '%s' "$BOX_DROP_PORTS" | tr ',' ' '); do
+        printf '    ip saddr { %s } tcp dport %s counter%s%s comment "box-scoped %s"\n' "$BOX_SET" "$port" "$LOGRULE" "$VERDICT" "$port"
+      done
     fi
     # One rule per port so the counters are per port. That is the difference between "something
     # used the guard set 4,000 times" and "nothing has touched 11434 in half an hour".

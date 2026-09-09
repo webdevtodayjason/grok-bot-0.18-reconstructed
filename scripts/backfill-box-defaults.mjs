@@ -21,6 +21,7 @@
 //   node scripts/backfill-box-defaults.mjs               add what is missing
 //   node scripts/backfill-box-defaults.mjs --root /data/titanbot --tenant demo
 import { accessSync, chownSync, constants, existsSync, readdirSync, readFileSync, statSync, writeFileSync, chmodSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -39,21 +40,71 @@ const say = (m) => console.log(`  ${m}`);
 const step = (m) => console.log(`\n== ${m}`);
 
 if (!existsSync(DEFAULTS)) { console.error(`FAILED: ${DEFAULTS} does not exist`); process.exit(1); }
-if (!existsSync(ROOT)) { console.error(`FAILED: ${ROOT} does not exist; run this on the host that holds the tenant trees`); process.exit(1); }
+// Not fatal any more: a host can have running boxes on named volumes and no tenant tree at all,
+// and that host is exactly the one this needs to work on.
+if (!existsSync(ROOT)) say(`note ${ROOT} does not exist here; only running boxes will be discovered`);
 
 const defaults = readdirSync(DEFAULTS).filter((n) => n.endsWith(".json")).sort();
 step(`defaults: ${defaults.join(", ")}`);
 
-// A tenant tree is a directory under the root with volumes/data in it. Deliberately the directory
-// listing rather than the control plane's table: TENANT-8's other half is a tenant tree the control
-// plane has never heard of, and a backfill that reads the table would skip exactly that one.
-const tenants = readdirSync(ROOT)
-  .filter((name) => (ONLY == null || name === ONLY))
-  .filter((name) => { try { return statSync(path.join(ROOT, name)).isDirectory(); } catch { return false; } })
-  .filter((name) => existsSync(path.join(ROOT, name, "volumes", "data")))
-  .sort();
+// TWO SOURCES, AND THE DOCKER ONE IS THE ONE THAT MATTERS.
+//
+// The first version of this discovered tenants by listing /data/titanbot/*/volumes/data. Measured
+// on the R750 2026-09-08: Jason's own box does not live there. Its sand-data is the named docker
+// volume `titanbot-box-data` at /data/docker/volumes/titanbot-box-data/_data, so the one box the
+// backfill could never see was the operator's, and it is the box still missing gates.json -- which
+// means the CURSOR-1 pins, sand_auto_review among them, are not applied on it. A discovery that
+// misses a live box is the exact condition TENANT-8 exists to remove.
+//
+// So: enumerate the running boxes by label and read each one's own /home/box/sand-data mount out of
+// docker, then walk the tenant trees as a second source so a tenant that is provisioned but not
+// running is still covered. Deliberately not the control plane's table: TENANT-8's other half is a
+// tenant tree the control plane has never heard of. Duplicates are folded by resolved path.
+const targets = new Map(); // resolved data dir -> { name, data, source }
+const addTarget = (name, data, source) => {
+  if (ONLY != null && name !== ONLY) return;
+  try { if (!statSync(data).isDirectory()) return; } catch { return; }
+  const key = data;
+  const existing = targets.get(key);
+  if (existing == null) targets.set(key, { name, data, source });
+  else if (!existing.source.includes(source)) existing.source = `${existing.source}, ${source}`;
+};
 
-if (tenants.length === 0) { console.error(`FAILED: no tenant tree with volumes/data under ${ROOT}`); process.exit(1); }
+const docker = (...argv) => execFileSync("docker", argv, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+let dockerBoxes = 0;
+try {
+  const names = docker("ps", "--filter", "label=com.titanbot.role=box", "--format", "{{.Names}}")
+    .split("\n").map((n) => n.trim()).filter(Boolean).sort();
+  for (const box of names) {
+    dockerBoxes += 1;
+    // The Source of whichever mount lands on /home/box/sand-data, whether it is a bind of a tenant
+    // tree or a named volume's _data directory. Both are just a path on this host.
+    const source = docker("inspect", box, "--format",
+      '{{range .Mounts}}{{if eq .Destination "/home/box/sand-data"}}{{.Source}}{{end}}{{end}}').trim();
+    if (source.length === 0) { say(`note ${box} has no /home/box/sand-data mount that docker will name`); continue; }
+    addTarget(box, source, "running box");
+  }
+} catch {
+  say("note docker is not usable here, so running boxes were not discovered; the tenant trees below are all this run saw");
+}
+
+if (existsSync(ROOT)) {
+  for (const name of readdirSync(ROOT).sort()) {
+    let isDir = false;
+    try { isDir = statSync(path.join(ROOT, name)).isDirectory(); } catch { continue; }
+    if (!isDir) continue;
+    const data = path.join(ROOT, name, "volumes", "data");
+    if (existsSync(data)) addTarget(name, data, "tenant tree");
+  }
+}
+
+const tenants = [...targets.values()].sort((a, b) => a.name.localeCompare(b.name));
+if (tenants.length === 0) {
+  console.error(`FAILED: no running box and no tenant tree with volumes/data under ${ROOT}`);
+  process.exit(1);
+}
+step(`targets: ${tenants.map((t) => `${t.name} (${t.source})`).join(", ")}`);
+say(`${dockerBoxes} running box(es) named by docker`);
 
 // AN UNREADABLE DIRECTORY IS NOT AN EMPTY ONE, and this check exists because the first run of this
 // script said otherwise. The tenant data directories on the R750 are mode 700 owned by the box's
@@ -62,9 +113,10 @@ if (tenants.length === 0) { console.error(`FAILED: no tenant tree with volumes/d
 // A backfill that cannot see what is there must refuse, not guess.
 let blocked = 0;
 let added = 0;
-for (const tenant of tenants) {
-  const data = path.join(ROOT, tenant, "volumes", "data");
-  step(`${tenant}`);
+for (const target of tenants) {
+  const { name: tenant, data } = target;
+  step(`${tenant} (${target.source})`);
+  say(`data ${data}`);
   try {
     accessSync(data, constants.R_OK | constants.X_OK | (DRY ? 0 : constants.W_OK));
   } catch {

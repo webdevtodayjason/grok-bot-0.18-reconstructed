@@ -55,15 +55,26 @@ export const MAX_OUTLINE_OUTPUT_CHARS = 600;
 
 const str = (value: unknown): string => (typeof value === "string" ? value : "");
 
-/** What a shell row needs to be a receipt: the command it ran and the head of what came back. */
+/** What a shell row needs to be a receipt: the command it ran and the head of what came back.
+ *
+ * PROXY-9. THE REDACTION LIVES HERE, not at the callers. There are two ways a shell row reaches a
+ * screen -- a standalone shellConversationTurn, and the ordinary agentConversationTurn -> toolCall
+ * -> shellToolCall that every agent command takes -- and the first fix redacted only the first of
+ * them, so a stored key echoed by an agent's own command went to the console in full, in `summary`
+ * and again in `output`. This function is the one seam both paths pass through, so redacting in it
+ * cannot be forgotten by a third caller.
+ *
+ * Redact BEFORE truncating: truncating first can cut a credential in half and leave a usable head
+ * of it on the page with no token to say anything was taken out. */
 export function shellOutline(shell: ShellToolCallLike): { summary: string | undefined; output: string | undefined; exitCode: number | undefined } {
-  const command = str(shell.args?.command).trim();
+  const command = redactOutlineSecrets(str(shell.args?.command).trim());
   const result = shell.result?.result;
   const value = result?.value;
   let output = value == null
     ? ""
     : str(value.interleavedOutput) || [str(value.stdout), str(value.stderr)].filter(Boolean).join("\n") || str(value.error) || str(value.reason);
   if (output.length === 0 && result?.case != null && result.case !== "success") output = result.case;
+  output = redactOutlineSecrets(output);
   if (output.length > MAX_OUTLINE_OUTPUT_CHARS) output = `${output.slice(0, MAX_OUTLINE_OUTPUT_CHARS)}\n… (truncated)`;
   return {
     summary: command.length > 0 ? command : undefined,
@@ -189,6 +200,10 @@ export function getToolCallActivityArgs(toolCall: OutlineToolCall): string | und
   } catch {
     return undefined;
   }
+  // PROXY-9. Every non-shell tool's arguments are serialized whole and drawn on the same page: an
+  // MCP call carrying a token, a browser navigate with one in the query string. Same seam, same
+  // rule, and before the truncation for the same reason as above.
+  serialized = redactOutlineSecrets(serialized);
   if (["{}", '\"\"', "[]", "null"].includes(serialized)) return undefined;
   if (serialized.length <= MAX_TOOL_ACTIVITY_ARGS_CHARS) return serialized;
   const copiedPrefix = Buffer.from(

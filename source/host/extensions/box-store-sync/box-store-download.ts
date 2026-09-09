@@ -62,9 +62,16 @@ export const COPY_IN_CRITICAL_BASENAMES = new Set([
 
 // The agent databases and their SQLite sidecars. Restoring a -wal or a -shm over a live database is
 // the same corruption by a different door, so they travel together.
+// search-index.db is the third of them and was missed the first time round. It lives beside the
+// other two on the same bind-mounted sand-data (content-search puts it at getSandRootDir()), and
+// sand_global_search defaults to true in deploy/box-defaults/gates.json -- so the day a box builds
+// that index, a recreate reproduces the BOX-6 corruption for it exactly. It is not on disk on the
+// demo box today, which makes this latent rather than live, and is why it is being closed now
+// rather than after the next malformed database.
 export const AGENT_DATABASE_BASENAMES = new Set([
   "store.db",
   "conversation-blobs.db",
+  "search-index.db",
 ]);
 const SQLITE_COPY_IN_SIDECARS = ["-wal", "-shm", "-journal"] as const;
 
@@ -432,6 +439,14 @@ export class BoxStoreDownload {
       if (destPath == null || !symlinkTargetStaysWithinRoot({ targetRoot, destPath, target: entry.target })) {
         failures.push(`${relPath}: unsafe symlink target`);
         return false;
+      }
+      // BOX-6. The file loop's skip did not cover this loop. A manifest symlink entry named
+      // store.db would unlink the live database and put a link in its place, which is the same
+      // corruption through a different door. Same predicate, same reason: a live agent database on
+      // the persistent mount is the truth and the store never replaces it.
+      if (isAgentDatabaseRelPath(relPath) && await isExistingRegularFile(destPath)) {
+        agentDatabasesLeftAlone.push(relPath);
+        return true;
       }
       try {
         await runSymlinkStep("prepare-parent", symlinkOrdinal, async () => {
