@@ -84,7 +84,11 @@ test("what the customer sees is drawn from age, and disagrees with the record on
   await withPlane(async (plane) => {
     const answer = await plane.admin("GET", "/v1/marketplace/verification");
     for (const row of answer.body.catalog) {
-      assert.match(row.customerSees, /^(checked \d{4}-\d{2}-\d{2}|under review)$/, `${row.id}: ${row.customerSees}`);
+      // The column says WHY a row is under review, because "under review" on its own tells an
+      // operator nothing about whether to act. cp/server.mjs has exactly two reasons, and both are
+      // pinned here rather than waved through with a wildcard: a fact on the row changed, or
+      // nobody has re-read it inside its recheck window.
+      assert.match(row.customerSees, /^(checked \d{4}-\d{2}-\d{2}|under review \((a fact on it changed|nobody has re-read it)\))$/, `${row.id}: ${row.customerSees}`);
       assert.ok(Number.isInteger(row.recheckDays) && row.recheckDays > 0, row.id);
       assert.match(row.oldestCheckedOn, /^\d{4}-\d{2}-\d{2}$/, row.id);
     }
