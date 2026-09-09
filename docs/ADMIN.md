@@ -222,10 +222,11 @@ that grows a login leg later gets the header with one import, from `scripts/gate
 are on the R750 today:
 
 - **rows written before 2026-09-09 18:00 UTC**, which is when the header shipped. Measured on the
-  R750 that day: 147.136.44.142 held 30 instance-door lockouts and 28 refusals with agent `node`,
-  plus 21 with a blank agent, spread from 03:55 to 15:22 UTC. Every one of them is a deploy gate run
-  from before the header existed. They are behind the Attack pill on that address, and the dated
-  clause reaches only the ones that sit within an hour of a real operator sign-in.
+  R750 at 22:40 UTC that day: over the last day 147.136.44.142 shows **131 attempts, 39 refused, 65
+  locked out, 27 that worked and 28 different passwords**, and **22** of those attempts are marked
+  as ours: **11 named by the header** from the 19:39 UTC deploy-gate run, **11 matched by the dated
+  clause**. The rest are earlier deploy-gate runs from before the header existed, they carry agent
+  `node` or nothing at all, and they are what keeps the Attack pill lit on that address.
 - **rows written by the control plane's own door**, which records no user agent at all. See below.
 
 So when you see a burst on your own address: check the times against your own ship log before you
@@ -238,8 +239,17 @@ exact agent `titanbot-gate/verify-deploy`, so the relay records the header with 
 all. Under the first shape of the rule not one of them was labelled, because the deploy gate holds no
 password on purpose -- it is let in by the gateway bearer, which writes no ledger row -- so it could
 never produce the successful operator sign-in that rule asked for, and the 11 grey rows on the panel
-that day were the dated clause's rows at a different hour entirely. With the label no longer deciding
-anything, that second test is gone from this clause and a named row is named on its own evidence.
+that day were the dated clause's rows at a different hour entirely.
+
+With the label no longer deciding anything, that second test is gone from the header clause and a
+named row is named on its own evidence. Measured on the R750 at 22:40 UTC on 2026-09-09, in a real
+browser at 1440x900: all **11** rows carrying `titanbot-gate/verify-deploy` read as gates and say
+**"says it is our own verification gate (verify-deploy)"**; **11** more read **"an older row, from
+before gates named themselves"**; the strip says **LOOK LIKE OUR OWN GATES 22, counted like
+everything else, marked in grey below**; the sentence under the filters splits the two clauses by
+name; and **ATTACKS still reads 1** on that same address, with its row carrying "22 of them look
+like our own gates, and are counted above" beside 131 attempts and 28 different passwords. That last
+part is the point: the label is now visible and free.
 
 ### The rows this can never label, and why that is right
 
@@ -641,11 +651,13 @@ just no longer pretending to be the present.
 
 **Red also needs a sample deep enough and fresh enough to be about now.** At least three of those
 recent requests, and the newest of them no more than two hours old. Below either, the chip reads
-"not checked" with the reason rather than red -- and never green. Measured on the R750 on
-2026-09-09: MiniMax's entire recent window was one request, from the evening before, and nothing
-else is ever run through it. Without the floor, one unlucky request would have painted that card
-"not answering" until the calendar month rolled over, on a sample of one, with no traffic coming to
-change it. The amber month count carries those failures either way.
+"not checked" with the reason rather than red -- and never green. Measured on the R750 at 22:40 UTC
+on 2026-09-09: MiniMax's entire recent window is **one request, from 2026-09-08 23:40 UTC**, and
+nothing else is ever run through it. Without the floor, one unlucky request would have painted that
+card "not answering" until the calendar month rolled over, on a sample of one, with no traffic
+coming to change it. The amber month count carries those failures either way. The two cases are
+held by tests on this Mac -- one failure alone, and four failures a day old -- because they cannot
+be made to happen on the R750 without breaking a provider somebody is using.
 
 **The key row's LAST ERROR reads the same request log** as the chip, so the two halves of a card can
 no longer disagree. Empty means the log holds no failure for that key's slots, not that nothing was
