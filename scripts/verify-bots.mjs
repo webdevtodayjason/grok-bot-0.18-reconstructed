@@ -1,4 +1,4 @@
-// BOTS-1. The Bots tab, a bot's page and one click on Add, in a real browser against a real box.
+// BOTS-4. The Bots tab, a bot's page and one click on Add, in a real browser against a real box.
 //
 // WHAT IT PROVES, and why each leg is here rather than in the unit test:
 //

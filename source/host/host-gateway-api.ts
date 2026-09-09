@@ -712,7 +712,7 @@ export function createHostGatewayApi(
 
     getAgentMemories: (args: any) =>
       method(manager, "getAgentMemories")(args.id),
-    // BOTS-1. The one write path into an agent's remembered facts. It answers
+    // BOTS-4. The one write path into an agent's remembered facts. It answers
     // { added, duplicates, rejected } rather than a bare ok, because a fact over the store's cap is
     // refused by name here instead of being written short.
     addAgentMemories: (args: any) =>

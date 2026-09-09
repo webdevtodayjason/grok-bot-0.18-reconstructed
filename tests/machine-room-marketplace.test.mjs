@@ -193,7 +193,7 @@ test("the catalog is read through the gateway, never from a file beside the page
   assert.equal(calls2.filter((c) => c.method === "listMarketplace").length, 1);
 });
 
-// BOTS-1, measured on grok-bot-local-vm 2026-09-09: opening the Marketplace fetched the whole
+// BOTS-4, measured on grok-bot-local-vm 2026-09-09: opening the Marketplace fetched the whole
 // catalog TWICE, 221,128 B on a box serving seven bots, because the Plugins half and the Bots half
 // both ask before either answer lands and a cache that only holds settled answers is empty for
 // both. With 72 bots in the catalog that is one body or two on every panel opening.

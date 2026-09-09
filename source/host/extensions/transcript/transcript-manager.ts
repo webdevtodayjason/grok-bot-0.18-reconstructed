@@ -375,7 +375,7 @@ export class TranscriptManager {
     return this.memory.list({ agentId });
   }
   /**
-   * BOTS-1. Seed an agent's own remembered facts. The catalog's Add button is the only caller: a
+   * BOTS-4. Seed an agent's own remembered facts. The catalog's Add button is the only caller: a
    * community bot's operating rules belong where the agent's own facts live, and until this there
    * was no write path for one at all -- the store is written by the agent itself, mid-turn, and by
    * nothing else.

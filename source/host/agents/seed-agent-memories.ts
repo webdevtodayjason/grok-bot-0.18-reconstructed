@@ -1,5 +1,5 @@
 /**
- * BOTS-1. Seeding an agent's own remembered facts, for the catalog's Add button.
+ * BOTS-4. Seeding an agent's own remembered facts, for the catalog's Add button.
  *
  * A community bot carries its operating rules as memories, and adding one has to put those rules
  * where the agent's own remembered facts live -- not in a document, not in a second copy of the

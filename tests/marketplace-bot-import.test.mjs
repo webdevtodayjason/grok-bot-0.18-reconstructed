@@ -36,7 +36,7 @@ const BOT = {
   tile: { color: "#31b6b8", shape: "circle" },
   description: "Runs a web research pass and comes back with sourced notes.",
   instructions: "You are a research desk. Search before you answer, and cite every claim with the page you read it on.",
-  // BOTS-1. Every row carries memories now -- the catalog derives one from `instructions` on the
+  // BOTS-4. Every row carries memories now -- the catalog derives one from `instructions` on the
   // rows that predate the field -- and the first of them is what the identity is composed from.
   memories: [{ text: "You are a research desk. Search before you answer, and cite every claim with the page you read it on." }],
   routines: [
@@ -212,7 +212,7 @@ async function renderedTab(extraWindow = {}) {
       if (route === "/connectors") return { ok: true, json: async () => ({ mcpServers: {} }) };
       const args = init && init.body ? JSON.parse(init.body) : {};
       const body = route === "/api/listMarketplace" ? catalog
-        // BOTS-1: the list is a card projection and the page fetches the row it opens.
+        // BOTS-4: the list is a card projection and the page fetches the row it opens.
         : route === "/api/getMarketplaceItem" ? (catalog.bots.find((bot) => bot.id === args.id) ?? {})
           : route === "/api/listShellTools" ? []
           : route === "/api/listAgents" ? []

@@ -373,7 +373,7 @@
     <!-- The Marketplace's Bots tab. It only attaches window.__marketplaceBots at load and reads
          the adapter lazily, so it can come before app.js builds one. -->
     <script src="marketplace-bots.js"></script>
-    <!-- BOTS-1. The Add sequence behind a catalog bot, in its own module so the page that draws a
+    <!-- BOTS-4. The Add sequence behind a catalog bot, in its own module so the page that draws a
          bot and the setup that creates one are not the same file. It attaches window.__botSetup at
          load and reads the gateway lazily, the same contract marketplace-bots.js keeps; the Bots
          tab falls back to its own Import Bot when this module is absent. -->

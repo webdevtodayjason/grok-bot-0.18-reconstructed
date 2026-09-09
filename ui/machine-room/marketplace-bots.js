@@ -30,7 +30,7 @@
  * description is the template's description followed by its instructions, in that order, and
  * docs say so. `title` is the operator-facing Role and is left for the operator.
  *
- * BOTS-1, and what changed on this page: a bot is now FOUR blocks, in this order and these words --
+ * BOTS-4, and what changed on this page: a bot is now FOUR blocks, in this order and these words --
  * Memories "Facts it already knows", Skills "Playbooks it can run", Routines "Jobs that run on
  * their own", Integrations "Apps it can use". Memories replaced Instructions as the first block
  * because the 65 community rows carry no instructions at all: their operating rules ARE their
@@ -57,7 +57,7 @@
  *                                    fallback is adapter.addConnector / adapter.installShellTool,
  *                                    which IS the connector editor's path (POST /connectors +
  *                                    refreshMcp).
- *   window.__botSetup              — BOTS-1's setup sequence, in its own file so that the page and
+ *   window.__botSetup              — BOTS-4's setup sequence, in its own file so that the page and
  *                                    the sequence are not one file two builders share:
  *                                    { alreadyOnRoster(gateway, bot), setUpBot(gateway, bot, opts) }.
  *                                    Absent on a build that does not carry it, and the page then
@@ -1558,7 +1558,7 @@
     renderFirstRun: (bot) => firstRunMarkup(bot),
     reload() { catalog = null; catalogError = null; details.clear(); detailErrors.clear(); return load(); },
 
-    // BOTS-1. The four blocks as data, so the unit test pins the words a person reads rather than
+    // BOTS-4. The four blocks as data, so the unit test pins the words a person reads rather than
     // a copy of them, and the pure render paths, so every state the gate cannot reach in one run
     // is still rendered by something before it is rendered at a person.
     BOT_PAGES: PAGES,

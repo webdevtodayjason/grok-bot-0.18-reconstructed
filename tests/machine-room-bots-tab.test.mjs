@@ -1,4 +1,4 @@
-// BOTS-1 / item C: the Bots tab and the bot page, pinned as the markup a person is handed.
+// BOTS-4 / item C: the Bots tab and the bot page, pinned as the markup a person is handed.
 //
 // WHY THESE ARE STRINGS RATHER THAN SHAPES. Jason gave the four blocks their words -- Memories
 // "Facts it already knows", Skills "Playbooks it can run", Routines "Jobs that run on their own",

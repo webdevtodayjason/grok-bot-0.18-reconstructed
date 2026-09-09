@@ -1,5 +1,5 @@
 /*
- * BOTS-1 — what one click on Add actually does.
+ * BOTS-4 — what one click on Add actually does.
  * --------------------------------------------
  * A person clicks the round Add on a catalog row and a few seconds later has an agent that greets
  * them in its own voice, already knowing its operating rules, holding its playbooks, carrying its

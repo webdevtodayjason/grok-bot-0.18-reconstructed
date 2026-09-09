@@ -3511,7 +3511,7 @@ button.evidence-chip[data-verdict]:hover { border-color: var(--glass-edge); colo
    a run-on line of small caps rather than as a filter. */
 .marketplace-chips { margin: 0 0 14px; }
 
-/* BOTS-1: the bot list, one row per bot with a round Add at its right.
+/* BOTS-4: the bot list, one row per bot with a round Add at its right.
    The row is a DIV holding two sibling buttons, never a button inside a button: Chrome fires both
    handlers on a nested click, so a nested Add would open the page AND start the setup on one
    press -- and a passing page.click() would prove nothing either way. */

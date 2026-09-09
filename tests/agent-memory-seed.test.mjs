@@ -1,4 +1,4 @@
-// BOTS-1 — seeding an agent's own remembered facts, and the one thing that must never happen.
+// BOTS-4 — seeding an agent's own remembered facts, and the one thing that must never happen.
 //
 // The catalog's Add button puts a bot's operating rules where the agent's own facts live. There was
 // no write path for that at all: the host serves getAgentMemories, deleteAgentMemory and

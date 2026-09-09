@@ -1,4 +1,4 @@
-// BOTS-1 — the Add sequence, driven by a fake gateway.
+// BOTS-4 — the Add sequence, driven by a fake gateway.
 //
 // One click on a catalog row has to leave a person with an agent that greets them in its own voice,
 // already knowing its operating rules, holding its playbooks, carrying its jobs switched off, and

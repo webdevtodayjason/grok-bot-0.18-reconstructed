@@ -340,7 +340,7 @@ let copyAgentId = null;
 // outlives the probe and shows up on every production agent. Snapshot the library once the probe
 // exists and delete everything the run added before the probe itself goes.
 let libraryBefore = null;
-// BOTS-1: the agent Import Bot minted, and the box-wide workflow library as it stood before that
+// BOTS-4: the agent Import Bot minted, and the box-wide workflow library as it stood before that
 // import. Both are set while the imported agent exists, so an assertion that throws between the
 // click and the delete still leaves the box the way the run found it.
 let botAgentId = null;
@@ -2184,7 +2184,7 @@ try {
       if (after?.mcpServers?.tinyfish == null) tinyfishAdded = false;
     }
 
-    // -- BOTS-1: the Marketplace's Bots tab, the bot page and Import Bot. The catalog is data in
+    // -- BOTS-4: the Marketplace's Bots tab, the bot page and Import Bot. The catalog is data in
     // the host bundle served by listMarketplace, and this page reads it only through the gateway,
     // so what the tab lists is what the agents' own SearchPlugins sees. Import Bot is a real write
     // on a shared box -- a new agent, and its skills in the box-wide workflow library -- so the
@@ -3080,7 +3080,7 @@ try {
   check(false, "dashboard gate", error.message);
 } finally {
   await browser.close();
-  // BOTS-1's leftovers first: the imported agent, and the skills that import added to the
+  // BOTS-4's leftovers first: the imported agent, and the skills that import added to the
   // box-wide library. The library sweep uses the imported agent while it still exists, because
   // getAgentWorkflows is addressed by agent id and the library outlives the agent.
   if (botAgentId || botLibraryBefore) {

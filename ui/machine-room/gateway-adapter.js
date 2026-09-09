@@ -3178,7 +3178,7 @@
         return call("clearAgentMemories", { id: agentId }).then(() => this.getMemories(agentId));
       },
 
-      // BOTS-1. The write side of the same store, which the host had no command for until this
+      // BOTS-4. The write side of the same store, which the host had no command for until this
       // wave: adding a bot from the catalog seeds its operating rules as the agent's OWN
       // remembered facts, not as a document and not as a second copy of the description.
       //
