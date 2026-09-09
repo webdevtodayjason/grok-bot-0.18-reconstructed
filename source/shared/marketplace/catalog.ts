@@ -1344,7 +1344,7 @@ const DECLARED_PLUGINS: readonly MarketplacePlugin[] = Object.freeze([
         anchor: "Built-in proxies",
         expected: "By default, `proxies` is set to false",
         checkedOn: "2026-09-09",
-        state: "verified",
+        state: "changed",
       }),
       Object.freeze({
         id: "live-view-handover",
