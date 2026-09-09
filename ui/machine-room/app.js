@@ -695,15 +695,15 @@
     renderNeedsYouCount();
   }
 
-  // ---- AGENTS-CAP-1: Titan and twelve more ---------------------------------------------------
-  // The box holds 13 bots at most and the host refuses the fourteenth (SAND_MAX_AGENTS). Rooms are
+  // ---- AGENTS-CAP-1: Titan and ninety-nine more ----------------------------------------------
+  // The box holds 100 bots at most and the host refuses the next one (SAND_MAX_AGENTS). Rooms are
   // not bots and are not counted, so the number drawn here is the roster's own bot count rather
   // than countAgents, which counts a room as an agent. The host's own number is kept on the
   // tooltip, because when the two disagree that is worth being able to see.
-  const AGENT_CAP_DEFAULT = 13;
+  const AGENT_CAP_DEFAULT = 100;
   const agentCap = () => (Number.isFinite(state.agentCap) && state.agentCap > 0 ? state.agentCap : AGENT_CAP_DEFAULT);
   const botCount = () => state.workers.length;
-  // Titan is one of the thirteen, so what is left to add is twelve. This is the number the Add
+  // Titan is one of the hundred, so what is left to add is ninety-nine. This is the number the Add
   // button carries, and the one the refusal talks about.
   const extraBotCount = () => Math.max(0, botCount() - 1);
   const extraBotCap = () => Math.max(0, agentCap() - 1);

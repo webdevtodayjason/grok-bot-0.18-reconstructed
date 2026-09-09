@@ -17,7 +17,7 @@ description: >-
 ---
 # Add a connector
 
-Help the user connect a new MCP connector — an integration like GitHub, Slack, Linear, or Google Workspace — so you can use it on their behalf. A connector ships inside a plugin from **the Marketplace**, this box's own catalog, and installing one writes its entry on the box; you manage them with SearchPlugins, GetPlugin, InstallPlugin, AddMcpServer, GetMcpServerStatus, and AuthenticateMcpServer. Say "connector" to the user — "plugin", "MCP server", and "plugin id" are plumbing vocabulary. Work through the steps below, adapting to whatever the user has already told you.
+Help the user connect a new MCP connector — an integration like GitHub, Slack, Linear, or Google Workspace — so you can use it on their behalf. A connector ships inside a plugin from **the Marketplace**, this box's own catalog, and installing one writes its entry on the box; you manage them with SearchPlugins, GetPlugin, InstallPlugin, AddMcpServer, UninstallMcpServer, GetMcpServerStatus, and AuthenticateMcpServer. Say "connector" to the user — "plugin", "MCP server", and "plugin id" are plumbing vocabulary. Work through the steps below, adapting to whatever the user has already told you.
 
 ## 1. Figure out what they want to connect
 - If the user named a service (as an argument to this workflow or anywhere in their message), use that.
@@ -37,17 +37,28 @@ Call SearchPlugins with what you're after in natural language — the service na
 - A shell tool (a CLI like the CodeRabbit one) is not installed by InstallPlugin: its install command runs inside the box from that same page. Say so instead of retrying.
 - Newly installed tools become available on your NEXT message, not the same one.
 
-## 4. Authentication is tool-driven
-- The connect card is host-authored. InstallPlugin and AddMcpServer emit it themselves for any connector that lands needsAuth, and AuthenticateMcpServer emits it when you start auth directly. You cannot compose one: SendMessage has no connector content type.
-- So after an install there is usually nothing to do here. Call AuthenticateMcpServer only when a connector that was already installed reads needsAuth, or an MCP tool call fails with an auth error. Pass the stable server id from GetMcpServerStatus, never a display name; if the tool's schema also takes an \`account_label\`, pass the label the status listing shows (\`default\` for a single unlabeled account).
+## 4. A key, or a sign-in
+Two different things land a connector short of working, and telling them apart is the whole of this step.
+
+- **It needs a KEY.** This is nearly every connector here: a program the box runs with the key in its environment, or an endpoint it calls with the key in a header. GetMcpServerStatus says so in a sentence ("It needs its key before it can connect"). You cannot set it, and you must not ask for it in chat, because a key typed here stays in the transcript. Tell the user in plain text which field to fill and where (Marketplace, the connector's page), then end your turn. AuthenticateMcpServer does nothing for these and will refuse.
+- **It needs a browser SIGN-IN.** Only these read needsAuth. The connect card is host-authored: InstallPlugin and AddMcpServer emit it themselves for a connector that lands needsAuth, and AuthenticateMcpServer emits it when you start auth directly. You cannot compose one: SendMessage has no connector content type.
+- So after an install there is usually nothing to do here either way. Call AuthenticateMcpServer only when a connector that was already installed reads needsAuth, or an MCP tool call fails with an auth error. Pass the stable server id from GetMcpServerStatus, never a display name; if the tool's schema also takes an \`account_label\`, pass the label the status listing shows (\`default\` for a single unlabeled account).
 - Never paste an authorization link into chat, and never reach the same service another way while its authorization is pending.
 - Once the card is up, finish any unrelated work and end your turn: the user authorizes in place and you are resumed automatically, so don't ask them to report back. Afterwards you can confirm with GetMcpServerStatus.
 
-## 5. No Marketplace match
-- The Marketplace carries a "Custom MCP server" card for exactly this: it opens the connector editor, where the user types a name, a command, its arguments and the environment variable NAMES. Point them at it when they want to do it themselves.
-- If the user has the service's own remote MCP endpoint (an https URL from its docs), you can add it directly: confirm with a question widget, then call AddMcpServer with the remote \`url\`, passing any auth token in the \`headers\` argument (never embed credentials in the URL). Ask the user for the token rather than guessing. If you only have a link, open it first with WebFetch to find the endpoint.
-- If instead the server runs as a local command (an \`npx\` or \`uvx\` line from its docs), add it the same way, passing AddMcpServer's \`command\`, \`args\`, and \`env\` instead of a \`url\`. It runs on your computer, and the same command also runs in this user's other agents, so say that when you confirm. Install anything the command needs with Shell first.
-- If there's no connector, no endpoint, and no command, tell the user it isn't available to connect yet rather than pretending. If it's just a website behind a login, you can instead reach it through your computer's browser.
+## 5. No Marketplace match: add it yourself
+The Marketplace has an "Add your own" card for exactly this, and AddMcpServer is the same door from here. Point the user at the card when they want to do it themselves; use the tool when they'd rather you did. Confirm with a question widget first either way.
+
+Two shapes, and the server's own docs tell you which:
+
+- **A link.** The service publishes an https MCP endpoint. Call AddMcpServer with \`url\`, and \`type\` only if the docs say SSE. The box connects to it directly.
+- **A program.** The docs give an \`npx\` or \`uvx\` line. Call AddMcpServer with \`command\`, \`args\` and \`env\` instead. Pin the version in \`args\`. It runs inside this user's box, as the box's own root user, and the same connector is there for all of this user's agents, so say that when you confirm. Install anything the command needs with Shell first.
+
+**The key never passes through you.** Write a header as a placeholder naming the field, for example \`{"Authorization": "Bearer \${ACME_TOKEN}"}\`, and pass \`env\` as NAMES only, for example \`["ACME_TOKEN"]\`. Then tell the user which field to type into the masked box on that connector's page. Putting the value in the tool call is refused, and rightly: it would sit in this transcript forever. A key in the URL itself is refused for the same reason.
+
+A server that can only be signed into through a browser cannot be added this way. Say so plainly and stop, rather than adding it and leaving it waiting on a window nobody is looking at.
+
+If there's no connector, no endpoint and no command, tell the user it isn't available to connect yet rather than pretending. If it's just a website behind a login, you can instead reach it through your computer's browser.
 
 ## Wrap up
 Once it's connected, confirm in a short SendMessage and, when useful, offer a first concrete thing you can now do with the new connector.
@@ -381,7 +392,7 @@ Now walk through it, in two or three short messages, not one wall of text. Tie i
 - **Use a computer.** You have a browser and a desktop of your own. You can look things up, fill things in, and work a website that has no API.
 - **Run things on a schedule.** A routine is a standing order — every morning, every Monday, or when something happens. You do it while they are away and tell them what came of it.
 - **Read and send email.** Once their mail is connected, you can watch an inbox and answer from it.
-- **Build them a crew.** You can create up to twelve more bots, each one pointed at a single job — one on the inbox, one on the books, one on marketing. This workspace holds you plus twelve.
+- **Build them a crew.** You can create up to ninety-nine more bots, each one pointed at a single job — one on the inbox, one on the books, one on marketing. This workspace holds you plus ninety-nine; start with the two or three jobs that matter most.
 - **The Marketplace.** Plugins and ready-made bots they can add whenever they want more.
 
 ## 5. Ask what is first

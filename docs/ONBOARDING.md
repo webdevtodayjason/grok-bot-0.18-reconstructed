@@ -4,7 +4,7 @@
 contract the two halves of it are built to. Titan introduces himself, asks five short questions,
 walks through what he can do, and asks what they want done first. Underneath it: one flag on the
 box, three gateway commands, two tools, one seed prompt, one dialog in the console, and a ceiling of
-thirteen agents.
+a hundred agents.
 
 **Status, 2026-09-07: built and measured.** This document is the contract,
 `scripts/verify-onboarding.mjs` is the gate written to it, and the gate now runs against the
@@ -324,22 +324,23 @@ makes. This is a separate prompt.
 which is the tier kept in mind every turn. That is what makes him still know them tomorrow. The
 state object in section 4 is the record of the interview; his memory is what he actually works from.
 
-## 8. The ceiling: Titan and twelve
+## 8. The ceiling: Titan and ninety-nine
 
-**A box holds 13 agents: Titan and 12 more.** `SAND_MAX_AGENTS` in `sand-host-settings.json`
-overrides it; the default is 13. Groups do not count. The crew this console draws faces from is
-exactly Titan plus twelve companions (`mascot-crew.js:33-47`), so thirteen is the size the product
-was already drawn at.
+**A box holds 100 agents: Titan and 99 more** (Jason, 2026-09-08: "Can you make it 100?"; it was
+13 until then, the size of the mascot crew, which is a drawing decision and not a ceiling: the faces
+wrap). `SAND_MAX_AGENTS` in `sand-host-settings.json` overrides it; the default is 100. Groups do
+not count. The number is a ceiling, not a load: a bot costs nothing until it runs, and a desktop
+seat is opened only for a bot that asks for one.
 
 It is enforced at one place, `mintAgent` (`session-materialization.ts:81`), which both `createAgent`
 and `duplicateAgent` funnel through. The refusal a person sees is one sentence:
 
-> This workspace holds Titan and 12 more bots. Remove one to add another.
+> This workspace holds Titan and 99 more bots. Remove one to add another.
 
 Templated from the ceiling in force, so a box with `SAND_MAX_AGENTS` set reads its own number. No
 status code, no class name, nothing about limits or maximums. It reaches the console as HTTP 409
 (`statusForCommandError`, `gateway-server.ts:15`) and the console shows the sentence as a toast. The
-Add button carries the count: **n of 12**, where n is the agents besides Titan.
+Add button carries the count: **n of 99**, where n is the agents besides Titan.
 
 The roster header carries the same ceiling, `n / 13 bots`, counted off the roster the console can
 see rather than off `countAgents`: a room is an agent to `countAgents` and is not a bot, so
