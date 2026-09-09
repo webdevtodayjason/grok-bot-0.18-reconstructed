@@ -397,12 +397,117 @@ export function detectBlocked(input) {
   return { blocked: false, reason: "", family: "" };
 }
 
+/* ------------------------------------------------------------------ *
+ * CLOUD-BROWSER-1. The third verdict: a page that answered, was not a wall and was not a login,
+ * and still gave up nothing worth reading.
+ * ------------------------------------------------------------------ */
+
+/**
+ * The hole this fills, measured on grok-bot-local-vm 2026-09-09.
+ *
+ * https://www.instagram.com/titaniumcomputing/ answered HTTP 200 in 3,259 ms through the box's own
+ * Chrome with needsLogin false, blocked false, and Meta's footer chrome -- About, Blog, Jobs, Help,
+ * API, Privacy, Terms, and the rest -- as its ENTIRE text. No follower count, no bio, no post. No
+ * verdict fired, so the model was handed a page it would summarise as though it had read it, and a
+ * router keyed on needsLogin||blocked would never escalate to a cloud browser on exactly the pages
+ * a cloud browser exists for.
+ *
+ * The rule is TOOLS-FETCH-2/3's, ported rather than invented: `looksLikeShell` is a big body that
+ * reduced to almost nothing, and `looksLikeTitleOnly` is a page whose whole readable text is its
+ * own title. The third clause is this driver's own, because this driver reads a RENDERED DOM rather
+ * than a server's response body, so the shell it meets is not empty -- it is furniture. A big body
+ * whose text survives only as short link-shaped lines is nav and footer and nothing else.
+ *
+ * Both halves always have to hold, and the big-body half is what keeps a real small page out of it:
+ * example.com reduces to 131 characters from a 559-byte body and is a whole page, so it is not a
+ * shell and never will be.
+ */
+export const EMPTY_SHELL_MIN_HTML_BYTES = 50_000;
+export const EMPTY_SHELL_MAX_CHARS = 400;
+/**
+ * How little running text a heavy page can have before it counts as having said nothing.
+ *
+ * Set from the measurement rather than from taste, and set to leave room on BOTH sides. On
+ * grok-bot-local-vm 2026-09-09, instagram.com/titaniumcomputing/ came back with 630 characters of
+ * text and, once the language picker is read as the run-together list it is, ZERO characters of
+ * running text. So the bar does not need to be high to catch it, and a high bar is what makes this
+ * verdict dangerous: telling someone "this page said nothing" about a page that said something
+ * short is worse than missing a shell, because they will believe it.
+ *
+ * A single ordinary sentence is about 120 characters. A page with one of those said something.
+ */
+export const EMPTY_SHELL_MAX_PROSE_CHARS = 120;
+// A line that is short and ends in no sentence punctuation is a link, a menu item or a button
+// label. Long lines and lines that end a sentence are prose, and prose means the page said something.
+const CHROME_LINE_MAX_CHARS = 30;
+
+/**
+ * A LONG LINE IS NOT AUTOMATICALLY PROSE, and this is the clause the real page taught us.
+ *
+ * Measured on grok-bot-local-vm 2026-09-09, reading instagram.com/titaniumcomputing/ through the
+ * box's own Chrome: 630 characters, every one of them footer chrome -- and 411 of those characters
+ * were a SINGLE line, the language picker, with its options run together and no separators:
+ * "AfrikaansالعربيةČeštinaDanskDeutsch..." A length test alone called that prose, so the verdict
+ * did not fire on the exact page it was written for.
+ *
+ * The rule that tells them apart is the one thing language always has and a concatenated list never
+ * does: spaces, at a plausible rate. Running text averages a word every five or six characters. That
+ * language picker averages one per forty. So a line whose average "word" is longer than twenty
+ * characters is a list that lost its separators, not a sentence, whatever its length.
+ */
+const PROSE_MAX_AVERAGE_WORD_CHARS = 20;
+
+function looksLikeRunningText(line) {
+  const words = line.split(/\s+/).filter((word) => word.length > 0).length;
+  return words > 0 && line.length / words <= PROSE_MAX_AVERAGE_WORD_CHARS;
+}
+
+function proseCharacters(text) {
+  let total = 0;
+  for (const raw of String(text ?? "").split("\n")) {
+    const line = raw.replace(/^-\s+/, "").trim();
+    if (line.length === 0) continue;
+    const shortLabel = line.length <= CHROME_LINE_MAX_CHARS && !/[.!?:;]$/.test(line);
+    if (shortLabel || !looksLikeRunningText(line)) continue;
+    total += line.length;
+  }
+  return total;
+}
+
+/**
+ * Did this page load and say nothing? Returns the verdict and a sentence, the same shape the other
+ * two detectors use, so a caller reads three answers rather than two answers and a special case.
+ */
+export function detectEmptyShell(input) {
+  const text = String(input.text ?? "").trim();
+  const title = String(input.title ?? "").trim();
+  const bytes = Number(input.htmlBytes ?? String(input.html ?? "").length);
+  const heavy = bytes >= EMPTY_SHELL_MIN_HTML_BYTES;
+
+  if (heavy && text.length < EMPTY_SHELL_MAX_CHARS) {
+    return { emptyShell: true, reason: "the page drew itself but left almost no words behind" };
+  }
+  if (title.length > 0 && text.length > 0 && text === title) {
+    return { emptyShell: true, reason: "the page gave up nothing but its own title" };
+  }
+  if (heavy && proseCharacters(text) < EMPTY_SHELL_MAX_PROSE_CHARS) {
+    return { emptyShell: true, reason: "the page gave up its menus and its footer and none of its content" };
+  }
+  return { emptyShell: false, reason: "" };
+}
+
 /** Everything a page read gives back, parsed once. */
 export function analyzePage(input) {
   const document = parseHtml(input.html ?? "");
   const extracted = extractReadableText(input.html ?? "", { document, innerText: input.innerText, cap: input.cap });
   const login = detectNeedsLogin({ document, html: input.html, text: extracted.text, title: input.title, url: input.url });
   const blocked = detectBlocked({ url: input.url, title: input.title, text: extracted.text, status: input.status });
+  // Asked LAST and only when the other two said no. A sign-in wall and a challenge page are both
+  // also short, and telling somebody "the page said nothing" when the truth is "the page wants you
+  // signed in" sends them to the wrong place.
+  const shell = login.needsLogin || blocked.blocked
+    ? { emptyShell: false, reason: "" }
+    : detectEmptyShell({ text: extracted.text, title: input.title, html: input.html });
   return {
     text: extracted.text,
     textTruncated: extracted.truncated,
@@ -412,5 +517,7 @@ export function analyzePage(input) {
     blocked: blocked.blocked,
     blockedReason: blocked.reason,
     blockedFamily: blocked.family,
+    emptyShell: shell.emptyShell,
+    emptyShellReason: shell.reason,
   };
 }

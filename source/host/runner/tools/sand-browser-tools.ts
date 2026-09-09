@@ -1,6 +1,10 @@
 import { Buffer } from "node:buffer";
 import { z } from "zod";
 import { createHash } from "node:crypto";
+// CLOUD-BROWSER-1. The host process runs INSIDE the box, so a file it writes under
+// /home/box/.titanbot-browser is the same file the driver next door reads. That is the whole reason
+// a cloud request can leave argv without a new transport.
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { buildHostShellArgs } from "../../box/box-shell-command.js";
 import { navigationProbeCommand, normalizeNavigationUrl, parseNavigationProbeOutput } from "../sand-action-audit.js";
 import { SAND_BOX_NO_MONITOR_AVAILABLE_MESSAGE } from "../../ports/box.js";
@@ -172,6 +176,18 @@ export interface BrowserDriverResponse {
    */
   readonly stillLoading?: boolean | undefined;
   /**
+   * CLOUD-BROWSER-1. The third verdict. The page answered, was not a wall and was not a sign-in,
+   * and still gave up nothing worth reading -- a big document whose whole text is a menu and a
+   * footer. Measured on grok-bot-local-vm 2026-09-09: instagram.com/titaniumcomputing/ answered
+   * 200 in 3,259 ms with needsLogin false, blocked false and Meta's footer as its entire text, so
+   * the model was handed a page it would have summarised as though it had read it. The router
+   * reads this to decide whether one cloud session is worth spending; the model reads the sentence
+   * the host makes out of it.
+   */
+  readonly emptyShell?: boolean | undefined;
+  /** Which browser answered: "box" or "cloud". The driver says so rather than the host inferring it. */
+  readonly engine?: string | undefined;
+  /**
    * BROWSER-1. What the picture actually is. The older driver only ever took PNGs, so the host
    * stamped every shot "image/png"; Titan's driver takes a JPEG resized to 1280 wide, and a
    * provider told png over jpeg bytes fails to decode with nothing worth reading in the message.
@@ -233,6 +249,12 @@ export function toDriverResponse(
     ...(optionalBoolean(parsed, "stillLoading") == null
       ? {}
       : { stillLoading: optionalBoolean(parsed, "stillLoading") }),
+    ...(optionalBoolean(parsed, "emptyShell") == null
+      ? {}
+      : { emptyShell: optionalBoolean(parsed, "emptyShell") }),
+    ...(optionalString(parsed, "engine") == null
+      ? {}
+      : { engine: optionalString(parsed, "engine") }),
     ...(optionalString(parsed, "mimeType") == null
       ? {}
       : { mimeType: optionalString(parsed, "mimeType") }),
@@ -285,6 +307,14 @@ export const SAND_BROWSER_BLOCKED_NOTE =
 export const SAND_BROWSER_STILL_LOADING_NOTE =
   "The page had not finished loading when this was read, so it may not be all of it. Look again with a fresh picture if something seems missing.";
 /**
+ * CLOUD-BROWSER-1. Said only when the page came back empty and there was no second engine to try.
+ * The alternative is silence, and silence here is the worst outcome on this whole path: the model
+ * is handed a footer, has no way to know it is a footer, and answers as though it read the page.
+ * No vendor name, no tool name, no status code -- this is a sentence Titan repeats to a person.
+ */
+export const SAND_BROWSER_EMPTY_SHELL_NOTE =
+  "This page loaded but gave up almost none of its words, so what is above may be only its menus. Say that plainly rather than summarising it, and try another source or ask the person to look at the screen.";
+/**
  * BROWSER-1. The one thing on this path that is not in the host bundle is the driver itself: it
  * lives in the box's runtime mount. A box whose mount is older than its bundle answered with a
  * Node stack trace before this, because the shell's stderr went straight into the tool result.
@@ -333,6 +363,46 @@ export interface BrowserDriverDependencies<Context> {
    */
   recordNavigation?(input: { readonly url: string; readonly title: string }): void;
   readonly autoReview?: SandBrowserAutoReviewOptions;
+  /**
+   * CLOUD-BROWSER-1. The cloud leg, or absent. When it is absent every one of the four tools works
+   * exactly as it did: the box's Chrome, the display, the loopback port, the base64 request.
+   *
+   * It is a port rather than an import so this file keeps no opinion about vendors, and so the unit
+   * tests can drive both engines against a fake without a box, a key or a network. The whole
+   * contract is: say which engine, hand back a session when it is a cloud one, and take the session
+   * away again. Everything above `run()` -- assertBrowsableUrl, the auto-review preflight,
+   * recordNavigation, the one-image render -- is untouched and inherited by both engines.
+   */
+  readonly cloudBrowser?: CloudBrowserSeam;
+}
+
+/**
+ * CLOUD-BROWSER-1. What the driver needs from the cloud, and nothing more.
+ *
+ * `route` is asked once before the first attempt and, at most, once more after it. There is no
+ * third ask and no loop: a session is money, and a loop is money that does not stop.
+ */
+export interface CloudBrowserSeam {
+  route(input: {
+    readonly url?: string | undefined;
+    readonly escalating?: boolean;
+  }): { readonly engine: string; readonly reason: string };
+  /** Worth one cloud session? True only on a sign-in wall, a challenge page, or an empty shell. */
+  shouldEscalate(verdicts: {
+    readonly needsLogin?: boolean | undefined;
+    readonly blocked?: boolean | undefined;
+    readonly emptyShell?: boolean | undefined;
+  }): boolean;
+  open(input: {
+    readonly engine: string;
+    readonly reason: string;
+    readonly url: string;
+  }): Promise<{
+    /** The websocket the box's driver attaches to. Never reaches argv; see `#requestFile`. */
+    readonly cdpUrl: string;
+    readonly sessionId: string;
+    close(): Promise<void>;
+  }>;
 }
 
 export interface BrowserDriverOutput {
@@ -407,6 +477,58 @@ export class SandBrowserDriver<Context = unknown> {
       readonly useRuntimeDriver?: boolean;
     },
   ): Promise<BrowserDriverOutput> {
+    /**
+     * CLOUD-BROWSER-1. THE ENTIRE CLOUD BRANCH, and it is here rather than in browser_open's
+     * execute for a reason worth stating: everything above this method -- assertBrowsableUrl, the
+     * auto-review preflight, recordNavigation and render()'s one-image contract -- runs before
+     * `run` is ever called. Branching here inherits all four for free, leaves the four tool specs,
+     * their names and turn-toolset.ts's predicate untouched, and keeps one place where a browser
+     * action reaches a page.
+     *
+     * At most two attempts, ever. The first is whatever the router chose; the second happens only
+     * when the router chose the box, the page came back on a sign-in wall, a challenge or an empty
+     * shell, and the router will then name a cloud engine. There is no third, no other-vendor
+     * fallback and no retry on failure.
+     */
+    const cloud = this.dependencies.cloudBrowser;
+    const url = typeof input.args.url === "string" ? input.args.url : undefined;
+    const first = cloud === undefined
+      ? { engine: "box", reason: "" }
+      : cloud.route(url === undefined ? {} : { url });
+
+    const attempt = await this.#runOnce(context, input, first.engine === "box" ? null : first);
+    if (cloud === undefined || first.engine !== "box" || attempt.response === undefined) return attempt.output;
+    if (!cloud.shouldEscalate(attempt.response)) return attempt.output;
+    const second = cloud.route({ escalating: true, ...(url === undefined ? {} : { url }) });
+    if (second.engine === "box") return attempt.output;
+    const escalated = await this.#runOnce(context, input, second);
+    // A cloud attempt that failed outright leaves the box's own answer standing. The person is
+    // better served by a footer plus the sentence that says it is a footer than by a vendor error.
+    return escalated.output.isError === true ? attempt.output : escalated.output;
+  }
+
+  /**
+   * One attempt against one engine. This is the method that used to be `run`, moved down whole:
+   * the request, the shell call, the failure wording and the result assembly are the same code,
+   * and the only additions are the cloud request's `cdpUrl`, the file the request travels in when
+   * it carries one, and the parsed response handed back so `run` above can read the verdicts.
+   */
+  async #runOnce(
+    context: Context,
+    input: {
+      readonly op: string;
+      readonly toolCallId: string;
+      readonly args: Record<string, unknown>;
+      readonly skipScreenshot?: boolean;
+      readonly useRuntimeDriver?: boolean;
+    },
+    route: { readonly engine: string; readonly reason: string } | null,
+  ): Promise<{ readonly output: BrowserDriverOutput; readonly response?: BrowserDriverResponse }> {
+    // The window index is resolved on BOTH paths, and deliberately so even though a cloud session
+    // has no window on this box's screen. The predicate that offers these four tools already
+    // requires a desktop (turn-toolset.ts, unchanged by this wave), so an agent with no window
+    // cannot reach either engine anyway -- and resolving it on one path and not the other would be
+    // a behaviour difference between the engines that the shape claim does not cover.
     const [windowIndex] = await Promise.all([
       this.resolveWindowIndex(context),
       input.useRuntimeDriver === true ? Promise.resolve() : this.ensureUploaded(context),
@@ -416,33 +538,92 @@ export class SandBrowserDriver<Context = unknown> {
       ? undefined
       : `${SAND_BROWSER_DRIVER_BOX_DIR}/shot-${sanitizeForBoxPath(input.toolCallId)}.png`;
     const requestedViewId = input.args.viewId;
-    const request = {
-      ...input.args,
-      op: input.op,
-      display: windowIndex,
-      cdpPort: BOX_CDP_PORT_BASE + windowIndex,
-      viewId: typeof requestedViewId === "string" && requestedViewId.length > 0
-        ? requestedViewId
-        : this.dependencies.getDefaultViewId(),
-      // After the arguments, always, so an allowHosts the model made up is overwritten by the
-      // operator's own list rather than adding to it.
-      allowHosts: readAllowedBrowserHosts(),
-      ...(screenshotPath == null ? {} : { screenshotPath }),
-    };
-    const encoded = Buffer.from(
-      JSON.stringify(request),
-      "utf8",
-    ).toString("base64");
 
-    const driverPath = input.useRuntimeDriver === true
-      ? SAND_BROWSER_RUNTIME_DRIVER_PATH
-      : SAND_BROWSER_DRIVER_BOX_PATH;
-    const shell = await this.dependencies.executeShell(context, {
-      command: `node ${driverPath} ${encoded}`,
-      name: "node",
-      workingDirectory: "/workspace",
-      toolCallId: `sand-browser-${input.op}-${sanitizeForBoxPath(input.toolCallId)}`,
-    });
+    // The cloud session is minted here and stopped in the finally below, on EVERY exit path
+    // including a thrown tool error. Browser Use's own docs say closing the CDP connection does not
+    // stop the browser, so a missed stop is a browser billing by the hour with nothing driving it.
+    let lease: { readonly cdpUrl: string; readonly sessionId: string; close(): Promise<void> } | null = null;
+    if (route !== null && this.dependencies.cloudBrowser !== undefined) {
+      lease = await this.dependencies.cloudBrowser.open({
+        engine: route.engine,
+        reason: route.reason,
+        url: typeof input.args.url === "string" ? input.args.url : "",
+      });
+    }
+
+    try {
+      const request = {
+        ...input.args,
+        op: input.op,
+        // On the cloud path the display and the port are meaningless: there is no Chrome on this
+        // box to reach and no seat on its screen to keep a window inside. The endpoint replaces both.
+        ...(lease === null
+          ? { display: windowIndex, cdpPort: BOX_CDP_PORT_BASE + windowIndex }
+          : { cdpUrl: lease.cdpUrl }),
+        viewId: typeof requestedViewId === "string" && requestedViewId.length > 0
+          ? requestedViewId
+          : this.dependencies.getDefaultViewId(),
+        // After the arguments, always, so an allowHosts the model made up is overwritten by the
+        // operator's own list rather than adding to it.
+        allowHosts: readAllowedBrowserHosts(),
+        ...(screenshotPath == null ? {} : { screenshotPath }),
+      };
+
+      const driverPath = input.useRuntimeDriver === true
+        ? SAND_BROWSER_RUNTIME_DRIVER_PATH
+        : SAND_BROWSER_DRIVER_BOX_PATH;
+      /**
+       * MARKET-17 / MARKET-24, and the one thing about this call that had to change.
+       *
+       * The request has always been base64 in argv, which is fine for a display number and an
+       * address and is not fine for a cloud endpoint: that URL carries the session's own credential,
+       * and argv is readable from any process in the box, the agent's own shell included. The box
+       * exec path cannot pipe stdin (buildHostShellArgs carries a command string and nothing else),
+       * so a request that carries an endpoint goes through a file this host writes 0600 in a 0700
+       * directory and the driver unlinks the moment it has read it. The gate greps every argument
+       * list in the box after a cloud run and fails on any vendor host, key or session id.
+       */
+      const command = lease === null
+        ? `node ${driverPath} ${Buffer.from(JSON.stringify(request), "utf8").toString("base64")}`
+        : `node ${driverPath} --request-file ${this.#writeRequestFile(input.toolCallId, request)}`;
+      const shell = await this.dependencies.executeShell(context, {
+        command,
+        name: "node",
+        workingDirectory: "/workspace",
+        toolCallId: `sand-browser-${input.op}-${sanitizeForBoxPath(input.toolCallId)}`,
+      });
+      return await this.#readShellAnswer(context, shell, screenshotPath);
+    } finally {
+      if (lease !== null) await lease.close().catch(() => undefined);
+    }
+  }
+
+  /**
+   * The request file: 0700 directory, 0600 file, written by this process and unlinked by the driver
+   * that reads it. The name carries no vendor and no session, so even a directory listing says
+   * nothing but that a browser call happened.
+   */
+  #writeRequestFile(toolCallId: string, request: Record<string, unknown>): string {
+    const directory = `${SAND_BROWSER_DRIVER_BOX_DIR}/requests`;
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    try { chmodSync(directory, 0o700); } catch { /* it exists at the right mode or we cannot fix it */ }
+    const path = `${directory}/req-${sanitizeForBoxPath(toolCallId)}-${Date.now()}.json`;
+    writeFileSync(path, JSON.stringify(request), { encoding: "utf8", mode: 0o600 });
+    try { chmodSync(path, 0o600); } catch { /* the create already carried the mode */ }
+    return path;
+  }
+
+  /** Everything from the shell answer onwards, unchanged: same failures, same words, same result. */
+  async #readShellAnswer(
+    context: Context,
+    shell: {
+      readonly case: "success" | string;
+      readonly stdout?: string;
+      readonly stderr?: string;
+      readonly exitCode?: number;
+    },
+    screenshotPath: string | undefined,
+  ): Promise<{ readonly output: BrowserDriverOutput; readonly response?: BrowserDriverResponse }> {
     // The cause goes to the host log, never into the tool result. Whatever the box printed is a
     // Node stack trace as often as it is a sentence, and the tool result is text the model is
     // handed and may repeat to a person.
@@ -470,8 +651,8 @@ export class SandBrowserDriver<Context = unknown> {
     }
     if (!response.ok) {
       return {
-        text: response.error ?? "The browser action failed.",
-        isError: true,
+        output: { text: response.error ?? "The browser action failed.", isError: true },
+        response,
       };
     }
 
@@ -496,18 +677,26 @@ export class SandBrowserDriver<Context = unknown> {
     if (response.stillLoading === true) {
       parts.push(SAND_BROWSER_STILL_LOADING_NOTE);
     }
+    // CLOUD-BROWSER-1. Said only when there is nothing better to offer: the two verdicts above are
+    // more specific, and a page that is a sign-in wall should be described as a sign-in wall.
+    if (response.emptyShell === true && response.needsLogin !== true && response.blocked !== true) {
+      parts.push(SAND_BROWSER_EMPTY_SHELL_NOTE);
+    }
 
     const imageB64 = response.screenshot === true && screenshotPath != null
       ? await this.fetchScreenshot(context, screenshotPath, response.mimeType ?? "image/png")
       : undefined;
     return {
-      text: parts.join("\n\n"),
-      ...(imageB64 == null ? {} : { imageB64 }),
-      ...(response.url == null ? {} : { url: response.url }),
-      ...(response.title == null ? {} : { title: response.title }),
-      ...(response.needsLogin == null ? {} : { needsLogin: response.needsLogin }),
-      ...(response.blocked == null ? {} : { blocked: response.blocked }),
-      ...(response.mimeType == null ? {} : { mimeType: response.mimeType }),
+      output: {
+        text: parts.join("\n\n"),
+        ...(imageB64 == null ? {} : { imageB64 }),
+        ...(response.url == null ? {} : { url: response.url }),
+        ...(response.title == null ? {} : { title: response.title }),
+        ...(response.needsLogin == null ? {} : { needsLogin: response.needsLogin }),
+        ...(response.blocked == null ? {} : { blocked: response.blocked }),
+        ...(response.mimeType == null ? {} : { mimeType: response.mimeType }),
+      },
+      response,
     };
   }
 

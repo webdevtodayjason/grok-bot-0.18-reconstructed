@@ -51,6 +51,59 @@ export class CdpConnection {
     return connection;
   }
 
+  /**
+   * CLOUD-BROWSER-1. Attach to an endpoint somebody else resolved for us.
+   *
+   * `open` above starts at a loopback PORT and asks /json/version for the socket. A cloud browser
+   * has no loopback port: the vendor hands out one endpoint URL whose path or query IS the session
+   * credential. Everything downstream -- the flat sessions, the deadlines, the event fan-out -- is
+   * the same object doing the same work.
+   *
+   * TWO SHAPES, because the vendors use both, and this cost a real measurement to learn. Measured
+   * against Browser Use 2026-09-09: `POST /api/v4/browsers` answers with a `cdpUrl` that is NOT a
+   * ws:// URL. Their own docs hand that string straight to Playwright's `connect_over_cdp`, which
+   * accepts an http(s) endpoint and resolves /json/version itself. A driver that only spoke
+   * websocket would have refused the vendor's own documented answer at the door -- so an http(s)
+   * endpoint is resolved here exactly the way the loopback path resolves a port, and a ws(s) one is
+   * connected to directly.
+   */
+  static async attachTo(endpointUrl, options = {}) {
+    const given = String(endpointUrl ?? "").trim();
+    if (given.length === 0) throw new Error("no browser endpoint was given to attach to");
+    let parsed;
+    try {
+      parsed = new URL(given);
+    } catch {
+      throw new Error("that browser endpoint is not an address we can use");
+    }
+    let url = given;
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      // The vendor's own credential travels in this URL, so the resolve is one request with a
+      // deadline and no redirect chasing beyond what fetch does by default.
+      const base = given.replace(/\/+$/, "");
+      const response = await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(options.timeoutMs ?? 15000) });
+      if (!response.ok) throw new Error(`the cloud browser answered ${response.status} when asked how to reach it`);
+      const version = await response.json();
+      const socketUrl = version?.webSocketDebuggerUrl;
+      if (typeof socketUrl !== "string" || socketUrl.length === 0) {
+        throw new Error("the cloud browser did not say how to reach it");
+      }
+      url = socketUrl;
+    } else if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+      throw new Error(`this driver cannot reach a browser over ${parsed.protocol}//`);
+    }
+    const socket = await connectWebSocket(url, { timeoutMs: options.timeoutMs ?? 15000 });
+    const connection = new CdpConnection(socket);
+    connection.browserVersion = "unknown";
+    try {
+      const version = await connection.send("Browser.getVersion", {}, { timeoutMs: options.timeoutMs ?? 10000 });
+      if (typeof version?.product === "string") connection.browserVersion = version.product;
+    } catch {
+      // A browser that will not name itself still drives. Nothing below reads this but the log.
+    }
+    return connection;
+  }
+
   get closed() {
     return this.#closedReason !== null;
   }

@@ -14,7 +14,19 @@
 // One line of output, always, whatever happened. A tool that prints nothing is the one failure the
 // host cannot describe to a person.
 
-import { mkdirSync, writeFileSync } from "node:fs";
+// CLOUD-BROWSER-1 gave this file a second way in and a second way to be told what to do.
+//
+// The second way in is `cdpUrl`: a browser somebody else is running, named by its debugger URL,
+// instead of a display and a loopback port. Same driver, same page reader, same JPEG, same
+// verdicts, same one marked line -- the only difference is which browser is on the other end.
+//
+// The second way to be TOLD is the one that matters for custody. The request has always arrived
+// base64 in argv, which is fine for a display number and an address and is not fine at all for a
+// cloud endpoint: that URL carries the session's own credential, and argv is readable from any
+// process in the box, the agent's own shell included (MARKET-17/MARKET-24). So a request that
+// carries one arrives on stdin (`--request-stdin`) or out of a file the host wrote 0600 in a 0700
+// directory (`--request-file <path>`), and the file is unlinked in a finally whatever happened.
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { BrowserDriver } from "./driver.mjs";
 
@@ -60,11 +72,16 @@ async function run(request) {
   const attachOptions = {};
   if (typeof request.cdpPort === "number") attachOptions.port = request.cdpPort;
   if (typeof request.display === "number") attachOptions.display = request.display;
+  // A cloud endpoint replaces the display and the port outright: there is no Chrome to start here,
+  // no window index to work out, and no seat on the box's screen to keep the browser inside.
+  const cdpUrl = typeof request.cdpUrl === "string" && request.cdpUrl.length > 0 ? request.cdpUrl : null;
 
   const wantsShot = typeof request.screenshotPath === "string" && request.screenshotPath.length > 0;
   const actionOptions = wantsShot ? {} : { screenshot: false };
 
-  const driver = await BrowserDriver.attach(attachOptions);
+  const driver = cdpUrl === null
+    ? await BrowserDriver.attach(attachOptions)
+    : await BrowserDriver.attachCdpUrl(cdpUrl, {});
   try {
     let page;
     switch (request.op) {
@@ -99,6 +116,18 @@ async function run(request) {
     if (typeof page.text === "string" && page.text.length > 0) result.text = page.text;
     if (page.needsLogin === true) result.needsLogin = true;
     if (page.blocked === true) result.blocked = true;
+    // CLOUD-BROWSER-1. The page loaded and said nothing. The host reads this to decide whether a
+    // second engine is worth one try; the model reads the sentence the host makes out of it, so it
+    // is never handed a footer and left to summarise it as the page.
+    if (page.emptyShell === true) {
+      result.emptyShell = true;
+      if (typeof page.emptyShellReason === "string" && page.emptyShellReason.length > 0) {
+        result.emptyShellReason = page.emptyShellReason;
+      }
+    }
+    // Which browser answered, so nothing downstream has to infer it. The gate's desktop leg reads
+    // this so it cannot pass vacuously, and the ledger reads it so a row names a real engine.
+    result.engine = cdpUrl === null ? "box" : "cloud";
     // The page was still loading when we read it. Better than nothing, and the model has to know
     // it is looking at a page mid-flight rather than at all of it.
     if (page.stillLoading === true) result.stillLoading = true;
@@ -131,10 +160,51 @@ const watchdog = setTimeout(() => {
 }, BUDGET_MS);
 watchdog.unref?.();
 
+/** Everything on stdin, as a string. Used only when the caller said `--request-stdin`. */
+function readStdin() {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    process.stdin.on("data", (chunk) => chunks.push(chunk));
+    process.stdin.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    process.stdin.on("error", (error) => reject(error));
+  });
+}
+
+/**
+ * The three ways this process is told what to do, and the one rule that decides which:
+ *
+ *   --request-stdin        the JSON arrives on stdin. Nothing is in argv and nothing is on disk.
+ *   --request-file <path>  the JSON is in a file the host wrote 0600. Read once, unlinked in a
+ *                          finally whatever happened, including on a throw.
+ *   <base64>               the way it has always worked, and still the way every box-browser call
+ *                          works: a display number and an address, neither of them a secret.
+ *
+ * The file leg exists because the box's exec path cannot pipe stdin to a command (buildHostShellArgs
+ * carries a command string and nothing else), and a cloud endpoint must not reach argv. What is
+ * left is a residual this file states rather than papers over: the agent's shell runs as root in
+ * the same container, so between the write and the unlink a determined agent could read the file.
+ * That window is one tool call long, the endpoint dies with the session minutes later, and the
+ * thing it fixes -- a credential sitting in a root process's argument list for anything running
+ * `ps` to read -- was permanent.
+ */
+async function readRequest() {
+  const argv = process.argv;
+  if (argv.includes("--request-stdin")) return JSON.parse(await readStdin());
+  const at = argv.indexOf("--request-file");
+  if (at >= 0) {
+    const file = argv[at + 1] ?? "";
+    try {
+      return JSON.parse(readFileSync(file, "utf8"));
+    } finally {
+      try { rmSync(file, { force: true }); } catch { /* already gone, or never ours to remove */ }
+    }
+  }
+  return JSON.parse(Buffer.from(argv[2] ?? "", "base64").toString("utf8"));
+}
+
 let result;
 try {
-  const raw = process.argv[2] ?? "";
-  result = await run(JSON.parse(Buffer.from(raw, "base64").toString("utf8")));
+  result = await run(await readRequest());
 } catch (error) {
   result = { ok: false, error: error instanceof Error ? error.message : String(error) };
 }

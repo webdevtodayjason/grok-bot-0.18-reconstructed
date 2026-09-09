@@ -234,11 +234,20 @@ export class BrowserDriver {
   #env;
   #mainFrameId = null;
   #statusByFrame = new Map();
+  /**
+   * CLOUD-BROWSER-1. A cloud session is a fresh browser that lives for one tool call, so there is
+   * no tab to remember between calls and nowhere sensible to remember it: the note on disk is keyed
+   * by loopback port, and every cloud session would share the one file and hand the next session a
+   * target id belonging to a browser that no longer exists. Stateless means: never read the note,
+   * never write it, and reuse whatever page the vendor already opened rather than making a second.
+   */
+  #stateless = false;
 
-  constructor({ connection, port, env }) {
+  constructor({ connection, port, env, stateless }) {
     this.#connection = connection;
     this.#port = port;
     this.#env = env ?? process.env;
+    this.#stateless = stateless === true;
   }
 
   get port() {
@@ -256,6 +265,27 @@ export class BrowserDriver {
     const connection = await CdpConnection.open(port, { timeoutMs: options.timeoutMs ?? 10000 });
     const driver = new BrowserDriver({ connection, port, env });
     driver.startedBrowser = started;
+    return driver;
+  }
+
+  /**
+   * CLOUD-BROWSER-1. Attach to a browser somebody else is running, named by its debugger URL.
+   *
+   * This is the WHOLE cloud leg of the driver. There is no second page reader, no second screenshot
+   * pipeline and no second set of verdicts: open, click, type and screenshot below are reached
+   * exactly as they are for the box's own Chrome, so the result of a cloud read is identical to the
+   * result of a box read by construction rather than because two implementations were kept in step.
+   * `checkPublicWebUrl` in `open` runs on this path too, which is the point of putting the cloud
+   * branch HERE rather than in a host-side re-implementation: that guard resolves the name and
+   * refuses a public host that lands on a private address, and a re-implementation would have
+   * quietly dropped it.
+   */
+  static async attachCdpUrl(cdpUrl, options = {}) {
+    const env = options.env ?? process.env;
+    const connection = await CdpConnection.attachTo(cdpUrl, { timeoutMs: options.timeoutMs ?? 20000 });
+    const driver = new BrowserDriver({ connection, port: null, env, stateless: true });
+    driver.startedBrowser = false;
+    driver.cloud = true;
     return driver;
   }
 
@@ -287,7 +317,7 @@ export class BrowserDriver {
       { url: "about:blank", newWindow: false, background: false },
       { timeoutMs: 15000 },
     );
-    writeState(this.#port, { targetId: created.targetId, at: new Date().toISOString() }, this.#env);
+    if (!this.#stateless) writeState(this.#port, { targetId: created.targetId, at: new Date().toISOString() }, this.#env);
     return created.targetId;
   }
 
@@ -317,10 +347,16 @@ export class BrowserDriver {
     if (this.#targetId !== null && this.#sessionId !== null) return this.#targetId;
 
     const targets = await this.#pageTargets();
-    const remembered = readState(this.#port, this.#env);
-    const reuse = remembered !== null && targets.some((target) => target.targetId === remembered.targetId)
-      ? remembered.targetId
-      : null;
+    // CLOUD-BROWSER-1. A cloud session opens with exactly one page already there. Taking THAT page
+    // rather than adding one keeps the vendor's own live view -- which shows the session's first
+    // page -- pointed at the page the person is being asked to look at. On the box path nothing
+    // changes: the note on disk is still what decides, so the agent's tab is still its own tab.
+    const remembered = this.#stateless ? null : readState(this.#port, this.#env);
+    const reuse = this.#stateless
+      ? (targets[0]?.targetId ?? null)
+      : remembered !== null && targets.some((target) => target.targetId === remembered.targetId)
+        ? remembered.targetId
+        : null;
 
     if (reuse === null) {
       const made = await this.#newTab();
@@ -337,7 +373,7 @@ export class BrowserDriver {
       // action from here on, which is what actually happened before this catch existed.
       this.#sessionId = null;
       this.#targetId = null;
-      forgetState(this.#port, this.#env);
+      if (!this.#stateless) forgetState(this.#port, this.#env);
       // And close it. Forgetting a wedged tab without closing it leaves it open in the browser the
       // person is watching, still loading, and the next call opens another beside it: measured on
       // grok-bot-local-vm 2026-09-07, the tab count climbed one per failed open and never came down.

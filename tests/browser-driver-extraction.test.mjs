@@ -170,11 +170,16 @@ test("analyzePage is the one shape the tool and the CLI hand back", () => {
     url: "https://console.example.com/login",
     status: 200,
   });
+  // CLOUD-BROWSER-1 added the third verdict and its sentence. The shape is pinned rather than
+  // spot-checked on purpose: the host parses this line field by field, and a field that appears
+  // without the host learning about it is a fact nobody reads.
   assert.deepEqual(Object.keys(result).sort(), [
-    "blocked", "blockedFamily", "blockedReason", "needsLogin", "needsLoginReason", "text", "textSource", "textTruncated",
+    "blocked", "blockedFamily", "blockedReason", "emptyShell", "emptyShellReason",
+    "needsLogin", "needsLoginReason", "text", "textSource", "textTruncated",
   ]);
   assert.equal(result.needsLogin, true);
   assert.equal(result.blocked, false);
+  assert.equal(result.emptyShell, false, "a page that asks for a sign-in is described as that, not as an empty page");
   assert.equal(typeof result.text, "string");
   assert.equal(typeof result.textTruncated, "boolean");
 });
