@@ -1812,6 +1812,13 @@
       // ensureForeverBox would answer the same question and ALLOCATE a seat doing it (measured
       // 16,277 ms cold on grok-bot-local-vm), so a picture must never be what calls it.
       boxDisplay: displayOfVncUrl(box?.vncUrl),
+      // HANDBACK-1 (fix): WHICH SEAT the agent actually works on, straight from the host's own
+      // assignment map. vncUrl alone could not answer it -- an agent that has never had its screen
+      // opened reports state absent with a null vncUrl while it is working on display :5, and the
+      // console then drew display :1 and captioned it "<name>'s screen". `null` means the agent has
+      // no seat of its own, which is the shared screen; `undefined` means this host does not send
+      // the field and nothing here may guess.
+      boxSeat: box == null || !("boxSeat" in box) ? undefined : (box.boxSeat ?? null),
     };
   }
 
@@ -1826,6 +1833,7 @@
     r.handoff = loaded.handoff;
     r.boxState = loaded.boxState;
     r.boxDisplay = loaded.boxDisplay ?? null;
+    r.boxSeat = loaded.boxSeat;
   }
   // The part of a record that reloadActive compares to decide whether the app must redraw. Every
   // emit rebuilds the whole conversation, so this has to name everything the views show and
@@ -1842,7 +1850,7 @@
     // is read from, and a digest of every message's own hand-off state ride here too. Without the
     // last one the card never repaints and the person is left looking at Action needed on a step
     // they have already finished.
-    r.handoff?.instruction ?? "", r.boxDisplay ?? "",
+    r.handoff?.instruction ?? "", r.boxDisplay ?? "", r.boxSeat === undefined ? "?" : String(r.boxSeat),
     (r.messages ?? []).filter((m) => m.handoff).map((m) => `${m.handoff.requestId}:${m.handoff.resolution ?? ""}`).join(","),
     r.composer?.state ?? "", r.composer?.nonce ?? "",
   ].join("|");
@@ -1953,7 +1961,7 @@
       // Filled by loadContext for the context on screen: the agent's skills, the chat platforms
       // it holds a token for, the box's pending hand-off, and whether the transcript window has
       // older entries the host can page in. Null channels means "not read yet", not "none".
-      skills: [], channels: null, handoff: null, boxState: null, boxDisplay: null, hasOlder: false,
+      skills: [], channels: null, handoff: null, boxState: null, boxDisplay: null, boxSeat: undefined, hasOlder: false,
       // The composer's last send, as the host's acceptance ledger reports it.
       composer: null,
       lastActivityAt: a.lastActivityAt ?? 0,
@@ -2625,6 +2633,7 @@
             target.handoff = status?.handoff ?? null;
             target.boxState = status?.state ?? target.boxState;
             target.boxDisplay = displayOfVncUrl(status?.vncUrl) ?? target.boxDisplay ?? null;
+            if (status != null && "boxSeat" in status) target.boxSeat = status.boxSeat ?? null;
           }
           emit("message:created", { context: state.activeContext });
         };
@@ -2655,8 +2664,14 @@
       // that is not there, so this never falls back.
       skipHandoff(agentId) {
         if (commandMissing("skipBoxHandoff")) return Promise.resolve({ supported: false });
-        return tryCall("skipBoxHandoff", { id: agentId }).then((answer) => {
-          if (answer == null) return { supported: false };
+        // NOT `answer == null`. skipBoxHandoff used to be a void command, so a success came back as
+        // the four bytes `null` -- byte for byte what tryCall hands back for a command this host has
+        // never heard of. Every Skip that worked was reported to the person as "this computer's
+        // software is too old", and the console then hid Skip everywhere for the rest of the
+        // session. Whether the command exists is tryCall's own answer, kept in unknownCommands, so
+        // that is what is asked. The host answers {ok:true} now as well, which is the belt.
+        return tryCall("skipBoxHandoff", { id: agentId }).then(() => {
+          if (commandMissing("skipBoxHandoff")) return { supported: false };
           // Same rule as handBack: the host, not the RPC, says whether the hand-off is over.
           return call("getForeverBoxStatus", { id: agentId }).catch(() => null).then((status) => {
             const target = state.workers.find((w) => w.id === agentId);
@@ -2664,6 +2679,7 @@
               target.handoff = status?.handoff ?? null;
               target.boxState = status?.state ?? target.boxState;
               target.boxDisplay = displayOfVncUrl(status?.vncUrl) ?? target.boxDisplay ?? null;
+              if (status != null && "boxSeat" in status) target.boxSeat = status.boxSeat ?? null;
             }
             emit("message:created", { context: state.activeContext });
             return { supported: true, pending: status?.handoff != null };

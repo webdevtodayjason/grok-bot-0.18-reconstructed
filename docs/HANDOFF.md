@@ -35,9 +35,16 @@ The four pill labels, and nothing else is ever drawn there:
 | State | Pill | Colour | Picture | Controls |
 |---|---|---|---|---|
 | `pending` | `Action needed` | amber, with a spinner | live, refreshed every 3 s | Take over · I'm done · Skip |
-| `done` | `Done` | green | frozen at the last frame | Open computer |
-| `skipped` | `Skipped` | muted | frozen at the last frame | Open computer |
-| `closed` | `No longer waiting` | muted | frozen at the last frame | Open computer |
+| `done` | `Done` | green | the last frame, frozen | Open computer |
+| `skipped` | `Skipped` | muted | the last frame, frozen | Open computer |
+| `closed` | `No longer waiting` | muted | the last frame, frozen | Open computer |
+
+The line behind the picture is chosen from the state too, not from whether a screen exists.
+`pending` says `Bringing the screen up`; a resolved card with no kept frame says `No picture of this
+step was kept`. The frozen frame lives in the browser that captured it (memory, mirrored to this
+origin's storage), so a second browser, a private window, or an `I'm done` pressed inside the first
+three seconds all reach a resolved card with no picture — and that card has to say so rather than
+promise one that is never coming.
 
 The DOM is frozen so three builders could work at once, and gates and tests point at it:
 `.handoff-card[data-handoff-card][data-request-id][data-state]`, the pill at `[data-handoff-pill]`,
@@ -53,21 +60,36 @@ While a step is pending, the top of the agent panel carries an amber card, above
 - the same instruction, word for word
 - two buttons: `Skip this step`, then `I'm done, continue` (filled)
 
-Under it, always, is the agent's screen tile captioned `<name>'s screen`: live while the step is
-pending, a still otherwise, and the plate `Bringing the screen up` while the seat is being
-allocated. The existing context card, the Now island, the desktop capsule and Routines keep their
-order below it. Ids: `#rail-handoff`, then `#rail-screen` with `#rail-screen-caption`.
+Under it, always, is the agent's screen tile: live while the step is pending, a still otherwise.
+The caption names the screen the tile is actually showing, which is one of three things and never a
+default (§5): `<name>'s screen` for an agent with a seat of its own, `The shared screen — every
+agent on this box sees it` for an agent with none, and `No screen to show` where the host has not
+said. The plate says `Connecting` only while a reader is really running for this agent; otherwise it
+says what clicking it does. The existing context card, the Now island, the desktop capsule and
+Routines keep their order below it. Ids: `#rail-handoff`, then `#rail-screen` with
+`#rail-screen-caption`.
 
-The roster row's needs-you pill and the conversation header's pill are the same pending hand-off,
-read the same way. They were already there; they now appear and disappear with the card.
+The roster row's needs-you pill and the conversation header's pill are NOT read off the hand-off.
+They run off the host's `awaitingUserResponse`, which is the only signal there is for an agent whose
+conversation is not open — `record.handoff` is null for every other agent. A pending hand-off sets
+`awaitingUserResponse`, so in practice the pill and the card appear together and go together; but an
+agent that simply ended a turn with a question shows the same pill with no hand-off anywhere, and
+that is correct. One signal is cross-agent, the other is per-conversation. `needsYou()` in `app.js`
+is the code.
 
 ### The desktop view, after Take over
 
-`Take over` opens the desktop view full-window with the app dimmed behind it
-(`#desktop-dialog[data-takeover="1"]`). Across the top is a translucent amber banner,
+`Take over` opens the desktop view over the whole window, inset 32 px on every side, with the app
+dimmed behind it through that margin (`#desktop-dialog[data-takeover="1"]`). The margin is the whole
+point of the dim: the dialog's backdrop is `rgba(5,13,17,0.62)` and an edge-to-edge dialog covers
+every pixel of it, which is what the first build did — the sentence was in the stylesheet and
+nothing a person could see. Across the top is a translucent amber banner,
 `#handoff-banner`, as a third fixed row above the workspace:
 
-- left: the instruction, in amber, clamped to two lines (`#hand-back-note`)
+- left: the instruction, verbatim, in amber, clamped to two lines (`#hand-back-note`). The same
+  words as the card and the rail card, with nothing prefixed to them — one step must not read three
+  different ways in the three places a person meets it. The agent's name is in the dialog title
+  directly above.
 - right: `Skip this step` (`#handoff-skip`), then `I'm done, continue`, filled (`#hand-back`)
 
 `I'm done, continue` hands the computer back and closes the view. `Skip this step` skips and closes.
@@ -207,26 +229,45 @@ pending hand-off, ticked every 3 s on its own timer, pushing its data URL into a
   already carries: it is why the desktop frame is mounted once and left alone.
 - **The frozen frame is the last frame.** Kept in memory and mirrored to `localStorage` keyed
   `agentId + requestId`, so a reload still shows a `done` card's picture.
-- **The display number is parsed from `getForeverBoxStatus.vncUrl`'s token and re-read on every
-  mount.** Seats churn under the display number.
+- **The screen is the one the host says the agent is on, and it is never guessed.** This is the
+  rule that was got wrong once and it cost a person a decision on the wrong screen, so it is written
+  out in full below.
 - **The URL is built on the page's own origin**, never the host's `127.0.0.1` form. Building it the
   host's way is the bug VNC-2 closed: through the R750 it sent the operator's browser at his own Mac
   and the frame read "Failed to connect to downstream server".
-- **No seat of its own means the shared seat, not a blank plate.** This is the one rule the R750
-  pass changed. It used to read "no seat means no picture": if `getForeverBoxStatus` carried no
-  `vncUrl`, the card drew `Bringing the screen up` and stopped. Measured while integrating, on
-  grok-bot-local-vm: an agent told to open a page in its browser still reported `state absent` with
-  `vncUrl` null **95 seconds later**, so that rule meant the ordinary hand-off never showed a
-  picture at all — the gate caught it as no thumbnail after 20 s. An agent with no forever box of
-  its own still has a screen: the shared seat on display `:1`, which is exactly what `ensureDesktop`
-  falls back to when `ensureForeverBox` hands back no token, and exactly what the desktop view then
-  paints. So the card falls back to the same one (`boxHandoffDisplayOf`). It is not somebody else's
-  screen — the product's own words for display `:1` are "the shared screen, every agent on this box
-  sees it". We still never call `ensureForeverBox` to get a picture: it allocates a seat and on a
-  cold box it takes time (below). `Take over` is what allocates the seat, which is where that cost
-  belongs.
 - **It never blocks the transcript.** The tick runs on its own timer; a frame that does not arrive
   leaves the previous one on screen.
+
+### Which screen, exactly
+
+`getForeverBoxStatus` carries `boxSeat`: the index the box's own assignment map holds for this
+agent, read without allocating anything.
+
+| `boxSeat` | What it means | Picture | Caption |
+|---|---|---|---|
+| a number (≥2) | the agent's own seat | display `:<boxSeat>` | `<name>'s screen` |
+| `null` | no seat of its own, so it works on the shared seat | display `:1` | `The shared screen — every agent on this box sees it` |
+| absent | this host predates the field and cannot say | none drawn | `No screen to show` |
+
+`vncUrl` is still read and still agrees when it is there, but it cannot answer the question on its
+own, and that is the bug this table exists for. **Measured live on `console.titanium.bot`
+2026-09-08, on Jason's own tenant box `titanbot-box-p927bfqm83ioloibamlvyd7g`:** while a hand-off
+was pending, the card's reader was mounted on `/vnc/1/` and the desktop view `Take over` opened was
+`/vnc/5/`, with `/home/box/.sand-window-assignments.json` inside that box holding `:5` for the
+agent. `getForeverBoxStatus` answered `state "absent"` with `vncUrl: null` — which is the ordinary
+state of an agent whose screen nobody has opened — so the console fell back to the shared seat and
+captioned another agent's wallpaper "<name>'s screen". The person decided on that picture, and the
+agent's own next line ("the browser is sitting on a blank page") disagreed with it.
+
+The fallback was not wrong because `:1` is somebody else's screen; it is genuinely shared. It was
+wrong because the caption claimed it was this agent's, and because the screen `Take over` opens was
+a different one. Both halves are now driven by the same answer, and the desktop view's own mount
+feeds the display it really painted back to the thumbnail (`noteBoxHandoffSeat`), so a seat that
+`Take over` allocates is what the picture reads from at once rather than 15 s later.
+
+**A host that cannot say draws nothing.** No guessed display, no picture, and the plate says so. A
+wrong screen is worse than no screen — the same rule Skip already follows on a host that cannot
+skip.
 
 **Measured, all on grok-bot-local-vm (this Mac), during the HANDBACK-1 design pass:**
 
@@ -240,21 +281,30 @@ pending hand-off, ticked every 3 s on its own timer, pushing its data URL into a
 | `ensureForeverBox` on a cold box | 16,277 ms, and it allocates a seat |
 
 **Measured on the R750, 2026-09-08, in real Chrome from Jason's Mac against
-`console.titanium.bot`, demo tenant box `titanbot-box-atonqjq7zx593jsacaccpfau`, host
-`ee8c10006d40`.** Separate table, because these are a different machine and a different path:
+`console.titanium.bot`.** Separate table, because this is a different machine and a different path.
 
-| Thing | Number |
-|---|---|
-| Prompt to the card on screen with `Action needed` | 10.3 s |
-| First thumbnail frame after the card | 1.5 s |
-| That frame | 5,395 characters of webp data URL, about 4 KB |
-| `I'm done, continue` click to the card reading `Done` | 1.1 s |
-| The agent's next message on screen, no reload | 22.0 s |
+**Which box, plainly, because the first version of this table got it wrong.** `console.titanium.bot`
+is a Caddy label on `titanbot-relay-p927bfqm83ioloibamlvyd7g`, whose box is
+`titanbot-box-p927bfqm83ioloibamlvyd7g` (Coolify resource `titanbot`) — Jason's own live tenant. The
+demo tenant `titanbot-box-atonqjq7zx593jsacaccpfau` (resource `titanbot-demo`) **has no relay
+container of its own and therefore no console**: `docker ps` on the R750 shows exactly one titanbot
+relay. So a browser measurement cannot be made on the demo box, and a wire measurement made inside
+it is not the same run as a browser measurement made through the console. Every number below names
+the box it was taken on:
 
-The wire half, run inside the same box: prompt to a pending hand-off 7.6 s, status 293 B with the
+| Thing | Number | Box |
+|---|---|---|
+| Prompt to the card on screen with `Action needed` | 10.3 s | `titanbot-box-p927…` (through `console.titanium.bot`) |
+| First thumbnail frame after the card | 1.5 s | `titanbot-box-p927…` |
+| That frame | 5,395 characters of webp data URL, about 4 KB | `titanbot-box-p927…` |
+| `I'm done, continue` click to the card reading `Done` | 1.1 s | `titanbot-box-p927…` |
+| The agent's next message on screen, no reload | 22.0 s | `titanbot-box-p927…` |
+
+The wire half was a **different box**: run inside `titanbot-box-atonqjq7zx593jsacaccpfau`, the demo
+tenant, which has no console of its own. Prompt to a pending hand-off 7.6 s, status 293 B with the
 hand-off object 144 B and no image, `handBackForeverBox` **16 ms** with the entry `handed_back`
 21 ms later, `skipBoxHandoff` **6 ms** stamped `dismissed`, and an ordinary prompt after both
-decisions answered in 27.6 s. Screenshots of all five card states are in that run's scratchpad.
+decisions answered in 27.6 s.
 
 ---
 
@@ -290,6 +340,14 @@ naming it: `startedAt`, the picture on the wire, the status size, the skip itsel
 resolution word, since `completed` is what an old host is supposed to write. A host being restarted
 under the run points at the supervisor log. A full roster names the ONBOARD-1 cap. A provider that
 does not answer prints its own number. And a read that FAILED is never reported as an empty answer.
+
+Three legs exist because a green run once meant nothing about the two worst bugs in this file.
+`--console` now fails if a toast matching `/too old/i` appears after a Skip that worked and if the
+console has turned Skip off for the session; it reads
+`iframe[data-box-handoff-thumb-source].src` and the desktop view's own client src and fails unless
+the two display numbers match; and it fails a resolved card still saying a picture is on its way.
+`--host` asserts `boxSeat` is on the wire and that `skipBoxHandoff` answers something a success can
+be told by.
 
 `scripts/verify-dashboard.mjs` keeps its GW-10 leg, pointed at the same `#hand-back` and
 `#hand-back-note` ids the banner inherited. It reads visibility through the element's ancestors now,
@@ -339,6 +397,19 @@ ordinary prompt that has to get a reply.
 an answer patches `window.fetch` through `addInitScript` instead. And a gate that reads the static
 shell will happily pass against placeholder markup, so poll for `window.__machineRoomAdapter` first.
 
+**A void gateway command is indistinguishable from a missing one.** `skipBoxHandoff` and
+`handBackForeverBox` both used to answer `void`, which on the wire is http 200 with the four bytes
+`null` — byte for byte what the gateway answers for a command it has never heard of. The console
+read that as "your software is too old", said so to the person after **every Skip that worked**, and
+then hid Skip everywhere for the rest of the session. Two halves to the fix and both are kept: the
+commands answer `{ok:true}` now, and the console reads its own record of unknown commands
+(`unknownCommands` in `tryCall`) rather than inferring support from an answer. If you add a gateway
+command whose success has no value, give it one.
+
+**The screen a picture shows has to be established, never assumed.** See §5. `vncUrl` is null for
+any agent whose screen nobody has opened, which is most of them, and falling back to display `:1`
+there put another agent's wallpaper under the caption "<name>'s screen".
+
 **A host that predates this wave has no Skip, and the control is hidden there rather than faked.**
 `skipBoxHandoff` is a new command; if it is unknown, no Skip is drawn in the card, the rail or the
 banner. The tempting fallback, `handBackForeverBox {trigger:"dismissed"}`, does reach the declined
@@ -356,9 +427,13 @@ Frozen here so it can be built against rather than discovered.
 
 - `getForeverBoxStatus.handoff` = `{requestId, instruction, startedAt, snapshotAt?}` or `null`.
   No image, ever.
-- `handBackForeverBox {id, trigger}` keeps its exact shape. Any trigger string other than `cancel`
-  or `dismissed` means `handed_back`.
-- `skipBoxHandoff {id}` is new. Resolution `dismissed`, trigger `dismissed`.
+- `getForeverBoxStatus.boxSeat` = the agent's window index (a number ≥ 2), or `null` for an agent
+  with no seat of its own, and the field is absent on a host that predates it. Read off the box's
+  assignment map; it allocates nothing. §5 is the table.
+- `handBackForeverBox {id, trigger}` keeps its exact arguments and answers `{ok:true}`. Any trigger
+  string other than `cancel` or `dismissed` means `handed_back`.
+- `skipBoxHandoff {id}` is new and answers `{ok:true}`. Resolution `dismissed`, trigger `dismissed`.
+  Both used to answer `void`; see §7 for why that was a bug and not a style.
 - Entry resolutions written from now on: `handed_back`, `dismissed`. Read-side aliases:
   `completed` reads as done, `cancelled` reads as skipped.
 

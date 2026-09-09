@@ -7,7 +7,10 @@
 //   getAgentTranscriptPage {id,beforeSeq,untilMs,limit} -> { entries, nextBeforeSeq? }
 //   promptAcceptanceStatus {accountSlot,clientNonce} -> { outcome:"found", record:{status,rejectionCode} } | { outcome:"not-found" }
 //   getForeverBoxStatus {id}                     -> { agentId, state, vncUrl, handoff: null | { requestId, instruction, startedAt, snapshotAt? } }
-//   skipBoxHandoff {id}                          -> {} (HANDBACK-1; an older host answers "unknown gateway method")
+//   skipBoxHandoff {id}                          -> {ok:true} (HANDBACK-1; an older host answers
+//                                                   "unknown gateway method", and a host from before the fix
+//                                                   answers a bare `null`, which is what this stub sends)
+//   handBackForeverBox {id,trigger}              -> {ok:true}, and `null` on a host from before the fix
 // HANDBACK-1 changed that `handoff` shape: it used to forward the whole PendingHandoff including
 // snapshotDataUrl, which put a base64 screenshot on every 15 s heartbeat. It carries no image now.
 //   getAgentWorkflows {id}                       -> WorkflowRecord[] (shared/workflow-model.ts)
@@ -238,7 +241,13 @@ test("GW-10: the hand-back control calls handBackForeverBox {id, trigger:'button
   let handoff = { requestId: "r1", instruction: "log in to the portal" };
   const { createGatewayAdapter, calls } = await loadAdapter({
     getForeverBoxStatus: () => ({ agentId: "w1", state: "running", handoff }),
-    handBackForeverBox: () => { handoff = null; return {}; },
+    // WHAT THE HOST REALLY ANSWERS. endHandoff returns void, so until this wave a successful
+    // hand-back and a successful skip both came back as the four bytes `null` -- the same answer a
+    // client gets for a command the host has never heard of. The stub used to send `{}`, which is
+    // why the test suite was green while every Skip on every box told the person their software was
+    // too old. Both commands answer {ok:true} now; the stubs stay on `null` because that is what a
+    // box still running the older host sends and it must keep working.
+    handBackForeverBox: () => { handoff = null; return null; },
     getAgentTranscriptTail: { entries: [] },
   });
   const state = seed();
@@ -621,6 +630,34 @@ test("HANDBACK-1: the display is parsed from the status, and nothing allocates a
   adapter.destroy();
 });
 
+// The seat, which is the answer vncUrl could not give: an agent whose screen nobody has opened
+// reports state absent with a null vncUrl while it works on display :5, and the console drew :1 for
+// it under a caption naming that agent. boxSeat comes straight off the box's assignment map, and it
+// is read passively -- if it were ensureForeverBox it would hand out a seat to draw a picture.
+test("HANDBACK-1: the seat rides on the status, and an absent field is not a seat of null", async () => {
+  const { createGatewayAdapter, calls } = await loadAdapter({
+    getForeverBoxStatus: () => ({ agentId: "w1", state: "absent", vncUrl: null, boxSeat: 5, handoff: { requestId: "r1", instruction: "sign in" } }),
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  await adapter.refresh();
+  assert.equal(state.workers[0].boxSeat, 5, "the agent's own seat, with no vncUrl anywhere");
+  assert.equal(state.workers[0].boxDisplay, null);
+  assert.equal(only(calls, "ensureForeverBox").length, 0);
+  adapter.destroy();
+
+  const older = await loadAdapter({
+    getForeverBoxStatus: () => ({ agentId: "w1", state: "absent", vncUrl: null, handoff: null }),
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state2 = seed();
+  const adapter2 = older.createGatewayAdapter(state2);
+  await adapter2.refresh();
+  assert.equal(state2.workers[0].boxSeat, undefined, "a host that does not send the field must not read as 'no seat'");
+  adapter2.destroy();
+});
+
 // The single highest-value line in the console half. recordSig is what reloadActive compares to
 // decide whether the app redraws; the pending-to-done flip keeps the SAME requestId and changes a
 // field inside an existing message, so nothing in the old signature moved and the card never
@@ -647,7 +684,7 @@ test("HANDBACK-1: skipHandoff calls skipBoxHandoff {id} and reads the box back",
   let handoff = { requestId: "r1", instruction: "sign in" };
   const { createGatewayAdapter, calls } = await loadAdapter({
     getForeverBoxStatus: () => ({ agentId: "w1", state: "running", handoff }),
-    skipBoxHandoff: () => { handoff = null; return {}; },
+    skipBoxHandoff: () => { handoff = null; return null; },
     getAgentTranscriptTail: { entries: [] },
   });
   const state = seed();
@@ -657,6 +694,45 @@ test("HANDBACK-1: skipHandoff calls skipBoxHandoff {id} and reads the box back",
   assert.deepEqual(only(calls, "skipBoxHandoff")[0].args, { id: "w1" });
   assert.deepEqual(result, { supported: true, pending: false });
   assert.equal(state.workers[0].handoff, null);
+  adapter.destroy();
+});
+
+// The blocker this pair pins. A void command answers `null` on the wire and so does a command the
+// host does not have, so support can never be read off the answer -- it is read off tryCall's own
+// record of which commands came back "unknown gateway method". Measured live in real Chrome on
+// 2026-09-08 before the fix: Skip worked, the card flipped to Skipped in 1.0 s and the agent
+// resumed with the declined prompt, and the toast on screen said "This computer's software is too
+// old to skip a step", after which no Skip control was drawn anywhere for the rest of the session.
+test("HANDBACK-1: a host that answers a bare null has still skipped, and Skip stays on screen", async () => {
+  let handoff = { requestId: "r1", instruction: "sign in" };
+  const { createGatewayAdapter } = await loadAdapter({
+    getForeverBoxStatus: () => ({ agentId: "w1", state: "running", handoff }),
+    skipBoxHandoff: () => { handoff = null; return null; },
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  await adapter.refresh();
+  assert.deepEqual(await adapter.skipHandoff("w1"), { supported: true, pending: false });
+  // And it is still supported on the next hand-off, which is what the console reads to decide
+  // whether to draw a Skip control at all.
+  handoff = { requestId: "r2", instruction: "sign in again" };
+  await adapter.refresh();
+  assert.deepEqual(await adapter.skipHandoff("w1"), { supported: true, pending: false });
+  adapter.destroy();
+});
+
+test("HANDBACK-1: a host that answers {ok:true} is read the same way", async () => {
+  let handoff = { requestId: "r1", instruction: "sign in" };
+  const { createGatewayAdapter } = await loadAdapter({
+    getForeverBoxStatus: () => ({ agentId: "w1", state: "running", handoff }),
+    skipBoxHandoff: () => { handoff = null; return { ok: true }; },
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state = seed();
+  const adapter = createGatewayAdapter(state);
+  await adapter.refresh();
+  assert.deepEqual(await adapter.skipHandoff("w1"), { supported: true, pending: false });
   adapter.destroy();
 });
 

@@ -143,10 +143,106 @@ test("the card carries its image from the first draw, hidden, so a frame has som
   assert.match(css, /\.handoff-thumb\[hidden\] \{\s*display: none;/);
 });
 
-test("a box with no screen says that, rather than promising one that is coming", async () => {
+test("a host that cannot say which screen this agent is on says so, and promises nothing", async () => {
   const html = card(entry(null), true, { live, agentId: "a-1", hasScreen: false });
-  assert.match(html, /This computer has no screen to show/);
+  assert.match(html, /This computer did not say which screen this agent is on/);
   assert.doesNotMatch(html, /Bringing the screen up/);
+});
+
+// A finished step is not waiting for anything. The plate used to be chosen from hasScreen alone, so
+// a done card in a browser that never captured a frame -- a reload, or an I'm done pressed inside
+// the first three seconds -- read "Bringing the screen up" for ever under a pill saying Done.
+// Measured in a fresh Chrome profile on 2026-09-08: both resolved cards on the R750 conversation
+// said it, with no reader mounted and nothing coming.
+test("a resolved card with no kept frame says so rather than promising a picture", async () => {
+  for (const resolution of ["handed_back", "dismissed"]) {
+    const html = card(entry(resolution), true, { live: null, agentId: "a-1" });
+    assert.doesNotMatch(html, /Bringing the screen up/, `${resolution} still promises a picture`);
+    assert.match(html, /No picture of this step was kept/);
+  }
+  // An entry nobody resolved and no live record is the fourth state, and it is finished too.
+  const closed = card(entry(null), true, { live: null, agentId: "a-1" });
+  assert.match(closed, /data-state="closed"/);
+  assert.doesNotMatch(closed, /Bringing the screen up/);
+});
+
+test("a resolved card that DID keep a frame shows the frame, not a plate", async () => {
+  const html = card(entry("handed_back"), true, { live: null, agentId: "a-1", frame: "data:image/webp;base64,AAAA" });
+  assert.match(html, /data-handoff-thumb-plate hidden/);
+  assert.match(html, /src="data:image\/webp;base64,AAAA"/);
+});
+
+// -- which screen the picture is of --------------------------------------------------------------
+// The blocker this section exists for: the card and the rail tile drew display :1 for an agent that
+// was working on display :5, under a caption naming that agent. Measured live on
+// console.titanium.bot 2026-09-08 -- the thumbnail reader's src was /vnc/1/ while the desktop view
+// Take over opened was /vnc/5/ and the box's own assignment file said 5. A person decided on the
+// wrong screen, and the agent's next message disagreed with the picture.
+
+async function loadSeat() {
+  const source = await readFile(path.join(repoRoot, "ui/machine-room/app.js"), "utf8");
+  const start = source.indexOf("  const BOX_HANDOFF_SHARED_DISPLAY = 1;");
+  assert.notEqual(start, -1, "app.js no longer resolves which screen a hand-off is about");
+  const end = source.indexOf("  // What only the live page can answer", start);
+  assert.ok(end > start, "the seat block moved; this slice needs re-reading rather than deleting");
+  const body = source.slice(start, end).replace(/renderBoxHandoffSurfaces\(\);/g, "/* render */;");
+  const fn = new Function(`${body}\nreturn { boxHandoffSeatOf, noteBoxHandoffSeat, boxHandoffScreenCaption, boxHandoffSeats };`);
+  return fn();
+}
+
+test("an agent with a seat of its own is drawn on that seat, not on the shared one", async () => {
+  const { boxHandoffSeatOf } = await loadSeat();
+  assert.deepEqual(boxHandoffSeatOf({ id: "a-1", boxDisplay: null, boxSeat: 5 }), { display: 5, shared: false });
+  // The live vncUrl answers it too, and agrees.
+  assert.deepEqual(boxHandoffSeatOf({ id: "a-2", boxDisplay: 5, boxSeat: 5 }), { display: 5, shared: false });
+});
+
+test("no seat of its own is the shared screen, and it is captioned as the shared screen", async () => {
+  const { boxHandoffSeatOf, boxHandoffScreenCaption } = await loadSeat();
+  const seat = boxHandoffSeatOf({ id: "a-1", boxDisplay: null, boxSeat: null });
+  assert.deepEqual(seat, { display: 1, shared: true });
+  const caption = boxHandoffScreenCaption({ id: "a-1", name: "Tester" }, seat);
+  assert.match(caption, /shared screen/);
+  assert.doesNotMatch(caption, /Tester's screen/, "the shared screen is not this agent's screen");
+});
+
+test("a host that does not answer the question gets no picture at all", async () => {
+  const { boxHandoffSeatOf, boxHandoffScreenCaption } = await loadSeat();
+  assert.equal(boxHandoffSeatOf({ id: "a-1", boxDisplay: null, boxSeat: undefined }), null);
+  assert.equal(boxHandoffScreenCaption({ id: "a-1", name: "Tester" }, null), "No screen to show");
+});
+
+test("the last answer for an agent survives a record that is briefly a placeholder", async () => {
+  const { boxHandoffSeatOf } = await loadSeat();
+  assert.deepEqual(boxHandoffSeatOf({ id: "a-9", boxSeat: 4 }), { display: 4, shared: false });
+  // listAgents rebuilds the roster before loadContext refills it; the caption must not flicker
+  // through three wordings in the gap.
+  assert.deepEqual(boxHandoffSeatOf({ id: "a-9" }), { display: 4, shared: false });
+});
+
+test("the desktop view's own mount is what the picture follows", async () => {
+  const { boxHandoffSeatOf, noteBoxHandoffSeat } = await loadSeat();
+  noteBoxHandoffSeat("a-3", 6, false);
+  assert.deepEqual(boxHandoffSeatOf({ id: "a-3" }), { display: 6, shared: false });
+  // A view that fell back to the shared screen says shared, whatever number it was given.
+  noteBoxHandoffSeat("a-4", 1, true);
+  assert.deepEqual(boxHandoffSeatOf({ id: "a-4" }), { display: 1, shared: true });
+  const source = await readFile(path.join(repoRoot, "ui/machine-room/app.js"), "utf8");
+  const paint = source.slice(source.indexOf("    const paint = (frameUrl, display, shared) => {"));
+  assert.match(paint.slice(0, 400), /noteBoxHandoffSeat\(agentId, display, shared\)/,
+    "every desktop mount goes through paint; if it stops telling the picture which screen it opened the two can disagree again");
+});
+
+test("the rail tile says Connecting only while a reader is running", async () => {
+  const source = await readFile(path.join(repoRoot, "ui/machine-room/app.js"), "utf8");
+  const start = source.indexOf("  function renderScreenTile() {");
+  const body = source.slice(start, source.indexOf("\n  }\n", start));
+  assert.match(body, /const reading = boxHandoffThumb != null && boxHandoffThumb\.agentId === lead\.id/);
+  assert.match(body, /reading \? "Connecting"/);
+  // The old rule was lead.boxDisplay != null, which is true for ever once the box has handed the
+  // agent a seat -- so an idle agent sat on "Connecting" with nothing connecting.
+  assert.doesNotMatch(codeOnly(body), /lead\.boxDisplay/);
+  assert.match(body, /boxHandoffScreenCaption\(lead, seat\)/);
 });
 
 // -- skip, on a host that cannot do it -----------------------------------------------------------
@@ -333,7 +429,9 @@ test("the surfaces are painted in the same pass as the context card, and the eng
   const body = source.slice(start, source.indexOf("\n  }\n", start));
   assert.match(body, /renderContextCard\(\);\n\s*renderBoxHandoffSurfaces\(\);/);
   const sync = source.slice(source.indexOf("  function renderBoxHandoffSurfaces() {"));
-  assert.match(sync, /boxHandoffEnsureThumb\(openId, live\.requestId, display\)/);
+  assert.match(sync, /boxHandoffEnsureThumb\(openId, live\.requestId, seat\.display\)/);
+  // No seat resolved means no reader and no picture: a wrong screen is worse than no screen.
+  assert.match(sync, /if \(live && seat\)/);
   // The reader stops when the hand-off ends or the conversation moves, and NOT on a render that
   // happens to carry no display: the roster and the box status are two reads, and tearing it down
   // in the gap between them restarted noVNC's handshake on every heartbeat.

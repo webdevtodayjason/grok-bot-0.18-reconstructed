@@ -135,7 +135,7 @@ const gw = async (method, args = {}) => {
 };
 // A command a pre-upgrade host does not know. Measured on grok-bot-local-vm 2026-09-08: the relay
 // answers exactly `404 {"error":"unknown gateway method: <name>"}` for a method the protocol map
-// has no entry for, and `200 null` for a known one called with an id nothing matches. So the probe
+// has no entry for, and a 200 for a known one called with an id nothing matches. So the probe
 // is precise — only that 404 shape means "this host predates the wave", and a 400 or a rejection
 // from inside the host is a real error the caller must not hide behind a SKIP.
 const tryCall = async (method, args = {}) => {
@@ -373,6 +373,17 @@ try {
         "the status hand-off carries requestId and instruction", shown);
       if (postWave) check(handoff.startedAt != null, "and startedAt, so the card can say how long the person has had it", String(handoff.startedAt ?? "absent"));
       else skip("and startedAt, so the card can say how long the person has had it", `this host has no skipBoxHandoff, so it predates the wave that added startedAt; it answered ${shown}`);
+      // WHICH SEAT the agent is on, which vncUrl could not answer: an agent whose screen nobody has
+      // opened reports state absent with a null vncUrl while it works on display :5. The console
+      // used to fall back to the shared seat :1 for it and caption that picture "<name>'s screen".
+      // `boxSeat` is read straight off the box's assignment map and allocates nothing.
+      if (!postWave) skip("and boxSeat, so the picture is the agent's own screen and not a guess", "this host predates the wave, and the console draws no picture at all rather than guessing a display");
+      else {
+        const hasSeat = status != null && Object.prototype.hasOwnProperty.call(status, "boxSeat");
+        check(hasSeat, "and boxSeat, so the picture is the agent's own screen and not a guess",
+          hasSeat ? `boxSeat ${status.boxSeat == null ? "null — no seat of its own, which is the shared screen" : `:${status.boxSeat}`}` : "the status carries no boxSeat, so the console cannot say which screen this agent is on");
+        check(!hasSeat || status.boxSeat == null || Number(status.boxSeat) >= 2, "and it is a fork seat or nothing, never the shared seat dressed as one", String(status.boxSeat));
+      }
       const picture = Object.keys(handoff).filter((k) => /snapshotDataUrl|dataUrl|image|screenshot/i.test(k) && k !== "snapshotAt");
       const statusBytes = Buffer.byteLength(JSON.stringify(status ?? null));
       if (postWave) {
@@ -405,6 +416,15 @@ try {
         check(false, "skipBoxHandoff stamps the entry dismissed", skipCall.error.message);
         notReached("skipBoxHandoff rejected", "and the agent's next message lands after a skip");
       } else {
+        // A SUCCESS THAT LOOKS LIKE A MISSING COMMAND. endHandoff returns void, so a successful skip
+        // used to come back as the four bytes `null` -- byte for byte what this gateway answers for
+        // a command it has never heard of. The console read that as "your software is too old",
+        // said so to the person after every Skip that worked, and then hid Skip everywhere for the
+        // rest of the session. The command answers {ok:true} now. A box still on the older host is
+        // not a failure here: the console reads its own record of unknown commands rather than the
+        // answer, so it is a printed SKIP naming the box.
+        if (skipCall.value == null) skip("skipBoxHandoff answers something a success can be told by", `${BOX} answered null, which is what this host answers for a command it does not have; that is the shape from before the fix and the console no longer reads support off it`);
+        else check(skipCall.value?.ok === true, "skipBoxHandoff answers something a success can be told by", JSON.stringify(skipCall.value));
         const resolved = await until(async () => {
           const e = handoffEntry(await tailOf(agentId), handoff.requestId);
           return e?.boxResolution ? e : null;
@@ -576,6 +596,28 @@ try {
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));
 
+    // Every toast the console shows, kept. #toast is one element whose text is replaced and then
+    // hidden after 2.8 s, so a leg that polls it can miss one -- and the toast is the ONLY place
+    // the console tells a person a command was not available. Measured live on 2026-09-08: a Skip
+    // that worked said "This computer's software is too old to skip a step" and nothing else on
+    // screen disagreed, so a gate that reads only the card passed on it.
+    await page.addInitScript(() => {
+      window.__handoffToasts = [];
+      const watch = () => {
+        const el = document.getElementById("toast");
+        if (!el) { setTimeout(watch, 100); return; }
+        const push = () => {
+          const text = (el.textContent ?? "").trim();
+          if (text && window.__handoffToasts.at(-1) !== text) window.__handoffToasts.push(text);
+        };
+        push();
+        new MutationObserver(push).observe(el, { childList: true, characterData: true, subtree: true });
+      };
+      watch();
+    });
+    const toastsSince = (mark) => page.evaluate((n) => (window.__handoffToasts ?? []).slice(n), mark);
+    const toastCount = () => page.evaluate(() => (window.__handoffToasts ?? []).length);
+
     // A gate that reads the static shell will happily pass against placeholder markup.
     const boot = async () => {
       await page.goto(`${GATEWAY}/`, { waitUntil: "load" });
@@ -608,8 +650,22 @@ try {
         instruction: card.querySelector("[data-handoff-instruction]")?.textContent?.trim() ?? "",
         actions: [...card.querySelectorAll("[data-handoff-action]")].map((b) => b.dataset.handoffAction),
         openText: card.querySelector('[data-handoff-action="open"]')?.textContent?.trim() ?? "",
+        // The line behind the picture. A resolved card that never captured a frame used to read
+        // "Bringing the screen up" for ever, under a pill saying Done.
+        plate: card.querySelector("[data-handoff-thumb-plate]")?.textContent?.trim() ?? "",
+        thumbVisible: (() => { const img = card.querySelector("img[data-handoff-thumb]"); return img != null && !img.hidden && (img.getAttribute("src") ?? "").length > 256; })(),
       };
     });
+    // WHICH SCREEN. The reader's own client and the desktop view's client, side by side. The relay
+    // proxies the box's noVNC at /vnc/<display>/, so the display number is in both URLs and they
+    // have to be the same number: the card says "<name>'s screen" and Take over is what a person
+    // clicks after deciding on that picture.
+    const displayOf = (url) => { const m = /\/vnc\/(\d+)\//.exec(String(url ?? "")); return m ? Number(m[1]) : null; };
+    const screensInUse = () => page.evaluate(() => ({
+      reader: document.querySelector("iframe[data-box-handoff-thumb-source]")?.src ?? null,
+      view: document.querySelector("#desktop-window iframe[data-box-vnc]")?.src ?? null,
+      console: window.__machineRoomHandoff?.screen?.() ?? null,
+    }));
     // The thumbnail's bytes, cheaply: a data URL is about 7 KB and there is no reason to pull five
     // of them across the wire to find out whether they moved.
     const thumbSig = () => page.evaluate(() => {
@@ -701,9 +757,18 @@ try {
       // "<name>'s screen", allowing the console to clamp a long name the way the desktop capsule
       // already does (CAPSULE-1). The shape and the ownership are what this leg is for; a clamp is
       // a design decision, not a wrong caption.
+      // Two honest captions, and the seat decides which. An agent with a seat of its own is
+      // "<name>'s screen"; an agent with none is on the shared seat and the caption says so rather
+      // than calling display :1 this agent's screen, which is the blocker this leg now guards.
       const captionName = rail.caption.replace(/['’]s screen$/, "").replace(/[….]+$/, "").trim();
-      check(rail.screenPresent && /['’]s screen$/.test(rail.caption) && captionName.length > 0 && AGENT_NAME.startsWith(captionName),
-        "and the screen tile under it is captioned for this agent", rail.caption || (rail.screenPresent ? "no caption" : "no #rail-screen"));
+      const seatNow = (await screensInUse()).console?.seat ?? null;
+      const captionOk = seatNow == null
+        ? /no screen to show/i.test(rail.caption)
+        : seatNow.shared
+          ? /shared screen/i.test(rail.caption)
+          : /['’]s screen$/.test(rail.caption) && captionName.length > 0 && AGENT_NAME.startsWith(captionName);
+      check(rail.screenPresent && captionOk, "and the screen tile under it is captioned for the screen it is showing",
+        `${rail.caption || (rail.screenPresent ? "no caption" : "no #rail-screen")} · seat ${seatNow == null ? "unknown" : seatNow.shared ? "shared :1" : `:${seatNow.display}`}`);
 
       console.log("\n== a reload mid-hand-off");
       const rebooted = await boot();
@@ -730,6 +795,26 @@ try {
         check(skipHit.found === true && skipHit.visible === true && skipHit.hit === true, "and Skip this step is beside it", skipHit.found ? `${skipHit.w}x${skipHit.h}, under its centre: ${skipHit.on}` : "no #handoff-skip");
       } else skip("and Skip this step is beside it", "this host has no skipBoxHandoff, so the control is deliberately not drawn");
 
+      // THE PICTURE AND THE VIEW ARE ONE SCREEN. Measured live on console.titanium.bot on
+      // 2026-09-08, before this leg existed: the card's reader was on /vnc/1/ and the view Take
+      // over opened was on /vnc/5/, with the box's own assignment file saying 5. The card said
+      // "<name>'s screen" over somebody else's wallpaper and the person decided on it. Both legs
+      // above passed on that build, which is why this one reads the URLs rather than the states.
+      const screens = await until(async () => { const v = await screensInUse(); return v.view ? v : null; }, within(30_000), 1000)
+        ?? await screensInUse();
+      const readerDisplay = displayOf(screens.reader);
+      const viewDisplay = displayOf(screens.view);
+      const hostSeat = (await gw("getForeverBoxStatus", { id: agentId }).catch(() => null))?.boxSeat;
+      if (viewDisplay == null) skip("the picture beside the card is the screen Take over opens", "the desktop view mounted no client inside 30s, so there is no second display to compare");
+      else if (readerDisplay == null) check(false, "the picture beside the card is the screen Take over opens", `the view is on display :${viewDisplay} and no thumbnail reader is mounted at all`);
+      else check(readerDisplay === viewDisplay, "the picture beside the card is the screen Take over opens",
+        `reader :${readerDisplay} · view :${viewDisplay}${hostSeat === undefined ? "" : ` · the box's assignment says ${hostSeat == null ? "no seat of its own" : `:${hostSeat}`}`}`);
+      // And the caption over it names that same screen rather than this agent by default.
+      const shown = screens.console?.seat ?? null;
+      check(shown == null || shown.display === viewDisplay || viewDisplay == null,
+        "and the console agrees with itself about which screen that is",
+        `${screens.console?.caption ?? "no caption"} · seat ${shown == null ? "unknown" : `:${shown.display}`} · view :${viewDisplay ?? "none"}`);
+
       console.log("\n== I'm done, continue");
       const repliesBefore = agentReplies(await tailOf(agentId)).length;
       const clickAt = Date.now();
@@ -743,6 +828,12 @@ try {
       const done = await until(async () => { const c = await cardState(); return c && c.state === "done" ? c : null; }, within(25_000), 1000);
       check(done != null, `the card flips to Done (${seconds(Date.now() - clickAt)} from the click)`, done ? `pill ${JSON.stringify(done.pill)}` : "the card was still not done after 25s");
       check(done != null && /open computer/i.test(done.openText) && !done.actions.includes("take-over"), "and offers one Open computer button instead of the three decisions", done ? `${done.actions.join(", ")} · ${done.openText}` : "no card");
+      // A finished step is not waiting for anything. Measured in a fresh Chrome profile on
+      // 2026-09-08: resolved cards read "Bringing the screen up" for ever, because the plate was
+      // chosen from whether a screen existed and never from the state, and the frozen frame lives
+      // only in the browser that captured it.
+      check(done != null && (done.thumbVisible || !/bringing the screen up/i.test(done.plate)),
+        "and it no longer says a picture is on its way", done ? (done.thumbVisible ? "the frozen frame is on the card" : `plate ${JSON.stringify(done.plate)}`) : "no card");
       const railGone = await until(() => page.evaluate(() => { const el = document.getElementById("rail-handoff"); return el == null || el.hidden || getComputedStyle(el).display === "none" ? true : null; }), within(15_000), 700);
       check(railGone === true, "and the rail's amber card is gone", railGone === true ? "#rail-handoff hidden" : "still on screen after 15s");
       // No reload: the console's own 15 s tick has to bring the resumed agent's message in. If this
@@ -769,10 +860,24 @@ try {
           const pending = await until(async () => { const c = await cardState(); return c && c.state === "pending" ? c : null; }, within(30_000), 1000);
           check(pending != null, "a second hand-off draws a second pending card", pending ? `request ${pending.requestId}` : "no pending card after 30s");
           const repliesBefore = agentReplies(await tailOf(agentId)).length;
+          const toastsBefore = await toastCount();
           await page.click('[data-handoff-action="skip"]', { timeout: 10_000 }).catch((e) => info(`Skip click rejected: ${e.message}`));
           const skipped = await until(async () => { const c = await cardState(); return c && c.state === "skipped" ? c : null; }, within(25_000), 1000);
           check(skipped != null && /skipped/i.test(skipped.pill), "Skip leaves the card reading Skipped", skipped ? `pill ${JSON.stringify(skipped.pill)}` : "the card never reached data-state=skipped");
           check(skipped != null && /open computer/i.test(skipped.openText), "and it too offers Open computer rather than a decision", skipped ? skipped.openText : "no card");
+          check(skipped != null && (skipped.thumbVisible || !/bringing the screen up/i.test(skipped.plate)),
+            "and it no longer says a picture is on its way", skipped ? (skipped.thumbVisible ? "the frozen frame is on the card" : `plate ${JSON.stringify(skipped.plate)}`) : "no card");
+          // WHAT THE PERSON WAS TOLD. This is the leg the wave was missing: the card above reached
+          // "skipped" and the agent resumed with the declined prompt, both true, while the toast on
+          // screen read "This computer's software is too old to skip a step. Update it, or do the
+          // step and press I'm done." on a fully-updated host. Nothing else on the page disagreed.
+          const toasts = await toastsSince(toastsBefore);
+          check(!toasts.some((t) => /too old|out of date|update it/i.test(t)),
+            "and the person is not told their software is too old for a Skip that worked", toasts.join(" | ") || "no toast at all");
+          // And Skip is still a control the console will draw. The old failure turned it off for
+          // the rest of the session, so the next hand-off had no Skip anywhere.
+          const stillSupported = await page.evaluate(() => window.__machineRoomHandoff?.skipSupported?.() ?? null);
+          check(stillSupported !== false, "and Skip is still offered for the next step", stillSupported === null ? "the console exposes no answer; read the toast leg above instead" : String(stillSupported));
           const entry = await until(async () => { const e = handoffEntry(await tailOf(agentId), second.pending.requestId); return e?.boxResolution ? e : null; }, within(20_000), 1500);
           check(entry?.boxResolution === "dismissed", "and the entry reads dismissed", entry ? JSON.stringify(entry.boxResolution) : "still unresolved after 20s");
           const said = await until(async () => { const rows = agentReplies(await tailOf(agentId)); return rows.length > repliesBefore ? rows.at(-1) : null; }, within(REPLY_TIMEOUT_MS), 3000);

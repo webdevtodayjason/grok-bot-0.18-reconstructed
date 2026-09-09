@@ -986,19 +986,28 @@ export function createHostGatewayApi(
         args.pendingWakes
       );
     },
-    handBackForeverBox: (args: any) =>
-      method(deps.extensions.api("session"), "endHandoff")(
+    // Both of these answer {ok:true} rather than undefined. endHandoff returns void, so on the wire
+    // a success was the four bytes `null` -- exactly what the console's tryCall hands back for a
+    // command this host has never heard of. The console could not tell a Skip that worked from a
+    // host too old to skip, and told the person their software was out of date after every
+    // successful Skip. An explicit answer is the half of that fix that lives here.
+    handBackForeverBox: async (args: any) => {
+      await method(deps.extensions.api("session"), "endHandoff")(
         args.id,
         args.trigger ?? "button"
-      ),
+      );
+      return { ok: true };
+    },
     // HANDBACK-1. Skip is its own command, not handBackForeverBox with a special trigger: the trigger
     // form stamps the entry as a hand-back, so the card would read Done on a step nobody did. An
     // older console never calls this, and a console talking to an older host hides its Skip controls.
-    skipBoxHandoff: (args: any) =>
-      method(deps.extensions.api("session"), "endHandoff")(args.id, {
+    skipBoxHandoff: async (args: any) => {
+      await method(deps.extensions.api("session"), "endHandoff")(args.id, {
         resolution: "dismissed",
         trigger: "dismissed"
-      }),
+      });
+      return { ok: true };
+    },
 
     startTeachRecording: (args: any) =>
       method(deps.extensions.api("teach-recording"), "start")(args),

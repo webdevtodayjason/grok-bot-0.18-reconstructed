@@ -9,6 +9,7 @@ import {
 import { createBoxConnectorToolCaller } from "./extensions/inference/box-connector-tools.js";
 import { shapeHandoffForStatus } from "./extensions/session/box-handoff-service.js";
 import { getSandRootDir } from "./host-paths.js";
+import { SAND_BOX_FIRST_FORK_WINDOW_INDEX } from "./ports/box.js";
 import {
   commandErrorReportToTelemetry,
   commandSuccessReportToTelemetry
@@ -918,10 +919,24 @@ export class SandHost {
       )
     );
     const diskPressureLevel = extensions.api("forever-box").diskPressureLevel;
+    // HANDBACK-1. WHICH SEAT this agent works on, read passively. The console draws a picture of the
+    // agent's screen beside the hand-off card, and it had to guess the display: getStatus reports
+    // `absent` with a null vncUrl for an agent that has never had its screen opened, so the console
+    // fell back to the shared seat :1 and captioned somebody else's wallpaper "<name>'s screen"
+    // while the agent was working on :5. The assignment map is the box's own record of the answer
+    // and reading it allocates nothing (ensureForeverBox does, at 16 s on a cold box, which is what
+    // Take over is for). `null` means no seat of its own, which is the shared screen and honest;
+    // the field being ABSENT means this host cannot say, and the console then draws no picture at
+    // all rather than a confident wrong one.
+    const seat = (extensions.api("forever-box").box as { getAgentWindowIndex?(agentId: string): number | undefined } | undefined)
+      ?.getAgentWindowIndex?.(status?.agentId);
 
     return {
       ...status,
       handoff,
+      ...(typeof status?.agentId === "string" && status.agentId.length > 0
+        ? { boxSeat: typeof seat === "number" && seat >= SAND_BOX_FIRST_FORK_WINDOW_INDEX ? seat : null }
+        : {}),
       ...(versionState.hostVersion == null
         ? {}
         : { hostVersion: versionState.hostVersion }),

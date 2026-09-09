@@ -148,8 +148,11 @@ export const COORDINATOR_METHOD_TABLE = {
   getAsyncTasks: { args: "object", reply: "array" },
   getForeverBoxStatus: { args: "object", reply: "box-status" },
   ensureForeverBox: { args: "object", reply: "box-status" },
-  handBackForeverBox: { args: "object", reply: "void" },
-  skipBoxHandoff: { args: "object", reply: "void" },
+  // HANDBACK-1: both answer {ok:true}. They were void, and on the wire a void success is the same
+  // `null` a client gets for a command the host does not have, which is how a Skip that worked
+  // reported itself as an out-of-date host.
+  handBackForeverBox: { args: "object", reply: "record" },
+  skipBoxHandoff: { args: "object", reply: "record" },
   startTeachRecording: { args: "object", reply: "record" },
   stopTeachRecording: { args: "object", reply: "record" },
   getTeachRecordingStatus: { args: "none", reply: "record" },

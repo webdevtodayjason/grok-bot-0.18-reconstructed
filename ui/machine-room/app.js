@@ -979,10 +979,15 @@
     // grok-bot-local-vm: the picture reached the rail tile in seconds and the card not at all
     // inside a minute, then late on a heartbeat.
     //
-    // The plate says which of the two "no picture" cases this is. A box with no screen allocated is
-    // not a slow screen, and telling a person to wait for something that is not coming is the kind
-    // of line that gets read as a fault in the product.
-    const plate = `<span class="handoff-thumb-plate" data-handoff-thumb-plate${frame ? " hidden" : ""}>${escapeHtml(view.hasScreen === false ? "This computer has no screen to show" : "Bringing the screen up")}</span>`
+    // The plate is chosen from the STATE, the way the pill is. It used to be chosen from hasScreen
+    // alone, so a finished step in a browser that never captured a frame -- a reload, or an I'm
+    // done pressed inside the first three seconds -- sat on "Bringing the screen up" for good, on a
+    // card whose own pill said Done. Nothing was coming. Telling a person to wait for something
+    // that will never arrive is the kind of line that gets read as a fault in the product.
+    const plateText = state === "pending"
+      ? (view.hasScreen === false ? "This computer did not say which screen this agent is on" : "Bringing the screen up")
+      : "No picture of this step was kept";
+    const plate = `<span class="handoff-thumb-plate" data-handoff-thumb-plate${frame ? " hidden" : ""}>${escapeHtml(plateText)}</span>`
       + `<img class="handoff-thumb" data-handoff-thumb data-agent-id="${escapeHtml(agentId)}" data-request-id="${escapeHtml(requestId)}" width="${BOX_HANDOFF_THUMB_W}" height="${BOX_HANDOFF_THUMB_H}"${frame ? ` src="${escapeHtml(frame)}"` : ""}${frame ? "" : " hidden"} alt="What is on this agent's screen right now" />`;
     const actions = state === "pending"
       ? `<button class="card-action primary" type="button" data-handoff-action="take-over" ${attrs}>Take over</button>`
@@ -3462,6 +3467,9 @@
       ? (state.workers.find((w) => w.id === agentId)?.name ?? "a member")
       : null;
     const paint = (frameUrl, display, shared) => {
+      // HANDBACK-1: the one funnel every desktop mount goes through, so the picture beside the card
+      // and the screen this view paints can never be two different displays.
+      noteBoxHandoffSeat(agentId, display, shared);
       // A room has no screen of its own -- it is looking at a member's. Saying "Diag Room's own
       // screen" would invent an ownership the host does not have.
       const line = shared
@@ -3597,19 +3605,64 @@
     } catch { /* the in-memory copy is still the frame this session draws */ }
   }
 
-  // The screen this card shows is the screen Take over would open, and nothing else. An agent with
-  // no forever box of its own still HAS one: the shared seat on display :1, which is exactly what
-  // ensureDesktop falls back to when ensureForeverBox hands back no token, and what the desktop
-  // view then paints. Measured on grok-bot-local-vm during the integration run: an agent told to
-  // browse still reported state "absent" with vncUrl null 95 s later, so reading the display off
-  // the passive status alone meant the ordinary hand-off never showed a picture at all -- the card
-  // sat on "Bringing the screen up" for the whole step. Falling back is not showing somebody
-  // else's screen: the product's own words for display :1 are "the shared screen -- every agent on
-  // this box sees it".
+  // The screen this card shows is the screen Take over would open, and nothing else. That is the
+  // whole point of the picture: the caption says "<name>'s screen" and a person decides on what it
+  // shows. It was not true. An agent whose screen nobody has opened reports state "absent" with a
+  // null vncUrl, and this fell back to the shared seat :1 for it -- so on the R750 the card and the
+  // rail tile painted :1 while the agent was working on :5, Take over then opened :5, and the
+  // agent's own reply ("the browser is sitting on a blank page") disagreed with the picture the
+  // person had just decided on.
+  //
+  // The host answers the question directly now. getForeverBoxStatus carries `boxSeat`, read out of
+  // the box's own assignment map without allocating anything:
+  //
+  //   a number    the agent's own seat; the picture is that display
+  //   null        no seat of its own, which IS the shared screen -- and the caption says so, rather
+  //               than calling somebody else's wallpaper this agent's screen
+  //   undefined   this host cannot say. Nothing is drawn and the plate says why. A wrong screen is
+  //               worse than no screen, which is the rule Skip already follows.
+  //
+  // The last answer for an agent is kept, because a roster record is briefly a placeholder between
+  // listAgents and loadContext and a caption that flickers through three wordings is its own bug.
+  // Opening the desktop writes into the same memory, so a seat allocated by Take over is what the
+  // thumbnail reads from the moment it exists rather than 15 s later on the next heartbeat.
   const BOX_HANDOFF_SHARED_DISPLAY = 1;
-  function boxHandoffDisplayOf(record) {
+  const boxHandoffSeats = new Map();
+  function rememberBoxHandoffSeat(agentId, seat) {
+    if (agentId && seat) boxHandoffSeats.set(agentId, seat);
+    return seat;
+  }
+  function boxHandoffSeatOf(record) {
+    const agentId = record?.id ?? "";
     const own = Number(record?.boxDisplay);
-    return Number.isFinite(own) && own > 0 ? own : BOX_HANDOFF_SHARED_DISPLAY;
+    if (Number.isFinite(own) && own > BOX_HANDOFF_SHARED_DISPLAY) return rememberBoxHandoffSeat(agentId, { display: own, shared: false });
+    const seat = record?.boxSeat;
+    if (seat !== undefined) {
+      const index = Number(seat);
+      return rememberBoxHandoffSeat(agentId, Number.isFinite(index) && index > BOX_HANDOFF_SHARED_DISPLAY
+        ? { display: index, shared: false }
+        : { display: BOX_HANDOFF_SHARED_DISPLAY, shared: true });
+    }
+    return boxHandoffSeats.get(agentId) ?? null;
+  }
+  // The desktop view's own funnel calls this with the display it really mounted, so the picture and
+  // the view can never name two different screens.
+  function noteBoxHandoffSeat(agentId, display, shared) {
+    const index = Number(display);
+    if (!agentId || !Number.isFinite(index)) return;
+    const seat = shared || index <= BOX_HANDOFF_SHARED_DISPLAY
+      ? { display: BOX_HANDOFF_SHARED_DISPLAY, shared: true }
+      : { display: index, shared: false };
+    const held = boxHandoffSeats.get(agentId);
+    boxHandoffSeats.set(agentId, seat);
+    if (!held || held.display !== seat.display || held.shared !== seat.shared) renderBoxHandoffSurfaces();
+  }
+  // What the caption over the picture is allowed to say. Three wordings, one per answer above.
+  function boxHandoffScreenCaption(record, seat) {
+    if (seat == null) return "No screen to show";
+    return seat.shared
+      ? "The shared screen — every agent on this box sees it"
+      : `${record?.name ?? "This agent"}'s screen`;
   }
 
   // What only the live page can answer, handed to handoffCardMarkup so that function stays pure.
@@ -3621,10 +3674,10 @@
       live: lead?.handoff ?? null,
       agentId,
       frame: boxHandoffFrame(agentId, requestId),
-      // There is always a screen to try now that the shared seat is the fallback, so the plate says
-      // the picture is coming rather than that there is none. The other wording stays in the markup
-      // for a caller that knows the box has no screen at all.
-      hasScreen: true,
+      // False only where the host has not said which seat this agent is on. That is the one case
+      // where no picture is drawn at all, because the alternative is a confident picture of the
+      // wrong screen under a caption naming this agent.
+      hasScreen: boxHandoffSeatOf(lead) != null,
     };
   }
 
@@ -3741,15 +3794,22 @@
     if (!lead) { tile.innerHTML = ""; return; }
     const live = lead.handoff ?? null;
     const frame = boxHandoffFrame(lead.id, live?.requestId ?? boxHandoffLastRequestId(lead) ?? "");
-    // "Connecting" only where something really is coming: a hand-off in flight, or a seat the box
-    // has already allocated. A permanent "Connecting" on an idle agent reads as a broken product.
-    const waiting = Boolean(live) || lead.boxDisplay != null;
-    const plate = waiting ? "Connecting" : "Click to open this computer's screen";
+    const seat = boxHandoffSeatOf(lead);
+    // "Connecting" only while a reader for THIS agent is actually running. It used to be said
+    // whenever the box had handed out a seat, so an idle agent with a screen sat on "Connecting"
+    // for ever with nothing connecting -- the exact failure the line above it warns about. When
+    // nothing is reading, the tile says what clicking it does; when the host cannot say which
+    // screen this agent is on, it says that instead of drawing one.
+    const reading = boxHandoffThumb != null && boxHandoffThumb.agentId === lead.id;
+    const plate = seat == null
+      ? "This computer did not say which screen this agent is on"
+      : reading ? "Connecting" : "Click to open this computer's screen";
+    const caption = boxHandoffScreenCaption(lead, seat);
     tile.innerHTML = `<button class="rail-screen-button" type="button" data-handoff-action="open" data-agent-id="${escapeHtml(lead.id)}" data-request-id="${escapeHtml(live?.requestId ?? "")}">`
       + `<span class="rail-screen-plate" data-rail-screen-plate${frame ? " hidden" : ""}>${escapeHtml(plate)}</span>`
-      + `<img data-rail-screen data-agent-id="${escapeHtml(lead.id)}" alt="${escapeHtml(lead.name)}'s screen"${frame ? ` src="${escapeHtml(frame)}"` : ""}${frame ? "" : " hidden"} />`
+      + `<img data-rail-screen data-agent-id="${escapeHtml(lead.id)}" alt="${escapeHtml(caption)}"${frame ? ` src="${escapeHtml(frame)}"` : ""}${frame ? "" : " hidden"} />`
       + `</button>`
-      + `<small class="rail-screen-caption" id="rail-screen-caption">${escapeHtml(lead.name)}'s screen</small>`;
+      + `<small class="rail-screen-caption" id="rail-screen-caption">${escapeHtml(caption)}</small>`;
   }
 
   // The newest hand-off this conversation has on screen, so a finished step still shows its own
@@ -3766,8 +3826,8 @@
     const lead = activeContext()?.kind === "worker" ? contextRecord() : null;
     const live = lead?.handoff ?? null;
     const openId = lead?.id ?? null;
-    const display = boxHandoffDisplayOf(lead);
-    if (live) boxHandoffEnsureThumb(openId, live.requestId, display);
+    const seat = boxHandoffSeatOf(lead);
+    if (live && seat) boxHandoffEnsureThumb(openId, live.requestId, seat.display);
     // A render that happens to carry no display is NOT the hand-off ending. The roster is rebuilt
     // from listAgents and the box status is a separate read, so the record is briefly without a
     // display between the two -- and tearing the reader down there restarted noVNC's 1.3 s
@@ -4055,7 +4115,10 @@
       // The full sentence is in the title: a model writes this text and a long one would push the
       // banner into the desktop it is describing (MR-33 was exactly that overflow, once).
       note.title = handoff ? handoff.instruction || "" : "";
-      note.textContent = handoff ? `${lead.name} handed you the computer: ${handoff.instruction || "no instruction given"}` : "";
+      // The instruction and nothing else, the way the card and the rail carry it. The agent's name
+      // is in the dialog title directly above this, and prefixing it here made one step read three
+      // different ways in the three places a person meets it.
+      note.textContent = handoff ? (handoff.instruction || "It did not say what it needs done.") : "";
     }
     if (skip) {
       skip.hidden = !(canHandBack && boxHandoffSkipSupported());
@@ -6147,6 +6210,26 @@
   // it the adapter here keeps that module out of this file's internals entirely.
   window.__machineRoomAdapter = adapter;
   // ===== end Marketplace hook =====
+
+  // HANDBACK-1: the two things about a hand-off a gate cannot see from the DOM. Reads only, no
+  // writes, and nothing in the app calls them. `skipSupported` is here because the blocker it
+  // catches is invisible on screen: a Skip that WORKED could turn Skip off for the rest of the
+  // session, and every surface looked right afterwards because the step really had been skipped.
+  // `screen` is here for the other one: which display the picture is actually of, next to the one
+  // the desktop view opens.
+  window.__machineRoomHandoff = {
+    skipSupported: () => boxHandoffSkipSupported(),
+    screen: () => {
+      const lead = activeContext()?.kind === "worker" ? contextRecord() : null;
+      const seat = boxHandoffSeatOf(lead);
+      return {
+        agentId: lead?.id ?? null,
+        seat,
+        caption: boxHandoffScreenCaption(lead, seat),
+        readerDisplay: boxHandoffThumb?.display ?? null,
+      };
+    },
+  };
 
   renderAll(false);
   renderDesktop("browser");
