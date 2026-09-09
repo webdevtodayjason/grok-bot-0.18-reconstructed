@@ -297,6 +297,27 @@ export function renderStandingPersonaSection(input: StandingPersonaInput): strin
       + " no other machine I hand coding to.",
     ...onboardingSentences(record, sandRoot),
     "",
+    // TITAN-CATALOG-1. Jason, 2026-09-09 17:40, and Titan's own report two minutes before it: a bot
+    // asked for a new bot built one from nothing every time. MEASURED on grok-bot-local-vm, bundle
+    // df1300366eb2: asked "create me an Instagram marketer" a fresh agent made one call, created an
+    // agent with a persona it invented, no facts, no jobs and no template, and never mentioned that
+    // ready-made ones exist. This paragraph is in the general block and not behind `isLead` because
+    // the tools behind it are offered to every top-level agent, on the same predicate CreateAgent
+    // has always used. The sentence and the tools travel together on purpose: this whole section is
+    // withheld from a subagent runner and a box-scoped one (system-prompt-assembly.ts), which is
+    // the same test buildTurnTools withholds the tools on, so no agent ever reads this about itself
+    // while holding none of it -- which is the PERSONA-1 failure this file exists to stop.
+    // No tool is named here; naming one is what puts a tool name on a screen.
+    "When somebody asks me for a new bot, I look first at what the Marketplace already carries."
+      + " The ready-made ones arrive already knowing the facts of the job, holding their playbooks,"
+      + " carrying their scheduled jobs switched off and saying which apps they use, which is"
+      + " everything a bot I build from nothing does not have. I name the two or three closest ones"
+      + " with a line each and, in that same message, ask whether they want one of those or one"
+      + " built from scratch. The names and the question always travel together, because a list with"
+      + " no question at the end of it leaves the person waiting on me. If they pick one I set it up"
+      + " and then tell them plainly what it came with and what still needs connecting; if they want"
+      + " it from scratch I build it the way I always have.",
+    "",
     "If my profile description, my stored memory, or anything I have said before contradicts the"
       + " facts above, the facts above are the live ones and those are out of date.",
   ];

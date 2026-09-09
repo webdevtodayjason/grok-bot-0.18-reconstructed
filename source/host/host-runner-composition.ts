@@ -73,6 +73,7 @@ import type {
   TurnAwaitToolFactoryInput,
   TurnBoxHelpToolFactoryInput,
   TurnBrowserToolFactoryInput,
+  TurnCatalogToolFactoryInput,
   TurnCloudAgentToolFactoryInput,
   TurnFileTransferToolFactoryInput,
   TurnMcpManagementToolFactoryInput,
@@ -2497,6 +2498,26 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
       const cloudAgent = dependencies.cloudAgent;
       const mcpManagement = dependencies.mcpManagement;
       const subagentManagement = dependencies.subagentManagement;
+      /**
+       * TITAN-CATALOG-1, AND THE ONE SEAM THIS WAVE LEAVES OPEN. The other half of the wave is the
+       * host-side import, `importMarketplaceBot`, which runs the eight-step Add sequence the
+       * console's bot-setup.js runs, against a `MarketplaceImportBox` adapter that
+       * `host-gateway-api.ts` builds out of the manager plus `mintAgent`,
+       * `removeAgentCompletely`, `createAutomationFor` and `deps.kickstartIfPending`. NONE of those
+       * four is reachable from here, and building a SECOND adapter out of the manager alone would
+       * differ in exactly the places that matter -- agent teardown, automation attribution and the
+       * introduction -- which is the drift this whole wave exists to end. So it is discovered, not
+       * rebuilt: `method()` answers undefined when the manager carries no such method,
+       * `createCatalogTools` then builds only the two read-only tools, and the setup tool is not
+       * offered at all rather than offered against nothing.
+       *
+       * The zero-change way to close it is on the OTHER side: give the transcript manager an
+       * `importMarketplaceBot(args)` of its own that calls the import module with the same adapter,
+       * and this line connects as it stands. Failing that, the import module can hold the adapter
+       * the gateway api already builds and export a call that uses it, and this line becomes that
+       * import. What must NOT happen is a second adapter here.
+       */
+      const importMarketplaceBot = method(transcript, "importMarketplaceBot");
       const startHandoff = method(extensions.api("session"), "startHandoff");
       const provider: TurnToolsetHostFactoryProvider = {
       createSendMessageToolInputs: turn => {
@@ -2929,6 +2950,24 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
               timestampMs: Date.now(),
             });
           },
+              }),
+              /**
+               * TITAN-CATALOG-1. The bots half of the Marketplace hangs off the SAME reader the
+               * plugin half already uses: a catalog plugin card carries no installed flag at all,
+               * and `McpPluginSummary.isInstalled` -- connectors.json for a connector, a binary
+               * probe in the box for a shell tool -- is the only honest answer to "does this box
+               * already have Slack". Deriving it here rather than accepting it as an argument is
+               * deliberate: the console has silently failed to pass its own installed set to the
+               * setup path since BOTS-4 landed, and an argument nobody passes is a report that
+               * tells a customer Slack is not something we carry.
+               */
+              createCatalogToolInputs: (): TurnCatalogToolFactoryInput => ({
+                dependencies: {
+                  listPlugins: () => mcpManagement.listPlugins(),
+                  ...(importMarketplaceBot === undefined
+                    ? {}
+                    : { importBot: args => importMarketplaceBot(args) }),
+                },
               }),
             }),
         ...(!isSharedRoomTurn && cloudAgent !== undefined

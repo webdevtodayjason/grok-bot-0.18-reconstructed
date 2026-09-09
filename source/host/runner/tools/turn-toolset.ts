@@ -90,6 +90,16 @@ import {
   createSendEmailTool,
   type SendEmailDependencies,
 } from "./send-email-tool.js";
+import {
+  CATALOG_SEARCH_TOOL_HINT,
+  CATALOG_SEARCH_TOOL_ID,
+  CATALOG_SETUP_TOOL_HINT,
+  CATALOG_SETUP_TOOL_ID,
+  CATALOG_TEMPLATE_TOOL_HINT,
+  CATALOG_TEMPLATE_TOOL_ID,
+  createCatalogTools,
+  type CatalogToolDependencies,
+} from "./sand-catalog-tools.js";
 import { readAgentMail } from "../../extensions/mail/agent-mail-store.js";
 import { resolveRelaySend } from "../../extensions/mail/relay-send-client.js";
 import {
@@ -207,6 +217,9 @@ export const SAND_DYNAMIC_TOOL_HINTS: Readonly<Record<string, string>> = {
   REQUEST_BOX_HELP: "Hand your box's desktop to the user for a sign-in or manual step.",
   [PROBLEM_REPORT_TOOL_ID]: PROBLEM_REPORT_TOOL_HINT,
   [SEND_EMAIL_TOOL_ID]: SEND_EMAIL_TOOL_HINT,
+  [CATALOG_SEARCH_TOOL_ID]: CATALOG_SEARCH_TOOL_HINT,
+  [CATALOG_TEMPLATE_TOOL_ID]: CATALOG_TEMPLATE_TOOL_HINT,
+  [CATALOG_SETUP_TOOL_ID]: CATALOG_SETUP_TOOL_HINT,
   CHECK_SUBAGENT: "Inspect a running background subagent's status and recent actions.",
   MESSAGE_SUBAGENT: "Send a new instruction into a running background subagent.",
   STOP_SUBAGENT: "Abort a running background subagent.",
@@ -611,6 +624,8 @@ export interface TurnToolFactories {
   sendEmail?(): TurnTool;
   mcpMeta?(dynamicToolRegistry?: DynamicToolRegistry): readonly TurnTool[];
   mcpManagement?(): readonly TurnTool[];
+  /** TITAN-CATALOG-1. The bots half of the Marketplace: search it, read one, set one up. */
+  catalog?(): readonly TurnTool[];
   subagentManagement?(): readonly TurnTool[];
 }
 
@@ -672,6 +687,10 @@ export interface TurnProblemReportToolFactoryInput {
 
 export interface TurnSendEmailToolFactoryInput {
   readonly dependencies: SendEmailDependencies;
+}
+
+export interface TurnCatalogToolFactoryInput {
+  readonly dependencies: CatalogToolDependencies;
 }
 
 export interface TurnGenerateImageToolFactoryInput {
@@ -768,6 +787,7 @@ export interface TurnToolsetFactoryInputs {
   readonly state?: TurnStateToolFactoryInput;
   readonly subagentManagement?: TurnSubagentManagementToolFactoryInput;
   readonly mcpManagement?: TurnMcpManagementToolFactoryInput;
+  readonly catalog?: TurnCatalogToolFactoryInput;
   readonly cloudAgent?: TurnCloudAgentToolFactoryInput;
 }
 
@@ -878,6 +898,10 @@ export interface TurnToolsetHostFactoryProvider {
     turn: TurnToolsetTurnInput,
     props: TurnToolsetBuildProps,
   ) => TurnMcpManagementToolFactoryInput;
+  readonly createCatalogToolInputs?: (
+    turn: TurnToolsetTurnInput,
+    props: TurnToolsetBuildProps,
+  ) => TurnCatalogToolFactoryInput;
   readonly createCloudAgentToolInputs?: (
     turn: TurnToolsetTurnInput,
     props: TurnToolsetBuildProps,
@@ -1280,6 +1304,12 @@ export function createTurnMcpManagementToolFactory(
   ).map(asTurnTool);
 }
 
+export function createTurnCatalogToolFactory(
+  input: TurnCatalogToolFactoryInput,
+): () => readonly TurnTool[] {
+  return () => createCatalogTools(input.dependencies).map(asTurnTool);
+}
+
 export function createTurnCloudAgentToolFactory(
   input: TurnCloudAgentToolFactoryInput,
 ): () => TurnTool {
@@ -1303,7 +1333,7 @@ export function createTurnToolsetFactories(
   | "boxAwait" | "externalShell" | "externalRead" | "boxShell" | "boxRead"
   | "sendMessage" | "sendToAgent" | "reaction" | "createAgent" | "updateAgent" | "updateState"
   | "subagentManagement"
-  | "mcpManagement" | "cloudAgent"
+  | "mcpManagement" | "catalog" | "cloudAgent"
 > {
   return {
     ...(input.task === undefined
@@ -1399,6 +1429,9 @@ export function createTurnToolsetFactories(
       : {
         mcpManagement: createTurnMcpManagementToolFactory(input.mcpManagement),
       }),
+    ...(input.catalog === undefined
+      ? {}
+      : { catalog: createTurnCatalogToolFactory(input.catalog) }),
     ...(input.cloudAgent === undefined
       ? {}
       : { cloudAgent: createTurnCloudAgentToolFactory(input.cloudAgent) }),
@@ -1499,6 +1532,11 @@ export function createTurnToolsetFactoriesForTurn(
       ? {}
       : {
         mcpManagement: provider.createMcpManagementToolInputs(turn, props),
+      }),
+    ...(provider.createCatalogToolInputs === undefined
+      ? {}
+      : {
+        catalog: provider.createCatalogToolInputs(turn, props),
       }),
     ...(provider.createCloudAgentToolInputs === undefined
       ? {}
@@ -1665,6 +1703,17 @@ export function buildTurnTools(
     if (createAgent !== undefined) tools.push(createAgent);
     const updateAgent = factories.updateAgent?.();
     if (updateAgent !== undefined) tools.push(updateAgent);
+    // TITAN-CATALOG-1. Deliberately in this block and not one of its own, because the brief asked
+    // for "the same predicate the existing create-agent path uses" and this IS that predicate:
+    // `!host.isSubagentRunner`, three lines up, is the only gate CreateAgent has ever had. There is
+    // no per-agent "allowed to create agents" mark anywhere in this tree (grep for canCreateAgents,
+    // allowCreateAgent, createAgentsAllowed: nothing), and createAgent is pushed here rather than
+    // through the `scoped` helper below, so it carries no local-tool permission either. Gating the
+    // catalog narrower than CreateAgent would mean a bot that may build a blank agent but may not
+    // build a good one, which is the opposite of the point. `readLeadAgentId` exists and has only
+    // ever driven a prompt paragraph; if lead-only is ever wanted it is its own item.
+    const catalog = factories.catalog?.();
+    if (catalog !== undefined) tools.push(...catalog);
     if (!host.isSystemPromptOverridden) {
       const updateState = factories.updateState?.();
       if (updateState !== undefined) tools.push(updateState);

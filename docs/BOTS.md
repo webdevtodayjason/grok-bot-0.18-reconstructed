@@ -378,11 +378,11 @@ same thing himself two minutes earlier: he could create a blank agent and read a
 template system where you pick a pre-built role and it comes with a starter persona, memory seeds,
 and maybe connector configs, that's not here yet."
 
-He was right, and the reason was structural. The whole of the Add sequence lived in the browser, in
-`ui/machine-room/bot-setup.js`. Nothing in the box could run it. **Measured on grok-bot-local-vm
-2026-09-09, before this wave:** a fresh agent asked "create me an Instagram marketer" made exactly
-one tool call, `CreateAgent`, and shipped an agent with a model-invented persona, 0 memories, 0
-jobs and 0 playbooks. He never looked at the catalog and never offered a template.
+He was right, and the reason was structural, in two places at once. The whole of the Add sequence
+lived in the browser, in `ui/machine-room/bot-setup.js`, so nothing in the box could run it. And
+nothing in the box could SEE the bots half of the catalog either: the plugin half already had eleven
+tools, the bot half had none. This wave is both halves, and they only work together -- a bot that can
+read the catalog but not import from it can still only build blank.
 
 ### One import, two doors
 
@@ -466,7 +466,71 @@ carrying the pack's name and none of its members, which looks like it worked, so
 row carrying `members` in plain words and points at the page. The Bots tab already routes packs
 away from `setUpBot`, so nothing in the console reaches that refusal.
 
+### What the bot can see now
+
+A door in the box is no use to someone who never opens the Bots tab and instead just says to their
+bot "create me an Instagram marketer".
+
+**Measured before this wave, grok-bot-local-vm, bundle `df1300366eb2`, 2026-09-09.** A fresh agent
+asked exactly that made ONE tool call, `CreateAgent`, and shipped an agent with a persona the model
+invented on the spot, 0 memories, 0 routines, no playbooks and no template. It never looked at the
+catalog and never mentioned that ready-made bots exist. Three tools in `source/host/runner/tools/sand-catalog-tools.ts`:
+
+| It does | What comes back |
+| --- | --- |
+| looks through the catalog | every bot as a card -- id, name, category, its one line, the counts of the four blocks, and each app it wants with whether this box has that plugin -- plus the app connectors, ranked against what the person actually asked for |
+| reads one in full | the whole row: the persona, the facts, the playbooks, the jobs with their cadence, and every app with THIS bot's own sentence about what it does with it |
+| sets one up | the host verb, which runs the same eight-step sequence the Add button runs, and answers what it made and what could not be connected |
+
+The plugin half of the same catalog already had eleven tools (`SearchPlugins`, `GetPlugin` and the
+nine lifecycle ones); this is the bot half, which had none. The two read-only tools resolve the row
+in process through `findMarketplaceBot`, never from anything the model hands back, because a list
+card carries no instructions, memories, skills, routines or apps at all and importing from one would
+create a description-only agent with nothing in it.
+
+### The question, in the words Jason asked for
+ One paragraph in the standing persona and two lines
+in the onboarding seed skill, both in first person and neither naming a tool: look at what the
+catalog already carries, name the two or three closest with a line each, and ask *"would you like
+one of those, or one built from scratch?"* -- then set it up and say what it came with and what
+still needs connecting. It sits in the general block of the persona, not behind the lead marker,
+because the tools are offered on the same predicate `CreateAgent` has always used.
+
+### What an answer costs
+
+**Measured on this Mac 2026-09-09 against the shipped catalog:** a
+query ("create me an Instagram marketer") ranks 19 rows, shows the best 15 and costs 5,884
+characters; one template in full is 7,717 (`account-book`); and the whole catalog with no query at
+all is 26,363 characters over 335 lines. The tool's own description tells the model to say what the
+person asked for, because "everything" is the expensive answer and is almost never the useful one.
+
+### Two things that bite here
+
+- **There is no Instagram bot.** One row in the whole catalog mentions Instagram and it is a pack.
+  The literal word "marketer" appears in no id, name or category, so a whole-word match on the
+  sentence in the report returns NOTHING -- which leaves the model with nothing to offer and sends
+  it straight back to building blank, the original bug wearing a tool. Query tokens are therefore
+  matched on their first six characters, which is what makes *marketer* and *Marketing* one stem.
+  For the same reason `scripts/verify-titan-catalog-tools.mjs` asserts that the reply names rows that
+  exist in `listMarketplace`, and never a particular id.
+- **A quiet chip is not free.** Every `defineCommunicateTool` tool rides the proto case
+  `communicateUpdateToolCall`, and the console's `NOT_A_RECEIPT` filter drops every outline row
+  matching `/communicate/` before it renders -- so built the obvious way these three would have
+  drawn nothing at all. They ride three unclaimed proto cases instead (`getAgentStatusToolCall`,
+  `readAgentTranscriptToolCall`, `createAgentToolCall`, none of which anything else in this product
+  builds), and the console gives each a fixed sentence with an EMPTY detail: *Looked at the
+  catalog*, *Read a template*, *Set up &lt;name&gt; from the catalog*. The template's name reaches the
+  page only through the call's own args, the way the mail chip takes its recipient out of `message`.
+  That is the FEEDBACK-1 / MAIL-3 pattern, and a test pins both halves so a rename on either side is
+  a red test rather than a proto name on a customer's screen.
+
 ### What the gates assert, and where
+
+Two scripts, because the two halves are measured differently: `scripts/verify-titan-catalog.mjs`
+drives the import verb against a real box, and `scripts/verify-titan-catalog-tools.mjs` drives a
+real turn and reads what the bot said. Both send `titanbot-gate/<script-name>` and both take the
+box lock, so they run one at a time.
+
 
 `scripts/verify-titan-catalog.mjs` on grok-bot-local-vm: the verb sets a real catalog row up; the
 box is read back and every fact is compared character for character (the store slices over its cap
@@ -482,6 +546,14 @@ On the R750 demo tenant the introduction leg is NOT asserted. `BOX-7` is measure
 no introduction for any new agent, including a plain one created with `isKickstartRequested: true`.
 There the claim is the roster row, the memories, the playbooks, the jobs switched off, and the
 receipt's wording about apps.
+
+`scripts/verify-titan-catalog-tools.mjs` on the same box: the bot looked at the catalog before it
+answered, read templates in full, asked whether they want one of those or one built from scratch,
+named only rows that exist in that box's own `listMarketplace`, created nothing while it was still
+asking, let no tool name reach the person, and still built one from scratch when that is what was
+asked for. **Measured 2026-09-09: 7 legs PASS, 0 FAIL.** Its final roster check fails loudly rather
+than swallowing a box that stopped answering -- an earlier draft used `.catch(() => [])` and would
+have printed that the roster was clean over bots still on it.
 
 ---
 

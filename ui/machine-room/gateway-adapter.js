@@ -226,7 +226,20 @@
   // drawn "Sent an email to ..." over a send that never happened.
   const MAIL_SEND_TOOL_CALL = "sendToUserToolCall";
   const MAIL_SEND_FAILED_PREFIX = "not sent: ";
-  const TOOL_LABELS = { shellToolCall: "Shell", readToolCall: "Read", communicateUpdateToolCall: "Update", computerUseToolCall: "Computer", Task: "Task", [PROBLEM_REPORT_TOOL_CALL]: "Report", [MAIL_SEND_TOOL_CALL]: "Email" };
+  // TITAN-CATALOG-1. The three catalog tools ride three proto cases nothing else in this product
+  // builds (source/host/runner/tools/sand-catalog-tools.ts says why), so these are the names their
+  // outline rows carry. They get entries here for the same reason the two above do: a row whose
+  // name is not in this table is headlined with the raw proto name, and a person must never read a
+  // tool name on their own screen. All three draw one fixed sentence with an EMPTY detail, because
+  // what the model read back is a catalog listing or a whole template row, not a receipt of work
+  // anybody wants to expand. The one readable part is the template's NAME, and it reaches the page
+  // only through the call's own args, the way mailSendRowText takes the recipient out of `message`.
+  const CATALOG_LIST_TOOL_CALL = "getAgentStatusToolCall";
+  const CATALOG_READ_TOOL_CALL = "readAgentTranscriptToolCall";
+  const CATALOG_SETUP_TOOL_CALL = "createAgentToolCall";
+  const CATALOG_LIST_ROW_TEXT = "Looked at the catalog";
+  const CATALOG_READ_ROW_TEXT = "Read a template";
+  const TOOL_LABELS = { shellToolCall: "Shell", readToolCall: "Read", communicateUpdateToolCall: "Update", computerUseToolCall: "Computer", Task: "Task", [PROBLEM_REPORT_TOOL_CALL]: "Report", [MAIL_SEND_TOOL_CALL]: "Email", [CATALOG_LIST_TOOL_CALL]: "Catalog", [CATALOG_READ_TOOL_CALL]: "Catalog", [CATALOG_SETUP_TOOL_CALL]: "Catalog" };
   const oneLine = (value, max) => {
     const text = String(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(" · ");
     return text.length > max ? `${text.slice(0, max - 1)}…` : text;
@@ -280,6 +293,16 @@
     if (failed) return to ? `Tried to email ${to} · it did not send` : "An email did not send";
     return to ? `Sent an email to ${to}` : "Sent an email";
   }
+  // TITAN-CATALOG-1. The bot's own name for the template it set up, out of the args JSON, the way
+  // mailSendRowText takes an address out of one. An unparseable row falls back to a sentence with
+  // no name in it rather than to the proto name.
+  function catalogSetupRowText(item) {
+    const found = String(item?.summary ?? "").match(/"name"\s*:\s*"([^"]*)"/);
+    const name = found ? found[1].trim() : "";
+    if (item?.status === "pending") return name ? `Setting up ${name} from the catalog` : "Setting up a bot from the catalog";
+    if (item?.status === "failed") return name ? `Tried to set up ${name} from the catalog · it did not finish` : "A setup from the catalog did not finish";
+    return name ? `Set up ${name} from the catalog` : "Set up a bot from the catalog";
+  }
   function toolRowText(item) {
     const label = TOOL_LABELS[item.name] ?? String(item.name ?? "Tool").replace(/ToolCall$/, "");
     // FEEDBACK-1. The one row in this table that is not a receipt of work done for the person, and
@@ -293,6 +316,12 @@
     // the person's own words going out under their business's name; the chip says a mail went and
     // to whom, and the readable copy lives on the workspace's own Mail card, not in an expander.
     if (item.name === MAIL_SEND_TOOL_CALL) return { text: mailSendRowText(item), detail: "", kind: label };
+    // TITAN-CATALOG-1. Three more of the same shape. What the model read back is the whole catalog
+    // or a whole template row; putting that behind an expander would be a wall of ids and cron
+    // expressions under a sentence that already says what happened.
+    if (item.name === CATALOG_LIST_TOOL_CALL) return { text: CATALOG_LIST_ROW_TEXT, detail: "", kind: label };
+    if (item.name === CATALOG_READ_TOOL_CALL) return { text: CATALOG_READ_ROW_TEXT, detail: "", kind: label };
+    if (item.name === CATALOG_SETUP_TOOL_CALL) return { text: catalogSetupRowText(item), detail: "", kind: label };
     const headline = item.name === "shellToolCall" ? shellHeadline(item.summary, item.output)
       : item.name === "readToolCall" ? readHeadline(item.summary)
       : null;

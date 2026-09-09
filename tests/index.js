@@ -105,6 +105,7 @@ import "./standing-persona.test.mjs";
 import "./awaiting-operator.test.mjs";
 import "./env-fanout.test.mjs";
 import "./titan-crew.test.mjs";
+import "./titan-catalog-tools.test.mjs";
 import "./cp-session.test.mjs";
 import "./cp-store.test.mjs";
 import "./cp-providers.test.mjs";

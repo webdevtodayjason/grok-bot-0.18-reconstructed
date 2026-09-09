@@ -437,12 +437,18 @@ async function adapterHelpers() {
     ${grab("PROBLEM_REPORT_ROW_TEXT", "const")}
     ${grab("MAIL_SEND_TOOL_CALL", "const")}
     ${grab("MAIL_SEND_FAILED_PREFIX", "const")}
+    ${grab("CATALOG_LIST_TOOL_CALL", "const")}
+    ${grab("CATALOG_READ_TOOL_CALL", "const")}
+    ${grab("CATALOG_SETUP_TOOL_CALL", "const")}
+    ${grab("CATALOG_LIST_ROW_TEXT", "const")}
+    ${grab("CATALOG_READ_ROW_TEXT", "const")}
     ${TOOL_LABELS}
     ${grab("oneLine", "arrow-block")}
     ${grab("baseName", "const")}
     ${grab("shellHeadline")}
     ${grab("readHeadline")}
     ${grab("mailSendRowText")}
+    ${grab("catalogSetupRowText")}
     ${grab("toolRowText")}
     ${grab("localPathOf")}
     ${grab("imagesOf", "const")}
