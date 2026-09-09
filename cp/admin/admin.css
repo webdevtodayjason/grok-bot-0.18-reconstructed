@@ -273,3 +273,14 @@ form.stack .controls { margin: 0; }
 .feedbackBody { width: 100%; }
 #panel-feedback details { margin-top: 8px; }
 #panel-feedback summary { cursor: pointer; }
+/* MARKET-26. The marketplace panel's one visual idea: a fact that has moved is a card that quotes
+   BOTH SIDES, so the two quoted strings have to be readable at their real length rather than
+   clipped to a tidy width. Everything else on this panel is a table the page already styles. */
+.card.changed { border-color: #4A2630; }
+.card.changed .detail { font-family: var(--mono); font-size: 12px; word-break: break-word; }
+#marketplaceChanges { margin-top: 10px; }
+#marketplaceChanges:empty { display: none; }
+/* The proxy-traffic cell. A vendor that publishes no figure gets a sentence, and the sentence is
+   allowed to wrap: shortening it to fit would turn "not reported by this vendor" into something an
+   operator reads as a zero, which is the one thing this column must never say. */
+#marketplaceLedger td.num .quiet { font-family: var(--sans); white-space: normal; }

@@ -12,6 +12,10 @@ A last section covers the **GitHub CLI (gh)**, which is not one of the six and n
 all: it is the shell tool that gives `git` inside the box a credential, so an agent that commits can
 also push.
 
+After it, **Marketing** (2026-09-09) covers the five rows Richard's work needs — and why only one of
+them is a connector, where the fourth credential destination lives, and how the recurring re-read of
+the vendors' own documentation keeps those rows from going stale between releases.
+
 ## How it works
 
 A connector is one entry in `/home/box/sand-data/connectors.json`, and that file is the whole
@@ -711,3 +715,168 @@ helper is not configured.
 
 Source: [cli/cli `docs/install_linux.md`](https://github.com/cli/cli/blob/trunk/docs/install_linux.md).
 Token permissions: [docs/connectors/github.md](connectors/github.md).
+
+---
+
+## Marketing: the rows, and the check that keeps them true
+
+Added 2026-09-09 (`MARKET-26`). Five rows — Meta, X, LinkedIn, Buffer and Browserbase — plus a job
+in the control plane that re-reads the vendor documentation they depend on. `docs/MARKETPLACE-CATALOG.md`
+is the row-by-row detail; this section is the connector-plane half: what is genuinely a connector,
+what is not, where the one new credential destination lives, and how the recurring check works.
+
+### Only one of the five is a connector
+
+**Buffer is a connector.** It is an endpoint at `https://mcp.buffer.com/mcp` with an
+`Authorization: Bearer` header and a self-serve key, and it behaves like every other remote row in
+this file.
+
+**The other four are not, and none of them is a gap waiting to be filled.**
+
+- **Meta, X and LinkedIn install nothing.** No official MCP server publishes an organic post
+  anywhere: Meta's Social Technologies MCP manages apps and webhooks, Meta's Ads MCP manages ads,
+  and X's hosted MCP reads posts and writes only bookmarks and Articles (all read 2026-09-09).
+  Posting is the customer's own developer app, or Buffer, or the browser. Inventing a connector
+  entry so the card looks complete would ship a connector that can only ever fail, which is the live
+  `CONNECT-13` defect. These three carry **no masked key box either** — there is nowhere for such a
+  token to go today, and a box for a value nothing reads is the same failure one level up.
+- **Browserbase installs nothing and still takes a key**, and that key goes somewhere new. See below.
+
+The rule this makes explicit, and the sentence to reach for when somebody asks why the Meta card has
+no Add button: **the connector and the posting path are different things.** A row is allowed to be a
+page.
+
+### The fourth credential destination: `cloudBrowser`
+
+`connector-env-secrets.json` grows a third top-level section, written through the same
+`writeSecretsDocument` primitive as the other two — same file, same 0600, same
+temp-file-plus-rename, and the primitive preserves the sections it is not writing.
+
+```
+{
+  "servers":      { "<connector>": { "<FIELD>": "…" } },   // the connector's own process env
+  "shell":        { "<FIELD>": "…" },                      // the agent's shell
+  "cloudBrowser": { "<engine>": { "<FIELD>": "…" } }       // read in the host process, and nowhere else
+}
+```
+
+A catalog row asks for it with a fourth consumer kind:
+
+```ts
+consumers: [{ kind: "cloud-browser", engine: "browserbase" }]
+```
+
+**Why it is not a `shell` secret, said plainly, because the shell store is the obvious wrong answer.**
+`shell-secrets.ts` says in its own header that its values are merged into the environment of the box
+**exec daemon** — the process that spawns every `/bin/sh` the agent's shell tool runs — and that an
+agent's shell can read its own environment. A cloud-browser session URL carries a session secret and
+the API key spends money; putting either where the agent can print it contradicts the whole point.
+So the `cloudBrowser` section is read **only in the host process**, by the cloud-browser module, and
+is merged into no child environment ever.
+
+One masked box on the plugin page still fans out to every destination that asked for it, which is
+what `MARKET-5` built the consumer list for. Browser Use is the case that shows it: one
+`BROWSER_USE_API_KEY` reaches its connector *and* the cloud engine, the way one GitHub token already
+reaches a connector and `gh`.
+
+### The recurring check (`cp/verification.mjs`)
+
+Meta, X and LinkedIn move app-review tiers, scope names, endpoint versions and rate tiers between
+our releases. A one-time audit is true on the day it is written and quietly wrong two months later,
+and the person it is wrong for is a customer following a dead sign-up path. So the facts are
+re-read, weekly and at boot, by a job in the control plane.
+
+**It never touches `verification`.** Two dated blocks, two different claims:
+
+| Block | The claim |
+| --- | --- |
+| `verification { checkedOn, proof, how }` | We ran this against the vendor on that date, from a box. |
+| `docs[{ id, what, url, anchor, expected, checkedOn, state }]` | The vendor still documents what this row assumes, on that date. |
+
+Re-reading a web page produces only doc-grade evidence, which is exactly the `proof: "documented"`
+the validator has always refused. A doc result can never raise a proof, and there is a test that
+walks a whole run's output asserting the word does not appear in it.
+
+**It diffs named facts, never page text.** Every one of these vendors' pages carries boilerplate that
+moves without the facts moving, and a differ that hashed the page would fire on all of it every week
+and be muted inside a month. Measured on real pages on 2026-09-09:
+
+- every LinkedIn Marketing page renders a deprecation banner whose sunset date (17 August 2026) is
+  three weeks in the past;
+- every canva.dev doc page prepends a section navigation that grows whenever the site does;
+- Meta's content-publishing page carries an `Updated:` stamp that changes on its own.
+
+All three are stripped before anything is compared, the strip rules are listed on the admin screen
+so nobody has to read the source to know what is being ignored, and there is a test that edits a
+banner and a navigation block and asserts that **neither the state nor the digest moves**.
+
+**Outcomes, and the one that is neither a pass nor a change.**
+
+| State | What it means |
+| --- | --- |
+| `verified` | The named literal is where the row says it is. |
+| `changed` | It is gone, the page 404s, or it now lands somewhere the row does not name. Four URLs a plausible 2025-era row would carry are dead today, so a 404 is a change and never a pass. |
+| `not-published` | The vendor states it does not publish this. LinkedIn's rate limits. Never fetched, never flipped — otherwise the weekly run reports LinkedIn's policy as news every seven days. |
+| `not-measured` | The page came back as a JavaScript shell, or the fetch failed. **This container could not read it**, which is not the same as the vendor changing it, and saying so sends nobody to read a diff that does not exist. |
+
+A redirect the row already records is not a change: `developers.facebook.com/docs/…` goes to
+`/documentation/…` and LinkedIn appends `?view=li-lms-YYYY-MM`, both today, and a row that called
+those a change would cry wolf on every run.
+
+**Fetching is free or it does not happen.** Plain HTTPS, or a configured document-fetch service
+(`CP_DOC_FETCH_URL` and `CP_DOC_FETCH_KEY` in this container's own environment — nothing reads an
+operator's home directory). Validators are stored per URL and replayed as `If-None-Match`, so a
+weekly run against an origin that publishes them extracts only what changed; most of these origins
+publish none, and the record says so rather than pretending. **A metered browser run for a
+documentation page is banned**: this job runs weekly across five vendors forever, and metering it
+would turn a safety net into a bill. Every answer carries `meteredRuns: 0` so nobody has to take
+that on trust.
+
+### Where the answer goes, and the two tiers
+
+Nothing pushes control-plane state into a running box — the tenant-key work already proved a
+control-plane rotate does not reach inside one — so a flip lands in two tiers, and the screens say
+which is which.
+
+1. **Immediately, for the operator.** The job writes into the control plane's existing
+   `admin_settings` table (`marketplace.verification.<rowId>`, plus a rollup and a feedback-shaped
+   list under `feedback.marketplace-verification` that a Feedback panel can render without knowing
+   anything about marketplace rows). `cp/store.mjs` is not touched and there is no migration. The
+   seventh panel at `/admin` shows it, with the changed fact named and **both sides quoted**.
+2. **At the next release, for the customer.** `node cp/cli.mjs marketplace verify --write` stamps
+   the corrected `checkedOn` and `state` back into `source/shared/marketplace/catalog.ts`. Commit it,
+   and the bundle carries it.
+
+**In between, the customer-facing half runs on age.** The plugin page draws "Checked 9 Sep 2026"
+until the row's own dates are older than its `recheckDays`, and "Under review — we are re-reading
+the vendor's docs, hold off installing" after that. It never blocks Install; it says so before the
+person commits.
+
+### Running it
+
+```
+node cp/cli.mjs marketplace list                       # every row, its last run and what the customer sees
+node cp/cli.mjs marketplace verify                     # a run, inside the control plane, over its own egress
+node cp/cli.mjs marketplace verify --row meta          # one row
+node cp/cli.mjs marketplace verify --fixtures          # against tests/fixtures, no network at all
+node cp/cli.mjs marketplace verify --write             # and stamp the dates back into catalog.ts
+```
+
+`marketplace verify` goes over the API by default, so the run happens inside the control plane's own
+container — which is where the egress is, where the record belongs, and the only place a "verified
+today" line is worth anything. `--fixtures` and `--write` run locally instead, because one reads
+files on this disk and the other edits a file in this repo.
+
+The weekly timer is on by default and `CP_MARKETPLACE_VERIFY=0` turns it off. With it off the rows
+still age into "under review" on their own, which is the honest behaviour for a control plane that
+has been told not to make outbound requests.
+
+### Reading the ledger from the same panel
+
+The seventh panel also shows the **cloud browsing sessions** each workspace has opened, asked of the
+relay (this container has no docker socket; the ledger is `cloud-browser-ledger.jsonl` inside each
+box). Two numbers, and the second is the one that matters: minutes are browser time, which is cents
+an hour, and **proxy bytes** are residential proxy traffic, which is dollars a gigabyte. One of the
+two vendors publishes no per-session traffic figure, so that cell says **"not reported by this
+vendor"** and never `0` — a zero on a money screen reads as free, and free is the one thing it is
+not.

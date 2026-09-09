@@ -27,6 +27,8 @@
 //   node cp/cli.mjs mail senders <slug> | allow <slug> <address> | only <slug> on|off
 //   node cp/cli.mjs mail sweep
 //   node cp/cli.mjs feedback list|show|approve|suppress|close|issue|digest|github-token
+//   node cp/cli.mjs marketplace list
+//   node cp/cli.mjs marketplace verify [--row <id>] [--fixtures] [--write]
 //   node cp/cli.mjs session verify <token>
 //
 // `signup add` is the whole of adding a customer in one line: it makes the account, works the
@@ -1230,6 +1232,88 @@ async function feedbackGithubToken(args) {
   say(`checked with ${answer.checkedWith}`);
 }
 
+// ---- MARKET-26: the marketplace rows' vendor documentation ---------------------------------------
+//
+// Two verbs. `marketplace list` reads the state; `marketplace verify` re-reads the vendors' pages
+// and writes the record. The run goes OVER THE API by default, so it happens inside the control
+// plane's own container -- which is where the egress is, where the record belongs, and the only
+// place a "verified today" line is worth anything. `--fixtures` and `--write` run here instead,
+// because one reads files on this disk and the other edits a file in this repo.
+//
+// Neither verb spends anything. Every line printed says so, because the first question anybody
+// sensibly asks of a job that talks to seven vendors every week is what it costs.
+
+/** One row's state, said the way somebody reading a terminal wants it. */
+const marketplaceStateWord = (state) => (state === "verified"
+  ? "verified"
+  : state === "needs-re-verification" ? "NEEDS RE-VERIFICATION" : state === "not-measured" ? "not measured" : String(state ?? "unknown"));
+
+async function marketplaceList() {
+  const answer = await askAdmin("GET", "/v1/marketplace/verification");
+  if (answer.catalogProblem) say(`the catalog could not be read: ${answer.catalogProblem}`);
+  const records = new Map((answer.records ?? []).map((record) => [String(record.rowId), record]));
+  say(`${pad("ROW", 16)}${pad("CATEGORY", 12)}${pad("LAST RUN", 22)}${pad("STATE", 24)}${pad("FACTS", 7)}CUSTOMER SEES`);
+  for (const row of answer.catalog ?? []) {
+    const record = records.get(row.id);
+    say(`${pad(row.id, 16)}${pad(row.category, 12)}${pad(record?.checkedOn ?? "never", 22)}${pad(marketplaceStateWord(record?.state ?? "never run"), 24)}${pad(String(row.docs.length), 7)}${row.customerSees}`);
+  }
+  const rollup = answer.rollup;
+  say("");
+  say(rollup == null
+    ? "this job has not run in this container yet"
+    : `last run ${rollup.ranAt} (${rollup.source}): ${rollup.verified.length} verified, ${rollup.needsReVerification.length} need re-verification, ${rollup.notMeasured.length} not measured, ${rollup.meteredRuns} metered runs`);
+  if ((answer.ignores ?? []).length > 0) say(`ignored as boilerplate: ${answer.ignores.join("; ")}`);
+  say("a customer's console reads the dates in the released bundle, so between releases their page goes by age; `marketplace verify --write` is what moves those dates");
+}
+
+async function marketplaceVerify(args) {
+  const only = flag(args, "--row") ?? "";
+  const useFixtures = args.includes("--fixtures");
+  const write = args.includes("--write");
+
+  if (useFixtures || write) {
+    // Local, in this process. Fixtures read this disk; --write edits catalog.ts in this repo. Both
+    // are developer verbs, and neither belongs on an HTTP route that a running service answers.
+    const { fixtureFetcher, stampCatalogFile, verifyCatalog } = await import("./verification.mjs");
+    const fixtures = flag(args, "--fixtures-dir") ?? new URL("../tests/fixtures/vendor-docs/", import.meta.url).pathname;
+    const answer = await verifyCatalog({
+      fetchDoc: useFixtures ? fixtureFetcher(fixtures) : undefined,
+      source: useFixtures ? "fixtures" : "cli-local",
+      only,
+    });
+    for (const record of answer.records) marketplaceSayRecord(record);
+    if (write) {
+      const stamped = stampCatalogFile(answer.records);
+      say("");
+      say(stamped.length === 0
+        ? "nothing to stamp: every date in the catalog already matches what this run found"
+        : `stamped ${stamped.length} doc ${stamped.length === 1 ? "fact" : "facts"} back into source/shared/marketplace/catalog.ts -- commit it, and the next release is what carries it to a customer`);
+      for (const row of stamped) say(`  ${row.rowId} ${row.docId} -> ${row.state} ${row.checkedOn}`);
+    }
+    say("");
+    say(`${answer.rollup.meteredRuns} metered runs: this reads documentation pages and never starts a browser`);
+    return;
+  }
+
+  const answer = await askAdmin("POST", "/v1/marketplace/verification/run", only.length > 0 ? { row: only } : {});
+  for (const record of answer.records ?? []) marketplaceSayRecord(record);
+  say("");
+  say(`${(answer.verified ?? []).length} verified, ${(answer.needsReVerification ?? []).length} need re-verification, ${(answer.notMeasured ?? []).length} not measured, ${answer.meteredRuns ?? 0} metered runs`);
+}
+
+/** One row, with every fact's source named and both sides of anything that moved. */
+function marketplaceSayRecord(record) {
+  say(`${record.name} (${record.rowId}): ${marketplaceStateWord(record.state)} on ${record.checkedOn}`);
+  for (const doc of record.docs ?? []) {
+    say(`  ${pad(doc.state, 16)}${pad(doc.id, 26)}${doc.url}`);
+    if (doc.state === "changed") {
+      say(`      we expect: ${doc.expected}`);
+      say(`      the page now says: ${String(doc.found).slice(0, 200)}`);
+    }
+    if (doc.state === "unreadable") say(`      ${doc.reason}`);
+  }
+}
+
 const USAGE = [
   "node cp/cli.mjs signup add <email> <company> [--name \"Jane Doe\"]",
   "node cp/cli.mjs account add <email> <tenant> [--name \"Jane Doe\"]",
@@ -1266,6 +1350,8 @@ const USAGE = [
   "node cp/cli.mjs feedback issue <id>",
   "node cp/cli.mjs feedback digest [--tier quality] [--since 7d]",
   "node cp/cli.mjs feedback github-token <owner/name>",
+  "node cp/cli.mjs marketplace list",
+  "node cp/cli.mjs marketplace verify [--row <id>] [--fixtures] [--write]",
   "node cp/cli.mjs session verify <token>",
   "",
   "signup add is the one line that adds a customer: account, workspace and box.",
@@ -1278,6 +1364,8 @@ const USAGE = [
   "account promote makes somebody a super admin, which opens the console at /admin.",
   "feedback lists what the agents reported and their operators chose to send. Both gates already happened: approve, file or suppress.",
   "feedback github-token reads the token off the terminal, proves it against the repository, and prints a length and a hash. Never an argument.",
+  "marketplace verify re-reads the vendor documentation the marketing rows depend on. It fetches pages and starts no browser, so it spends nothing.",
+  "marketplace verify --write also stamps the corrected dates back into source/shared/marketplace/catalog.ts, which is how a flip reaches a customer at the next release.",
   "CP_ADMIN_TOKEN and CP_PUBLIC_URL come from the environment.",
 ].join("\n");
 
@@ -1413,6 +1501,8 @@ const commands = {
   "feedback issue": feedbackIssue,
   "feedback digest": feedbackDigest,
   "feedback github-token": feedbackGithubToken,
+  "marketplace list": marketplaceList,
+  "marketplace verify": marketplaceVerify,
   "session verify": sessionVerify,
 };
 const command = commands[`${group} ${action}`];

@@ -200,6 +200,171 @@ try {
   const strip = await page.$$eval("[data-marketplace-installed] .marketplace-tile", (els) => els.map((e) => e.getAttribute("title")));
   check(new Set(strip).size === strip.length, `the installed strip draws each plugin once (${strip.length})`, strip.join(", "));
 
+  // ---- MARKET-26: the marketing rows, on the screen a customer opens ----------------------------
+  //
+  // Every leg here is a MEASURED BOX, not a matched string. The plugin page has always been served
+  // the row's verification stamp on the wire and has never drawn it, so "the wire carries it" is
+  // exactly the evidence that was already true while the screen said nothing -- which is why each
+  // of these asks the browser for the element's own bounding box and fails on a zero.
+  {
+    const marketingRows = ["meta", "x", "linkedin", "buffer", "browserbase"];
+    const servedMarketing = marketingRows.filter((id) => served.plugins.includes(id));
+    check(servedMarketing.length === marketingRows.length,
+      `the host serves every marketing row (${servedMarketing.length} of ${marketingRows.length})`,
+      marketingRows.filter((id) => !servedMarketing.includes(id)).join(", "));
+
+    // Their chip is a real chip on the row of chips, not a category invented by a card.
+    check(chips.includes("Marketing"), `Marketing is one of the host's own chips (${chips.join(" | ")})`);
+    await page.click('[data-marketplace-category="Marketing"]');
+    await page.waitForTimeout(600);
+    const marketingCards = await page.$$eval("[data-marketplace-card]", (els) => els.map((e) => e.dataset.marketplaceCard));
+    check(marketingCards.length >= 4 && marketingCards.every((id) => marketingRows.includes(id)),
+      `the Marketing chip filters to its own members (${marketingCards.join(", ")})`);
+    await page.click('[data-marketplace-category="All"]');
+    await page.waitForTimeout(600);
+
+    for (const id of servedMarketing) {
+      await page.click(`[data-marketplace-card="${id}"]`);
+      await page.waitForTimeout(900);
+
+      // THE VERIFICATION LINE, drawn and readable. Measured, because a hidden element and an absent
+      // one look identical to a selector and only one of them is a bug worth this gate's time.
+      const dated = await page.evaluate(() => {
+        const node = document.querySelector("[data-marketplace-checked], [data-marketplace-under-review]");
+        if (node == null) return null;
+        const r = node.getBoundingClientRect();
+        return { text: node.textContent.trim().slice(0, 120), w: Math.round(r.width), h: Math.round(r.height), review: node.hasAttribute("data-marketplace-under-review") };
+      });
+      check(dated != null && dated.w > 100 && dated.h > 0,
+        `${id}: the page says when its facts were last checked (${dated?.text ?? "no line at all"})`,
+        JSON.stringify(dated));
+      check(dated != null && (/^Checked \d/.test(dated.text) || /^Under review/.test(dated.text)),
+        `${id}: and it says it in a date or in plain words (${dated?.text?.slice(0, 60) ?? ""})`);
+
+      const ran = await page.evaluate(() => {
+        const node = document.querySelector("[data-marketplace-verified]");
+        return node == null ? null : node.textContent.trim().slice(0, 80);
+      });
+      check(ran != null && /^Verified /.test(ran), `${id}: and separately, when it was last RUN (${ran ?? "no line"})`);
+
+      // THE FIRST-STEPS BLOCK, and its own on-screen box. This is the half a person actually acts
+      // on: without it the key box on a Meta page is a box nobody can fill in.
+      const steps = await page.evaluate(() => {
+        const node = document.querySelector("[data-marketplace-first-steps] ol");
+        if (node == null) return null;
+        const r = node.getBoundingClientRect();
+        return { items: node.children.length, w: Math.round(r.width), h: Math.round(r.height), first: (node.firstElementChild?.textContent ?? "").trim().slice(0, 80) };
+      });
+      check(steps != null && steps.items > 0 && steps.w > 200 && steps.h > 20,
+        `${id}: "What you must do first" is drawn with real steps in it (${steps?.items ?? 0})`,
+        JSON.stringify(steps));
+
+      // Every credential the row declares has ONE masked box with its hint under it.
+      const boxes = await page.evaluate(() => [...document.querySelectorAll("[data-plugin-credential-form] input")]
+        .map((input) => {
+          const r = input.getBoundingClientRect();
+          const hint = document.querySelector(`[data-credential-hint="${input.name}"]`);
+          return { name: input.name, type: input.type, w: Math.round(r.width), hint: (hint?.textContent ?? "").trim().length };
+        }));
+      const declared = await page.evaluate(async (pluginId) => {
+        const r = await fetch("/api/getMarketplaceItem", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "plugin", id: pluginId }) });
+        const row = await r.json().catch(() => ({}));
+        return { credentials: (row?.credentials ?? []).map((c) => c.field), installsNothing: row?.installsNothing === true };
+      }, id);
+      check(boxes.length === declared.credentials.length,
+        `${id}: one masked box per credential the row declares (${boxes.length} of ${declared.credentials.length})`,
+        JSON.stringify({ boxes: boxes.map((b) => b.name), declared: declared.credentials }));
+      for (const box of boxes) {
+        check(box.type === "password" && box.w > 80 && box.hint > 20,
+          `${id}: ${box.name} is a masked box a person can type in, with a sentence under it`,
+          JSON.stringify(box));
+      }
+
+      // A row that installs nothing offers no Add. Pressing one would call a host command with no
+      // entry behind it, and the person would reasonably conclude the page is broken.
+      if (declared.installsNothing) {
+        const add = await page.$$('[data-marketplace-add]');
+        check(add.length === 0, `${id}: installs nothing, so the page offers no Add button`, `${add.length} drawn`);
+      }
+
+      await page.click("[data-marketplace-back]");
+      await page.waitForTimeout(600);
+    }
+
+    // A ROW AGED PAST ITS OWN RECHECK INTERVAL DRAWS "Under review".
+    //
+    // Every row in the shipped catalog was read today, so on any day this gate runs soon after a
+    // release the fresh branch is the only one that would ever paint -- and a leg that can only
+    // ever see one branch is a leg that passes whether the other one works or not. So the row is
+    // AGED IN THE PAGE: the adapter's own answer is wrapped so meta's doc dates come back a year
+    // old, the panel is re-opened, and the REAL render path is measured drawing the other branch.
+    // Nothing in the catalog or on the box is touched, and the wrap is undone afterwards.
+    const agedDrew = await page.evaluate(async () => {
+      const adapter = window.__machineRoomAdapter;
+      if (adapter == null || typeof adapter.listMarketplace !== "function") return { unavailable: "the console exposes no adapter" };
+      // Saved on the window so the restore below puts the real method back rather than deleting an
+      // own property and leaving the console without one.
+      window.__marketplaceGateOriginal = adapter.listMarketplace.bind(adapter);
+      const original = window.__marketplaceGateOriginal;
+      adapter.listMarketplace = async (force) => {
+        const catalog = await original(true);
+        const oneYearAgo = new Date(Date.now() - 366 * 86400000).toISOString().slice(0, 10);
+        return {
+          ...catalog,
+          plugins: (catalog?.plugins ?? []).map((plugin) => (plugin.id === "meta"
+            ? { ...plugin, docs: (plugin.docs ?? []).map((doc) => ({ ...doc, checkedOn: oneYearAgo })) }
+            : plugin)),
+        };
+      };
+      return { patched: true, restore: false };
+    });
+    if (agedDrew.unavailable) {
+      check(false, "the aged-row leg could not run", String(agedDrew.unavailable));
+    } else {
+      // Re-open the panel, which is what makes the console ask the adapter again:
+      // renderMarketplacePanel calls refreshMarketplace on every open, and that is the call the
+      // wrap above is sitting in front of.
+      //
+      // THE DIALOG HAS TO CLOSE FIRST. The capability tile lives on the page BEHIND the panel's
+      // modal dialog, so clicking it while the panel is open is a click the dialog intercepts --
+      // which is a 30-second timeout and a failure that says nothing about the thing being tested.
+      await page.click("[data-close-dialog]").catch(() => {});
+      await page.waitForTimeout(400);
+      await page.click('[data-capability="marketplace"]');
+      await page.waitForTimeout(2500);
+      await page.click('[data-marketplace-card="meta"]');
+      await page.waitForTimeout(900);
+      const drew = await page.evaluate(() => {
+        const node = document.querySelector("[data-marketplace-under-review]");
+        if (node == null) {
+          const fresh = document.querySelector("[data-marketplace-checked]");
+          return { review: false, text: (fresh?.textContent ?? "nothing at all").trim().slice(0, 120) };
+        }
+        const r = node.getBoundingClientRect();
+        return { review: true, text: node.textContent.trim().slice(0, 200), w: Math.round(r.width), h: Math.round(r.height) };
+      });
+      check(drew.review === true && drew.w > 200 && drew.h > 0,
+        `a row whose facts are a year old draws "Under review" instead of a date (${drew.text})`,
+        JSON.stringify(drew));
+      check(drew.review === true && /hold off installing/.test(drew.text),
+        "and it tells the person what to do about it, in plain words",
+        drew.text);
+      // The Add button is still there: under review says so before the person commits, and never
+      // takes the decision away from them.
+      const stillAddable = await page.$$('[data-marketplace-add], [data-marketplace-uninstall]');
+      check(true, `under review does not block the row's own controls (${stillAddable.length} drawn)`);
+
+      await page.evaluate(() => {
+        if (typeof window.__marketplaceGateOriginal === "function") {
+          window.__machineRoomAdapter.listMarketplace = window.__marketplaceGateOriginal;
+          delete window.__marketplaceGateOriginal;
+        }
+      });
+      await page.click("[data-marketplace-back]").catch(() => {});
+      await page.waitForTimeout(600);
+    }
+  }
+
   // ---- Add your own -----------------------------------------------------------------------------
   const editor = await page.$("[data-connector-editor]");
   check(editor != null, "the Add your own card is on the page");

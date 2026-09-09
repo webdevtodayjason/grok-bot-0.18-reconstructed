@@ -5,7 +5,12 @@ needs and where that key is minted with the least permission that works, the fir
 proves it, what bites, and how we know it works.
 
 `docs/MARKETPLACE.md` is the panel and the install flow. `docs/CONNECTORS.md` is the connector
-plane and its custody rules. **This file is the catalog itself** — nineteen rows, up from ten.
+plane and its custody rules. **This file is the catalog itself** — twenty-four rows, up from ten.
+
+Five of them are the marketing rows Wave B added on 2026-09-09, and they carry a **second dated
+block**: `docs[]`, the vendor facts each row depends on, re-read on a schedule by
+`cp/verification.mjs`. "We ran it" and "the vendor still documents it" are two different claims
+and they stay in two different places. See **Marketing** below.
 
 ---
 
@@ -304,6 +309,169 @@ itself. The alternative to Playwright when the job is a goal rather than a scrip
 
 ---
 
+## Marketing
+
+Read against each vendor's own documentation on **2026-09-09**, and every endpoint below was called
+from inside `grok-bot-local-vm` on the same day with an invented token, so the verification stamps
+are measurements rather than readings.
+
+**The one thing to know before reading any of these rows.** *No official MCP server publishes an
+organic post anywhere.* Meta's Social Technologies MCP manages apps and webhooks. Meta's Ads MCP
+manages ads. X's hosted MCP reads posts and writes only bookmarks and Articles. So on Meta, X and
+LinkedIn **the connector and the posting path are different things**, and these rows say so instead
+of shipping a card that looks like it posts. Posting today is the customer's own developer app, or
+Buffer, or the browser.
+
+Three of these rows install nothing, and that is deliberate. A row whose only honest content is
+"here is what this vendor requires of you first" is a page, not an entry. `installsNothing` is how
+the console knows to draw the steps and no Add button, and `validateMarketplaceCatalog` makes such a
+row carry first steps and at least one dated source — so a row that installs nothing cannot also say
+nothing. None of the three carries a masked key box either: there is nowhere for a Meta token to go
+today, and a box for a value nothing reads is the same lie one level up as a connector that can only
+ever fail (which is the live `CONNECT-13` defect).
+
+### How to read the second dated block
+
+These four rows carry `docs[]` as well as `verification`, and the two must not be confused.
+
+| Block | The claim | Who writes it |
+| --- | --- | --- |
+| `verification` | We ran this against the vendor on that date, from a box. | A person, when the row is added or re-run. |
+| `docs[]` | The vendor still documents what this row assumes, on that date. | `cp/verification.mjs`, weekly and on release. |
+
+They stay apart because re-reading a web page produces only doc-grade evidence, which is exactly the
+`proof: "documented"` the validator has always refused. A doc result can never raise a row's proof —
+`tests/marketplace-verification.test.mjs` asserts it — and the recurring job is described in
+`docs/CONNECTORS.md`.
+
+`recheckDays` is what the customer's page runs on. Nothing pushes control-plane state into a running
+box, so between releases the console goes by **age**: it draws "Checked 9 Sep 2026" until the row's
+own dates are older than `recheckDays`, and "Under review — hold off installing" after that. It
+never blocks Install; it says so before the person commits.
+
+### Meta: Facebook Pages and Instagram
+
+Installs nothing. Graph API **v26.0**.
+
+- **Transport** — none. Your own developer app against `graph.facebook.com`.
+- **Credential** — none on this row. There is nowhere for a Meta token to go today.
+- **What bites, in order of how much time it costs you.**
+  1. **Two logins, two different permission sets.** Instagram Login wants
+     `instagram_business_basic` and `instagram_business_content_publish`. Facebook Login wants
+     `instagram_basic`, `instagram_content_publish` and `pages_read_engagement`. Picking one decides
+     every permission name after it, and they are not interchangeable.
+  2. **Standard Access is free and nearly useless for an agency.** It posts only to accounts whose
+     staff hold a role on your app — your own accounts. The moment you post for a client who does
+     not, you need **Advanced Access**: Business Verification, App Review *per permission*, and an
+     **annual Data Use Checkup** that keeps the access alive. Weeks, not an afternoon.
+  3. **Do not copy `pages_manage_read_engagement`** from Meta's Pages getting-started page. The
+     Permissions Reference does not contain it (checked 2026-09-09). `pages_manage_posts` is the one
+     that creates a Page post, and it depends on `pages_read_engagement` and `pages_show_list`.
+  4. **The publishing limit is documented twice, differently.** The Rate Limit section says 100
+     API-published posts in a 24-hour moving period; the carousel section on the same page says 50.
+     Plan against 50, and read the account's own `/content_publishing_limit` before a batch. It is on
+     the row as `knownContradiction`, so the console says it too.
+- **Verified** — `endpoint-answered`. `GET /v26.0/me` with an invented token: HTTP 400
+  `OAuthException` code 190, "Invalid OAuth access token", in 0.20 s.
+
+### X
+
+Installs nothing. No tiers, no application, no app review — and a per-post price.
+
+- **Transport** — none. Your own developer app against `api.x.com/2`.
+- **Credential** — none on this row.
+- **What bites.**
+  - **Pay-per-usage, and the link surcharge is thirteenfold.** `Post: Create` is **$0.015** a
+    request; `Post: Create (with URL)` is **$0.200**. A marketing habit is mostly the second one.
+    Set a spending limit on the app before anyone uses it, and keep X posting off until somebody has
+    agreed a per-post ceiling for the client.
+  - **The hosted MCP cannot create an ordinary post**, and `POST /2/tweets` refuses an app-only
+    bearer outright — measured, see below. It needs OAuth 2.0 user context with `tweet.write`,
+    `tweet.read`, `users.read` and `offline.access`, which means a local stdio bridge rather than a
+    remote connector row.
+  - Quote-posting through `quote_tweet_id` is Enterprise-only on the same page that documents the
+    parameter. On the row as `knownContradiction`.
+- **Verified** — `endpoint-answered`. `POST /2/tweets` with an invented bearer: HTTP 403
+  "Unsupported Authentication … Supported authentication types are [OAuth 1.0a User Context, OAuth
+  2.0 User Context]", in 0.19 s. That refusal *is* the row's own point, measured.
+
+### LinkedIn
+
+Installs nothing. The slowest of the three to get into, and the one most likely to stop working
+quietly.
+
+- **Transport** — none. Your own approved app against `api.linkedin.com/rest`.
+- **Credential** — none on this row.
+- **What bites.**
+  - **The Page has to exist before the app can.** An app is attached to a Page and verified by that
+    Page's admin, so this needs somebody at the client, not just you.
+  - **Community Management access is an application with a review.** Every app starts in the
+    **Development tier** meanwhile: 500 calls per app per day, 100 per member per day. Enough to
+    build against, not enough to run twenty clients on.
+  - **Tokens expire every 60 days and refresh tokens are reserved for approved partners.** For most
+    apps, renewal is re-authorising by hand. Put a reminder in the calendar for day fifty-five.
+  - `w_organization_social` posts as the organisation, `r_organization_social` reads it back, and the
+    authenticated person needs an admin role on the Page whatever the app was granted.
+  - **LinkedIn publishes no rate limits**, by its own statement. That fact is recorded on the row as
+    a terminal `not-published` state so the weekly re-read does not report LinkedIn's policy as news
+    every seven days.
+  - Every LinkedIn Marketing page still renders a deprecation banner for a sunset date **three weeks
+    in the past** (Marketing Version 202508, 17 August 2026, read 2026-09-09). It is boilerplate; the
+    verification job strips it before comparing anything.
+- **Verified** — `endpoint-answered`. `GET /rest/posts` with an invented bearer and
+  `Linkedin-Version: 202608`: HTTP 401 `INVALID_ACCESS_TOKEN`, in 0.36 s.
+
+### Buffer
+
+**The only scheduler with a day-one path**, and the row that actually posts.
+
+- **Transport** — endpoint, `https://mcp.buffer.com/mcp`, `Authorization: Bearer`.
+- **Credential** — `BUFFER_API_KEY`, minted by you in Buffer under **Settings → API**. No
+  application, no review.
+- **First call** — `list_channels`, then `create_post`.
+- **What bites.**
+  - **The key is account-wide.** There is no per-organisation scoping, so a key made on an agency
+    account reaches every client channel on that account. That sentence is on the masked field, not
+    only here.
+  - **`schedulingType: "notification"` is a first-class path, and it is the one that matters.** It
+    schedules a post as a *reminder to a person* instead of publishing it, which maps straight onto
+    the hand-off card — so a network we cannot post to for this client yet still gets scheduled work.
+  - `create_post` reaches Instagram, Facebook, Twitter, LinkedIn, Pinterest, YouTube, Google
+    Business, Mastodon, TikTok, Threads, Bluesky and Buffer's own Start Page.
+  - **Free plan: 100 requests per 15 minutes, 250 a day, 3,000 a month**, per client, shared across
+    every request rather than counted per tool. A conversation that lists posts, reads a few and
+    edits one has already spent several.
+- **Verified** — `endpoint-answered`. MCP `initialize` with an invented bearer: HTTP 401
+  `{"error":"Unauthorized: Invalid or expired token"}` in 0.33 s.
+
+### Browserbase (Web & Search)
+
+Installs nothing, and carries a key the **host** reads. `CLOUD-BROWSER-1`'s second engine: the same
+four browsing tools, pointed at a browser running in Browserbase instead of the one in the box.
+
+- **Transport** — none, and no connector. Its own MCP repo is archived and its MCP key is a URL
+  query parameter, which the custody rule refuses at the door.
+- **Credential** — `BROWSERBASE_API_KEY`, with the new **`cloud-browser`** consumer. It is read only
+  in the host process, out of the `cloudBrowser` section of `connector-env-secrets.json`, and merged
+  into no child environment ever. Deliberately **not** a `shell` consumer: shell-secrets values are
+  merged into the environment of the box exec daemon — the process that spawns every `/bin/sh` the
+  agent's shell tool runs — and an agent can read its own environment.
+- **What bites** — without the paid plan this is a cloud Chrome with **no residential proxy** and
+  **15-minute sessions**, which is not the thing that gets past a sign-up page. `proxies` defaults
+  to false and the built-in ones are the paid, residential ones.
+- **Verified** — `endpoint-answered`. `POST /v1/sessions` with an invented key in `X-BB-API-Key`:
+  HTTP 401 in 0.33 s. **No session was started, so nothing was billed.**
+
+### What we deliberately did not ship this release
+
+| Candidate | Why not | What would change it |
+| --- | --- | --- |
+| **Later** | `later.com/api` 404s today. There is no public API to write a row against. | A public API. Not expected. |
+| **Canva** | No day-one path below Enterprise: the Connect APIs need a public integration to be reviewed by Canva before anybody but your own team can use it. | An Enterprise account, or a self-serve tier. Filed as roadmap. |
+| **A per-tenant OAuth callback for Meta, X and LinkedIn** | Out of scope for this release, which is why all three rows say "bring your own app" in plain words. | The callback, which is its own row. |
+
+---
+
 ## Code review
 
 ### CodeRabbit CLI
@@ -336,7 +504,7 @@ because a row that cannot be verified does not get one.
 | **HubSpot (hosted)** | OAuth-only, no device-code grant. | A headless auth path. |
 | **Notion (hosted)**, **Sentry**, **Semgrep** | 401 `invalid_token` — live endpoints, all OAuth-issued tokens. Notion ships as a **local program** instead, which is the row that shipped. | — |
 | **Asana, Trello, HubSpot** | OAuth-only, no device grant, no headless path. | — |
-| **Browserbase** | Its key is a **URL query parameter**, so the link itself is the credential — refused by the custody rule at the door. Its MCP repo is also archived. | A header-based auth scheme. |
+| **Browserbase** (as a connector) | Its MCP key is a **URL query parameter**, so the link itself is the credential — refused by the custody rule at the door. Its MCP repo is also archived. **It ships anyway, as a credential-only row**: the cloud-browser engine reads its key in the host process, which needs no connector at all. See Marketing above. | A header-based MCP auth scheme, if a connector is ever wanted. |
 | **PayPal, Shopify** | 404 at the URLs tried. Not chased further. | Correct endpoints. |
 | **Hugging Face** | Works keyless (4 tools in 0.2 s) but is not a small-business tool; left out to keep the catalog from bloating rather than because it failed. | A reason an owner would want it. |
 

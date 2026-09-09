@@ -1808,6 +1808,142 @@
     finally { button.disabled = false; }
   });
 
+  // ---- panel 7: the marketplace ------------------------------------------------------------------
+  //
+  // MARKET-26 and CLOUD-BROWSER-1, on one screen because they are the two ways the Marketplace goes
+  // wrong without anybody noticing: a row that has drifted from what its vendor documents, and a
+  // cloud browsing session nobody counted.
+  //
+  // The screen's own rules, the same two the rest of this page follows. Every state carries when it
+  // was measured, and a number that could not be measured says so in words. The second one is why
+  // proxy traffic is drawn the way it is below: one of the two cloud-browser vendors publishes no
+  // per-session traffic figure at all, and printing 0 for it would read as free when it is in fact
+  // the most expensive line on the page.
+
+  const MARKETPLACE_STATE_WORDS = {
+    verified: "verified",
+    "needs-re-verification": "needs re-verification",
+    "not-measured": "not measured",
+  };
+
+  function marketplaceStateChip(state) {
+    if (state == null) return el("span", "quiet", "never run here");
+    const word = MARKETPLACE_STATE_WORDS[state] ?? String(state);
+    const tone = state === "verified" ? "ok" : state === "needs-re-verification" ? "refused" : "";
+    return el("span", `chip${tone ? ` ${tone}` : ""}`, word);
+  }
+
+  async function loadMarketplace() {
+    const answer = await api("GET", "/v1/admin/marketplace");
+    const records = new Map((answer.records ?? []).map((record) => [String(record.rowId), record]));
+
+    const rows = $("marketplaceRows").querySelector("tbody");
+    clear(rows);
+    if (answer.catalogProblem) {
+      rows.appendChild(rowSpanning(5, String(answer.catalogProblem)));
+    } else if ((answer.catalog ?? []).length === 0) {
+      rows.appendChild(rowSpanning(5, "No catalog row carries vendor facts to re-read."));
+    }
+    for (const row of answer.catalog ?? []) {
+      const record = records.get(row.id);
+      const tr = document.createElement("tr");
+      const name = el("td", null, row.name);
+      name.title = `${row.id} · ${row.category}`;
+      tr.appendChild(name);
+
+      const last = document.createElement("td");
+      last.appendChild(measured(record?.checkedAt ?? null, "this job has not run in this container yet", ago));
+      if (record?.checkedAt) last.title = when(record.checkedAt);
+      tr.appendChild(last);
+
+      const state = document.createElement("td");
+      state.appendChild(marketplaceStateChip(record?.state));
+      tr.appendChild(state);
+
+      tr.appendChild(el("td", "num", String((row.docs ?? []).length)));
+
+      // What the CUSTOMER is being told right now, which is a different fact from the one above it:
+      // their console reads the dates compiled into the released bundle, so between releases it goes
+      // by age and can honestly disagree with this screen.
+      const seen = el("td", null, row.customerSees);
+      seen.title = `their page goes by age: these facts were read ${row.oldestCheckedOn} and this row is re-read every ${row.recheckDays} days`;
+      tr.appendChild(seen);
+      rows.appendChild(tr);
+    }
+
+    // What actually moved, with both sides quoted, so nobody has to go and read the vendor's page
+    // to find out what the word "changed" meant.
+    const changes = $("marketplaceChanges");
+    clear(changes);
+    for (const record of answer.records ?? []) {
+      for (const change of record.changed ?? []) {
+        const node = el("div", "card changed");
+        node.appendChild(el("div", "title", `${record.name}: ${change.what}`));
+        node.appendChild(el("div", "detail", `we expect: ${change.expected}`));
+        node.appendChild(el("div", "detail", `the page now says: ${String(change.found).slice(0, 400)}`));
+        node.appendChild(el("div", "detail", change.url));
+        changes.appendChild(node);
+      }
+      for (const missed of record.unreadable ?? []) {
+        const node = el("div", "card");
+        node.appendChild(el("div", "title", `${record.name}: not measured`));
+        node.appendChild(el("div", "detail", missed.reason));
+        node.appendChild(el("div", "detail", missed.url));
+        changes.appendChild(node);
+      }
+    }
+
+    const ledger = answer.ledger ?? {};
+    const ledgerBody = $("marketplaceLedger").querySelector("tbody");
+    clear(ledgerBody);
+    if (ledger.measured !== true) {
+      ledgerBody.appendChild(rowSpanning(5, `not measured: ${ledger.why || "the relay could not be asked"}`));
+    } else if ((ledger.tenants ?? []).length === 0) {
+      ledgerBody.appendChild(rowSpanning(5, "No cloud browsing session has been opened yet."));
+    }
+    for (const row of ledger.tenants ?? []) {
+      const tr = document.createElement("tr");
+      tr.appendChild(el("td", null, row.tenant));
+      tr.appendChild(el("td", "num", String(row.sessions)));
+      tr.appendChild(el("td", "num", `${Math.round(Number(row.minutes) * 10) / 10} min`));
+
+      // THE CELL THIS PANEL EXISTS FOR. A null is a vendor that publishes no traffic figure, and it
+      // renders as that sentence. Never a zero: browser time is cents an hour and residential proxy
+      // traffic is dollars a gigabyte, so a zero here hides the larger of the two numbers.
+      const proxy = el("td", "num");
+      if (row.proxyBytes === null || row.proxyBytes === undefined) {
+        const node = el("span", "quiet", "not reported by this vendor");
+        node.title = `${(row.proxyUnreportedBy ?? []).join(", ")} publishes no per-session traffic figure`;
+        proxy.appendChild(node);
+      } else {
+        proxy.appendChild(text(bytes(row.proxyBytes) ?? "not measured"));
+        // A PARTIAL FIGURE SAYS SO ON THE SCREEN, not only in a tooltip. This workspace has run
+        // sessions on both vendors and only one of them reports traffic, so "10 MB" on its own is a
+        // number an operator would reasonably read as the total and budget against. Nobody hovers a
+        // cell that looks complete.
+        if ((row.proxyUnreportedBy ?? []).length > 0) {
+          const rest = el("div", "quiet", `plus ${row.proxyUnreportedBy.join(", ")}, not reported`);
+          rest.title = `${row.proxyUnreportedBy.join(", ")} publishes no per-session traffic figure, so this total is only the part that is measured`;
+          proxy.appendChild(rest);
+        }
+      }
+      tr.appendChild(proxy);
+      tr.appendChild(el("td", null, (row.vendors ?? []).join(", ")));
+      ledgerBody.appendChild(tr);
+    }
+    $("marketplaceLedgerNote").textContent = ledger.note
+      ?? "One row per session a workspace has opened on a cloud browser.";
+
+    const rollup = answer.rollup;
+    $("marketplaceDelivery").textContent = [
+      rollup == null
+        ? "This re-read has not run in this container yet."
+        : `Last run ${when(rollup.ranAt)} (${rollup.source}), ${rollup.meteredRuns} metered runs: it reads documentation pages and never starts a browser.`,
+      "A flip lands here immediately and on a customer's page at the next release, because nothing pushes this state into a running box. `marketplace verify --write` is what moves the dates they see.",
+      (answer.ignores ?? []).length > 0 ? `Ignored as boilerplate when comparing: ${answer.ignores.join("; ")}.` : "",
+    ].filter(Boolean).join(" ");
+  }
+
   // ---- everything at once ----------------------------------------------------------------------
 
   async function loadAll() {
@@ -1815,14 +1951,14 @@
     const button = $("refresh");
     button.disabled = true;
     // Each panel loads on its own and reports its own failure into its own space, so one route
-    // being down does not blank the other five. `allSettled`, deliberately.
-    const results = await Promise.allSettled([loadSignIns(), loadClients(), loadBoxes(), loadSystem(), loadSpend(), loadProviders(), loadFeedback()]);
+    // being down does not blank the other seven. `allSettled`, deliberately.
+    const results = await Promise.allSettled([loadSignIns(), loadClients(), loadBoxes(), loadSystem(), loadSpend(), loadProviders(), loadFeedback(), loadMarketplace()]);
     button.disabled = false;
     const broken = results.filter((result) => result.status === "rejected" && String(result.reason?.message) !== "unauthorized");
     if (broken.length > 0) banner(`${broken.length} panel${broken.length === 1 ? "" : "s"} could not be loaded: ${broken.map((row) => row.reason.message).join("; ")}`);
     // The one flag a browser gate waits on, rather than a fixed sleep. It says the render finished,
     // not that everything in it succeeded, which is exactly what a gate wants to inspect.
-    window.__adminLive = { panels: 7, at: new Date().toISOString() };
+    window.__adminLive = { panels: 8, at: new Date().toISOString() };
     document.body.setAttribute("data-admin-loaded", "true");
   }
 

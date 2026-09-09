@@ -49,6 +49,17 @@ import { createMailDirectory, mailDomain } from "./mail.mjs";
 import { normalizeReport } from "./feedback.mjs";
 import { createProxyClient, includedModelRows } from "./proxy.mjs";
 import {
+  VERIFY_INTERVAL_MS,
+  docNoiseRules,
+  loadCatalogPlugins,
+  readRecords,
+  readRollup,
+  rowAge,
+  rowsWithDocs,
+  startVerificationTimer,
+  verifyCatalog,
+} from "./verification.mjs";
+import {
   NEW_TENANTS_BLOCKED,
   adoptionDirs,
   boxContainerName,
@@ -581,6 +592,10 @@ export function createApp(options = {}) {
     config, store, client, now, fetchImpl, proxy,
     json, noContent, publicAccount, publicTenant, tenantView, tenantPower, tenantProvision,
     currentSession, version: CP_VERSION,
+    // MARKET-26. The marketplace panel's read, built ONCE in this file and handed over, so the
+    // console and the operator's own route cannot drift into two different answers about which of
+    // our rows may be stale.
+    marketplaceVerificationState,
     // PROVIDERS-1. The address a change came from, so an admin_actions row can say WHERE as well as
     // who and when. This function is the only thing in the process that knows which peers are
     // trusted proxies, which are Cloudflare and which are boxes, and the admin API had no way to
@@ -599,6 +614,56 @@ export function createApp(options = {}) {
       return readProxyKey(slug, config, { file: proxyKeyFileIn(profileDir) });
     },
   });
+
+  /**
+   * MARKET-26. What the catalog says, what the last run found, and how old each is.
+   *
+   * The two dates are kept apart on purpose. `catalog` is the row as it will reach a CUSTOMER --
+   * the dates compiled into the host bundle, and the age their console draws "under review" from,
+   * because nothing pushes control-plane state into a running box. `records` is what the last run
+   * in THIS container found, which the operator sees now. When they disagree, the fix is a release
+   * carrying `marketplace verify --write`, and the screen says so rather than hiding it.
+   */
+  function marketplaceVerificationState() {
+    const at = now();
+    let rows = [];
+    let catalogProblem = null;
+    try {
+      rows = rowsWithDocs(loadCatalogPlugins()).map((row) => {
+        const age = rowAge(row, at);
+        return {
+          id: String(row.id),
+          name: String(row.name ?? row.id),
+          category: String(row.category ?? ""),
+          recheckDays: age.recheckDays,
+          oldestCheckedOn: age.oldest,
+          ageDays: age.days,
+          // The word the customer's own plugin page uses for the same row, so an operator reading
+          // this screen knows what the customer is being told right now.
+          customerSees: age.stale ? "under review" : `checked ${age.oldest}`,
+          docs: (row.docs ?? []).map((doc) => ({
+            id: String(doc.id), what: String(doc.what), url: String(doc.url),
+            anchor: String(doc.anchor), checkedOn: String(doc.checkedOn), state: String(doc.state),
+          })),
+          knownContradiction: row.knownContradiction ?? null,
+        };
+      });
+    } catch (error) {
+      catalogProblem = String(error?.message ?? error);
+    }
+    return {
+      measuredAt: new Date(at).toISOString(),
+      rollup: readRollup(store),
+      records: readRecords(store),
+      catalog: rows,
+      catalogProblem,
+      // Named on the answer rather than only in the source, because a differ that silently ignores
+      // part of a page is a differ nobody can audit.
+      ignores: docNoiseRules(),
+      everyWeek: VERIFY_INTERVAL_MS,
+      meteredRuns: 0,
+    };
+  }
 
   async function handleSessionCreate(request, response, body) {
     const email = normalizeEmail(body.email);
@@ -980,6 +1045,42 @@ export function createApp(options = {}) {
       return json(response, 405, { error: "method_not_allowed" });
     }
 
+    // ---- MARKET-26: the marketplace rows' vendor documentation ---------------------------------
+    //
+    // Two routes and nothing else. The state, and a run. Both behind the operator bearer, because
+    // what they carry is which of our own catalog rows may be telling a customer something that is
+    // no longer true -- an operator's fact, not a customer's.
+    //
+    // The run is deliberately synchronous and deliberately small: it fetches a handful of vendor
+    // documentation pages over plain HTTPS and writes a record. It starts no browser and spends
+    // nothing; `meteredRuns` comes back on every answer saying so, because a job that quietly cost
+    // money every week would be found out by the invoice rather than by the screen.
+    if (segments[1] === "marketplace" && segments[2] === "verification") {
+      if (!requireAdmin(request, response)) return undefined;
+
+      if (segments.length === 3 && method === "GET") {
+        return json(response, 200, marketplaceVerificationState());
+      }
+
+      if (segments.length === 4 && segments[3] === "run" && method === "POST") {
+        const only = String(body?.row ?? "").trim();
+        try {
+          const answer = await verifyCatalog({ store, now, source: "api", only, actor: "the operator token" });
+          return json(response, 200, {
+            ...answer.rollup,
+            records: answer.records,
+            measuredAt: new Date(now()).toISOString(),
+          });
+        } catch (error) {
+          // A vendor's documentation site being unreachable is not a 500 on this service. The run
+          // says what it could not do and the previous record stays exactly where it was.
+          return json(response, 502, { error: "verification_failed", message: String(error?.message ?? error) });
+        }
+      }
+
+      return json(response, 405, { error: "method_not_allowed" });
+    }
+
     // ---- accounts (operator) -------------------------------------------------------------------
     if (segments[1] === "accounts") {
       if (!requireAdmin(request, response)) return undefined;
@@ -1247,7 +1348,7 @@ export function createApp(options = {}) {
     }
   }
 
-  return { config, store, client, handle: guarded, refreshBoxPeers, boxPeers, reconcileFallbacks };
+  return { config, store, client, handle: guarded, refreshBoxPeers, boxPeers, reconcileFallbacks, marketplaceVerificationState };
 }
 
 export function createHttpServer(app) {
@@ -1305,6 +1406,18 @@ async function main() {
   // screenshot outage rather than a slow page. It reads first and writes only what is missing, so
   // on an ordinary boot it writes nothing and prints one line saying so.
   void reconcileFallbacksAtBoot(app);
+  // MARKET-26. Weekly, and once at boot, on the peer timer's own pattern above: unref'd so it never
+  // holds a shutdown open, and swallowing its own failures so a vendor's documentation site being
+  // down is never this service being down. Off entirely when the operator says so, because the one
+  // thing worse than a stale row is a control plane that makes outbound requests nobody asked for.
+  if (String(process.env.CP_MARKETPLACE_VERIFY ?? "1") !== "0") {
+    startVerificationTimer({
+      store: app.store,
+      log: (line) => process.stdout.write(`${line}\n`),
+    });
+  } else {
+    process.stdout.write("marketplace verification is off (CP_MARKETPLACE_VERIFY=0); rows will age into \"under review\" on their own\n");
+  }
   const server = createHttpServer(app);
   server.listen(config.port, "0.0.0.0", () => {
     process.stdout.write(`control plane listening on ${config.port}, tenants under ${config.tenantRoot}, release ${config.releaseRoot}\n`);

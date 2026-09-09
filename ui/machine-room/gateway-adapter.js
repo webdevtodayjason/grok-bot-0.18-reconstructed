@@ -1489,10 +1489,25 @@
     marketplaceCatalogCache = {
       plugins: Array.isArray(answer.plugins) ? answer.plugins : [],
       bots: Array.isArray(answer.bots) ? answer.bots : [],
-      // The host serves categories as { plugins, bots } (source/shared/marketplace/catalog.ts), and
-      // this cache feeds the Plugins tab; a flat array is accepted too so an older host still
-      // draws chips instead of silently drawing none. marketplace-bots.js takes .bots the same way.
-      categories: (Array.isArray(answer.categories) ? answer.categories : (answer.categories?.plugins ?? [])).map(String),
+      // The host serves categories as { plugins, bots } (source/shared/marketplace/catalog.ts) and
+      // THAT SHAPE IS KEPT, which it was not before.
+      //
+      // MEASURED ON SCREEN, 2026-09-09: this line flattened the host's answer to its PLUGIN
+      // categories alone, and the Bots tab -- which reads the same cached answer through this
+      // adapter -- drew "Development", "Code review" and "Shell tools" as its chips. Bot categories
+      // exist and are a different list ("From Titanbot team", "Engineering", "Sales"); the flatten
+      // is the only reason nobody ever saw them. marketplace-bots.js has always accepted either
+      // shape and prefers `.bots` when it is given one, so keeping the object is the whole fix, and
+      // `categories.plugins` below is what the Plugins tab reads.
+      //
+      // A host older than the split answers a flat array, which is normalised into the same object
+      // rather than passed through, so one shape reaches every reader.
+      categories: Array.isArray(answer.categories)
+        ? { plugins: answer.categories.map(String), bots: [] }
+        : {
+          plugins: (answer.categories?.plugins ?? []).map(String),
+          bots: (answer.categories?.bots ?? []).map(String),
+        },
     };
     return marketplaceCatalogCache;
   }
