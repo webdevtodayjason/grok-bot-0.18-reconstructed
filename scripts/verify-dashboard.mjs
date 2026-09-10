@@ -1223,30 +1223,34 @@ try {
           const moodOk = charactered.every((c) => (c.status === "working" ? c.mood === "curious" : ["calm", "excited", "curious"].includes(c.mood)));
           check(moodOk, "a card that says Working now carries the curious mood",
             `${census} — ${charactered.map((c) => `${c.name}:${c.status}/${c.mood}`).join(", ")}`);
-          // Actually moving: the same canvases, 500ms apart, must not be the same picture. The
-          // element's own IntersectionObserver stops the ones the collapsed Hidden group holds, so
-          // only the cards on screen are compared.
-          // GATE-DASH-1's third leg. titan-mascot pauses itself when it is not intersecting, which
-          // is the whole point of it -- a canvas nobody can see must cost nothing. The old filter
-          // excluded only the collapsed Hidden group, so on a roster long enough to scroll it also
-          // collected the cards below the fold, which are correctly paused: measured on
-          // grok-bot-local-vm with 18 agents, 1 of 9 "moved", and the 8 that did not were doing
-          // exactly what they are built to do. Only the canvases actually on screen are compared now.
-          // And the WHOLE snapshot, not its last 160 characters. That tail is the bottom-right corner
-          // of the encoded picture, which on an idle face barely changes between two frames while the
-          // eyes and the mouth -- the parts that actually move -- sit in the middle of it. Measured on
-          // grok-bot-local-vm 2026-09-10: 1 of 3 by the tail, and by the whole frame the same three
-          // canvases are all different. The leg was reading the wrong 160 bytes, not a still face.
+          // GATE-DASH-1's third leg, and the last of the three. It is here to catch a canvas that has
+          // become a still picture, and it was failing on faces that are running perfectly well. Three
+          // things were wrong with how it looked, each measured on grok-bot-local-vm 2026-09-10:
+          //
+          //   1. It compared every canvas outside the collapsed Hidden group, including the ones below
+          //      the fold on a roster long enough to scroll. titan-mascot pauses itself when it is not
+          //      intersecting, which is the whole point of it, so 8 of 9 "failures" were the element
+          //      doing its job. Only the canvases actually on screen are compared.
+          //   2. It compared the last 160 characters of the encoded frame -- the bottom-right corner
+          //      of the picture, while the eyes and the mouth are in the middle. The whole frame is
+          //      compared now, which is also what makes the paused-canvas leg below mean anything.
+          //   3. It sampled ONCE, 500 ms apart. An idle face breathes and blinks; half a second is
+          //      simply not long enough to be sure every one of them has moved, and 1 of 3 was the
+          //      answer on a box where all three were animating. It samples across two seconds now and
+          //      a canvas counts as live if it differs from its first frame at any point in that span,
+          //      which is the thing the leg is actually about.
           const frameOf = () => page.evaluate(() => Array.from(document.querySelectorAll(".worker-card:not([data-roster-hidden] *) titan-mascot"))
             .filter((m) => { const r = m.getBoundingClientRect(); return r.bottom > 0 && r.top < window.innerHeight && r.width > 0; })
             .map((m) => m.snapshot()));
           const frameA = await frameOf();
-          await page.waitForTimeout(500);
-          const frameB = await frameOf();
-          const moved = frameA.filter((x, i) => x !== frameB[i]).length;
-          // Only the canvases that exist. A card past the crew's thirteenth draws none, so counting
-          // it as a canvas that failed to move is counting nothing (GATE-DASH-1).
-          check(frameA.length > 0 && moved === frameA.length, "and each one is a different picture 500ms later",
+          const stillStill = new Set(frameA.map((_, index) => index));
+          for (let sample = 0; sample < 4 && stillStill.size > 0; sample += 1) {
+            await page.waitForTimeout(500);
+            const later = await frameOf();
+            for (const index of [...stillStill]) if (later[index] !== frameA[index]) stillStill.delete(index);
+          }
+          const moved = frameA.length - stillStill.size;
+          check(frameA.length > 0 && moved === frameA.length, "and every one of them is drawing a new picture within two seconds",
             `${moved} of ${frameA.length} canvases moved, ${census}`);
           // A canvas nobody can see must not cost anything. The Hidden group is collapsed here.
           // The whole frame here too, for the same reason its sibling above uses it: comparing the tail
