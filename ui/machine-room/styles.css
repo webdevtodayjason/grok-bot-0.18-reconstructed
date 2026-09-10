@@ -868,6 +868,84 @@ select:focus-visible {
   overflow-wrap: anywhere;
 }
 
+/* -- COMMAND-CARD-1: the auto-review approval card ----------------------------------------------
+   The original's shape: title and pill on one row, then three quiet lines under it, then the
+   command behind a disclosure. Nothing here invents a colour or a control -- the pill is
+   .status-pill with its existing attention/success/muted variants, the card is an .inline-card with
+   its --card-accent set per state, and the disclosure is the .tool-receipt <details> the tool rows
+   already use, so it inherits the hidden marker, the clipped <pre> and the mist twin for free. */
+
+.approval-card {
+  display: grid;
+  gap: 8px;
+}
+
+.approval-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.approval-card-head strong {
+  font-size: 12px;
+  letter-spacing: 0.01em;
+}
+
+/* The request is the sentence the person reads to decide, so it is the one line at body weight.
+   overflow-wrap because a summary can carry a URL or an identifier with nothing to break on. */
+.approval-request {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* Whose computer, why it was asked, and the standing rule: three grey lines, deliberately quieter
+   than the request. They are notes, not warnings -- nothing here is red, because an operator reads
+   a coloured line under a reply as a failure. */
+.approval-where,
+.approval-why,
+.approval-rule {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.approval-where {
+  color: var(--text-tertiary);
+}
+
+/* Inside a card rather than in the transcript's system rail, so it carries its own frame; the
+   summary, the marker and the <pre> come from .tool-receipt above. */
+.approval-command {
+  padding: 7px 11px;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.16);
+  color: var(--text-secondary);
+  font-size: 10.5px;
+}
+
+.approval-command > pre {
+  font-size: 10.5px;
+}
+
+/* "Show the command" / "Hide the command" with no script behind it: <details> already toggles, and
+   the transcript rebuilds its own innerHTML on every render, so a bound handler would not survive. */
+.approval-command .approval-more-hide,
+.approval-command[open] .approval-more-show { display: none; }
+.approval-command[open] .approval-more-hide { display: inline; }
+
+[data-theme="mist"] .approval-command {
+  border-color: rgba(30, 39, 43, 0.16);
+  background: rgba(30, 39, 43, 0.05);
+}
+
 .message-status {
   margin-left: 8px;
   color: var(--stone-500);

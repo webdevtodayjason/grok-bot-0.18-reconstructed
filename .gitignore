@@ -1,4 +1,8 @@
-node_modules/
+# No trailing slash. A git worktree of this repo has no node_modules of its own, and the way to give
+# it one is a symlink to the main checkout. "node_modules/" matches directories ONLY, so that symlink
+# showed up as an untracked path in every worktree -- and the alternative, no dependencies at all,
+# makes npm test report 88 failures that are really just missing modules.
+node_modules
 /.cache/
 /.build/
 /dist/

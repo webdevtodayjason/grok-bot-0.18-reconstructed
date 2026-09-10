@@ -1533,8 +1533,14 @@
   }
 
 
+  // COMMAND-CARD-1: the auto-review row is Allow / Always allow / Refuse, in the person's words.
+  // "Always allow" is drawn only when the host proposed a rule to add, because with no rule there
+  // is nothing to write into the settings and a button that cannot do its own name is worse than a
+  // button that is absent. The host's own vocabulary is still only approved|denied
+  // (source/host/runner/sand-auto-review.ts): "always" is this console's word for a settings write
+  // followed by an approve, and the adapter is where those two calls live.
   const DECISION_ACTIONS = {
-    "auto-review": [["approved", "✓ Approve", true], ["denied", "✕ Deny", false]],
+    "auto-review": [["approved", "✓ Allow", true], ["always", "↗ Always allow", false], ["denied", "✕ Refuse", false]],
     "local-tool": [["allow-once", "✓ Allow once", true], ["always", "↗ Always allow", false], ["deny", "✕ Deny", false]],
   };
 
@@ -1549,6 +1555,122 @@
   function secretCustodyHint(card) {
     if (!isShellSecretCard(card)) return "Stored securely, never shown to your agent.";
     return `Stored securely and never shown in this chat. It becomes $${String(card.field ?? "credential")} in this agent's shell, so commands it runs can read it.`;
+  }
+
+  // ---- COMMAND-CARD-1: the approval card, in the shape Jason kept a screenshot of ---------------
+  //
+  // The original's card for a shell command, top to bottom: a title naming what the bot wants, a
+  // pill in the top right carrying the decision, a grey line saying whose computer it runs on, the
+  // request as one plain sentence, a grey paragraph naming the standing rule when one decided it,
+  // and a "Show the command" disclosure holding the command with its middle elided. Jason, on the
+  // screenshot: "which I thought was cool." Our card carried the request and two buttons and none
+  // of the rest, so a person could not see what they were allowing, could not see it afterwards,
+  // and had no way to say yes to this shape of thing once and for all.
+  //
+  // WHERE EACH LINE COMES FROM. The title is the surface. The request sentence is the host's own
+  // approval.summary with its trailing location clause taken off. The grey line is that clause,
+  // rewritten with this agent's name. The command and the reason are approval.command and
+  // approval.reason, which the adapter now carries separately instead of joining them into one
+  // string. The rule is approval.proposedRule, which most approvals do not have.
+  const APPROVAL_COMMAND_CAP = 400;
+
+  // The host's surface tokens are snake_case at the request sites (host_shell, box_shell, mcp,
+  // computer, browser, automation_write, cloud_agent, subagent) whatever the type union says, and
+  // none of them is a word to put on a customer's screen.
+  const APPROVAL_WANTS = {
+    host_shell: "wants to run a command",
+    box_shell: "wants to run a command",
+    mcp: "wants to use a connector",
+    computer: "wants to use the computer",
+    browser: "wants to use the browser",
+    automation_write: "wants to change a routine",
+    cloud_agent: "wants to run a cloud agent",
+    subagent: "wants to start a task",
+  };
+  const approvalWants = (surface) => APPROVAL_WANTS[String(surface ?? "")] ?? "wants your review";
+
+  // host_shell is the person's own machine; everything else is the box the agent lives on.
+  const approvalWhere = (surface, who) => (String(surface ?? "") === "host_shell"
+    ? "Runs on your computer"
+    : `Runs on ${who}'s computer`);
+
+  // The host writes the location into its own summary, and it writes it with the OLD product's name
+  // in it -- "… on Grok Bot's computer" appears five times in
+  // source/host/runner/sand-auto-review-summaries.ts, and it lands in this card's title and in the
+  // title a push notification puts on a lock screen. The clause is the grey line's job here, so it
+  // comes off the sentence, which both restores the original's shape and takes a dead vendor's name
+  // off a customer's screen. The five host strings are their own row; this is the console half.
+  const APPROVAL_WHERE_CLAUSE = /\s+on\s+(?:your local computer|[A-Za-z0-9 ._-]{1,40}'s computer)\.?$/i;
+  const approvalRequestSentence = (card) => String(card.title ?? "").replace(APPROVAL_WHERE_CLAUSE, "").trim()
+    || "This action needs your review";
+
+  // What goes on a lock screen. Only the auto-review card has a clause to strip; every other kind
+  // keeps the title the relay already pushes for it.
+  const cardPushTitle = (card) => (card.kind === "auto-review" ? approvalRequestSentence(card) : card.title);
+
+  // The original elides the middle and counts what it dropped: "...[353 chars omitted]...". The cap
+  // is what is SHOWN, so the count is the real remainder and adding the two back gives the command.
+  function approvalCommandShown(command) {
+    const text = String(command ?? "");
+    if (text.length <= APPROVAL_COMMAND_CAP) return text;
+    const head = Math.ceil(APPROVAL_COMMAND_CAP / 2);
+    const tail = APPROVAL_COMMAND_CAP - head;
+    return `${text.slice(0, head)}\n...[${text.length - APPROVAL_COMMAND_CAP} chars omitted]...\n${text.slice(text.length - tail)}`;
+  }
+
+  // Four states, and the two green ones are not the same sentence. "Always allowed" is claimed only
+  // when a standing rule really is in the person's Auto-review settings -- the adapter hands the
+  // saved allow list in, and the claim is that this approval's own proposed rule is on it. Anything
+  // else that was approved was approved by hand, once.
+  function approvalPill(status, ruleSaved) {
+    if (status === "pending") return '<span class="status-pill attention" data-approval-pill>Needs your yes</span>';
+    if (status === "approved") {
+      return ruleSaved
+        ? '<span class="status-pill success" data-approval-pill>Always allowed</span>'
+        : '<span class="status-pill success" data-approval-pill>Allowed once</span>';
+    }
+    return '<span class="status-pill muted" data-approval-pill>Refused</span>';
+  }
+
+  // The whole card, in every state. A settled card keeps the request, the rule and the command:
+  // the branch this replaced threw all three away and left "You approved this", so a person had no
+  // way to see afterwards what it was they had allowed.
+  function approvalCardMarkup(message, card, hook, allowRules, escapeHtml) {
+    const status = String(card.status ?? "pending");
+    const pending = status === "pending";
+    const who = String(message.authorName ?? "").trim() || "your agent";
+    const rule = typeof card.rule === "string" && card.rule.trim().length > 0 ? card.rule.trim() : "";
+    const ruleSaved = rule.length > 0 && (allowRules ?? []).some((entry) => String(entry).trim() === rule);
+    const accent = pending ? "var(--amber-500)" : status === "approved" ? "var(--green-500)" : "var(--stone-500)";
+    const command = typeof card.command === "string" ? card.command : "";
+    // Only while it is still a question. Once it is settled the reason is why it was ASKED, and on a
+    // card the person already answered it reads as a complaint about their answer.
+    const reason = pending && typeof card.reason === "string" ? card.reason.trim() : "";
+    // No script behind the toggle: <details> already opens and closes, and the two words swap on
+    // [open] in the stylesheet. The transcript wipes its own innerHTML on every render, so a handler
+    // bound to this element would not survive anyway.
+    const disclosure = command.length === 0 ? ""
+      : `<details class="tool-receipt approval-command"><summary><span class="approval-more-show">Show the command</span><span class="approval-more-hide">Hide the command</span></summary><pre>${escapeHtml(approvalCommandShown(command))}</pre></details>`;
+    // Past tense only when it is true. A pending card says what the button WOULD do; a settled card
+    // whose rule was never saved says nothing at all, rather than implying a standing rule exists.
+    const rulePara = rule.length === 0 ? ""
+      : ruleSaved
+        ? `<p class="approval-rule">A rule always allowing this was added to your Auto-review settings: “${escapeHtml(rule)}”</p>`
+        : pending
+          ? `<p class="approval-rule">Always allow adds this rule to your Auto-review settings: “${escapeHtml(rule)}”</p>`
+          : "";
+    const actions = !pending ? ""
+      : `<div class="inline-card-actions">${DECISION_ACTIONS["auto-review"]
+        .filter(([value]) => value !== "always" || rule.length > 0)
+        .map(([value, label, primary]) => `<button class="card-action${primary ? " primary" : ""}" type="button" data-decide="${escapeHtml(value)}" data-message-id="${escapeHtml(message.id)}">${escapeHtml(label)}</button>`)
+        .join("")}</div>`;
+    return `<div class="inline-card approval-card"${hook} data-approval-card data-approval-state="${escapeHtml(status)}" data-approval-surface="${escapeHtml(String(card.surface ?? ""))}" style="--card-accent:${accent}">`
+      + `<div class="approval-card-head"><strong>${escapeHtml(`${who} ${approvalWants(card.surface)}`)}</strong>${approvalPill(status, ruleSaved)}</div>`
+      + `<p class="approval-where">${escapeHtml(approvalWhere(card.surface, who))}</p>`
+      + `<p class="approval-request">${escapeHtml(approvalRequestSentence(card))}</p>`
+      + (reason.length > 0 ? `<p class="approval-why">${escapeHtml(reason)}</p>` : "")
+      + rulePara + disclosure + actions
+      + `</div>`;
   }
 
   // ---- CONSOLE-ATTR-1: the hooks a shell reads off this page when it has no bearer yet ----------
@@ -1608,8 +1730,17 @@
   }
   // ---- end CONSOLE-ATTR-1 --------------------------------------------------------------
 
-  function decisionMarkup(message) {
+  function decisionMarkup(message, allowRules = []) {
     const card = message.card;
+    // CONSOLE-ATTR-1, hoisted so there is still exactly ONE call site in this function: every
+    // return below that draws a settled card or an answer in flight gets the empty string, because a
+    // shell counting those would be a tray showing work nobody has to do. Four of the six push kinds
+    // come through here (auto-review, local-tool, widget, secret) and the title is the one the relay
+    // puts in the notification -- with the auto-review card's location clause taken off it, so the
+    // old product's name does not travel to a lock screen.
+    const hook = card.status && card.status !== "pending"
+      ? ""
+      : needsYouCardAttrs(escapeHtml, { kind: card.kind, agentId: activeContext().id, entryId: message.id, agentName: contextName(), title: cardPushTitle(card) });
     if (card.status === "sending") {
       return `<div class="inline-card" style="--card-accent:var(--teal-500)"><div class="inline-card-header"><span class="inline-card-icon">◌</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small class="approval-result">Sending your answer…</small></span></div></div>`;
     }
@@ -1620,6 +1751,11 @@
     if (card.kind === "secret" && card.status === "provided") {
       return `<div class="inline-card secret-card" style="--card-accent:var(--green-500)"><div class="inline-card-header"><span class="inline-card-icon">\u2713</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small class="approval-result">Saved securely and kept private.</small></span><span class="status-pill success secret-saved-pill">\u2713 Saved</span></div></div>`;
     }
+    // COMMAND-CARD-1: the auto-review card is drawn whole, in every state, by one function. It is
+    // taken before the generic settled branch below on purpose -- that branch collapses a card to a
+    // title and "You approved this", and what a person needs afterwards is the command they allowed
+    // and the rule they granted.
+    if (card.kind === "auto-review") return approvalCardMarkup(message, card, hook, allowRules, escapeHtml);
     if (card.status && card.status !== "pending") {
       const settled = card.status === "approved" ? "You approved this"
         : card.status === "denied" ? "You denied this"
@@ -1654,11 +1790,6 @@
           // with the field rather than after it.
           ? `<div class="field"><label class="sr-only" for="secret-input-${escapeHtml(message.id)}">${escapeHtml(card.field ?? "credential")}</label><input id="secret-input-${escapeHtml(message.id)}" data-secret-input="${escapeHtml(message.id)}" type="password" autocomplete="off" aria-describedby="secret-hint-${escapeHtml(message.id)}" placeholder="${escapeHtml(card.field ?? "credential")}" /><small class="field-hint secret-hint" id="secret-hint-${escapeHtml(message.id)}">${escapeHtml(secretCustodyHint(card))}</small></div><button class="card-action primary" type="button" data-submit-secret="${escapeHtml(message.id)}">Save securely</button>`
           : `<span class="field-hint">Answer this in the host app. This page has no command to carry a credential to it.</span>`;
-    // CONSOLE-ATTR-1, and ONLY on this branch: every return above is a card that is settled or has an
-    // answer in flight, and a shell counting those would be a tray showing work nobody has to do.
-    // Four of the six push kinds come through here (auto-review, local-tool, widget, secret) and
-    // `card.title` is the same title the relay puts in the notification for each of them.
-    const hook = needsYouCardAttrs(escapeHtml, { kind: card.kind, agentId: activeContext().id, entryId: message.id, agentName: contextName(), title: card.title });
     return `<div class="inline-card"${hook} style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small>${escapeHtml(card.detail || "The agent is blocked until you answer.")}</small></span>${dismiss}</div>${card.rule ? `<div class="tag-list"><span class="tag">would add rule · ${escapeHtml(card.rule)}</span></div>` : ""}<div class="inline-card-actions">${actions}</div></div>`;
   }
 
@@ -1788,8 +1919,18 @@
       + `</div>`;
   }
 
+  // The standing Always-allowed rules the host is holding right now, as this page last read them
+  // (gateway-adapter.js fills them from getHostSettings on every load). An empty list is the honest
+  // answer for a host that could not be reached: the card then says "Allowed once", which claims
+  // less than the truth rather than more.
+  const savedAllowRules = () => state.settings?.autoReview?.allow ?? [];
+
   function specialMessageMarkup(message) {
-    if (message.type === "decision") return decisionMarkup(message);
+    // COMMAND-CARD-1: the allow list is read at RENDER time, not when the transcript was mapped.
+    // A person who presses Always allow gets the settings write, then the approve, then a reload;
+    // the card that comes back has to say "Always allowed" on that first repaint, and only the live
+    // settings can tell it so. decisionMarkup itself stays a pure function of what it is handed.
+    if (message.type === "decision") return decisionMarkup(message, savedAllowRules());
     if (message.type === "handoff") return handoffCardMarkup(message, escapeHtml, boxHandoffSkipSupported(), boxHandoffView(message));
     if (message.type === "skill") return `<div class="inline-card" style="--card-accent:var(--violet-500)"><div class="inline-card-header"><span class="inline-card-icon">✦</span><span class="inline-card-copy"><strong>${escapeHtml(message.title)}</strong><small>${escapeHtml(message.description)}</small></span></div><div class="tag-list"><span class="tag">skill draft</span><span class="tag">recording attached</span><span class="tag">review required</span></div></div>`;
     return "";
