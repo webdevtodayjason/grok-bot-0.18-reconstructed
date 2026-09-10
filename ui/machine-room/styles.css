@@ -4848,7 +4848,8 @@ body[data-composer-drop="1"] .composer {
   display: grid;
   gap: 0.4rem;
   margin: 0 0 0.5rem;
-  /* VOICE-2, and this is the THIRD time this exact bug has been fixed in this file: .control-shelf
+  /* VOICE-6 (filed as VOICE-2 in the brief; the row was renamed because that id was taken), and this
+     is the THIRD time this exact bug has been fixed in this file: .control-shelf
      is a three-column grid, and a child auto-placed into it takes a COLUMN. The strip mounts after
      the shelf's own three children, so it landed in column 2 and shoved the composer into column 3.
      Measured on grok-bot-local-vm at 1440x900, real Chrome, 2026-09-10: one press of Talk took
