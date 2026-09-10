@@ -47,6 +47,10 @@ import { filterAttempts, hashTried, readOrCreateSalt } from "../ui/login-ledger.
 // MAIL-2. The product domain the per-bot addresses live at, so the panel names the same domain
 // the relay routes on rather than a second copy of the default.
 import { createMailDirectory, mailDomain } from "./mail.mjs";
+// ONBOARD-2. The invite as a job with five named steps. The route answers 202 the moment the two
+// rows exist and this runs the rest, because a synchronous invite behind Cloudflare is a 524 with a
+// half-built tenant behind it and the temporary password lost with the response.
+import { ONBOARD_LABELS, SIGN_IN_LINK_TTL_MS, createOnboarding } from "./onboard.mjs";
 // ADMIN-2. The sequence that turns a company into a customer, in its own file so this console runs
 // the same eight steps the customer's own door runs and cannot drift into a ninth.
 import { addClient } from "./signup.mjs";
@@ -741,6 +745,11 @@ const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42
  */
 export function createAdminApi({
   config, store, client, now = () => Date.now(), fetchImpl = globalThis.fetch,
+  // ONBOARD-2. The thing that talks to a BOX, which is not the thing that talks to Coolify. In
+  // production they are the same fetch, because the control plane is on titanbot-net for exactly
+  // this; in a test process there is no docker network, so a probe of titanbot-box-svc-1:1340 is a
+  // name lookup that means nothing and the separation is what lets a gate drive the sequence.
+  probeImpl = fetchImpl,
   json, noContent, publicAccount, publicTenant, tenantView, tenantPower, tenantProvision,
   currentSession, version = "0.0.0", pageDir = new URL("./admin/", import.meta.url).pathname,
   read = (file) => readFileSync(file, "utf8"),
@@ -763,6 +772,16 @@ export function createAdminApi({
   // thing on this service that speaks http2, and a test has to be able to drive every branch of its
   // verdict table without an Apple developer account and without a network.
   http2Impl = null,
+  // ONBOARD-2. The two cross-item calls, injectable and otherwise defaulted by a dynamic import
+  // INSIDE the handler that uses them: `welcome` is cp/welcome.mjs's sender and `decommission` is
+  // cp/decommission.mjs's removal. Handled this way rather than imported at the top of this file so
+  // the console parses, runs and passes its own tests in a checkout where neither exists yet, and so
+  // a test can hand each of them a double and read back what it was called with.
+  deps = {},
+  // ONBOARD-2. The invite's waits, in milliseconds. Every one of them defaults to a production
+  // number that cp/onboard.mjs reads out of the environment, so this is only ever passed by a gate
+  // that has to watch five steps go green inside three hundred seconds rather than ten minutes.
+  onboard = {},
 } = {}) {
   // Made on the first refused sign-in rather than at boot, so a data directory that is not writable
   // yet cannot stop the service from starting.
@@ -1243,6 +1262,16 @@ export function createAdminApi({
         // question the panel answers rather than a CLI call. The codes themselves are on
         // /v1/admin/mail; the column that renders them on this row is filed as MAIL-2b.
         mailCodes: store.countMailAddresses(tenant.slug),
+        // ONBOARD-2. Where this customer's invite got to, and what went out to them.
+        //
+        // Both are reads of rows this service already holds -- the provisioning ledger and the
+        // welcome record -- so adding them to this panel costs no round trip and works for a
+        // workspace whose invite finished weeks ago. `onboarding` is null for a tenant that predates
+        // the job, which is the honest answer: there were no steps, not five waiting ones.
+        onboarding: store.listSteps(tenant.slug).some((row) => row.step === "workspace")
+          ? onboarding.state(tenant.slug)
+          : null,
+        welcome: welcomeSends(tenant.slug, 5),
         // Named rather than left out, because a fact that could not be measured has to read as one
         // and never as an empty column.
         spend: byTenant.get(tenant.slug) ?? null,
@@ -2570,6 +2599,73 @@ export function createAdminApi({
   // to this service.
   const mailDirectory = () => createMailDirectory({ store, domain: mailDomain(), now });
 
+  // ---- ONBOARD-2: the invite, as a job -----------------------------------------------------------
+  //
+  // Built here rather than in cp/server.mjs so this console owns its own sequence and cp/server.mjs
+  // is not touched. Everything the sequence needs is already in this scope: the store, the relay's
+  // two doors, the plan model push, the address directory and the box probe.
+  const onboarding = createOnboarding({
+    store, config, fetchImpl, probeImpl, now,
+    askRelay, askRelayPost, pointWorkspaceAt, mailDirectory,
+    deps,
+    log,
+    // The ceiling cache holds a number this sequence just changed, so it is dropped rather than
+    // left to age out under a panel the operator is watching.
+    onCeilingApplied: () => forgetCeilings(),
+    ...onboard,
+  });
+
+  /**
+   * The address a customer's reply lands at, and the one setting this console reads for the mail.
+   *
+   * The default is support@titaniumcomputing.com and not support@titanium.bot, deliberately: the
+   * first domain already receives mail and the second does not have inbound on yet. A reply address
+   * nobody reads is worse than one on the parent company's brand. `cp/cli.mjs settings set` changes
+   * it in one line the day that flips. The console control for it belongs to the settings surface,
+   * which is another wave's file this session, and is filed with the ONBOARD-2 rows.
+   */
+  const WELCOME_REPLY_TO_SETTING = "mail.welcome.replyTo";
+  const WELCOME_REPLY_TO_DEFAULT = "support@titaniumcomputing.com";
+  const welcomeReplyTo = () => {
+    const held = String(store.getSetting(WELCOME_REPLY_TO_SETTING, "") ?? "").trim();
+    return held.length > 0 ? held : WELCOME_REPLY_TO_DEFAULT;
+  };
+
+  /**
+   * The welcome sends on one customer's row.
+   *
+   * Read through a guard rather than called straight, because the table belongs to the wave that
+   * built the sender and this console has to render a row on a control plane that predates it. What
+   * comes back is who, whom, when, the outcome and the provider's id. There is no link and no
+   * password in that table and there is none in this answer.
+   */
+  const welcomeSends = (slug, limit = 5) => {
+    if (typeof store.listWelcomeSends !== "function") {
+      return { rows: [], read: false, why: "this control plane has no record of welcome sends in it yet" };
+    }
+    try {
+      const rows = store.listWelcomeSends(String(slug), { limit }).map((row) => ({
+        to: String(row.email ?? row.to ?? ""),
+        at: Number.isFinite(Number(row.at)) ? new Date(Number(row.at)).toISOString() : String(row.at ?? ""),
+        outcome: String(row.outcome ?? ""),
+        resendId: String(row.resendId ?? row.resend_id ?? ""),
+        shape: String(row.shape ?? ""),
+        actor: String(row.actor ?? ""),
+        detail: String(row.detail ?? ""),
+      }));
+      return { rows, read: true, why: "" };
+    } catch (error) {
+      return { rows: [], read: false, why: notMeasured(error) };
+    }
+  };
+
+  /** cp/decommission.mjs, resolved the same way the welcome sender is, and for the same reason. */
+  async function removalModule() {
+    if (deps.decommission != null) return deps.decommission;
+    try { return await import("./decommission.mjs"); }
+    catch { return null; }
+  }
+
   async function handle(request, response, { segments, method, body, url }) {
     if (servePage(url.pathname, response)) return true;
     if (segments[0] !== "v1" || segments[1] !== "admin") return false;
@@ -2635,18 +2731,27 @@ export function createAdminApi({
       return true;
     }
 
-    // ADMIN-2. A CLIENT ADDED, from the panel that already runs every one of them.
+    // ONBOARD-2. A CLIENT INVITED, in one press, and the press answers at once.
     //
-    // Jason, 2026-09-09 11:43: "if I was going to onboard a new client, would that be something I
-    // would do from this console or is this console merely reporting?" It was reporting. This is
-    // the answer: the account, the workspace named after the company, the box, and the plan model
-    // and bot ceiling applied on top, in one request. The CLI stays as the second door and runs the
-    // same steps, because a console that is the ONLY door is a console whose outage is an outage of
-    // onboarding.
+    // Jason, 2026-09-10 10:54: "Is the super admin panel ready in a state where I can invite a user
+    // and it will handle the full onboarding process... Is the welcome email sent out?" ADMIN-2
+    // built the form and built it as one synchronous request. This is the same invite as a JOB.
     //
-    // THE TEMPORARY PASSWORD IS IN THIS ANSWER AND NOWHERE ELSE. It is generated here, stored as a
-    // scrypt hash, and there is no route that can be asked for it again -- the same shape the
-    // reset-password action has. It is in no ledger row and no log line.
+    // WHY 202 AND NOT 201. api.titanium.bot is behind Cloudflare, which cuts a proxied request at
+    // about 100 seconds (measured 2026-09-10: server cloudflare, cf-ray a38fb0ce0e2ec476-AUS). This
+    // route already blocked for up to CP_BOX_READY_TIMEOUT_MS plus the Coolify calls plus two relay
+    // round trips; adding a wait for Titan, an address sweep and a mail send guarantees a 524 with a
+    // half-built tenant behind it AND THE TEMPORARY PASSWORD LOST WITH THE RESPONSE, on the one
+    // screen where losing it costs a customer their account.
+    //
+    // SO THE PASSWORD IS IN THIS ANSWER, BEFORE ANY WAITING, and nowhere else ever again. It is
+    // generated by cp/signup.mjs, stored as a scrypt hash, and there is no route that can be asked
+    // for it back. It is in no ledger row and no log line. Whatever happens to the box, the model,
+    // the addresses or the mail, the card can always draw it.
+    //
+    // THE REFUSALS HAPPEN HERE AND CREATE NOTHING AT ALL, in cp/signup.mjs's own sentences, word for
+    // word with the customer's own door: bad email, empty company, duplicate email, a company whose
+    // name yields no workspace name, new workspaces switched off.
     if (rest.length === 1 && rest[0] === "clients" && method === "POST") {
       const email = normalizeEmail(body?.email);
       const company = String(body?.company ?? "").trim();
@@ -2660,6 +2765,8 @@ export function createAdminApi({
         added = await addClient({
           store, config, fetchImpl,
           email: body?.email, company, name: String(body?.name ?? ""),
+          // The build is the job's, not this request's.
+          awaitProvisioning: false,
         });
       } catch (error) {
         ledger.failed(notMeasured(error));
@@ -2673,82 +2780,305 @@ export function createAdminApi({
       }
       const slug = added.slug;
 
-      // WHAT THE WORKSPACE RUNS ON, through the same door its own row uses. Reported as applied or
-      // not with the reason, never failing the whole add: the customer exists either way, and a
-      // relay that did not answer is a thing to fix rather than a reason to leave a half-made
-      // account behind with its password already shown once.
+      // The plan model and the ceiling are the JOB's third step now rather than two calls made here,
+      // because both of them are relay round trips and this answer has to leave before any of those.
+      // They are reported on the card in the same words, from the same ledger row.
       const wantedModel = String(body?.planModel ?? "").trim();
-      let planModel = { applied: false, why: "no plan model was asked for, so this workspace gets whatever a new one gets", alias: "" };
-      if (wantedModel.length > 0) {
-        if (!isPlanModel(wantedModel)) {
-          planModel = { applied: false, why: `${wantedModel} is not a plan model, so nothing was pointed at it`, alias: wantedModel };
-        } else {
-          const answer = await pointWorkspaceAt(slug, wantedModel);
-          planModel = answer.ok
-            ? {
-              applied: answer.body?.pinned !== true,
-              alias: wantedModel,
-              why: answer.body?.pinned === true
-                ? `this workspace's container environment pins its model (${String(answer.body?.pinnedBy ?? "SAND_OPENAI_COMPATIBLE_* is set on the container")}), so nothing here takes effect there until that is gone`
-                : "",
-            }
-            : { applied: false, alias: wantedModel, why: answer.why };
-        }
-      }
-
-      // AGENTS-CAP-2. How many bots this workspace may hold, same door as its own row's control.
+      const planModel = wantedModel.length === 0
+        ? { applied: false, alias: "", why: "no plan model was asked for, so this workspace gets whatever a new one gets" }
+        : isPlanModel(wantedModel)
+          ? { applied: false, alias: wantedModel, why: "this workspace is being pointed at it now; the Waking Titan step says whether it took" }
+          : { applied: false, alias: wantedModel, why: `${wantedModel} is not a plan model, so nothing was pointed at it` };
       const wantedCeiling = Number(body?.ceiling);
-      let ceiling = { applied: false, asked: null, maxAgents: null, why: "no ceiling was asked for, so this workspace keeps the product default" };
-      if (String(body?.ceiling ?? "").length > 0) {
-        if (!Number.isInteger(wantedCeiling) || wantedCeiling < CEILING_MIN || wantedCeiling > CEILING_MAX) {
-          ceiling = { applied: false, asked: wantedCeiling, maxAgents: null, why: `a ceiling is a whole number from ${CEILING_MIN} to ${CEILING_MAX}, and a number outside that is one the box quietly ignores` };
-        } else {
-          const answer = await askRelayPost(`/admin/tenants/${encodeURIComponent(slug)}/ceiling`, { maxAgents: wantedCeiling });
-          forgetCeilings();
-          const read = answer.ok && answer.body?.read === true;
-          ceiling = {
-            applied: read && answer.body?.pinned !== true,
-            asked: wantedCeiling,
-            // WHAT THE BOX READ BACK, never what was sent, the way the ceiling route already says it.
-            maxAgents: read && Number.isFinite(Number(answer.body?.maxAgents)) ? Number(answer.body.maxAgents) : null,
-            why: answer.ok
-              ? (answer.body?.pinned === true
-                ? `this workspace's container environment pins its ceiling (${String(answer.body?.pinnedBy ?? "SAND_MAX_AGENTS")})`
-                : (read ? "" : `the box did not report a ceiling back. ${String(answer.body?.why ?? "")}`.trim()))
-              : answer.why,
-          };
-        }
-      }
+      const askedCeiling = String(body?.ceiling ?? "").length > 0 && Number.isInteger(wantedCeiling)
+        && wantedCeiling >= CEILING_MIN && wantedCeiling <= CEILING_MAX
+        ? wantedCeiling
+        : null;
+      const ceiling = String(body?.ceiling ?? "").length === 0
+        ? { applied: false, asked: null, maxAgents: null, why: "no ceiling was asked for, so this workspace keeps the product default" }
+        : askedCeiling == null
+          ? { applied: false, asked: wantedCeiling, maxAgents: null, why: `a ceiling is a whole number from ${CEILING_MIN} to ${CEILING_MAX}, and a number outside that is one the box quietly ignores` }
+          : { applied: false, asked: askedCeiling, maxAgents: null, why: "this workspace is being set to it now; the Waking Titan step says what the box read back" };
 
-      // THE WELCOME MAIL IS NOT DRAWN AS A GREEN LIGHT, because this control plane sends no mail at
-      // all: there is no sender in it, and the agent-address directory beside this file is a
-      // different thing entirely. The flag is accepted so the form can carry it and the day a sender
-      // lands this is one line; until then it answers sent false with the reason, and the operator
-      // sends the note themselves from the success card. ADMIN-2c is filed to flip it.
+      // The welcome, and the one field that is not the owner's address.
+      //
+      // AN OVERRIDE, NOT A COPY. One recipient, never a bcc. A copy to a third party would put a
+      // live sign-in link and a temporary password for a customer's workspace in somebody else's
+      // inbox until the link expires, and that link is a bearer the relay never checks for
+      // revocation. So when a different address is given, the welcome goes THERE and not to the
+      // owner, and the card and the row both say so in plain words.
+      const sendWelcome = body?.sendWelcome === true;
+      const welcomeTo = normalizeEmail(body?.welcomeTo ?? "");
+      const overridden = sendWelcome && welcomeTo.length > 0 && welcomeTo !== email;
       const welcomeMail = {
+        asked: sendWelcome,
         sent: false,
-        asked: body?.sendWelcome === true,
-        why: "this control plane sends no mail yet, so nothing was sent. Copy the note from this card and send it the way you would send any password.",
+        to: sendWelcome ? (welcomeTo.length > 0 ? welcomeTo : email) : "",
+        overridden,
+        replyTo: welcomeReplyTo(),
+        why: sendWelcome
+          ? (overridden
+            ? `it will go to ${welcomeTo} and not to ${email}, because a different address was asked for`
+            : "it goes when the steps above it are done")
+          : "no welcome was asked for, so nothing will be sent. The temporary password is on this card.",
       };
 
-      ledger.done(`${email} on workspace ${slug}, box ${added.state}`);
-      json(response, 201, {
+      const job = onboarding.start({
+        slug,
+        name: company,
+        planModel: isPlanModel(wantedModel) ? wantedModel : "",
+        ceiling: askedCeiling,
+        sendWelcome,
+        welcomeTo: overridden ? welcomeTo : "",
+        actor: guard?.account?.email ?? "the operator token",
+        // Handed to the job so the mail can carry it. It is not stored: the job holds it in memory
+        // for the length of the run and the ledger never sees it.
+        temporaryPassword: added.temporaryPassword,
+      });
+
+      ledger.done(`${email} on workspace ${slug}, build started as ${job.jobId}`);
+      json(response, 202, {
         tenant: publicTenant(added.tenant),
         account: publicAccount(added.account),
         // ONCE. This is the only time this value exists outside a scrypt hash.
         temporaryPassword: added.temporaryPassword,
         signIn: added.signIn,
+        slug,
         state: added.state,
+        jobId: job.jobId,
+        steps: job.steps,
         planModel,
         ceiling,
         welcomeMail,
         provisioning: added.provisioning,
-        message: added.state === "failed"
-          ? `${email} can sign in at ${added.signIn} with the password on this card, and the workspace ${slug} did not finish building (${added.provisioning.step || "no step named"}: ${added.provisioning.why || "no reason given"}). Press Provision on its row to pick up where it stopped.`
-          : added.state === "building"
-            ? `${email} can sign in at ${added.signIn} with the password on this card. The workspace ${slug} was created and is still starting; the first one on a server takes a few minutes because the image is large.`
-            : `${email} can sign in at ${added.signIn} with the password on this card, and the workspace ${slug} is up and answering.`,
+        message: `${email} can sign in at ${added.signIn} with the password on this card. The workspace ${slug} is being built now, and the steps below say where it is up to.`,
       });
+      return true;
+    }
+
+    // ---- ONBOARD-2: the card's poll, the retry, the welcome, the link and the removal -------------
+    //
+    // These sit ABOVE the six actions below on purpose: that block answers every three-segment POST
+    // on a client and falls through to a 404, so a route added after it would never be reached.
+
+    /** The five steps, as a pure read of the provisioning ledger. A page reload rejoins the job. */
+    if (rest.length === 3 && rest[0] === "clients" && rest[2] === "onboarding" && method === "GET") {
+      const slug = decodeURIComponent(rest[1]);
+      if (store.getTenant(slug) == null) { json(response, 404, { error: "not_found" }); return true; }
+      json(response, 200, { ...onboarding.state(slug), labels: ONBOARD_LABELS });
+      return true;
+    }
+
+    /** The welcome sends on this customer's row. Who, whom, when, the outcome, the provider id. */
+    if (rest.length === 3 && rest[0] === "clients" && rest[2] === "welcome" && method === "GET") {
+      const slug = decodeURIComponent(rest[1]);
+      if (store.getTenant(slug) == null) { json(response, 404, { error: "not_found" }); return true; }
+      const sends = welcomeSends(slug, 20);
+      json(response, 200, { slug, ...sends, replyTo: welcomeReplyTo(), measuredAt: new Date(now()).toISOString() });
+      return true;
+    }
+
+    /**
+     * What a removal would do to this customer, before anybody presses anything.
+     *
+     * Answered by the removal library so the card and the act cannot disagree about which effects
+     * are coming. On a control plane that has no removal library yet it says so rather than drawing
+     * an empty list, because an empty list of effects reads as "this is harmless".
+     */
+    if (rest.length === 3 && rest[0] === "clients" && rest[2] === "removal" && method === "GET") {
+      const slug = decodeURIComponent(rest[1]);
+      if (store.getTenant(slug) == null) { json(response, 404, { error: "not_found" }); return true; }
+      const module = await removalModule();
+      if (typeof module?.plan !== "function") {
+        json(response, 200, {
+          slug, read: false, effects: [],
+          why: "this control plane has no removal in it yet, so nothing can say what removing this customer would do",
+        });
+        return true;
+      }
+      try {
+        json(response, 200, { slug, read: true, why: "", ...(await module.plan({ store, config, slug, askRelay, askRelayPost, client, fetchImpl, now })) });
+      } catch (error) {
+        json(response, 200, { slug, read: false, effects: [], why: notMeasured(error) });
+      }
+      return true;
+    }
+
+    if (rest.length === 3 && rest[0] === "clients" && method === "POST"
+      && ["onboard", "welcome", "sign-in-link"].includes(rest[2])) {
+      const slug = decodeURIComponent(rest[1]);
+      if (store.getTenant(slug) == null) { json(response, 404, { error: "not_found" }); return true; }
+
+      /** Retry, which resumes at the first step that is not ok rather than starting over. */
+      if (rest[2] === "onboard") {
+        if (onboarding.running(slug)) {
+          json(response, 409, {
+            error: "already_running",
+            message: "This workspace is already being built. The steps below are the live ones.",
+            ...onboarding.state(slug),
+          });
+          return true;
+        }
+        const ledger = beginAction(guard, request, { action: "client.onboard.retry", target: slug, detail: `resuming the invite for ${slug}` });
+        const job = onboarding.retry(slug);
+        if (job == null) { ledger.failed("no such workspace"); json(response, 404, { error: "not_found" }); return true; }
+        ledger.done(`resumed as ${job.jobId}, stopped at ${job.stopped ?? "nothing"}`);
+        json(response, 202, { ...job, labels: ONBOARD_LABELS, message: "The invite picked up at the first step that was not done." });
+        return true;
+      }
+
+      /**
+       * Send again.
+       *
+       * It mints a FRESH link and LEAVES THE PASSWORD ALONE, because the original is a scrypt hash
+       * nobody can ask back and changing it would lock out a customer who has already signed in. A
+       * tick on the card asks for a new password, which is the existing reset and is said on the
+       * answer so the operator knows which of the two shapes went out.
+       */
+      if (rest[2] === "welcome") {
+        const to = normalizeEmail(body?.to ?? "");
+        const withNewPassword = body?.withNewPassword === true;
+        const ledger = beginAction(guard, request, {
+          action: "client.welcome",
+          target: slug,
+          detail: `sending the welcome for ${slug}${to.length > 0 ? ` to ${to}` : ""}${withNewPassword ? " with a new password" : ""}`,
+        });
+        let temporaryPassword = "";
+        if (withNewPassword) {
+          const tenant = store.getTenant(slug);
+          const accounts = store.listAccountsForTenant(slug);
+          const owner = accounts.find((one) => String(one.email) === String(tenant?.ownerEmail ?? "")) ?? accounts[0] ?? null;
+          if (owner == null) {
+            ledger.failed("nobody to write to");
+            json(response, 409, { error: "no_account", message: "That workspace has nobody to write to, so there is no password to reset." });
+            return true;
+          }
+          temporaryPassword = randomBytes(TEMP_PASSWORD_BYTES).toString("base64url");
+          store.setAccountPassword(owner.id, temporaryPassword);
+        }
+        let verdict;
+        try { verdict = await onboarding.welcome(slug, { to, temporaryPassword, actor: guard?.account?.email ?? "the operator token" }); }
+        catch (error) {
+          ledger.failed(notMeasured(error));
+          json(response, 502, { error: "welcome_failed", message: `The welcome did not go: ${notMeasured(error)}` });
+          return true;
+        }
+        if (verdict == null) { ledger.failed("no such workspace"); json(response, 404, { error: "not_found" }); return true; }
+        const sent = verdict.ok === true;
+        ledger[sent ? "done" : "failed"](sent ? `the welcome went for ${slug}` : String(verdict.detail?.why ?? "it did not go"));
+        json(response, sent ? 200 : 502, {
+          slug,
+          sent,
+          // ONCE, and stored nowhere. This is what lets the card offer a link for a customer whose
+          // mail bounced. It is never written to a send row, an audit row or a log line.
+          signIn: String(verdict.signIn ?? ""),
+          // The same rule the add card keeps: a new password is shown once and never again.
+          ...(temporaryPassword.length > 0 ? { temporaryPassword } : {}),
+          // WHAT ACTUALLY WENT, out of the sender's own answer. A Send again on a workspace whose
+          // first password was never handed back carries the link alone, and telling the operator
+          // "link and the first password" about that would be a card describing a mail that does not
+          // exist. The route's own guess is only the fallback.
+          shape: String(verdict.shape ?? "") || (temporaryPassword.length > 0 ? "link and a new password" : "link only"),
+          steps: verdict.steps ?? [],
+          sends: welcomeSends(slug, 20),
+          message: sent
+            ? `The welcome went${to.length > 0 ? ` to ${to}` : ""}.${temporaryPassword.length > 0 ? " It carries a new temporary password, and the old one stopped working." : ""}`
+            : `The welcome did not go: ${String(verdict.detail?.why ?? "nothing said why")}`,
+        });
+        return true;
+      }
+
+      /**
+       * A fresh sign-in link, answered ONCE.
+       *
+       * This is the operator's recovery when a welcome bounced, and it is the gate's way to a link
+       * without reading anybody's inbox. It is a bearer credential in a url that the relay never
+       * checks for revocation, so the 24 hours is a ceiling and not a target, and the link is in
+       * this answer and in no row, no log line, no screenshot and no report. ONBOARD-5.
+       */
+      const ledger = beginAction(guard, request, {
+        action: "client.sign-in-link",
+        target: slug,
+        detail: `minting a ${Math.round(SIGN_IN_LINK_TTL_MS / 3600000)} hour sign-in link for ${slug}`,
+      });
+      let link;
+      try { link = onboarding.mintSignInLink(slug); }
+      catch (error) { ledger.failed(notMeasured(error)); json(response, 500, { error: "mint_failed", message: notMeasured(error) }); return true; }
+      if (link == null) {
+        ledger.failed("nobody to sign in as");
+        json(response, 409, { error: "no_account", message: "That workspace has nobody to sign in as yet." });
+        return true;
+      }
+      // The EMAIL and the EXPIRY are on the record. The link is not.
+      ledger.done(`a sign-in link for ${link.email}, good until ${link.expiresAt}`);
+      json(response, 200, {
+        slug,
+        email: link.email,
+        url: link.url,
+        expiresAt: link.expiresAt,
+        message: `This link signs ${link.email} in and works until ${link.expiresAt}. It is shown once, it is not written down anywhere, and anybody holding it is signed in as them, so send it the way you would send a password.`,
+      });
+      return true;
+    }
+
+    /**
+     * ONBOARD-2 / ADMIN-5. A CUSTOMER REMOVED, for a test and for churn.
+     *
+     * This route stays thin on purpose: parse, refuse what it can refuse without doing anything,
+     * write the record, call the removal library, answer what that library reported. Every effect
+     * and every order is in cp/decommission.mjs, because the order is the part that matters and it
+     * belongs beside the thing that carries it out.
+     *
+     * The low-level DELETE /v1/tenants/{slug} in cp/server.mjs is untouched and stays as the
+     * operator's door for a stopped tenant. docs/ADMIN.md says which is which.
+     */
+    if (rest.length === 2 && rest[0] === "clients" && method === "DELETE") {
+      const slug = decodeURIComponent(rest[1]);
+      const tenant = store.getTenant(slug);
+      if (tenant == null) { json(response, 404, { error: "not_found", message: "There is no workspace by that name." }); return true; }
+      // THE TYPED NAME, and it is checked here so a client with a mismatched confirm has nothing
+      // done to it at all, not even a stop.
+      const confirm = String(body?.confirm ?? "").trim();
+      if (confirm !== slug) {
+        json(response, 400, {
+          error: "confirm",
+          message: `Type the workspace name to remove it. This one is called ${slug}.`,
+        });
+        return true;
+      }
+      const deleteData = body?.deleteData === true;
+      const module = await removalModule();
+      if (typeof module?.removeClient !== "function") {
+        json(response, 501, {
+          error: "no_removal",
+          message: "This control plane has no removal in it, so nothing was touched. Stop the workspace from its row instead.",
+        });
+        return true;
+      }
+      const ledger = beginAction(guard, request, {
+        action: "client.remove",
+        target: slug,
+        detail: `removing ${slug}${deleteData ? " and deleting their data" : " and keeping their data"}`,
+      });
+      let removed;
+      try {
+        removed = await module.removeClient({
+          store, config, client, fetchImpl, now, slug, deleteData,
+          askRelay, askRelayPost,
+          actor: guard?.account?.email ?? "the operator token",
+          via: viaOf(request),
+          ip: clientOf(request),
+        });
+      } catch (error) {
+        ledger.failed(notMeasured(error));
+        json(response, 500, { error: "remove_failed", message: `The removal stopped: ${notMeasured(error)}`, effects: [] });
+        return true;
+      }
+      const ok = removed?.ok === true;
+      ledger[ok ? "done" : "failed"](ok
+        ? `${slug} is gone${removed?.dataDeleted === true ? ", data and all" : ", data kept"}`
+        : String(removed?.why ?? "the removal did not finish"));
+      json(response, ok ? 200 : (Number(removed?.status) > 0 ? Number(removed.status) : 409), removed ?? { error: "remove_failed", message: "The removal answered nothing." });
       return true;
     }
 
@@ -4371,5 +4701,8 @@ export function createAdminApi({
     store.pruneLoginAttempts(at - ATTEMPT_RETENTION_MS);
   }
 
-  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system, spend, providers: providersAnswer, feedback };
+  // ONBOARD-2. `onboarding` is on here for one reason: a shutdown and a gate both need to be able to
+  // wait for an invite that is still going, and a background job writing into a store somebody has
+  // already closed is a stack trace nobody can act on.
+  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system, spend, providers: providersAnswer, feedback, onboarding };
 }

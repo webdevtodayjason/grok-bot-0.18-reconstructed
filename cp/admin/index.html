@@ -149,11 +149,17 @@
     <p class="quiet">One row per customer, and the people who can sign in to it.</p>
 
     <!--
-      ADMIN-2. Jason, 2026-09-09 11:43: "if I was going to onboard a new client, would that be
-      something I would do from this console or is this console merely reporting?" It is not merely
-      reporting from here on. This form runs the same sequence the CLI's `signup add` runs: the
-      account, the workspace slug derived from the company name, and the box. The CLI stays as the
-      second door for a machine.
+      ONBOARD-2. Jason, 2026-09-10 10:54: "Is the super admin panel ready in a state where I can
+      invite a user and it will handle the full onboarding process, including creating the account
+      and workspace, creating a Docker container for the AI agents, setting up their emails? Is the
+      entire process ready? Is the welcome email sent out?"
+
+      One press, five named steps. The route answers the moment the account and the workspace exist
+      and the card below polls the steps: creating the workspace, building the computer, waking
+      Titan, giving the agents their addresses, sending the welcome. It answers early on purpose --
+      this console is behind Cloudflare, which cuts a request at about 100 seconds, and a synchronous
+      invite would time out with a half-built customer behind it and the temporary password lost with
+      the response.
 
       THE SUBMIT IS A FETCH AND NEVER A NATIVE ONE. This page's own CSP says form-action 'none', so
       a native submit is blocked with nothing on the screen to explain it, which reads as a dead
@@ -165,18 +171,27 @@
     </div>
     <form id="addClientForm" class="stack" hidden>
       <div class="fields">
+        <label>The person's name<input id="acName" type="text" autocomplete="off" placeholder="their name" required></label>
         <label>Email<input id="acEmail" type="email" autocomplete="off" placeholder="owner@theircompany.com" required></label>
         <label>Company<input id="acCompany" type="text" autocomplete="off" placeholder="Their Company" required></label>
-        <label>The person's name<input id="acName" type="text" autocomplete="off" placeholder="their name"></label>
         <label>Plan model
           <select id="acPlanModel"></select>
           <input id="acPlanModelText" type="text" autocomplete="off" placeholder="a routing name, e.g. plan-zai" hidden>
         </label>
         <label>Agent ceiling<input id="acCeiling" type="number" min="1" step="1" value="40" autocomplete="off"></label>
       </div>
-      <label class="check"><input id="acWelcome" type="checkbox" disabled> Send the welcome mail
-        <span class="quiet" id="acWelcomeWhy">this service does not send mail yet, so copy the note
-          below instead</span></label>
+      <label class="check"><input id="acWelcome" type="checkbox" checked> Send the welcome email
+        <span class="quiet" id="acWelcomeWhy">it goes once their bots have their addresses, and
+          replies come back to the support address</span></label>
+      <!--
+        AN OVERRIDE, NOT A COPY. When this is filled in the welcome goes THERE and not to the owner,
+        and both the card and the row say so. A copy to a second address would put a live sign-in
+        link and a temporary password for somebody's workspace in a third party's inbox until the
+        link expires, and that link signs the holder in.
+      -->
+      <label id="acWelcomeToRow">Send the welcome to a different address
+        <input id="acWelcomeTo" type="email" autocomplete="off" placeholder="leave empty to send it to the owner">
+        <span class="quiet">for a test, or an owner who wants it somewhere else</span></label>
       <p class="quiet">The workspace name comes from the company, the same way the command line
         derives it. A temporary password is minted and shown once in the card below, because it is
         stored as a hash and no route on this service can read it back.</p>

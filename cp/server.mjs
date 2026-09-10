@@ -628,6 +628,11 @@ export function createApp(options = {}) {
   // operator-token routes, and every route inside it refuses anything that is not a super admin.
   const admin = createAdminApi({
     config, store, client, now, fetchImpl, proxy,
+    // ONBOARD-2. The box probe, which is the same fetch as fetchImpl in production and is not in a
+    // test: the console's invite asks a new box for its own /health before it will mail a customer,
+    // and a test process has no docker network for that name to resolve on. One word, so the
+    // sequence is drivable; production behaviour is identical either way.
+    probeImpl,
     json, noContent, publicAccount, publicTenant, tenantView, tenantPower, tenantProvision,
     currentSession, version: CP_VERSION,
     // MARKET-26. The marketplace panel's read, built ONCE in this file and handed over, so the

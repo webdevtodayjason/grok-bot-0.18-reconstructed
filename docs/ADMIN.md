@@ -357,48 +357,155 @@ which plan model that workspace runs on and how many bots it may hold.
 
 #### Add a client
 
-The first step of onboarding used to be the one step this console did not have: adding a customer
-was a CLI line on the R750 and nothing else. It is a form on this panel now: email, company, the
-person's name, which plan model their workspace runs on, and how many bots they may hold, which
-defaults to 40.
+Jason, 2026-09-10: *"Is the super admin panel ready in a state where I can invite a user and it will
+handle the full onboarding process, including creating the account and workspace, creating a Docker
+container for the AI agents, setting up their emails? Is the entire process ready? Is the welcome
+email sent out?"*
 
-**What it creates, in one press:** an account they sign in with, a workspace whose name is derived
-from the company, and a box. It runs the same sequence the CLI's `signup add` runs, so a client
-added here and a client added from a terminal are the same client, made the same way.
+It is now. One form: the person's name, their email, the company, which plan model their workspace
+runs on, how many bots it may hold (40 by default), **send the welcome email** which is on by
+default, and, only when that is on, an optional address to send the welcome to instead of the owner.
 
-**Three outcomes, and the form says which one happened.** The workspace is **running**, or it is
-still **building** and the row appears in the list and fills itself in as it provisions, or the
-build **failed** and the reason is on the card. A client whose box is still building is a real
-client with a real account; they simply cannot sign in to anything yet.
+**One press, five named steps.** The press answers immediately with the account, the workspace and
+the temporary password, and the card below it fills itself in:
 
-**The temporary password is shown once and never again.** It is generated here, shown in the success
-card, and stored the way every other password on this service is stored, as a scrypt hash. Nothing
-can ask for it back: not this console, not the CLI, not the database. If it is lost before it
-reaches the person, reset it from their row, which mints another one and shows that once too. A
-**Copy the welcome note** button puts the sign-in address, their email and that password on the
-clipboard as plain sentences, so it can go into a mail you write yourself.
+1. **Creating the workspace** -- the account row and the workspace row. Every refusal happens here
+   and creates nothing at all.
+2. **Building the computer** -- the eight provisioning steps, then the box's own `GET /health`
+   answered with that workspace's bearer. **Coolify saying the container is running is not enough**
+   and never turns this green: a created container is not a booted host, and a welcome sent on that
+   evidence reaches a customer whose workspace will not open. Ten minutes at three second intervals,
+   because a server that has never pulled the image takes longer than any provisioner's ceiling.
+3. **Waking Titan** -- the plan model is pushed **first**, then the ceiling, then the model is read
+   back off the relay, and only then is the box read. The order is not cosmetic: a new box gets
+   `{"SAND_BACKEND_URL":""}` written into it, so a box nobody pointed at a model has Titan awake and
+   mute. If nothing reads back the step goes amber and **the job stops before the welcome**, saying
+   *"Titan is up but has no model yet, so he would not answer."*
+4. **Giving the agents their addresses** -- the relay's address sweep, asked for **this workspace**
+   rather than the fleet. A 503 is *a sweep is already running* and is retried, never a failed
+   onboarding. The 200 is not the signal: what turns this green is a live row for that workspace in
+   this service's own directory, and Titan's address is read here and goes into the mail.
+5. **Sending the welcome** -- the mail, from the product's own address, with the send recorded on the
+   customer's row.
 
-**No mail is sent, and the checkbox says so rather than lying about it.** This service has no
-outbound sender at all today, so "send the welcome mail" is present, unchecked and disabled, with
-the reason beside it. Richard's welcome mail in September was sent by hand. Wiring it is filed as
-**ADMIN-2c** and is one line in this route the day an outbound path exists.
+A step is one of **waiting**, **working**, **done**, **needs you** (done with a caveat, or stopped
+where a person can act) or **stopped**. Amber and red both offer **Retry**, which resumes at the
+first step that is not done rather than building a second box beside the first. A step that has
+written nothing down for three minutes reads as stalled and offers the same Retry -- that is what a
+control plane restart mid-invite looks like from the outside. **Nothing is ever half-green:** an
+amber step is a step somebody has to look at, even when the one after it could have run.
+
+**The state lives in the provisioning ledger, not in memory.** A control plane restart mid-invite
+loses the runner and loses nothing else. Reload the page and the card rejoins; the poll route is a
+pure read.
+
+**Why the press answers before anything is built.** This console is behind Cloudflare, which cuts a
+proxied request at about 100 seconds (measured 2026-09-10). A synchronous invite that waited for a
+cold box, a model push, an address sweep and a mail send would time out with a half-built customer
+behind it **and the temporary password lost with the response**, on the one screen where losing it
+costs a customer their account.
+
+**The temporary password is in the first answer and nowhere else.** It is minted, shown once on the
+card, and stored the way every other password here is stored, as a scrypt hash nothing can ask back.
+The card draws it **always**, whatever happens to the box, the model, the addresses or the mail. If
+it is lost before it reaches the person, reset it from their row, which mints another and shows that
+once too. **Copy the welcome note** puts the sign-in address, their email and that password on the
+clipboard as plain sentences.
+
+**The welcome email**, and the field beside it. It goes from the product's own address on the
+operator's domain, carries a one-time sign-in link **and** the temporary password, and names Titan's
+own agent address. Replies come back to `mail.welcome.replyTo`, which defaults to
+`support@titaniumcomputing.com` -- a domain that already receives, because a reply address nobody
+reads is worse than one on the parent company's brand. Change it in one line:
+
+```sh
+node cp/cli.mjs settings set mail.welcome.replyTo help@titanium.bot
+```
+
+The **send the welcome to a different address** field is an **override and not a copy**. When it is
+filled in the mail goes there and **not** to the owner, and the card and the row both say so. There
+is no bcc anywhere in this path on purpose: a copy would put a live sign-in link and a temporary
+password for somebody's workspace in a third party's inbox until the link expires, and that link
+signs its holder in.
 
 **The refusals are the sign-up sequence's own sentences, word for word**, because two doors that
 refuse the same thing in two different sets of words are two doors that will drift: an address that
-already has an account, a company name that yields no usable workspace name, a workspace name
-already taken or held back after a previous customer was removed, and new tenants being switched off
-on this install. Nothing is created when any of them fires: no account, no workspace, no box.
+already has an account, a company name that yields no usable workspace name, a workspace name already
+taken or held back after a previous customer was removed, and new tenants being switched off on this
+install. Nothing is created when any of them fires: no account, no workspace, no box.
 
-The CLI stays as the second door and does the same thing:
+The CLI stays as the second door and runs the same sequence:
 
 ```sh
 node cp/cli.mjs signup add <email> <company>
 ```
 
-One thing this shares with nothing else on the panel and is worth knowing: the add sequence
-currently exists in two places, this route's copy and the public sign-up route's, holding the same
-refusal sentences through a test that pins both to the same words. Collapsing them is filed as
-**ADMIN-2b**.
+#### Send again, and a sign-in link
+
+Every welcome that goes out is a row on the customer's own row: who sent it, who it went to, when,
+the outcome and the provider's id. There is no link and no password in that record.
+
+**Send again** mints a **fresh** link and leaves the password alone, because the original is a scrypt
+hash nobody can ask back and changing it would lock out a customer who has already signed in. Tick
+**with a new password** and it resets the password and includes it, which is the same reset the
+person's own row offers; the new one is shown once in the banner and the row records which of the two
+shapes went out. A double press inside the hour cannot mail a real human twice.
+
+**Copy a sign-in link** is the recovery when a welcome bounced. Understand what it is: a stateless
+bearer credential in a URL. The relay verifies it with that workspace's own key and **never checks it
+for revocation**, so it works as many times as it is clicked until it expires and cannot be cancelled
+short of rotating `CP_SESSION_SECRET`, which signs the whole fleet out. Twenty-four hours is a
+ceiling and not a target. It is answered once, put on the clipboard, and written to no row, no log
+line and no screenshot. Send it the way you would send a password. **ONBOARD-5** is filed against it.
+
+#### Remove a client
+
+**Remove** is on the customer's row, behind three gates, and they are not ceremony. Click again to
+confirm, then the workspace name typed to match, then a **delete their data** switch that is OFF by
+default. A typed name that does not match does **nothing at all** -- not a stop, not a disable.
+
+What it does, in this order, each one a step in the ledger and one row in the record of who changed
+what: every sign-in for that workspace is disabled first so nobody can get in during the teardown;
+every one of their bots' addresses is retired, because nothing else ever will (the sweep only retires
+codes for a roster it could read, and it cannot read a box that no longer exists, so a removed
+customer's addresses would keep routing for ever); their key at the proxy is revoked **before** the
+container, because a box that is up and cannot reach a model is visible and a box that is gone and
+can is not; the service is stopped, then deleted; and then **the container is proved absent**.
+
+That last step is the one that matters. Coolify's delete answers `200 Service deletion request
+queued` and dispatches the real work later, and the remote half of that job is wrapped in a catch
+that logs *"Remote cleanup failed, continuing with local deletion"* and deletes the local record
+anyway. So the failure that costs the most -- Coolify forgetting the service while the container
+keeps running with the customer's gateway token -- **answers 200 and looks like success**. The
+removal polls until the container name is really gone and records which proof it rested on. If
+neither proof arrives it **stops there**, the workspace row is not deleted, and the card says
+*"Coolify took the record and the container is still running"* with the command that finishes it.
+
+The data switch, and what the card says when it is off: **their files are kept and nothing deletes
+them on a timer.** There is no reaper in this product, nothing counts days, and a card promising
+thirty of them would be the product lying to the operator. **ONBOARD-4** is filed for a real one. With
+the switch on, the deletion is done by the relay and not by this service, because this service runs
+as uid 1001 and a tenant's volumes are 0700 owned by uid 1000: it physically cannot, and a route that
+pretended otherwise would report a success that never happened.
+
+Finally the accounts are deleted and the workspace name is released, so the name is genuinely free
+again. The accounts are **disabled at the start and deleted at the end** on purpose: the retirement
+exists to stop a new company inheriting a previous customer's sign-ins, and with those sign-ins
+deleted there is nothing to inherit.
+
+**What it refuses, with no effect at all:** a workspace that does not exist, an **adopted** one (which
+is what makes it impossible to remove `titanium`, your own live console, and stopping it first is not
+a way round the guard), the operator's own workspace, and a confirm that is not the workspace name.
+
+The CLI twin does the same thing and prints each effect as it lands:
+
+```sh
+node cp/cli.mjs tenant remove <slug> [--delete-data] [--yes]
+```
+
+`DELETE /v1/tenants/{slug}` still exists in `cp/server.mjs` and is untouched. That is the low-level
+door for a workspace that is already stopped: it takes the row out and does none of the nine things
+above. **Remove** is the one to use for a customer.
 
 #### The cards
 
@@ -1011,7 +1118,21 @@ cookie.
 ```sh
 node scripts/verify-admin.mjs
 node scripts/verify-admin.mjs --no-browser     # the API legs only
+node scripts/verify-onboard-panel.mjs          # ONBOARD-2: the invite and Remove, in a real browser
 ```
+
+`verify-onboard-panel` drives **the screen** rather than the routes. It stands up this console's own
+page and routes against a fake Coolify, a stub relay, a stub box and doubles for the welcome sender
+and the removal, then in headless Chromium it opens Add a client, checks the welcome box is on and no
+longer disabled, presses Add, watches all five step rows reach done **in order** with no row ever
+green while an earlier one was not, screenshots the card at every transition, and then works the
+Remove control: the first click arms, a typed name that does not match is refused with **nothing
+done**, and one that matches goes through with the data switch carried to the route. It also asserts
+the negative that matters: the stub box counts every call it takes, and the sequence made only
+`listAgents` and `getOnboardingState` -- **never a prompt**, which would spend a customer's first-run
+interview for ever. Measured on this Mac 2026-09-10: **30 PASS 0 FAIL**, the press answering in 89 ms.
+The separate end-to-end gate, `scripts/verify-onboard.mjs`, drives the sequence and the removal
+against a control plane with no browser at all.
 
 It starts a control plane of its own on a free port with a throwaway data directory, a fake Coolify,
 a fake relay serving a built-in login-attempts fixture, and a fake GitHub. It needs no box, no docker
