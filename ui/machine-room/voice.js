@@ -389,17 +389,25 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     paint();
   }
 
-  function note(condition, text) {
-    state.notes = [{ condition, text }];
+  function note(condition, text, fromRelay = false) {
+    state.notes = [{ condition, text, fromRelay }];
     paint();
   }
 
   // A refusal arrives as a note frame carrying the relay's own sentence and then a bye naming the
   // condition. The sentence the relay wrote is the one the person reads -- only the condition is
   // taken from the bye, which is what decides whether the row offers a way forward.
-  function retitleNote(condition) {
+  function retitleNote(condition, fromRelay = false) {
     if (state.notes.length === 0 || !NOTES[condition]) return false;
-    state.notes = [{ condition, text: state.notes[0].text }];
+    // THE RELAY'S DIAGNOSIS OUTRANKS THE PAGE'S. MEASURED on the R750 2026-09-10, in a browser with
+    // no microphone permission on a workspace with no realtime key: the relay said no-key and drew the
+    // control that opens the card, then the microphone failed and the page retitled the same row
+    // no-microphone. The sentence on screen still said to add a key, the control that would let the
+    // person do it was gone, and the row named the wrong cause. The relay knows why the line did not
+    // open; this page only knows about its own microphone, and that is the lesser fact once the line
+    // was already refused.
+    if (state.notes[0].fromRelay && !fromRelay) return true;
+    state.notes = [{ condition, text: state.notes[0].text, fromRelay: state.notes[0].fromRelay }];
     paint();
     return true;
   }
@@ -506,11 +514,13 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     state.orb = "off";
     caption("");
     const reason = condition || state.byeReason;
+    // stop() is also called with no argument at all, for an ordinary press of the button.
+    const relaySaidIt = String(condition ?? "").length === 0 && state.byeReason.length > 0;
     state.byeReason = "";
     // The relay's own sentence, already on screen, wins over ours; only the condition is taken from
     // the close, so the row can offer the card when nothing is set up.
-    if (reason && retitleNote(reason)) return;
-    if (reason) note(reason, text); else paint();
+    if (reason && retitleNote(reason, relaySaidIt)) return;
+    if (reason) note(reason, text, relaySaidIt); else paint();
   }
 
   function toggle() { return state.on ? stop() : start(); }
@@ -598,7 +608,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       // A note is a quiet row and nothing else: it never colours the orb, never opens an expander,
       // and a frame with nothing to say paints no row rather than an empty one.
       case "note":
-        if (String(frame.text ?? "").trim().length > 0) note(String(frame.reason ?? "relay"), frame.text);
+        if (String(frame.text ?? "").trim().length > 0) note(String(frame.reason ?? "relay"), frame.text, true);
         break;
       // The relay's own latency ledger for the turn just taken. Nothing on screen: it is for the gate
       // and for a support question about why a reply felt slow, and the only number in it the page

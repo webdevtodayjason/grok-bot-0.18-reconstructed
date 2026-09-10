@@ -199,6 +199,33 @@ test("VOICE-1 notes: the relay's own sentence wins, and the close only names the
   assert.match(voice._noteMarkup("no-key", voice._state.notes[0].text), /data-voice-open-settings/);
 });
 
+test("VOICE-1 notes: the relay's reason outranks the page's, so the way forward is not taken away", async () => {
+  const { voice } = await loadVoice();
+  voice._state.on = true;
+  // MEASURED ON THE R750 2026-09-10, in real Chrome with no microphone permission on a workspace with
+  // no realtime key. The relay refused the line and said so, drawing the one control that leads
+  // anywhere; then the microphone failed and the page retitled the SAME row "no-microphone". The
+  // person was left reading "add a key on the Voice card" with no way to open it, under a heading that
+  // named the wrong cause. The relay knows why the line did not open; this page only knows about its
+  // own microphone, and once the line was already refused that is the lesser fact.
+  frame(voice, { t: "note", reason: "no-key", text: "This workspace has no realtime voice key yet." });
+  frame(voice, { t: "bye", reason: "no-key" });
+  voice.stop("no-microphone");
+  assert.equal(voice._state.notes.length, 1, "still one row");
+  assert.equal(voice._state.notes[0].condition, "no-key", "and it still names what the relay said");
+  assert.equal(voice._state.notes[0].text, "This workspace has no realtime voice key yet.");
+  assert.match(voice._noteMarkup(voice._state.notes[0].condition, voice._state.notes[0].text), /data-voice-open-settings/,
+    "so the control that opens the card is still there");
+
+  // The other way round is NOT blocked: with nothing from the relay, the page's own microphone
+  // condition is the only thing anybody knows, and it must still be said.
+  const { voice: second } = await loadVoice();
+  second._state.on = true;
+  second.stop("no-microphone");
+  assert.equal(second._state.notes[0].condition, "no-microphone");
+  assert.match(second._sentenceFor("no-microphone"), /microphone/i);
+});
+
 test("VOICE-1 notes: a 4003 close paints its own reason, not a generic failure", async () => {
   // A close only means anything on a live session, which is the precondition the guard in onClose
   // enforces -- so each case here arms one first.
