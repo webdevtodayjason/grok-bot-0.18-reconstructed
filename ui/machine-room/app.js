@@ -6822,7 +6822,9 @@
   });
   elements.panelContent.addEventListener("submit", handlePanelSubmit);
 
-  const openSettings = openSettingsPanel;
+  // A click event is not a section id, so the two gears go through a wrapper rather than being
+  // handed straight to a function whose first argument names a section.
+  const openSettings = () => openSettingsPanel("general");
   document.getElementById("settings-button").addEventListener("click", openSettings);
   document.getElementById("shelf-settings").addEventListener("click", openSettings);
   document.getElementById("people-button").addEventListener("click", () => {
@@ -7587,6 +7589,12 @@
   // exactly as window.__marketplaceBots and window.__titanMascots already do.
   window.__mrUi = {
     openPanel, paragraphMarkup, maskSecrets, escapeHtml, renderAll, showToast,
+    // THE ONE WAY INTO SETTINGS from another module, and the reason it exists: voice.js used to
+    // synthesise a click on #shelf-settings, which computes display:none at 390x844 -- so "Open
+    // voice settings" was dead on every phone, silently, because a click on a hidden element is not
+    // an error. openSettings(sectionId) takes a section rather than an event and works at every
+    // width. It is the wrapper below, so a module calling it gets General unless it names a section.
+    openSettings: (sectionId) => openSettingsPanel(typeof sectionId === "string" ? sectionId : "general"),
     // ===== SETTINGS-2: the seam settings.js and account-menu.js build against =====
     // Six facts this file already holds and two bodies it still owns. Publishing them here keeps the
     // settings surface out of this file's internals entirely, the same way __marketplaceBots and the

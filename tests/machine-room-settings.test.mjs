@@ -420,6 +420,19 @@ test("a sibling module contributes a row by registering it, idempotently and by 
   for (const bad of [null, undefined, {}, { id: "" }, { id: 7 }]) assert.equal(mr.register(bad), false, `register(${JSON.stringify(bad)}) should refuse`);
 });
 
+// The seam voice.js opens Settings through, and why it is a function of a SECTION and not a click.
+// voice.js used to synthesise a click on #shelf-settings, which computes display:none at 390x844 --
+// so "Open voice settings" was dead on every phone, silently, because a click on a hidden element
+// is not an error and nothing throws. This takes a section id and works at every width.
+test("__mrUi publishes one way into Settings, and it takes a section rather than an event", async () => {
+  const app = await read("ui/machine-room/app.js");
+  assert.match(app, /openSettings: \(sectionId\) => openSettingsPanel\(typeof sectionId === "string" \? sectionId : "general"\)/,
+    "__mrUi.openSettings must exist and must not be handed a click event as a section");
+  // And the gears go through a wrapper for the same reason: bound straight to openSettingsPanel,
+  // the first argument every press passed was a MouseEvent standing where a section id goes.
+  assert.match(app, /const openSettings = \(\) => openSettingsPanel\("general"\);/);
+});
+
 test("account-menu.js reads the surface's row list rather than keeping a second copy", async () => {
   const source = await read("ui/machine-room/account-menu.js");
   assert.match(source, /__mrSettings/, "the menu reads the published rows");
