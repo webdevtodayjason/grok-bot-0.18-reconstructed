@@ -623,6 +623,10 @@ const delegations: ReadonlyArray<[string, keyof TranscriptManager]> = [
   ["resumeAfterBoxHandoff", "boxHandoff"],
   ["resumeAfterMcpAuth", "boxHandoff"],
   ["resumeAfterListenerConnect", "boxHandoff"],
+  // CODE-1. The method already exists on boxHandoff and already takes an arbitrary prompt; without
+  // this line the facade has no property for it, `optionalMethod` returns undefined, and an agent is
+  // never told its coding task finished. One line, the same shape as the four above it.
+  ["resumeWithHiddenPrompt", "boxHandoff"],
   ["subscribeAutomations", "automationRuntime"],
   ["getAgentAutomations", "automationRuntime"],
   ["isAgentBusy", "turnRuntime"],
