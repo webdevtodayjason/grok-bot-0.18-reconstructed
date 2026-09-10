@@ -449,11 +449,19 @@
 
       // ---- SETTINGS-2 ---------------------------------------------------------------------------
       // Declared here so the demo adapter answers the same three shapes the gateway one does and the
-      // settings surface degrades identically with no gateway behind it. There is no /me offline, so
-      // the identity is null and the Operator section is not drawn -- which is the fail-closed rule
-      // the live console follows too.
+      // settings surface degrades identically with no gateway behind it.
+      //
+      // WHO IS LOOKING IS NOT THE GATEWAY'S FACT. This adapter runs when the GATEWAY is unreachable,
+      // but the page itself was still served by the relay, and the relay is the only thing that knows
+      // whether this session is the operator's. So the read is the same same-origin GET /auth/state
+      // the gateway adapter makes, and a console whose box is down still shows its operator the
+      // technical section -- which is exactly when they need it. Unreachable or carrying no operator
+      // field, it answers null and no Operator section is drawn: fail closed, same as live.
       getWorkspaceIdentity() {
-        return Promise.resolve(null);
+        if (typeof fetch !== "function") return Promise.resolve(null);
+        return fetch("/auth/state", { headers: { accept: "application/json" } })
+          .then((response) => (response.ok ? response.json() : null))
+          .catch(() => null);
       },
 
       getLocalToolPermission() {

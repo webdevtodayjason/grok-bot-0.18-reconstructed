@@ -14,8 +14,10 @@
 //   3. backgrounds.js no longer keys its mount on the panel's TITLE. The old guard matched
 //      /Global router|Operator settings/, which this wave renames; with it in place the background
 //      picker would have disappeared with no error, no page error and no test.
-//   4. Exactly one body on the surface carries class "settings-list", because that class is
-//      push-settings.js's whole mount contract and two of them would mount its card twice.
+//   4. Two cards mount themselves into Settings from outside it, and each has ONE home. The
+//      Notifications card aims at [data-push-mount], the Notifications body's own slot. The Voice
+//      card aims at "#panel-content .settings-list", which is the operator's stack and nowhere else.
+//      Give them the same selector and whichever section is on screen gets both.
 //
 // settings.js is a classic browser script: it hangs one object on the window it is handed. Evaluating
 // it against a stub with NO document is how its pure half is meant to be read, and is the contract
@@ -222,26 +224,33 @@ test("the account menu is the reference's rows, in the reference's order", () =>
 
 // ---- the mount contract -------------------------------------------------------------------------
 
-test("exactly one body carries .settings-list, and it is the Notifications body", () => {
+test("exactly one body carries the Notifications slot, and no customer body is a .settings-list", () => {
   const mr = pure();
   const bodies = mr.SECTIONS.map((section) => ({ id: section.id, markup: mr._bodyMarkup(section, FULL_FACTS) }));
+  const withSlot = bodies.filter((body) => /data-push-mount/.test(body.markup)).map((body) => body.id);
+  assert.deepEqual(withSlot, ["notifications"],
+    "push-settings.js mounts on [data-push-mount], so a second one on the surface is its card in two places");
+  // .settings-list is the OPERATOR stack's, because that is the selector voice.js hunts for. A
+  // customer body carrying it would take the Voice card and its technical rows onto a customer's
+  // screen -- which is the whole thing this wave exists to stop.
   const withList = bodies.filter((body) => /class="settings-list"/.test(body.markup)).map((body) => body.id);
-  assert.deepEqual(withList, ["notifications"],
-    "push-settings.js mounts on .settings-list, so a second one on the page is its card in two places");
+  assert.deepEqual(withList, [], "no body this file draws may carry .settings-list");
   for (const body of bodies) {
-    if (body.id === "notifications" || body.id === "operator") continue;
+    if (body.id === "operator") continue;
     assert.match(body.markup, new RegExp(`data-settings-section="${body.id}"`), `${body.id}'s body is not marked with its own id`);
-    assert.match(body.markup, /class="settings-rows"/, `${body.id}'s body must not be a settings-list`);
+    assert.match(body.markup, /class="settings-rows"/, `${body.id}'s body must be a settings-rows`);
   }
 });
 
-test("app.js's operator body is no longer a .settings-list either", async () => {
+test("app.js's operator body keeps .settings-list, which is where the Voice card lands", async () => {
   const source = await read("ui/machine-room/app.js");
   const start = source.indexOf("function settingsPanel(");
   assert.notEqual(start, -1, "app.js no longer draws the operator body");
   const body = source.slice(start, source.indexOf("function openSettingsPanel(", start));
-  assert.ok(!/class="settings-list"/.test(body), "the operator body would have mounted the Notifications card a second time");
-  assert.match(body, /class="settings-operator-list"/);
+  // voice.js queries "#panel-content .settings-list" and inserts after [data-mail]. Both halves of
+  // that have to be here or its card silently stops appearing anywhere at all.
+  assert.match(body, /class="settings-list settings-operator-list"/);
+  assert.ok(body.includes("mailSection()"), "voice.js puts its card after the mail card, so the mail card has to be here");
   // Nothing is lost: every card the old panel held is still built here.
   for (const part of ["endpoint-select", "pluginGroupSection(\"Plan\"", "pluginGroupSection(\"Providers\"", "pluginGroupSection(\"Listeners\"",
     "auto-review-toggle", "data-save-review", "jobBusSection()", "mailSection()", "data-update-box", "data-reset-box"]) {
@@ -372,12 +381,43 @@ test("settings.js publishes its pure half with no document and throws on nothing
   assert.doesNotThrow(() => loadBrowserScript("ui/machine-room/settings.js", { document: undefined }),
     "a module that needed a page would take the console down on a stub");
   const mr = pure();
-  for (const name of ["SECTIONS", "sectionsFor", "rowsFor", "accountMenuRows", "open", "shown", "paint"]) {
+  for (const name of ["SECTIONS", "sectionsFor", "rowsFor", "accountMenuRows", "open", "shown", "paint", "register", "refresh"]) {
     assert.ok(mr[name] != null, `__mrSettings.${name} is not published`);
   }
   // open() on a stub with no page answers false rather than throwing.
   assert.equal(mr.open("general"), false);
   assert.equal(mr.shown(), null);
+});
+
+// The seam voice.js, push-settings.js and backgrounds.js were told to build against, so that no
+// module ever again finds its place on this panel by matching a string of copy. That is the failure
+// that would have deleted the background picker the moment this wave renamed the panel: silently,
+// with no error and nothing in this suite pinning it.
+test("a sibling module contributes a row by registering it, idempotently and by section", () => {
+  const mr = pure();
+  const drawn = () => mr._bodyMarkup(mr.SECTIONS.find((s) => s.id === "general"), FULL_FACTS);
+  assert.ok(!drawn().includes("data-settings-contributed=\"talking\""), "nothing is contributed before anything registers");
+
+  assert.equal(mr.register({ id: "talking", section: "general", group: "system", markup: () => "<strong>Talking</strong><span>x</span>" }), true);
+  assert.match(drawn(), /data-settings-contributed="talking"/, "a registered row is drawn into its own section and group");
+  assert.match(drawn(), /data-settings-group="system"[\s\S]*data-settings-contributed="talking"/, "and into the group it named");
+
+  // IDEMPOTENT BY ID. A module that registers on load, and again on a reconnect, is one row.
+  mr.register({ id: "talking", section: "general", group: "system", markup: () => "<strong>Talking</strong><span>y</span>" });
+  assert.equal(drawn().match(/data-settings-contributed="talking"/g).length, 1, "registering twice under one id is one row");
+
+  // A row for another section does not leak into this one.
+  mr.register({ id: "elsewhere", section: "computer", group: "computers", markup: () => "<strong>Elsewhere</strong><span>z</span>" });
+  assert.ok(!drawn().includes("data-settings-contributed=\"elsewhere\""), "a row registered on Computer is not drawn on General");
+
+  // operatorOnly is honoured against the facts, never against a page heuristic.
+  mr.register({ id: "operators-only", section: "general", group: "system", operatorOnly: true, markup: () => "<strong>Only me</strong><span>q</span>" });
+  assert.ok(!drawn().includes("data-settings-contributed=\"operators-only\""), "a customer is not shown an operator's contributed row");
+  const asOperator = mr._bodyMarkup(mr.SECTIONS.find((s) => s.id === "general"), { ...FULL_FACTS, operator: true });
+  assert.match(asOperator, /data-settings-contributed="operators-only"/, "and the operator is");
+
+  // Nonsense is refused rather than stored.
+  for (const bad of [null, undefined, {}, { id: "" }, { id: 7 }]) assert.equal(mr.register(bad), false, `register(${JSON.stringify(bad)}) should refuse`);
 });
 
 test("account-menu.js reads the surface's row list rather than keeping a second copy", async () => {

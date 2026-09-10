@@ -121,8 +121,7 @@
 .settings-head h2 { margin: 0; font-size: 20px; font-weight: 560; letter-spacing: -0.02em; }
 .settings-head p { margin: 5px 0 0; color: var(--text-secondary); font-size: 12px; }
 
-.settings-rows,
-.panel-dialog.is-settings .settings-list {
+.settings-rows {
   display: grid;
   gap: 20px;
   min-width: 0;

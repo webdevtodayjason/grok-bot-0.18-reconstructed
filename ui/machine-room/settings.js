@@ -92,6 +92,41 @@
   const BANNED_VENDORS = ["resend", "openai", "xai", "anthropic", "z.ai", "glm", "grok", "firebase", "apns", "coolify", "s3", "github", "slack", "browser-use"];
   const BANNED = new RegExp(`\\b(?:${[...BANNED_WORDS, ...BANNED_VENDORS].map((word) => word.replace(/\./g, "\\.")).join("|")})\\b`, "i");
 
+  // ---- the registry other modules build against --------------------------------------------------
+  //
+  // A contributed row is a row like any other: a label, at most one grey line and exactly one
+  // control, put into a named section and group by the module that owns its behaviour. This is what
+  // replaces three separate MutationObservers hunting for a panel by its TITLE -- the failure mode
+  // that would have deleted the background picker silently the moment this wave renamed the panel.
+  //
+  // register({id, section, group, order, markup, fill, operatorOnly}) is idempotent by id, so a
+  // module that registers on every load, or twice, ends up with one row. markup() returns the row's
+  // inner HTML; fill(root) is called with the painted section body after every paint of that
+  // section, which is how a live value gets in. A contributor whose section is not on screen is not
+  // filled, because there is nothing to fill.
+  const CONTRIBUTORS = new Map();
+
+  function register(entry) {
+    if (entry == null || typeof entry.id !== "string" || entry.id.length === 0) return false;
+    CONTRIBUTORS.set(entry.id, {
+      id: entry.id,
+      section: typeof entry.section === "string" ? entry.section : "general",
+      group: typeof entry.group === "string" ? entry.group : null,
+      order: Number.isFinite(entry.order) ? entry.order : 100,
+      markup: typeof entry.markup === "function" ? entry.markup : () => "",
+      fill: typeof entry.fill === "function" ? entry.fill : null,
+      operatorOnly: entry.operatorOnly === true,
+    });
+    // Registered while its own section is on screen: repaint, so a module that loads late is not
+    // invisible until the person navigates away and back.
+    if (shown() === (typeof entry.section === "string" ? entry.section : "general")) paint(current, null);
+    return true;
+  }
+
+  const contributorsFor = (sectionId, groupId, isOperator) => [...CONTRIBUTORS.values()]
+    .filter((one) => one.section === sectionId && one.group === groupId && (one.operatorOnly !== true || isOperator === true))
+    .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+
   // The original's four, then the one this product adds, then the operator's. The order is the
   // screenshots' order and the nav draws it as given.
   const SECTIONS = [
@@ -510,8 +545,12 @@
   function bodyMarkup(section, facts) {
     const head = `<header class="settings-head"><h2 data-settings-title>${esc(section.title)}</h2><p data-settings-subtitle>${esc(section.subtitle)}</p></header>`;
     if (section.mounts === "push") {
-      // THE ONE BODY THAT CARRIES .settings-list, which is push-settings.js's whole mount contract.
-      return head + `<div class="settings-list" data-settings-section="${esc(section.id)}"></div>`;
+      // data-push-mount is the slot push-settings.js aims at, and it is the ONLY thing that decides
+      // where that card lands. It is deliberately not the .settings-list class: that class belongs to
+      // the OPERATOR body's stack of cards, which is what it has always described, and voice.js finds
+      // its own card's home by exactly that selector. One class, one owner, two cards that cannot
+      // land on each other's section.
+      return head + `<div class="settings-rows" data-push-mount data-settings-section="${esc(section.id)}"></div>`;
     }
     if (section.mounts === "operator") {
       const markup = typeof host().operatorMarkup === "function" ? host().operatorMarkup() : "";
@@ -521,10 +560,12 @@
     const groups = section.groups.map((group) => {
       const mine = rows.filter((row) => row.group === group.id);
       const header = group.id === "account" ? accountHeaderMarkup(facts) : "";
-      if (mine.length === 0 && header === "") return "";
+      const extra = contributorsFor(section.id, group.id, facts.operator === true)
+        .map((one) => `<div class="setting-row" data-setting-row="${esc(one.id)}" data-settings-contributed="${esc(one.id)}">${one.markup()}</div>`).join("");
+      if (mine.length === 0 && header === "" && extra === "") return "";
       return `<div class="settings-group" data-settings-group="${esc(group.id)}">`
         + `<p class="settings-group-label">${esc(group.label)}</p>`
-        + `<div class="settings-card">${header}${mine.map(rowMarkup).join("")}</div></div>`;
+        + `<div class="settings-card">${header}${mine.map(rowMarkup).join("")}${extra}</div></div>`;
     }).join("");
     return head + `<div class="settings-rows" data-settings-section="${esc(section.id)}">${groups}</div>`;
   }
@@ -693,6 +734,13 @@
     // Operator through app.js, which still owns every control on it.
     if (section.mounts === "push") global.__pushSettings?.mount?.(panel());
     if (section.mounts === "operator" && typeof host().operatorFill === "function") host().operatorFill();
+    // And every contributed row on this section, with the body that was just painted. A fill that
+    // throws is that module's problem and must not take the section down with it.
+    for (const one of CONTRIBUTORS.values()) {
+      if (one.section !== section.id || one.fill == null) continue;
+      if (one.operatorOnly === true && facts.operator !== true) continue;
+      try { one.fill(mount ?? body); } catch { /* one row short beats a blank section */ }
+    }
     if (rowId) {
       const row = body.querySelector(`[data-setting-row="${rowId}"]`);
       if (row != null) { row.classList.add("is-pointed"); row.scrollIntoView({ block: "center" }); }
@@ -704,10 +752,23 @@
     return true;
   }
 
-  /** Re-reads every fact and repaints the section on screen, keeping the nav and the search box. */
-  async function refresh() {
+  /**
+   * With no argument: re-reads every fact and repaints the section on screen, keeping the nav and
+   * the search box. With a contributor's id: re-fills that one row in place, and repaints its
+   * section only if the person is looking at it. A module with a new value to show calls the second
+   * form so a background change updates one card rather than throwing the person back to General.
+   */
+  async function refresh(id = null) {
+    if (typeof id === "string" && id.length > 0) {
+      const one = CONTRIBUTORS.get(id);
+      if (one == null) return false;
+      if (shown() !== one.section) return true;
+      paint(current, null);
+      return true;
+    }
     await readFacts();
     if (shown() != null) paint(current, null);
+    return true;
   }
 
   function open(sectionId = "general", rowId = null) {
@@ -945,6 +1006,9 @@
     BANNED,
     BANNED_WORDS,
     BANNED_VENDORS,
+    // The registry a sibling module contributes a row through, so nothing has to hunt for this
+    // panel by its title ever again.
+    register,
     // The live half.
     open,
     shown,

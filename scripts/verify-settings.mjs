@@ -30,10 +30,12 @@
 //     data-machine-value is excluded and the excluded text is printed, so the exclusion is visible
 //     rather than assumed.
 //
-// ONE KNOWN SKIP while this wave is landing: voice.js still mounts its own Voice card into whatever
-// .settings-list is on screen, which under the new contract is the Notifications body. That card
-// and its key field are item C's and retire with it. The sweep says so by name rather than passing
-// over it quietly.
+// ONE CARD ON THIS SURFACE IS NOT THIS WAVE'S. voice.js mounts its own Voice card by querying
+// "#panel-content .settings-list" and inserting after the mail card. That selector is left pointing
+// at the OPERATOR stack on purpose -- which is where the design puts voice's service, model and
+// voice rows anyway -- so the card keeps working with no edit to a file this item does not own, and
+// lands on no customer section. Its key field is item C's to retire under KEYS-1. The sweep asserts
+// the card is on none of the five customer sections rather than passing over it quietly.
 //
 //   node scripts/verify-settings.mjs              both viewports against a relay from this worktree
 //   node scripts/verify-settings.mjs --url ...    read-only, against a deployed console
@@ -311,7 +313,7 @@ try {
   const stale = await page.evaluate(() => /Operator settings|Global router/i.test(document.body.textContent ?? ""));
   check(!stale, '"Operator settings" appears nowhere on the page');
 
-  step("every section paints exactly one body, and only Notifications is a settings-list");
+  step("every section paints exactly one body, and no customer body is a settings-list");
   const bodies = [];
   for (const id of EXPECTED_NAV) {
     await gotoSection(page, id);
@@ -322,6 +324,7 @@ try {
       return {
         sections,
         lists: document.querySelectorAll("#panel-content .settings-list").length,
+        pushMounts: document.querySelectorAll("#panel-content [data-push-mount]").length,
         pushCards: document.querySelectorAll("[data-push-settings]").length,
         scrollHeight: scroller?.scrollHeight ?? 0,
         clientHeight: scroller?.clientHeight ?? 0,
@@ -332,9 +335,15 @@ try {
     check(seen.sections.length === 1 && seen.sections[0] === id,
       `pressing ${id} paints one body and it is ${id}'s`, seen.sections.join(",") || "none");
   }
+  // .settings-list is the selector voice.js hunts for, and it belongs to the OPERATOR stack alone.
+  // A customer body carrying it would take the Voice card and its technical rows onto a customer's
+  // screen. The Notifications card has its own slot, [data-push-mount], and shares nothing.
   const listCounts = bodies.map((body) => `${body.id}:${body.lists}`);
-  check(bodies.every((body) => body.lists === (body.id === "notifications" ? 1 : 0)),
-    "only the Notifications body carries .settings-list, which is push-settings.js's whole mount contract", listCounts.join(" "));
+  check(bodies.every((body) => body.lists === 0),
+    "no customer body carries .settings-list, so voice.js's card can never land on one", listCounts.join(" "));
+  check(bodies.every((body) => body.pushMounts === (body.id === "notifications" ? 1 : 0)),
+    "and [data-push-mount] is the Notifications body's alone, which is push-settings.js's whole mount contract",
+    bodies.map((body) => `${body.id}:${body.pushMounts}`).join(" "));
   const notifications = bodies.find((body) => body.id === "notifications");
   check(notifications.pushCards === 1, "and the Notifications card mounts exactly once, with no double mount when the observer re-fires",
     `${notifications.pushCards} [data-push-settings]`);
@@ -385,14 +394,13 @@ try {
     offenders.length === 0 ? `swept five sections${voiceLine ? " and the composer's voice line" : ""}`
       : offenders.map((one) => `${one.where}: "${one.text}"`).join(" | "));
   info(`machine-supplied values excluded from the sweep, on purpose: ${excluded.length > 0 ? excluded.slice(0, 6).join(", ") : "none on this box"}`);
-  // The one card that is not this wave's: item C retires voice.js's own settings card.
-  const voiceCard = await page.evaluate(() => document.querySelector("[data-voice]") != null);
-  if (voiceCard) {
-    skip("the Voice card is not on the surface",
-      "voice.js still mounts its own card into whatever .settings-list is drawn, so it lands in Notifications. That card and its key field are item C's and retire with it; this is the one transient the merged design names");
-  } else {
-    check(true, "the Voice card is not on the surface", "voice.js draws the Talking row through window.__voice instead");
-  }
+  // The one card that is not this wave's. voice.js mounts it into "#panel-content .settings-list",
+  // which is the OPERATOR stack and nothing a customer is ever shown -- so the sweep asserts it is
+  // not on any of the five customer sections rather than that it does not exist. Its key field is
+  // item C's to retire under KEYS-1.
+  const voiceCard = await page.evaluate(() => document.querySelector('[data-settings-section]:not([data-settings-section="operator"]) [data-voice]') != null);
+  check(!voiceCard, "the Voice card is on none of the customer sections",
+    voiceCard ? "[data-voice] is inside a customer body, which is a key field on a customer's screen" : "it mounts on the operator's stack, where voice.js looks for it");
 
   step("the search");
   await gotoSection(page, "general");
@@ -562,6 +570,38 @@ try {
     check(kept.adminLink, "and the section says where the keys are instead", "api.titanium.bot/admin");
     info(`plugin groups on this box: ${kept.groups.join(", ") || "none (this Mac has no plan group; the R750 with a proxy does)"}`);
     await shoot(page, "settings-operator-1440x900");
+  }
+
+  // ---- the tripwire the merged design named by name ------------------------------------------------
+  //
+  // Execution on this computer stops being a read-only pill and becomes a writable picker, and the
+  // middle choice is the one that could have been a lie: the settings extension's own setter is
+  // typed "always" | "never" at extension.ts:7 while the controller reads "ask" at
+  // local-tool-permission-controller.ts:45. So the write is PROVED here rather than assumed --
+  // set "ask", reopen the panel, read what the host answered -- and the original value is put back
+  // afterwards, because this gate shares a box with every other one.
+  step("Execution on this computer writes, and the host gives the value back");
+  await gotoSection(page, "computer");
+  const before = await page.evaluate(() => document.querySelector('[data-setting-row="execution"] select')?.value ?? null);
+  if (before == null) {
+    skip("a write of \"ask\" round-trips through the host", "this box reports no local tool permission at all, so the row is not drawn");
+  } else {
+    const target = before === "ask" ? "never" : "ask";
+    await page.selectOption('[data-setting-row="execution"] select', target);
+    await page.waitForTimeout(2500);
+    await openSettings(page, false);
+    await gotoSection(page, "computer");
+    const after = await page.evaluate(() => document.querySelector('[data-setting-row="execution"] select')?.value ?? null);
+    check(after === target, `a write of "${target}" round-trips through the host`,
+      `${before} -> asked for ${target}, host answered ${after}`);
+    if (after !== target) {
+      info(`TRIPWIRE: the host would not take "${target}". That option has to ship disabled with an honest line, and the row is item C's to file.`);
+    }
+    // Put the box back the way it was found.
+    await page.selectOption('[data-setting-row="execution"] select', before);
+    await page.waitForTimeout(2000);
+    const restored = await page.evaluate(() => document.querySelector('[data-setting-row="execution"] select')?.value ?? null);
+    info(`this box's local tool permission restored to ${restored} (it was ${before} before this run)`);
   }
   await page.context().close();
 

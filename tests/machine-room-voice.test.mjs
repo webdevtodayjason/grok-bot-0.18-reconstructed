@@ -592,6 +592,15 @@ function serveConsole() {
       }));
       return;
     }
+    // SETTINGS-2: the session door. The Voice card is the OPERATOR's -- it holds a service, a model,
+    // a voice and, until item C retires it, a key -- and the settings surface draws that section only
+    // when the relay says this session is the operator's. Answered here the way a relay with no
+    // password configured answers it, which is what this console has always been in a test.
+    if (url.pathname === "/auth/state") {
+      response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      response.end(JSON.stringify({ required: false, authenticated: true, operator: true }));
+      return;
+    }
     const file = path.join(root, url.pathname === "/" ? "index.html" : url.pathname.replace(/^\/+/, ""));
     if (!file.startsWith(root)) { response.writeHead(403).end(); return; }
     try {
@@ -762,6 +771,11 @@ test("VOICE-1 in a real browser: the button is on screen, a mouse can press it, 
     // would be the hand operation no-hand-operations-on-the-product forbids, so this control existing
     // on screen is the mechanism, not a convenience -- and it mounts itself into a panel app.js paints.
     await page.click("#shelf-settings");
+    // SETTINGS-2: Settings opens on General and paints one section at a time. This card is on the
+    // Operator section, which is where voice.js's own mount looks for it, so the press that reaches
+    // it is the nav entry. One more press; the same card, with the same controls on it.
+    await page.waitForSelector("[data-settings-surface]", { timeout: 20_000 }).catch(() => {});
+    await page.click('[data-settings-nav="operator"]').catch(() => {});
     let card = null;
     for (let n = 0; n < 40; n += 1) {
       card = await page.evaluate(() => {

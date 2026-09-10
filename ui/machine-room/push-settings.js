@@ -6,15 +6,17 @@
  * app.js's published helpers lazily through window.__mrUi. app.js is NOT touched by this file, and
  * neither is gateway-adapter.js.
  *
- * HOW IT GETS ON SCREEN, and why it is not a second panel. Settings already carries a section per
- * capability, and mailSection() is the precedent: the person opens the gear and the Mail card is
- * there, inline, beside Inference and the job bus. Notifications belongs in exactly that row of
- * cards, so this file appends one more <section class="settings-section"> to the panel's own
- * .settings-list when that list appears, through a MutationObserver on #panel-content.
+ * HOW IT GETS ON SCREEN, and why it is not a second panel. SETTINGS-2 gave Notifications a section
+ * of its own on the settings surface, and its body carries one empty slot, [data-push-mount]. This
+ * file appends its <section class="settings-section"> into that slot when it appears, through a
+ * MutationObserver on #panel-content and through the surface's own call after it paints that body.
+ * Where there is no surface at all -- the panel app.js still draws when settings.js is not served --
+ * it falls back to that panel's .settings-list, which is where this card has always gone.
  *
- * Keyed on the STRUCTURE (.settings-list) and never on a string of copy. Keying on the panel's
- * eyebrow would have made this section disappear the day somebody reworded "Global router & policy",
- * silently, with the routes still live and nothing on screen to reach them.
+ * Keyed on the STRUCTURE and never on a string of copy. Keying on the panel's eyebrow would have
+ * made this section disappear the day somebody reworded "Global router & policy", silently, with the
+ * routes still live and nothing on screen to reach them -- which is exactly what SETTINGS-2 then did
+ * to that wording.
  *
  * WHAT IT CAN AND CANNOT DO, said plainly, because the limits are the design:
  *
@@ -233,9 +235,26 @@
     section.innerHTML = next.innerHTML;
   }
 
+  /**
+   * Where this card belongs on whatever Settings is open, and nowhere else.
+   *
+   * SETTINGS-2: the surface paints ONE body at a time, and the Notifications body carries the slot
+   * this aims at. With the surface on screen and that slot absent, the person is looking at another
+   * section and there is nothing to mount into -- a null is the right answer, not a miss, and it is
+   * what stops this card being appended to the Operator section's card stack. The .settings-list
+   * fallback is the panel that shipped before the surface, which app.js still draws when settings.js
+   * is not served: keyed on the STRUCTURE, never on a string of copy, exactly as before.
+   */
+  function pushTarget(panel) {
+    if (typeof panel?.querySelector !== "function") return null;
+    const slot = panel.querySelector("[data-push-mount]");
+    if (slot != null) return slot;
+    return panel.querySelector("[data-settings-surface]") == null ? panel.querySelector(".settings-list") : null;
+  }
+
   /** Appends the card to an open Settings panel, once. */
   function mount(panel) {
-    const list = panel?.querySelector?.(".settings-list");
+    const list = pushTarget(panel);
     if (!list || list.querySelector(`[${SECTION_MARK}]`)) return;
     const host = global.document.createElement("section");
     host.className = "settings-section";

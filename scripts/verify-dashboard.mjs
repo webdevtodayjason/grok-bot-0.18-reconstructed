@@ -1169,25 +1169,52 @@ try {
             mood: el.querySelector("[data-titan-mood]")?.dataset.titanMood ?? "",
             status: el.getAttribute("data-status") ?? "",
           })));
-          const facesOk = crewCards.length > 0 && crewCards.every((c) => c.character && c.canvas);
-          check(facesOk, "every roster card draws its agent as a Titan crew member on a live canvas", crewCards.map((c) => `${c.name}:${c.character ?? "none"}`).join(", "));
+          // GATE-DASH-1, closed here. mascot-crew.js has a CREW OF THIRTEEN -- Titan plus twelve
+          // companions -- and assignCrew hands each one out ONCE, so on a box with more agents than
+          // that the extra cards correctly draw no character. Three legs asserted otherwise and went
+          // red on any busy box, about nothing: the duplicate-companion leg beside them already had
+          // the guard. All three carry it now, and each one says how many agents it read against how
+          // many characters exist, so a reader sees "15 agents, 13 characters" rather than a bare
+          // failure and re-diagnoses it every wave.
+          const CREW_SIZE = 13;
+          const charactered = crewCards.filter((c) => c.character);
+          const capped = crewCards.length > CREW_SIZE;
+          const census = `${crewCards.length} agent(s) against ${CREW_SIZE} characters`;
+          const facesOk = crewCards.length > 0
+            && charactered.length === Math.min(crewCards.length, CREW_SIZE)
+            && charactered.every((c) => c.canvas);
+          check(facesOk, `every roster card draws its agent as a Titan crew member on a live canvas${capped ? ", up to the size of the crew" : ""}`,
+            `${census} — ${crewCards.map((c) => `${c.name}:${c.character ?? "none"}`).join(", ")}`);
           // Titan is the first agent of an instance, and no companion is handed out twice while
           // there are companions left. Both are mascot-crew.js's contract, read off the page.
           check(crewCards.some((c) => c.character === "Titan"), "and one of them is Titan, who is always the first agent on an instance");
           const companions = crewCards.map((c) => c.character).filter((c) => c && c !== "Titan");
           check(companions.length > 12 || new Set(companions).size === companions.length, "no companion is drawn twice while there are unused ones", companions.join(", "));
-          // The mood is the status the roster already paints, not a second opinion about it.
-          const moodOk = crewCards.every((c) => (c.status === "working" ? c.mood === "curious" : ["calm", "excited", "curious"].includes(c.mood)));
-          check(moodOk, "a card that says Working now carries the curious mood", crewCards.map((c) => `${c.name}:${c.status}/${c.mood}`).join(", "));
+          // The mood is the status the roster already paints, not a second opinion about it. A card
+          // with no character has no mood to read either, so it is not asked for one (GATE-DASH-1).
+          const moodOk = charactered.every((c) => (c.status === "working" ? c.mood === "curious" : ["calm", "excited", "curious"].includes(c.mood)));
+          check(moodOk, "a card that says Working now carries the curious mood",
+            `${census} — ${charactered.map((c) => `${c.name}:${c.status}/${c.mood}`).join(", ")}`);
           // Actually moving: the same canvases, 500ms apart, must not be the same picture. The
           // element's own IntersectionObserver stops the ones the collapsed Hidden group holds, so
           // only the cards on screen are compared.
-          const frameOf = () => page.evaluate(() => Array.from(document.querySelectorAll(".worker-card:not([data-roster-hidden] *) titan-mascot")).map((m) => m.snapshot().slice(-160)));
+          // GATE-DASH-1's third leg. titan-mascot pauses itself when it is not intersecting, which
+          // is the whole point of it -- a canvas nobody can see must cost nothing. The old filter
+          // excluded only the collapsed Hidden group, so on a roster long enough to scroll it also
+          // collected the cards below the fold, which are correctly paused: measured on
+          // grok-bot-local-vm with 18 agents, 1 of 9 "moved", and the 8 that did not were doing
+          // exactly what they are built to do. Only the canvases actually on screen are compared now.
+          const frameOf = () => page.evaluate(() => Array.from(document.querySelectorAll(".worker-card:not([data-roster-hidden] *) titan-mascot"))
+            .filter((m) => { const r = m.getBoundingClientRect(); return r.bottom > 0 && r.top < window.innerHeight && r.width > 0; })
+            .map((m) => m.snapshot().slice(-160)));
           const frameA = await frameOf();
           await page.waitForTimeout(500);
           const frameB = await frameOf();
           const moved = frameA.filter((x, i) => x !== frameB[i]).length;
-          check(frameA.length > 0 && moved === frameA.length, "and each one is a different picture 500ms later", `${moved} of ${frameA.length} canvases moved`);
+          // Only the canvases that exist. A card past the crew's thirteenth draws none, so counting
+          // it as a canvas that failed to move is counting nothing (GATE-DASH-1).
+          check(frameA.length > 0 && moved === frameA.length, "and each one is a different picture 500ms later",
+            `${moved} of ${frameA.length} canvases moved, ${census}`);
           // A canvas nobody can see must not cost anything. The Hidden group is collapsed here.
           const parkedFrames = async () => page.evaluate(() => Array.from(document.querySelectorAll("[data-roster-hidden] titan-mascot")).map((m) => m.snapshot().slice(-160)));
           const parkedA = await parkedFrames();
