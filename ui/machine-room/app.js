@@ -1806,7 +1806,7 @@
       : message.type === "attachment" && message.attachment
         ? `${paragraphMarkup(message.text)}${(message.attachments ?? [message.attachment]).map((a) => attachmentMarkup({ ...message, attachment: a })).join("")}`
       : `${paragraphMarkup(message.text)}${specialMessageMarkup(message)}`;
-    return `<article class="message-row${isUser ? " is-user" : ""}${isWorking ? " working-message" : ""}" data-message-id="${escapeHtml(message.id)}">${!isUser ? roomSpeakerMarkup(author, message) : ""}<div class="message-block"><div class="message-meta"><strong>${escapeHtml(message.authorName || (author && author.name) || "Worker")}</strong><time>${escapeHtml(message.time || "now")}</time></div><div class="message-bubble">${body}</div>${evidenceChipMarkup(message)}</div></article>`;
+    return `<article class="message-row${isUser ? " is-user" : ""}${isWorking ? " working-message" : ""}" data-message-id="${escapeHtml(message.id)}">${!isUser ? roomSpeakerMarkup(author, message) : ""}<div class="message-block"><div class="message-meta"><strong>${escapeHtml(message.authorName || (author && author.name) || "Worker")}</strong><time>${escapeHtml(message.time || "now")}</time></div><div class="message-bubble">${body}</div>${message.spoken ? `<span class="voice-spoken-chip">Spoken</span>` : ""}${evidenceChipMarkup(message)}</div></article>`;
   }
 
   // The transcript is a tail window; the row above it says the host holds more and offers to

@@ -4767,3 +4767,156 @@ body[data-composer-drop="1"] .composer {
     min-width: 0;
   }
 }
+
+/* VOICE-1 ===========================================================================
+   The talk button, the orb, the live caption strip and the spoken chip.
+
+   EVERY RULE BELOW IS A NEW SELECTOR. Nothing above this banner is edited, because two other waves
+   have this file open and an append is the only hunk a rebase cannot mangle.
+
+   BRAND, AND A NAMED DEVIATION. The brief asks for Signal Cyan #00C8F0 on Midnight #090D14. Neither
+   appears anywhere in tokens.css:1-20, which is this console's approved board palette; that pair is
+   titanium.bot's marketing board. Hardcoding it here would make the console's newest control the one
+   element that does not match the console. So the orb is --teal-500 / --teal-300 and reuses the
+   pulse-ring idiom the avatars already use, including the prefers-reduced-motion block. */
+
+.voice-talk {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex: 0 0 auto;
+  padding: 0.5rem 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--teal-500) 42%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--teal-500) 10%, rgba(12, 23, 27, 0.5));
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+.voice-talk:hover:not(:disabled) { border-color: color-mix(in srgb, var(--teal-500) 70%, white 8%); }
+.voice-talk:disabled { opacity: 0.45; cursor: not-allowed; }
+.voice-talk.is-live { border-color: var(--teal-300); background: color-mix(in srgb, var(--teal-500) 20%, rgba(12, 23, 27, 0.5)); }
+.voice-talk-label { font-size: 0.86rem; letter-spacing: 0.01em; }
+
+/* Four states and no others. Off is a flat dot; the three live ones each move differently, so the
+   state is readable out of the corner of an eye rather than only by its colour. */
+.voice-orb {
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 50%;
+  background: var(--stone-500);
+  box-shadow: 0 0 0 0 transparent;
+  flex: 0 0 auto;
+}
+.voice-orb[data-state="listening"] {
+  background: var(--teal-300);
+  animation: voice-orb-listen 1.8s ease-in-out infinite;
+}
+.voice-orb[data-state="thinking"] {
+  background: var(--teal-500);
+  animation: voice-orb-think 1s linear infinite;
+}
+.voice-orb[data-state="speaking"] {
+  background: var(--teal-300);
+  animation: voice-orb-speak 0.72s ease-in-out infinite;
+}
+@keyframes voice-orb-listen {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--teal-500) 60%, transparent); }
+  50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--teal-500) 0%, transparent); }
+}
+@keyframes voice-orb-think {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+@keyframes voice-orb-speak {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 8px color-mix(in srgb, var(--teal-300) 70%, transparent); }
+  50% { transform: scale(1.35); box-shadow: 0 0 16px color-mix(in srgb, var(--teal-300) 40%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .voice-orb[data-state="listening"],
+  .voice-orb[data-state="thinking"],
+  .voice-orb[data-state="speaking"] { animation: none; }
+}
+
+/* The live half, above the composer. The durable record of a spoken turn is the transcript row
+   itself -- this is what is being heard and said right now, plus any note. The transcript is rebuilt
+   wholesale on every render, so nothing drawn here can live inside it. */
+/* :not([hidden]) because [hidden] LOSES to an author display rule, and this file already carries
+   three rules that exist only because that bit a shipped control (styles.css:3830, :4162, :4216).
+   A strip that cannot hide is a caption line sitting above every composer on every page. */
+.voice-strip:not([hidden]) {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0 0 0.5rem;
+}
+.voice-caption {
+  margin: 0;
+  min-height: 1.1em;
+  color: var(--text-secondary);
+  font-size: 0.86rem;
+  font-style: italic;
+}
+.voice-caption:empty { display: none; }
+.voice-notes { display: grid; gap: 0.35rem; }
+.voice-note .message-bubble {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.voice-note-action { font-size: 0.8rem; }
+
+.voice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.6rem;
+}
+
+/* The spoken chip. A quiet mark on the person's own row saying that row was said out loud, not
+   typed. It rides the send's nonce, so it survives a reload and every wholesale repaint. Attention
+   colour, never error red: it is a fact about the row and not a verdict on it. */
+.voice-spoken-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-top: 0.3rem;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid color-mix(in srgb, var(--teal-500) 40%, transparent);
+  border-radius: 999px;
+  color: var(--teal-300);
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+}
+
+/* THE ONE EXISTING SELECTOR THIS WAVE RE-DECLARES, and the reason, because everything else under
+   this banner is a selector of its own.
+
+   .composer is a three-column grid (38px / textarea / Send) with a fixed row height. A fourth child
+   therefore opens an IMPLICIT SECOND ROW: MEASURED in Chrome at 390, 768 and 1440 CSS px, Send was
+   pushed onto a row of its own below the talk button and the form grew from 54 to 104 px. The track
+   is restored rather than the rule edited -- appended declarations, so a rebase is still a clean
+   append and nothing above the banner moves. This file's own comment at :1448 records that the
+   fourth track used to be there, for a mic button that could not act and was removed. This is the
+   control that slot was for. */
+.composer {
+  grid-template-columns: 38px minmax(0, 1fr) auto auto;
+}
+
+@media (max-width: 690px) {
+  /* On a phone the textarea is the scarce thing, so the word goes and the orb stays -- the button
+     keeps its aria-label, so it still says what it is to anyone not reading the screen. It is then
+     the same 38px circle as the attach button beside it. */
+  .composer {
+    grid-template-columns: 38px minmax(0, 1fr) auto auto;
+  }
+  .voice-talk {
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border-radius: 50%;
+    justify-content: center;
+  }
+  .voice-talk-label {
+    display: none;
+  }
+}

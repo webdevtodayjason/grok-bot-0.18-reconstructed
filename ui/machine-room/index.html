@@ -223,6 +223,11 @@
           <!-- QOL-COMPOSER: a textarea, not an input. Enter sends, Shift+Enter opens a line, and
                the box grows with what is in it up to eight lines (autosizeComposer in app.js). -->
           <textarea id="message-input" name="message" rows="1" autocomplete="off" placeholder=""></textarea>
+          <!-- VOICE-1: press to talk, press again to stop. type="button" is load-bearing -- inside a
+               form a default button submits, which would send the composer on every press. The orb
+               lives inside it and its four states are driven only by voice.js from the relay's
+               frames. The label stays a word, because an icon alone never said what this does. -->
+          <button class="voice-talk" id="voice-talk" type="button" data-voice-talk aria-pressed="false" aria-label="Talk to your agent"><span class="voice-orb" data-voice-orb data-state="off"></span><span class="voice-talk-label">Talk</span></button>
           <button class="send-button" type="submit"><span>➤</span> Send</button>
         </form>
         <div class="shelf-utilities">
@@ -413,6 +418,13 @@
          over a cloud session; scripts/verify-browser-tools.mjs now opens the console in a real
          browser and fails if the strip is not on screen. -->
     <script src="cloud-browser.js"></script>
+    <!-- VOICE-1. The talk button, the orb, the microphone and the speaker. Same contract as
+         cloud-browser.js above: it publishes window.__voice at load, reads the adapter and the UI
+         helpers lazily, finds its own hosts in the DOM, and no-ops with either absent. It is here
+         rather than after app.js for the reason written below: the strip and the Voice card are put
+         back by its own observer, and a module that arrives late shows a console with no way to
+         talk for a tick. -->
+    <script src="voice.js"></script>
     <!-- CONSOLE-4: the three sibling modules items B, C and D fill. They sit here, beside
          marketplace-bots.js and ahead of app.js, for one reason: app.js consults all three seams
          inside its FIRST renderAll, and a module that arrives after that first paint would show
