@@ -1493,13 +1493,32 @@
   // Escaped FIRST, so these patterns only ever match text the model wrote. Nothing here can
   // introduce a tag the escape did not already remove.
   function inlineMarkup(line) {
+    // CONSOLE-5: a backticked span is a chip a person can copy, not just monospace text. The class
+    // is what the stylesheet hangs on; role and tabindex are what put the copy within reach of a
+    // keyboard, and the delegated keydown handler further down answers them.
+    //
+    // THE CODE COMES OUT OF THE LINE BEFORE THE EMPHASIS PASSES AND GOES BACK AFTER THEM. Running
+    // the chip replace first left the chip's own contents in front of the bold and italic patterns,
+    // so `chmod +x *.sh *.py` came out as <code>chmod +x <em>.sh </em>.py</code> and the click
+    // copied "chmod +x .sh .py" -- a command a person would paste and run. Two globs in one command
+    // and a quoted draft holding **bold** are exactly what the persona sentence asks an agent to
+    // backtick, so this was the common case, not a corner. A chip's text is the agent's text.
+    //
+    // The placeholder is a NUL either side of the index, and any NUL the agent wrote is dropped
+    // first: a sentence that already held one could otherwise name a chip that is not there.
+    const codes = [];
     return escapeHtml(line)
-      // CONSOLE-5: a backticked span is a chip a person can copy, not just monospace text. The
-      // class is what the stylesheet hangs on; role and tabindex are what put the copy within
-      // reach of a keyboard, and the delegated keydown handler further down answers them.
-      .replace(/`([^`]+)`/g, '<code class="code-chip" tabindex="0" role="button" aria-label="Copy this">$1</code>')
+      .replace(/\u0000/g, "")
+      .replace(/`([^`]+)`/g, (whole, code) => `\u0000${codes.push(code) - 1}\u0000`)
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+      .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+      // The label is built from the code itself. "Copy this" was the element's whole accessible
+      // name, which replaced its contents -- so every chip in a transcript announced itself as the
+      // same anonymous button and the address, channel or hostname inside it was unreachable.
+      .replace(/\u0000(\d+)\u0000/g, (whole, index) => {
+        const code = codes[Number(index)] ?? "";
+        return `<code class="code-chip" tabindex="0" role="button" aria-label="Copy ${code}">${code}</code>`;
+      });
   }
 
   function paragraphMarkup(text) {
@@ -1676,7 +1695,12 @@
   // title a push notification puts on a lock screen. The clause is the grey line's job here, so it
   // comes off the sentence, which both restores the original's shape and takes a dead vendor's name
   // off a customer's screen. The five host strings are their own row; this is the console half.
-  const APPROVAL_WHERE_CLAUSE = /\s+on\s+(?:your local computer|[A-Za-z0-9 ._-]{1,40}'s computer)\.?$/i;
+  // Not end-anchored: the subagent summary writes the location MID-sentence -- "Run a task on Grok
+  // Bot's computer: “<instruction>”" (sand-auto-review-summaries.ts) -- so an anchor at the end left
+  // the dead vendor's name in the request line of the one card kind that names a task. The clause
+  // comes off wherever it is followed by a colon or a comma, and at the end it takes its full stop
+  // with it; what is left is "Run a task: “…”" with the grey line carrying this agent's name.
+  const APPROVAL_WHERE_CLAUSE = /\s+on\s+(?:your local computer|[A-Za-z0-9 ._-]{1,40}'s computer)(?:\.?$|(?=\s*[:,]))/i;
   const approvalRequestSentence = (card) => String(card.title ?? "").replace(APPROVAL_WHERE_CLAUSE, "").trim()
     || "This action needs your review";
 
@@ -1694,10 +1718,16 @@
     return `${text.slice(0, head)}\n...[${text.length - APPROVAL_COMMAND_CAP} chars omitted]...\n${text.slice(text.length - tail)}`;
   }
 
-  // Four states, and the two green ones are not the same sentence. "Always allowed" is claimed only
+  // Five states, and the two green ones are not the same sentence. "Always allowed" is claimed only
   // when a standing rule really is in the person's Auto-review settings -- the adapter hands the
   // saved allow list in, and the claim is that this approval's own proposed rule is on it. Anything
   // else that was approved was approved by hand, once.
+  //
+  // ONLY "denied" READS REFUSED. "expired" is a status the HOST writes by itself and in bulk:
+  // expireAllPendingAutoReviewApprovalCards() runs at host start, so a bundle swap, a restart, a
+  // session end, a settings change or a cancel all turn every unanswered card in a transcript into
+  // one -- and telling a person they refused something they never saw is a lie the page tells about
+  // them. Everything that is not pending, approved or denied is the host closing the question.
   function approvalPill(status, ruleSaved) {
     if (status === "pending") return '<span class="status-pill attention" data-approval-pill>Needs your yes</span>';
     if (status === "approved") {
@@ -1705,7 +1735,8 @@
         ? '<span class="status-pill success" data-approval-pill>Always allowed</span>'
         : '<span class="status-pill success" data-approval-pill>Allowed once</span>';
     }
-    return '<span class="status-pill muted" data-approval-pill>Refused</span>';
+    if (status === "denied") return '<span class="status-pill muted" data-approval-pill>Refused</span>';
+    return '<span class="status-pill muted" data-approval-pill>No longer waiting</span>';
   }
 
   // The whole card, in every state. A settled card keeps the request, the rule and the command:
@@ -1719,6 +1750,11 @@
     const ruleSaved = rule.length > 0 && (allowRules ?? []).some((entry) => String(entry).trim() === rule);
     const accent = pending ? "var(--amber-500)" : status === "approved" ? "var(--green-500)" : "var(--stone-500)";
     const command = typeof card.command === "string" ? card.command : "";
+    // The other half of the pill above: a card the host closed says so in words, the way the
+    // sibling kinds in decisionMarkup have always said "Closed by the host".
+    const closed = !pending && status !== "approved" && status !== "denied"
+      ? '<p class="approval-closed">The host closed this without an answer.</p>'
+      : "";
     // Only while it is still a question. Once it is settled the reason is why it was ASKED, and on a
     // card the person already answered it reads as a complaint about their answer.
     const reason = pending && typeof card.reason === "string" ? card.reason.trim() : "";
@@ -1745,7 +1781,7 @@
       + `<p class="approval-where">${escapeHtml(approvalWhere(card.surface, who))}</p>`
       + `<p class="approval-request">${escapeHtml(approvalRequestSentence(card))}</p>`
       + (reason.length > 0 ? `<p class="approval-why">${escapeHtml(reason)}</p>` : "")
-      + rulePara + disclosure + actions
+      + closed + rulePara + disclosure + actions
       + `</div>`;
   }
 
@@ -1818,7 +1854,11 @@
       ? ""
       : needsYouCardAttrs(escapeHtml, { kind: card.kind, agentId: activeContext().id, entryId: message.id, agentName: contextName(), title: cardPushTitle(card) });
     if (card.status === "sending") {
-      return `<div class="inline-card" style="--card-accent:var(--teal-500)"><div class="inline-card-header"><span class="inline-card-icon">◌</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small class="approval-result">Sending your answer…</small></span></div></div>`;
+      // cardPushTitle, not card.title: on an auto-review card the raw title is the host's own summary
+      // with "on Grok Bot's computer" in it, which is the one string the rest of this card exists to
+      // clean up. This state is held for a whole round trip on Allow and Refuse and for three
+      // gateway calls on Always allow, so it is a screen a person reads, not a flicker.
+      return `<div class="inline-card" style="--card-accent:var(--teal-500)"><div class="inline-card-header"><span class="inline-card-icon">◌</span><span class="inline-card-copy"><strong>${escapeHtml(cardPushTitle(card))}</strong><small class="approval-result">Sending your answer…</small></span></div></div>`;
     }
     // SECRET-1: the answered credential card collapses to one line and a green pill, the way the
     // original product's card does. Nothing about the value is on screen -- the card says the value

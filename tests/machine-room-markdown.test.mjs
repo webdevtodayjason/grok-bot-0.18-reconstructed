@@ -81,7 +81,36 @@ test("a backticked span is a chip, and the chip is reachable from a keyboard", (
   assert.match(html, /class="code-chip"/, "the class the stylesheet hangs on");
   assert.match(html, /tabindex="0"/, "a chip can be focused");
   assert.match(html, /role="button"/, "and it announces itself as something to press");
-  assert.match(html, /aria-label="Copy this"/, "with what pressing it does");
+  assert.match(html, /aria-label="Copy #titan-alerts"/,
+    "and the name a screen reader hears is the identifier itself, not an anonymous 'Copy this'");
+});
+
+test("a chip's own text is the agent's text, asterisks and all", () => {
+  // The emphasis passes used to run over the chip's contents, because the chip was built first. A
+  // command with two globs in it came out as <code>chmod +x <em>.sh </em>.py</code> and the click
+  // copied "chmod +x .sh .py" -- a command a person would paste and run. File names and quoted
+  // drafts are exactly what the standing persona asks an agent to backtick.
+  const inner = (code) => {
+    const html = paragraphMarkup(code);
+    const match = /<code class="code-chip"[^>]*>([\s\S]*?)<\/code>/.exec(html);
+    assert.ok(match, `no chip drawn for ${code}`);
+    return match[1];
+  };
+  assert.equal(inner("`chmod +x *.sh *.py`"), "chmod +x *.sh *.py");
+  assert.equal(inner("`**bold draft**`"), "**bold draft**");
+  assert.equal(inner("`SELECT *, id FROM t`"), "SELECT *, id FROM t");
+  // The label copies the same string, so the chip announces what the clipboard will hold.
+  assert.match(paragraphMarkup("`chmod +x *.sh *.py`"), /aria-label="Copy chmod \+x \*\.sh \*\.py"/);
+  // Emphasis OUTSIDE a chip still works, which is what the tokenising has to leave alone.
+  const mixed = paragraphMarkup("run `SELECT *, id FROM t` *now* and **then**");
+  assert.match(mixed, /<em>now<\/em>/);
+  assert.match(mixed, /<strong>then<\/strong>/);
+  assert.equal(inner("run `SELECT *, id FROM t` *now*"), "SELECT *, id FROM t");
+  // And a NUL an agent wrote cannot name a chip that is not there: the placeholder is a NUL pair.
+  const nul = String.fromCharCode(0);
+  const smuggled = paragraphMarkup(`${nul}0${nul} then \`ok\``);
+  assert.match(smuggled, /<code class="code-chip"[^>]*>ok<\/code>/);
+  assert.doesNotMatch(smuggled, /undefined/);
 });
 
 test("a chip is still escaped inside itself, which is the only guard on an agent's text", () => {

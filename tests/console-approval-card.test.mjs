@@ -108,12 +108,50 @@ test("approved by hand is Allowed once; approved under a saved rule is Always al
   assert.match(draw({ status: "approved", rule }, ["Allow anything at all"]), /data-approval-pill>Allowed once</);
 });
 
-test("denied and expired both read Refused, on the muted pill and the grey accent", () => {
-  for (const status of ["denied", "expired"]) {
+test("only a refusal reads Refused; a card the host closed says the host closed it", () => {
+  // "expired" is the HOST's own word and the host writes it in bulk:
+  // expireAllPendingAutoReviewApprovalCards() runs at host start, so a bundle swap, a restart, a
+  // session end, a settings change or a cancel turns every unanswered card in a transcript into one.
+  // Reading that back as "Refused" tells a person they did something they never did -- and this
+  // wave's own ship, updateHostNow inside two boxes, would have rewritten their pending cards.
+  const denied = draw({ status: "denied" });
+  assert.match(denied, /status-pill muted" data-approval-pill>Refused</);
+  assert.doesNotMatch(denied, /approval-closed/, "a refusal was answered, by them");
+  for (const status of ["expired", "error", "cancelled", "timeout"]) {
     const out = draw({ status });
-    assert.match(out, /status-pill muted" data-approval-pill>Refused</, `${status} reads Refused`);
-    assert.match(out, /--card-accent:var\(--stone-500\)/, `${status} is not painted as an approval`);
+    assert.match(out, /status-pill muted" data-approval-pill>No longer waiting</, `${status} does not claim a refusal`);
+    assert.doesNotMatch(out, />Refused</, `${status} is not a refusal`);
+    assert.match(out, /<p class="approval-closed">The host closed this without an answer\.<\/p>/,
+      `${status} says in words what happened, the way the sibling card kinds do`);
   }
+  for (const status of ["denied", "expired"]) {
+    assert.match(draw({ status }), /--card-accent:var\(--stone-500\)/, `${status} is not painted as an approval`);
+  }
+  // An answered card claims nothing of the sort, and neither does a pending one.
+  assert.doesNotMatch(draw({ status: "approved" }), /approval-closed/);
+  assert.doesNotMatch(draw(), /approval-closed/);
+});
+
+test("the answer in flight drops the host's location clause too", () => {
+  // card.status "sending" is held for a whole round trip on Allow and Refuse and for three
+  // sequential gateway calls on Always allow, so it is a screen a person reads. It used to print
+  // card.title raw, which is the one string the rest of this card exists to clean up.
+  const out = draw({ status: "sending" });
+  assert.match(out, /<strong>Echo hello-from-rac in shell<\/strong>/);
+  assert.match(out, /Sending your answer/);
+  assert.doesNotMatch(out, /Grok Bot/, "the dead upstream's name is on no state of this card");
+});
+
+test("the dead upstream's name is on none of the states, drawn or in flight", () => {
+  for (const status of ["pending", "approved", "denied", "expired", "sending"]) {
+    assert.doesNotMatch(draw({ status }), /Grok Bot/, `${status} keeps the old product's name off the screen`);
+  }
+  // The subagent summary, which writes the location mid-sentence rather than at the end.
+  assert.doesNotMatch(
+    draw({ surface: "subagent", title: "Run a task on Grok Bot's computer: “check the mail”" }),
+    /Grok Bot/,
+    "including the one summary whose location clause is not at the end",
+  );
 });
 
 // ---- the title, and the dead vendor's name --------------------------------------------------
@@ -144,14 +182,23 @@ test("the host's 'on X's computer' clause never reaches the title, the request o
   assert.doesNotMatch(out, /Grok Bot/, "the dead upstream's name is not on a customer's screen");
   assert.match(out, /<p class="approval-request">Echo hello-from-rac in shell<\/p>/);
   assert.equal(attrOf("data-title", out), "Echo hello-from-rac in shell");
-  // Both wordings the host writes, and only at the end of the sentence, where it is a location.
+  // Both wordings the host writes, wherever it writes them, because it is always a location.
   assert.equal(approvalRequestSentence({ title: "Run a command on your local computer" }), "Run a command");
   assert.equal(approvalRequestSentence({ title: "Post an alert to Jason on Titan's computer." }), "Post an alert to Jason");
-  // Mid-sentence it is part of what the agent asked for and stays.
+  // Mid-sentence too, because the subagent surface writes it there:
+  // sand-auto-review-summaries.ts line 249 writes `Run a task on Grok Bot's computer: “<instruction>”`,
+  // so an end-anchored strip left the vendor's name in the request line of that one card kind.
+  assert.equal(
+    approvalRequestSentence({ title: "Run a task on Grok Bot's computer: “check the mail”" }),
+    "Run a task: “check the mail”",
+  );
   assert.equal(
     approvalRequestSentence({ title: "Run a task on Titan's computer: “tidy the inbox”" }),
-    "Run a task on Titan's computer: “tidy the inbox”",
+    "Run a task: “tidy the inbox”",
   );
+  // A comma is the same shape. Anything else keeps its words, since only a location comes off.
+  assert.equal(approvalRequestSentence({ title: "Do a thing on Titan's computer, quietly" }), "Do a thing, quietly");
+  assert.equal(approvalRequestSentence({ title: "Walk on Titan's computer floor" }), "Walk on Titan's computer floor");
   // And a summary that is only the clause still leaves a sentence behind.
   assert.equal(approvalRequestSentence({ title: "" }), "This action needs your review");
 });

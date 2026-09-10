@@ -831,7 +831,12 @@ async function legTileLive(page) {
       check(mounts >= 1 && after != null && before != null && after > before && duty < 0.25,
         "the idle tile goes back for a new picture on its own and holds no client in between",
         `${mounts} mount(s) in 60 s with no render asking for one, the picture's stamp moved ${(((after ?? 0) - (before ?? 0)) / 1000).toFixed(1)}s forward, a client was up for ${(duty * 100).toFixed(0)}% of the window (a held one would be 100%)`);
-      info(`the idle minute cost ${idle.kib.toFixed(1)} KiB over ${idle.frames} websocket frames, ${perMount.toFixed(1)} KiB a grab, on grok-bot-local-vm at 1440x1000. At the steady two grabs a minute that is ${(perMount * 2).toFixed(1)} KiB; with the adapter's own measured 56.1 KiB idle minute (docs/APPS.md) ${(perMount * 2 + 56.1).toFixed(1)} KiB all in. A grab is a whole framebuffer and costs whatever is on the screen: 17.5 KiB over a settled desktop, 51.9 KiB at the client's default quality, 75.0 KiB over a photo-heavy page. The 100 KiB idle ceiling is API bytes at phone width and excludes noVNC by name (COST-2); the lever for this number is the cadence.`);
+      // NO "ALL IN" SUM. This number is websocket bytes at 1440x1000; the adapter's own measured
+      // 56.1 KiB idle minute is decoded API bytes at 390x844 at device scale 3, which is the width
+      // at which this tile costs 0 B. Adding the two described no machine. docs/APPS.md publishes no
+      // desktop idle ceiling, so there is nothing to add this to and the honest thing is to print it
+      // with its own viewport and say what it is not.
+      info(`the idle minute cost ${idle.kib.toFixed(1)} KiB over ${idle.frames} websocket frames, ${perMount.toFixed(1)} KiB a grab, on grok-bot-local-vm at 1440x1000. At the steady two grabs a minute that is ${(perMount * 2).toFixed(1)} KiB of websocket at this viewport. A grab is a whole framebuffer and costs whatever is on the screen: 17.5 KiB over a settled desktop, 51.9 KiB at the client's default quality, 75.0 KiB over a photo-heavy page. docs/APPS.md's 100 KiB idle ceiling is decoded API bytes at 390x844 and excludes noVNC by name (COST-2); it publishes no desktop idle ceiling, so this figure is reported rather than compared. The lever for it is the cadence.`);
     } else {
       skip("the idle tile goes back for a new picture on its own and holds no client in between", `out of budget: ${seconds(budgetLeft())} left`);
     }
@@ -1245,6 +1250,13 @@ async function legFiles(page) {
 const CHIP_FIXTURE = [
   "Alerts land in `#titan-alerts`, the host is `titan-box-01`, and anything with a paper trail goes out from `titan@myagents.email`.",
   "",
+  // A command with two globs in it, and an *italic* word after it. The first build of this leg pressed
+  // three asterisk-free identifiers, so it could not see that the bold and italic passes were running
+  // over the chip's own contents: `chmod +x *.sh *.py` drew as chmod +x <em>.sh </em>.py and the
+  // clipboard got "chmod +x .sh .py", a command a person would paste and run. File names and quoted
+  // drafts are exactly what the standing persona asks an agent to backtick, so this is the common case.
+  "Then `chmod +x *.sh *.py` and tell me *now* if it fails.",
+  "",
   "The draft I would send: `Thanks for the heads up. I pulled the overnight sweep and three hosts are out of policy; the summary is with you before nine.`",
 ].join("\n");
 
@@ -1302,9 +1314,9 @@ async function legChips(page) {
     ui.openPanel("Gate", "Chip check", `<div class="file-viewer-markdown">${ui.paragraphMarkup(text)}</div>`);
     return document.querySelectorAll("#panel-content code.code-chip").length;
   }, CHIP_FIXTURE).catch(() => null);
-  check(drawn === 4, "the page's own renderer draws a chip per backticked span",
-    drawn == null ? "window.__mrUi does not publish paragraphMarkup and openPanel" : `${drawn} chips from 4 backticked spans`);
-  if (drawn !== 4) return;
+  check(drawn === 5, "the page's own renderer draws a chip per backticked span",
+    drawn == null ? "window.__mrUi does not publish paragraphMarkup and openPanel" : `${drawn} chips from 5 backticked spans`);
+  if (drawn !== 5) return;
 
   const paint = await page.evaluate(() => {
     const chips = [...document.querySelectorAll("#panel-content code.code-chip")];
@@ -1335,6 +1347,53 @@ async function legChips(page) {
     long ? `${long.w}x${long.h} of ${paint.inner} wide, ${long.text.length} characters` : "no long chip drawn");
   await shoot(page, `chips-panel-${Date.now()}`);
 
+  // The chip's own text is the agent's text. Read off the live DOM after the browser has reparsed
+  // the markup, which is where the old bug became visible: the emphasis passes rewrote the inside of
+  // the chip, Chrome closed the <em> where it could, and textContent -- what the clipboard gets --
+  // came out short. The italic word after the chip has to survive, since that is what the fix must
+  // leave alone.
+  const inside = await page.evaluate(() => {
+    const chips = [...document.querySelectorAll("#panel-content code.code-chip")];
+    const glob = chips.find((c) => c.textContent.startsWith("chmod"));
+    if (glob) glob.setAttribute("data-gate-glob", "1");
+    const para = glob?.closest("p");
+    return {
+      text: glob?.textContent ?? null,
+      tags: glob ? [...glob.querySelectorAll("*")].map((el) => el.tagName.toLowerCase()) : null,
+      label: glob?.getAttribute("aria-label") ?? null,
+      italicAfter: para?.querySelector("em")?.textContent ?? null,
+    };
+  });
+  check(inside.text === "chmod +x *.sh *.py", "a chip holding two globs reads exactly what the agent wrote",
+    `the chip says ${JSON.stringify(inside.text)}`);
+  check(Array.isArray(inside.tags) && inside.tags.length === 0, "and nothing was painted inside it",
+    `the chip holds ${JSON.stringify(inside.tags)}`);
+  check(inside.italicAfter === "now", "while an italic word outside the chip still renders",
+    `the paragraph's em says ${JSON.stringify(inside.italicAfter)}`);
+
+  // The accessible name, out of Chrome's own accessibility tree rather than off the attribute. A
+  // chip whose name was "Copy this" was the same anonymous button for every identifier in a
+  // transcript, and the address inside it was unreachable from a screen reader.
+  const named = await (async () => {
+    const cdp = await page.context().newCDPSession(page);
+    try {
+      await cdp.send("Accessibility.enable");
+      const { root } = await cdp.send("DOM.getDocument", { depth: -1 });
+      const { nodeId } = await cdp.send("DOM.querySelector", { nodeId: root.nodeId, selector: "#panel-content code.code-chip[data-gate-glob]" });
+      if (!nodeId) return null;
+      const { nodes } = await cdp.send("Accessibility.getPartialAXTree", { nodeId, fetchRelatives: false });
+      const node = nodes.find((one) => one.name?.value);
+      return node ? { name: node.name.value, role: node.role?.value ?? "" } : null;
+    } catch (error) {
+      return { error: String(error?.message ?? error) };
+    } finally {
+      await cdp.detach().catch(() => {});
+    }
+  })();
+  check(named != null && typeof named.name === "string" && named.name.includes("chmod +x *.sh *.py"),
+    "and a screen reader hears the code itself, not an anonymous Copy this",
+    named == null ? "no accessibility node for the chip" : `Chrome computes name ${JSON.stringify(named.name)}, role ${JSON.stringify(named.role ?? "")}`);
+
   // The press. Hit-tested first, then a real mouse at the centre that hit test just cleared.
   const hit = await hitTest(page, "#panel-content code.code-chip");
   check(hit.found && hit.visible && hit.hit, "a mouse can reach the chip", `${hit.w}x${hit.h}, under its centre is ${hit.on}`);
@@ -1359,6 +1418,22 @@ async function legChips(page) {
     check(said === "Copied", "with a word for a screen reader", `the live region says ${JSON.stringify(said ?? "")}`);
   }
   await shoot(page, `chips-copied-${Date.now()}`);
+
+  // The glob chip, pressed with a real mouse: the clipboard string has to be byte-identical to what
+  // was between the backticks. Every other press in this leg is on an asterisk-free identifier.
+  const globAt = await centreOf(page, "#panel-content code.code-chip[data-gate-glob]");
+  if (!globAt) {
+    check(false, "pressing a chip that holds globs copies the command whole", "the glob chip has no box to press");
+  } else {
+    await page.evaluate(() => navigator.clipboard.writeText("nothing-was-copied")).catch(() => {});
+    await page.mouse.click(globAt.x, globAt.y);
+    const globCopy = await until(() => page.evaluate(async () => {
+      const read = await navigator.clipboard.readText().catch(() => null);
+      return read && read !== "nothing-was-copied" ? read : null;
+    }), within(6000), 250);
+    check(globCopy === "chmod +x *.sh *.py", "pressing a chip that holds globs copies the command whole",
+      globCopy ? `clipboard holds ${JSON.stringify(globCopy)}` : "the clipboard never changed");
+  }
 
   // Keyboard: the chip carries role="button" and tabindex="0", so Enter has to do what the mouse did.
   await page.evaluate(() => {
@@ -1491,6 +1566,14 @@ const APPROVAL_CASES = [
   },
   { label: "allowed-once", allow: [], card: { status: "approved", rule: null } },
   { label: "refused", allow: [], card: { status: "denied", rule: null } },
+  // The host writes this status itself, in bulk, at every host start -- a bundle swap, a restart, a
+  // session end, a settings change, a cancel. It used to draw the same "Refused" pill as a denial,
+  // which told a person they had refused something they never saw.
+  { label: "closed-by-host", allow: [], card: { status: "expired", rule: null } },
+  // Not a card at all: the state the page holds while the answer is in flight, one round trip on
+  // Allow and Refuse and three gateway calls on Always allow. It used to print the host's raw
+  // summary, which is the one string the rest of this card exists to clean up.
+  { label: "sending", allow: [], card: { status: "sending", rule: null } },
 ];
 
 async function legApproval(page) {
@@ -1503,7 +1586,7 @@ async function legApproval(page) {
   if (source == null) { check(false, "app.js still carries DECISION_ACTIONS and decisionMarkup to slice", "one of the two anchors moved"); return; }
   if (!await bootConsole(page, 60_000)) { check(false, "the console booted", `no adapter at ${ORIGIN} inside the budget`); return; }
 
-  // ---- part 1: the five states, shipped markup on the shipped stylesheet ----------------------
+  // ---- part 1: the six states, shipped markup on the shipped stylesheet -----------------------
   const drawn = await page.evaluate(({ src, cases, longCommand }) => {
     const escapeHtml = (value) => String(value ?? "")
       .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
@@ -1530,7 +1613,16 @@ async function legApproval(page) {
     const read = (label) => {
       const root = host.querySelector(`[data-state-case="${label}"]`);
       const card = root?.querySelector("[data-approval-card]") ?? null;
-      if (card == null) return null;
+      if (card == null) {
+        // The in-flight state is a plain inline card, not an approval card. It still gets read,
+        // because the words on it are words a person sits looking at for a round trip.
+        const plain = root?.querySelector(".inline-card") ?? null;
+        return plain == null ? null : {
+          text: plain.textContent.replace(/\s+/g, " ").trim(),
+          title: plain.querySelector("strong")?.textContent ?? "",
+          box: `${Math.round(plain.getBoundingClientRect().width)}x${Math.round(plain.getBoundingClientRect().height)}`,
+        };
+      }
       return {
         text: card.textContent.replace(/\s+/g, " ").trim(),
         commandShown: card.querySelector(".approval-command pre")?.textContent ?? "",
@@ -1539,6 +1631,7 @@ async function legApproval(page) {
         where: card.querySelector(".approval-where")?.textContent ?? "",
         request: card.querySelector(".approval-request")?.textContent ?? "",
         rule: card.querySelector(".approval-rule")?.textContent ?? "",
+        closed: card.querySelector(".approval-closed")?.textContent ?? "",
         buttons: [...card.querySelectorAll("[data-decide]")].map((b) => b.getAttribute("data-decide")),
         disclosure: card.querySelector(".approval-command") != null,
         box: `${Math.round(card.getBoundingClientRect().width)}x${Math.round(card.getBoundingClientRect().height)}`,
@@ -1547,7 +1640,7 @@ async function legApproval(page) {
     return Object.fromEntries(cases.map((one) => [one.label, read(one.label)]));
   }, { src: source, cases: APPROVAL_CASES, longCommand: `echo ${"a".repeat(761)}` });
 
-  const pills = { "pending-rule": "Needs your yes", "pending-no-rule": "Needs your yes", "always-allowed": "Always allowed", "allowed-once": "Allowed once", refused: "Refused" };
+  const pills = { "pending-rule": "Needs your yes", "pending-no-rule": "Needs your yes", "always-allowed": "Always allowed", "allowed-once": "Allowed once", refused: "Refused", "closed-by-host": "No longer waiting" };
   for (const [label, want] of Object.entries(pills)) {
     const got = drawn[label];
     check(got != null && got.pill === want, `the ${label} card's pill reads ${JSON.stringify(want)}`, got == null ? "no card drawn" : `pill ${JSON.stringify(got.pill)}, ${got.box}`);
@@ -1569,8 +1662,16 @@ async function legApproval(page) {
       `the ${label} card's request sentence has the host's location clause stripped`, JSON.stringify(drawn[label]?.request ?? null));
     check(drawn[label]?.disclosure === true, `the ${label} card keeps the command behind a disclosure`);
   }
+  check(drawn["closed-by-host"]?.closed === "The host closed this without an answer.",
+    "a card the host closed says so in words rather than claiming the person refused it",
+    JSON.stringify(drawn["closed-by-host"]?.closed ?? null));
+  check(drawn.refused?.closed === "" && drawn["allowed-once"]?.closed === "",
+    "and a card the person really answered claims nothing of the sort");
+  check(drawn.sending?.title === "Echo hello-from-command-card in shell",
+    "the answer in flight drops the host's location clause too",
+    `the in-flight card says ${JSON.stringify(drawn.sending?.title ?? null)}`);
   const noOldName = Object.values(drawn).every((one) => one != null && !one.text.includes("Grok Bot"));
-  check(noOldName, "the dead upstream's name is on none of the five cards");
+  check(noOldName, "the dead upstream's name is on none of the six states, drawn or in flight");
   check(drawn["pending-rule"]?.commandShown?.includes("[366 chars omitted]") === true,
     "a 766-character command is elided at 400 and the remainder counted",
     JSON.stringify((drawn["pending-rule"]?.commandShown ?? "").match(/\[[^\]]*omitted[^\]]*\]/)?.[0] ?? null));
@@ -1595,7 +1696,7 @@ async function legApproval(page) {
   check(toggled.closed.join("") === "Show the command" && toggled.open.join("") === "Hide the command",
     "the disclosure swaps its own two words with no script behind it", `closed ${JSON.stringify(toggled.closed)}, open ${JSON.stringify(toggled.open)}`);
   info(`the command block wraps (${toggled.preWrap}) and clips at ${toggled.preMax}`);
-  info(`the five cards at 1440x1000: ${Object.entries(drawn).map(([k, v]) => `${k} ${v?.box ?? "-"}`).join(", ")}`);
+  info(`the six states at 1440x1000: ${Object.entries(drawn).map(([k, v]) => `${k} ${v?.box ?? "-"}`).join(", ")}`);
   info(`pending pill colour ${drawn["pending-rule"]?.pillColour}, always-allowed ${drawn["always-allowed"]?.pillColour}, refused ${drawn["refused"]?.pillColour}`);
   await page.evaluate(() => {
     const first = document.querySelector('#gate-approval-states [data-state-case="pending-rule"] .approval-command');

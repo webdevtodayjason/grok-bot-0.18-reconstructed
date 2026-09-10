@@ -1008,6 +1008,7 @@ code.code-chip[data-copy-failed]::after {
    a coloured line under a reply as a failure. */
 .approval-where,
 .approval-why,
+.approval-closed,
 .approval-rule {
   margin: 0;
   color: var(--text-secondary);

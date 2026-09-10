@@ -458,13 +458,20 @@ the 390x244 thumbnail is not visibly worse for it (4,207 characters against 4,26
 The desktop dialog's own client is untouched.
 
 **What those numbers are not.** `docs/APPS.md`'s **100 KiB idle** and **600 KiB working** ceilings
-are *decoded API bytes at phone width*, and they exclude noVNC **by name** as `COST-2`. The gate
-prints the tile against those figures because that is the only honest way to say whether it is large,
-not because they are the same budget. At two grabs a minute the idle tile is about **36.6 KiB** on a
-settled desktop, or **92.7 KiB all in** with the adapter's own measured 56.1 KiB idle minute — and a
-grab over a photo-heavy page measured 75.0 KiB, which at two a minute would be over on its own. **A
-grab is a whole framebuffer and costs whatever is on the screen.** If Jason wants that number lower,
-the lever is the cadence, and the numbers to move it with are in this table.
+are *decoded API bytes at 390x844, device scale 3, touch*, and they exclude noVNC **by name** as
+`COST-2`. It publishes no desktop idle ceiling at all. The gate prints the tile against those figures
+because that is the only honest way to say whether it is large, not because they are the same budget.
+At two grabs a minute the idle tile is **36.6 to 37.7 KiB** of websocket on a settled desktop at
+1440x1000 across runs, and a grab over a photo-heavy page measured 75.0 KiB, which at two a minute
+would be over the phone figure on its own. **A grab is a whole framebuffer and costs whatever is on
+the screen.** If Jason wants that number lower, the lever is the cadence, and the numbers to move it
+with are in this table.
+
+**These bytes are not added to the adapter's.** An earlier version of this paragraph and of the gate's
+own INFO line summed the tile's 1440x1000 websocket bytes with the adapter's measured **56.1 KiB** idle
+minute to get a "92.7 KiB all in" — but that 56.1 KiB is measured at **390x844**, the width at which
+this tile's own measurement is **0 B**, so the sum described no machine. Both halves are now printed
+with the viewport they were measured at and nothing is added across them.
 
 **Where that ceiling really applies, this costs nothing.** At phone width the rails are drawers, and a
 shut drawer is `visibility: hidden` and translated off the right edge — so the tile's **bounding box
@@ -1169,11 +1176,36 @@ inside an 810 px panel: two lines, wrapped, not clipped and not overflowing.
 ### What changed, and what deliberately did not
 
 `inlineMarkup` in `app.js` emits `<code class="code-chip" tabindex="0" role="button" aria-label="Copy
-this">`. **That is the whole renderer change.** No linkifier, no fenced-code block handler — both are
-obvious, neither was asked for, and both are new behaviour rather than preserved behaviour. A bare URL
-and a markdown link render exactly as they did before this wave, which is to say plainly, brackets and
-all; a fenced block is still literal paragraphs. If either of those is wanted it is its own gap row,
+<the code>">`. **That is the whole renderer change.** No linkifier, no fenced-code block handler — both
+are obvious, neither was asked for, and both are new behaviour rather than preserved behaviour. A bare
+URL and a markdown link render exactly as they did before this wave, which is to say plainly, brackets
+and all; a fenced block is still literal paragraphs. If either of those is wanted it is its own gap row,
 with its own before-and-after.
+
+**The code comes out of the line before the emphasis passes and goes back after them.** Each backticked
+span is replaced by a NUL-wrapped index, the bold and italic patterns run over what is left, and the
+chips are built from the captured strings at the end. The first build of this did the chip replace
+first and left the chip's own contents in front of those patterns, so
+
+```
+`chmod +x *.sh *.py`   ->   <code class="code-chip" …>chmod +x <em>.sh </em>.py</code>
+`**bold draft**`       ->   <code class="code-chip" …><strong>bold draft</strong></code>
+```
+
+and a click copied `chmod +x .sh .py` — a command a person would paste and run, silently missing two
+globs. Two globs in one command and a quoted draft holding `**bold**` are exactly what the persona
+sentence below asks an agent to put in backticks, so this was the common case and not a corner. Any NUL
+the agent wrote is dropped before the pass, so a sentence that already held one cannot name a chip that
+is not there. **A chip's text is the agent's text, byte for byte** — that is the whole point of the
+copy, and `verify-console-polish --chips` now presses a chip holding two globs and compares the
+clipboard string to what was between the backticks.
+
+**The accessible name is the code itself**, built inside the replace while the raw string is in hand.
+It was `aria-label="Copy this"` for one build, and an `aria-label` *replaces* the element's contents as
+its accessible name — so every chip in a transcript announced itself as the same anonymous "Copy this,
+button" and the address, channel or hostname inside it was unreachable from a screen reader. Chrome's
+own accessibility tree now computes `Copy chmod +x *.sh *.py`, read over CDP in the gate rather than
+trusted off the attribute.
 
 Proving that is `tests/machine-room-code-chip-pixels.test.mjs`. It renders one fixture transcript
 twice in the same browser at 900x1400 over the shipped stylesheets — once through the renderer as it
@@ -1195,7 +1227,8 @@ Two things that test forced, and both are in the shipped CSS on purpose:
 
 A click on a chip copies **that chip's text and nothing else**. It copies `textContent`, never a data
 attribute: `escapeHtml` runs before the backtick pass, so the markup holds `&amp;` and `&lt;` while
-`textContent` is the original the agent wrote. `navigator.clipboard.writeText` with a
+`textContent` is the original the agent wrote — and nothing is painted *inside* a chip, so there is no
+`<em>` for `textContent` to drop on the way out. `navigator.clipboard.writeText` with a
 `document.execCommand("copy")` fallback, because a relay reached over plain http on a LAN address is
 not a secure context and the promise there never arrives; when both fail the chip says so with a `✕`
 rather than showing a tick that lied.
@@ -1277,9 +1310,10 @@ since `index.html` stamps a cache-busting `?v=` on every stylesheet — the firs
 its own `app.js` and the relay's older CSS and reported the chip as body white with no border, which
 was the old rule and not this build at all.
 
-**Measured on `grok-bot-local-vm`, Chrome 1440x1000, 2026-09-10: 17 passed, 0 failed, 0 skipped**,
-including a real agent's reply drawing three chips at `rgb(255, 107, 107)` and a mouse press putting
-`#titan-alerts` on the clipboard.
+**Measured on `grok-bot-local-vm`, this Mac, Chrome 1440x1000, 2026-09-10: 22 passed, 0 failed, 0
+skipped**, including a real agent's reply drawing six chips at `rgb(255, 107, 107)`, a mouse press
+putting `#titan-alerts` on the clipboard, a press on `chmod +x *.sh *.py` putting that command on the
+clipboard whole, and Chrome computing the accessible name `Copy chmod +x *.sh *.py`.
 
 `verify-console-polish.mjs` also gained the gate user agent it never sent. It now identifies itself as
 `titanbot-gate/verify-console-polish` on every API call and as the browser's real `userAgent`, so a
@@ -1288,7 +1322,7 @@ repo importing nothing from `scripts/gate-agent.mjs`.
 
 | Gate | What it covers |
 |---|---|
-| `node --test tests/machine-room-markdown.test.mjs` | the renderer's own shape: the chip's class and its keyboard attributes, that a chip is still escaped inside itself, that `overflow-wrap: anywhere` and `cursor: pointer` are in the shipped rule, that the chip is never `--danger-500`, and that nothing else styles a bare `code` any more |
+| `node --test tests/machine-room-markdown.test.mjs` | the renderer's own shape: the chip's class and its keyboard attributes, that the accessible name is the code, that a chip holding asterisks keeps them and holds no tags, that a chip is still escaped inside itself, that `overflow-wrap: anywhere` and `cursor: pointer` are in the shipped rule, that the chip is never `--danger-500`, and that nothing else styles a bare `code` any more |
 | `node --test tests/machine-room-code-chip-pixels.test.mjs` | before and after in one browser: every non-chip element on the same pixel, no linkifier, no fenced-code handler, the chips the only nodes whose colour moved, and the long chip wrapping inside the bubble |
 | `node --test tests/machine-room-files.test.mjs` | that the viewer still renders through the same renderer |
 | `node --test tests/standing-persona.test.mjs` | that every agent, not only the lead, is told to use backticks, and that the sentence names no surface |
@@ -1335,14 +1369,23 @@ approved this", so a person had no way to see afterwards what it was they had al
 `detail` string, which is why the card could draw neither as its own thing. It now carries
 `command`, `reason` and `surface` as their own fields; `detail` stays for anything still reading it.
 
-### The four pill states
+### The five pill states
 
 | Pill | When | Colour |
 |---|---|---|
 | Needs your yes | pending | `.status-pill attention`, the amber the needs-you pill already uses |
 | Always allowed | approved, **and** this approval's own proposed rule is on the host's `allowInstructions` | `.status-pill success` |
 | Allowed once | approved, with no such rule on the list | `.status-pill success` |
-| Refused | denied or expired | `.status-pill muted` |
+| Refused | denied, and **only** denied | `.status-pill muted` |
+| No longer waiting | anything else the host settled it as — `expired`, `error`, `cancelled`, `timeout` — with the line "The host closed this without an answer." under the request | `.status-pill muted` |
+
+**Only a refusal reads Refused.** `expired` is a status the host writes by itself and in bulk:
+`expireAllPendingAutoReviewApprovalCards()` runs at **host start**, so a bundle swap, a restart, a
+session end, a settings change or a cancel turns every unanswered auto-review card in a transcript into
+one. For one build this page drew those as "Refused", which tells a person they refused something they
+never saw — and this wave's own ship, `updateHostNow` inside two boxes, is exactly the event that
+produces them. The sibling kinds in `decisionMarkup` were already honest about it ("Closed by the host
+— expired"); this card now says the same thing in its own words.
 
 Nothing on this card is painted in the error colour. An approval that is merely waiting is not a
 failure, and a coloured line under a reply gets read as one.
@@ -1359,11 +1402,30 @@ every reload.
 The host writes the location into its own summary, and it writes it with the **old** product's name:
 `source/host/runner/sand-auto-review-summaries.ts` says "on Grok Bot's computer" in five places. That
 summary is the card's title and is also what a push notification puts on a lock screen. The console
-strips a trailing `on <someone>'s computer` (or `on your local computer`) off the summary to get the
-request sentence, and draws the clause itself as the grey line with **this agent's** name in it. That
-is both the original's own shape and the console half of taking a dead vendor's name off a customer's
-screen. It is anchored at the end of the sentence on purpose: mid-sentence — "Run a task on Titan's
-computer: '…'" — the clause is part of what the agent asked for and stays.
+strips `on <someone>'s computer` (or `on your local computer`) off the summary to get the request
+sentence, and draws the clause itself as the grey line with **this agent's** name in it. That is both
+the original's own shape and the console half of taking a dead vendor's name off a customer's screen.
+
+**It is not anchored at the end.** It was for one build, and the one summary that writes the location
+mid-sentence is `sand-auto-review-summaries.ts:249` — `Run a task on Grok Bot's computer: “<instruction>”`,
+the subagent surface, which this card knows by name as "Titan wants to start a task". So the card read
+"Run a task on Grok Bot's computer: “check the mail”" with the vendor's name in it. The clause now comes
+off wherever it is followed by a colon or a comma as well as at the end of the sentence, where it still
+takes its full stop with it:
+
+| summary the host writes | request sentence |
+|---|---|
+| `Run a command on your local computer` | Run a command |
+| `Post an alert to Jason on Titan's computer.` | Post an alert to Jason |
+| `Run a task on Grok Bot's computer: “check the mail”` | Run a task: “check the mail” |
+| `Walk on Titan's computer floor` | unchanged — only a location comes off, not any run of those words |
+
+**And the answer in flight is the same card's words.** While a press is on its way to the host,
+`decisionMarkup` draws a one-line "Sending your answer…" card — held for a whole round trip on Allow
+and Refuse and for three sequential gateway calls on Always allow (`getHostSettings`,
+`setHostSettings`, `resolveAutoReviewApproval`), so it is a screen a person reads rather than a flicker.
+It printed `card.title` raw for one build, which put "on Grok Bot's computer" back on the screen on
+every press; it now prints `cardPushTitle(card)`, the same helper the lock-screen title uses.
 
 The five host strings are **NAME-1's**, not this card's, and they are still there.
 
@@ -1468,11 +1530,28 @@ restarted through Coolify, and no box had an agent mid-turn when it took the swa
 | `git diff <shared tip>..<merge> -- source/ deploy/` | one file, `standing-persona.ts`, 9 lines |
 | `verify-console-polish --chips` | **17 passed, 0 failed** |
 | `verify-console-polish --approval` | **51 passed, 0 failed**, including one real forced approval end to end |
-| `verify-console-polish --tile-live` | **12 passed, 0 failed**; the tile followed a page change in **1.01 s**, a working minute cost **18.8 KiB**, an idle grab **18.6 KiB** and a hidden tab **0 B** |
+| `verify-console-polish --tile-live` | **12 passed, 0 failed**; the tile followed a page change in **1.01 s**, and the bytes are a range rather than a number — see below |
 | `verify-console-polish --tile --files` | **24 + 4 passed, 0 failed** after the integration fix below |
 | `verify-console-polish --boot --scroll --picker --badge` | **10 passed, 0 failed** |
 | `verify-persona` | **13 of 13**, 63 s. An earlier run in the same hour reported one failure — the last question's turn timed out at 93 s while three gates were sharing this box — and that is the box's endpoint, not the prompt |
 | `verify-dashboard` | **158 passed, 16 failed**, and the SAME sixteen in the same order on a clean tree at the shared tip. Not one of them belongs to this wave; DASH-7 carries the list |
+
+**The tile's bytes swing, so they are quoted as a range with the run that produced each one.** Every
+figure here is websocket bytes at **1440x1000 on `grok-bot-local-vm`, this Mac**, through
+playwright-core with CDP frame accounting. A grab is a whole framebuffer and costs whatever is on the
+screen, which is why a single run is not a number to plan with:
+
+| | across runs | the ship's run | reruns the same day |
+|---|---|---|---|
+| a forced working minute | **6.2 to 137.1 KiB** (§3) | 18.8 KiB | 9.5 KiB, and 16.0 KiB over 11 frames on a third run |
+| one whole page change | **21.4 to 104.0 KiB**, over 17 to 62 frames | 21.4 KiB / 17 frames | 104.0 KiB / 62 frames, and 24.2 KiB / 21 frames on a third run |
+| an idle grab | **17.5 to 18.8 KiB** on a settled desktop, 75.0 KiB over a photo-heavy page | 18.6 KiB | 18.8 KiB |
+| a hidden tab, and the rail at 390x844 | **0 B**, 0 readers, every run | 0 B | 0 B |
+
+The latency is the stable half: **0.76 s to 1.01 s** from the launcher returning to a changed frame,
+across the same runs, bounded by the 3 s live cadence. The earlier version of this table printed one
+run's working minute and idle grab as if they were the quantity, with §3 a thousand lines up being
+honest about the spread; the table is where a reader stops, so the spread belongs here.
 
 ### On the R750, through `https://console.titanium.bot` at 1440x1000
 
