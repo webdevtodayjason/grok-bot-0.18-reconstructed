@@ -48,6 +48,9 @@ const GATES = [
   "verify-one-console.mjs",
   "verify-one-console-browser.mjs",
   "verify-control-plane.mjs",
+  // ONBOARD-2. It signs a THROWAWAY super admin in at a live api.titanium.bot/v1/sessions to run one
+  // real onboarding, so the attempt it writes is a real row on the operator's own panel.
+  "verify-onboard-r750.mjs",
   // VOICE-1: it posts a password at a relay's own /login to get the console cookie the voice door
   // takes, and drives real Chrome through the same door. The relay is one it starts itself, but the
   // door is real and the header costs one import, so it is held to the same rule.
