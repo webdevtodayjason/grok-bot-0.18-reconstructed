@@ -81,6 +81,14 @@ export async function addClient({
   company: rawCompany,
   name = "",
   bytes = randomBytes,
+  // ONBOARD-2. When false this stops after the two rows exist and does NOT build the box, so the
+  // caller can answer at once and run the build as a job behind a polled card.
+  //
+  // WHY THE DEFAULT IS TRUE AND STAYS TRUE. Every existing caller -- cp/server.mjs's handleSignup
+  // included, which is not edited -- gets exactly today's behaviour. The refusals above are the
+  // whole of what this option can change about what a person is told, and it changes none of them:
+  // they are all decided before the first write either way.
+  awaitProvisioning = true,
 }) {
   const email = normalizeEmail(wanted);
   const company = String(rawCompany ?? "").trim();
@@ -124,8 +132,27 @@ export async function addClient({
     throw error;
   }
 
-  const result = await provisionTenant({ store, config, slug, name: company, fetchImpl, probeImpl });
   const signIn = `https://${host}`;
+
+  // ONBOARD-2. The caller is running the build as a job, so this hands back the account and the
+  // password NOW. state is "building" and boxReady is false, which is exactly what is true: the
+  // workspace row exists, nothing has been built yet, and the person can already sign in.
+  if (!awaitProvisioning) {
+    return {
+      ok: true,
+      slug,
+      account,
+      tenant: store.getTenant(slug),
+      temporaryPassword,
+      signIn,
+      state: "building",
+      boxReady: false,
+      boxNote: "The workspace was created and its computer is being built now.",
+      provisioning: { ok: true, step: "", why: "", awaited: false },
+    };
+  }
+
+  const result = await provisionTenant({ store, config, slug, name: company, fetchImpl, probeImpl });
   if (!result.ok) {
     return {
       ok: true,

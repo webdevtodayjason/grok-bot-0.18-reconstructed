@@ -53,6 +53,9 @@ const FULL_FACTS = {
   microphones: [{ id: "mic-1", label: "MacBook Pro Microphone" }],
   microphone: "mic-1",
   voice: { enabled: true, available: true },
+  // VOICE-7. The Talk mode row, so the sweeps below read its words too: a row added to this surface
+  // that no banned-word or one-control leg ever looked at is a row outside the rule.
+  talkMode: "push",
   botName: "Titan",
   botEmail: "titan@acme.example",
   botCount: 4,

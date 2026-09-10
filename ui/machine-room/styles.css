@@ -5225,3 +5225,120 @@ body[data-composer-drop="1"] .composer {
     text-align: center;
   }
 }
+
+/* ============================================================== VOICE-7: the speech panel
+   Jason, 2026-09-10 11:09: "a semi-transparent modal over the current chat window where that is
+   being built out. We see the words being created, and when it's done, that just becomes the next
+   line ... That modal goes away and that becomes the next line from whoever was speaking."
+
+   WHERE IT LIVES, AND WHY THAT IS THE WHOLE OF THE FOOTER PROOF. It is a child of
+   .conversation-space (index.html:134), which is position:relative and which app.js never rebuilds
+   -- renderTranscript only ever writes .transcript's innerHTML. So the panel floats over the
+   conversation and CANNOT touch .control-shelf: not a margin, not a grid row, nothing. The strip
+   this replaces was inserted before #composer and therefore became a grid ITEM of the shelf, which
+   is the measured cause of VOICE-6's growth (1392x106 to 1392x160 at 1440x900 on this Mac,
+   390x133 to 390x199 on a phone). Nothing in this block is inside that grid.
+
+   pointer-events: none on the layer, because the conversation underneath stays clickable while
+   somebody is talking. The panel is something to read, never something to dismiss.
+
+   IT MUST NOT READ AS AN ERROR (memory: host-notes-read-as-errors.md). No title, no icon, no close
+   control, no border that looks like dialog chrome, no condition name. An orb that is obviously
+   listening, and the words. It dissolves; it does not close.
+
+   COLOUR. --glass-strong is rgba(17,25,30,0.82), which is the brief's "Midnight at about 80 per
+   cent", and --blur-soft is the blur behind it -- both are this console's own tokens.css. The
+   accent is the orb's own --teal-300/--teal-500. The brand board's Signal Cyan #00C8F0 belongs to
+   titanium.bot's marketing site and appears nowhere in this console; using it here would make the
+   newest surface the one that does not match. Same named deviation as .voice-talk above. */
+.voice-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  place-items: center;
+  padding: 24px;
+  pointer-events: none;
+}
+/* :not([hidden]) for the same reason .voice-strip needs it: [hidden] loses to an author display
+   rule, and a panel that cannot hide is a permanent sheet over every conversation. */
+.voice-overlay:not([hidden]) { display: grid; }
+
+.voice-overlay-panel {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  width: min(34rem, 100%);
+  max-height: 60%;
+  overflow-y: auto;
+  padding: 20px 22px;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: var(--radius-lg);
+  background: var(--glass-strong);
+  box-shadow: var(--shadow-medium), var(--inset-highlight);
+  backdrop-filter: blur(var(--blur-soft)) saturate(118%);
+  opacity: 1;
+  transform: scale(1);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+/* The dissolve. The words stay put and fade; nothing slides, because a panel that moves on its way
+   out draws the eye to the exit instead of to the line it just became. */
+.voice-overlay[data-phase="gone"] .voice-overlay-panel {
+  opacity: 0;
+  transform: scale(0.985);
+}
+
+.voice-overlay-orb {
+  width: 0.85rem;
+  height: 0.85rem;
+  margin-top: 0.3rem;
+  border-radius: 50%;
+  background: var(--teal-300);
+  flex: 0 0 auto;
+  animation: voice-orb-listen 1.8s ease-in-out infinite;
+}
+
+.voice-overlay-text {
+  margin: 0;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 1.02rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+/* Before the first word arrives, and on a vendor that sends no live words at all. One plain word,
+   in the muted colour, so the panel is never an empty sheet. */
+.voice-overlay-waiting {
+  color: var(--text-tertiary);
+  font-size: 0.95rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-overlay-orb { animation: none; }
+  /* No fade either: the panel is there, and then it is not. The row it became is the record. */
+  .voice-overlay-panel { transition: none; }
+}
+
+@media (max-width: 690px) {
+  .voice-overlay { padding: 12px; }
+  .voice-overlay-panel {
+    max-height: 52%;
+    padding: 16px 16px;
+    gap: 11px;
+  }
+  .voice-overlay-text { font-size: 0.98rem; }
+}
+
+/* PUSH TO TALK, the button while it is held. A filled state rather than a second control, and the
+   three properties without which a press-and-hold on a 38px phone circle is a long-press context
+   menu, a text selection and a drag instead of a turn at the microphone. */
+.voice-talk {
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+.voice-talk.is-held {
+  border-color: var(--teal-300);
+  background: color-mix(in srgb, var(--teal-500) 46%, rgba(12, 23, 27, 0.5));
+  color: var(--text-primary);
+}

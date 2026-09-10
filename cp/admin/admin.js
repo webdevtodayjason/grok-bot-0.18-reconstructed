@@ -332,9 +332,9 @@
   $("refresh").addEventListener("click", () => {
     // ADMIN-2. Refresh takes the new-client card away with everything else on the screen, because it
     // is the only sight of a temporary password there will ever be and it must not sit around after
-    // the operator has moved on. It also stops the provisioning poll: a fresh load is about to
-    // answer the same question the poll was asking.
-    stopWatchingProvision();
+    // the operator has moved on. It also stops the step poll: a fresh load is about to answer the
+    // same question the poll was asking.
+    stopWatchingSteps();
     clear($("addClientResult"));
     void loadAll();
   });
@@ -728,6 +728,231 @@
     return row;
   }
 
+  /**
+   * ONBOARD-2. Where this customer's invite got to, on their own row.
+   *
+   * A workspace that predates the job has no steps and reads as one sentence rather than five
+   * waiting rows: there were no steps, which is a different fact from "none of them have happened".
+   */
+  function clientOnboardingRow(client) {
+    const row = el("div", "row onboardRow");
+    row.appendChild(el("span", "quiet", "Invite"));
+    const state = client.onboarding;
+    if (state == null) {
+      row.appendChild(el("span", "quiet", "this workspace was made before the console ran invites, so there are no steps to show"));
+      return row;
+    }
+    if (state.done === true) {
+      row.appendChild(el("span", "chip ok", "done"));
+      const last = (state.steps ?? [])[4];
+      if (last?.at) {
+        const clock = el("span", "quiet", ago(last.at));
+        clock.title = when(last.at);
+        row.appendChild(clock);
+      }
+      return row;
+    }
+    const strip = el("div", "steps");
+    drawSteps(strip, state, { onRetry: (button) => retryOnboarding(client.slug, button, null) });
+    row.appendChild(strip);
+    return row;
+  }
+
+  /**
+   * ONBOARD-2. What went out to this customer, and the two ways to send it again.
+   *
+   * Who, whom, when, the outcome and the provider's id. There is no link and no password in that
+   * record and there is none on this row: a sign-in link is a bearer credential the relay never
+   * checks for revocation, so it is answered once into a banner and written down nowhere.
+   */
+  function clientWelcomeRow(client) {
+    const row = el("div", "row welcomeRow");
+    row.appendChild(el("span", "quiet", "Welcome"));
+    const welcome = client.welcome ?? { rows: [], read: false, why: "" };
+    // The invite's own fifth step, used when the send record cannot be read. It says less than the
+    // record does -- no provider id, no second send -- and it says something true, which beats "not
+    // measured" beside a welcome that plainly went.
+    const step = (client.onboarding?.steps ?? []).find((one) => one.key === "welcome") ?? null;
+    if (welcome.read !== true && step != null && step.state !== "waiting") {
+      row.appendChild(el("span", step.state === "ok" ? "chip ok" : step.state === "failed" ? "chip attack" : "chip locked",
+        step.state === "ok" ? `sent to ${String(step.detail?.to ?? "the owner")}` : String(step.why || step.state)));
+      if (step.at) {
+        const clock = el("span", "quiet", ago(step.at));
+        clock.title = `${when(step.at)} -- ${String(welcome.why || "this control plane keeps no record of welcome sends, so this is the invite's own step")}`;
+        row.appendChild(clock);
+      }
+    } else if (welcome.read !== true) {
+      row.appendChild(measured(null, String(welcome.why || "this control plane keeps no record of welcome sends")));
+    } else if ((welcome.rows ?? []).length === 0) {
+      row.appendChild(el("span", "quiet", "nothing has been sent to this customer"));
+    } else {
+      for (const send of welcome.rows.slice(0, 3)) {
+        const chip = el("span", send.outcome === "sent" ? "chip ok" : "chip attack", `${send.outcome || "sent"} to ${send.to}`);
+        chip.title = `${when(send.at)}${send.resendId ? ` -- provider id ${send.resendId}` : ""}${send.actor ? ` -- sent by ${send.actor}` : ""}${send.shape ? ` -- ${send.shape}` : ""}`;
+        row.appendChild(chip);
+      }
+    }
+
+    const fresh = document.createElement("label");
+    fresh.className = "check";
+    const tick = document.createElement("input");
+    tick.type = "checkbox";
+    tick.className = "welcomeNewPassword";
+    fresh.appendChild(tick);
+    fresh.appendChild(text(" with a new password"));
+    row.appendChild(fresh);
+
+    const send = el("button", "ghost small", "Send again");
+    send.type = "button";
+    send.addEventListener("click", async () => {
+      send.disabled = true;
+      try {
+        const answer = await api("POST", `/v1/admin/clients/${encodeURIComponent(client.slug)}/welcome`, { withNewPassword: tick.checked === true });
+        // A new password is shown ONCE, here, and nowhere else ever again.
+        banner(tick.checked === true && answer.temporaryPassword
+          ? `${answer.message} New temporary password: ${answer.temporaryPassword}`
+          : String(answer.message || "The welcome went."), answer.sent === true);
+        await loadClients().catch(() => {});
+      } catch (error) { banner(String(error.message)); }
+      finally { send.disabled = false; }
+    });
+    row.appendChild(send);
+
+    const link = el("button", "ghost small", "Copy a sign-in link");
+    link.type = "button";
+    link.addEventListener("click", async () => {
+      link.disabled = true;
+      try {
+        const answer = await api("POST", `/v1/admin/clients/${encodeURIComponent(client.slug)}/sign-in-link`, {});
+        try {
+          await navigator.clipboard.writeText(String(answer.url ?? ""));
+          banner(`A sign-in link for ${answer.email} is on the clipboard. ${answer.message}`, true);
+        } catch {
+          // The link is put on the screen only when the clipboard refused, because a link on a screen
+          // is a link in a screenshot.
+          banner(`${answer.message} It could not be put on the clipboard, so here it is once: ${answer.url}`);
+        }
+        await loadClients().catch(() => {});
+      } catch (error) { banner(String(error.message)); }
+      finally { link.disabled = false; }
+    });
+    row.appendChild(link);
+    return row;
+  }
+
+  /**
+   * ONBOARD-2 / ADMIN-5. Remove a customer, for a test and for churn.
+   *
+   * Three gates in front of it and they are not ceremony. Click again to confirm, then the workspace
+   * name typed to match, then a switch for their data that is OFF by default. The data switch says
+   * what is TRUE when it is off: the files are kept and nothing deletes them on a timer, because
+   * nothing in this product counts days and a card claiming thirty of them would be the product lying
+   * to the operator.
+   */
+  function clientRemoveRow(client) {
+    const row = el("div", "row removeRow");
+    row.appendChild(el("span", "quiet", "Remove"));
+
+    const confirm = document.createElement("input");
+    confirm.type = "text";
+    confirm.className = "removeConfirm";
+    confirm.placeholder = `type ${client.slug}`;
+    confirm.autocomplete = "off";
+    confirm.hidden = true;
+
+    const data = document.createElement("label");
+    data.className = "check";
+    const wipe = document.createElement("input");
+    wipe.type = "checkbox";
+    wipe.className = "removeData";
+    data.appendChild(wipe);
+    data.appendChild(text(" delete their data"));
+    data.hidden = true;
+
+    const said = el("span", "clock", "");
+    said.hidden = true;
+
+    const result = el("div", "removeResult");
+
+    const button = el("button", "ghost small", "Remove");
+    button.type = "button";
+    let armed = false;
+    const disarm = () => {
+      armed = false;
+      button.textContent = "Remove";
+      button.className = "ghost small";
+      confirm.hidden = true;
+      data.hidden = true;
+      said.hidden = true;
+    };
+    const saySwitch = () => {
+      said.textContent = wipe.checked === true
+        ? "Their files at /data/titanbot will be deleted and there is no undo."
+        : "Their files are kept at /data/titanbot. Nothing deletes them on a timer, so somebody has to remove them by hand when the time comes.";
+    };
+    wipe.addEventListener("change", saySwitch);
+
+    button.addEventListener("click", async () => {
+      if (!armed) {
+        armed = true;
+        button.textContent = "Click again to remove";
+        button.className = "ghost small danger";
+        confirm.hidden = false;
+        data.hidden = false;
+        said.hidden = false;
+        saySwitch();
+        confirm.focus();
+        return;
+      }
+      button.disabled = true;
+      clear(result);
+      try {
+        const answer = await api("DELETE", `/v1/admin/clients/${encodeURIComponent(client.slug)}`, {
+          confirm: confirm.value.trim(),
+          deleteData: wipe.checked === true,
+        });
+        banner(String(answer.message || `${client.slug} was removed.`), answer.ok !== false);
+        // THE EFFECTS GO ON THE PANEL AND NOT ON THE ROW, because the row is about to stop existing:
+        // the customer has been removed, the list reloads, and effects drawn inside their own card
+        // would be thrown away before anybody read them. This card is the panel's own result area,
+        // which survives a list reload and is cleared by Refresh like everything else on this screen.
+        const card = el("div", "newClient removedClient");
+        card.appendChild(el("strong", null, `${client.name || client.slug} was removed.`));
+        card.appendChild(el("p", "quiet", String(answer.message ?? "")));
+        for (const effect of answer.effects ?? []) {
+          const line = el("div", "row");
+          line.appendChild(el("span", effect.ok === false ? "chip attack" : "chip ok", String(effect.name ?? "")));
+          line.appendChild(el("span", "quiet", String(effect.detail ?? effect.what ?? "")));
+          card.appendChild(line);
+        }
+        const host = $("addClientResult");
+        clear(host);
+        host.appendChild(card);
+        disarm();
+        await loadClients().catch(() => {});
+      } catch (error) {
+        // The route's own sentence: a confirm that does not match, an adopted workspace, the
+        // operator's own workspace, a container Coolify forgot while it kept running.
+        banner(String(error.message));
+        for (const effect of error.body?.effects ?? []) {
+          const line = el("div", "row");
+          line.appendChild(el("span", effect.ok === false ? "chip attack" : "chip ok", String(effect.name ?? "")));
+          line.appendChild(el("span", "quiet", String(effect.detail ?? effect.what ?? "")));
+          result.appendChild(line);
+        }
+      } finally { button.disabled = false; }
+    });
+
+    row.appendChild(button);
+    row.appendChild(confirm);
+    row.appendChild(data);
+    row.appendChild(said);
+    const wrap = el("div", "removeWrap");
+    wrap.appendChild(row);
+    wrap.appendChild(result);
+    return wrap;
+  }
+
   async function loadClients() {
     const answer = await api("GET", "/v1/admin/clients");
     summarise("panel-clients", clientChips(answer), clientHeadline(answer));
@@ -779,6 +1004,10 @@
       card.appendChild(clientModelRow(client));
       // AGENTS-CAP-2. And how many bots it may hold, read off the box the same way.
       card.appendChild(clientCeilingRow(client));
+      // ONBOARD-2. Where their invite got to, what went out to them, and the way to take them away.
+      card.appendChild(clientOnboardingRow(client));
+      card.appendChild(clientWelcomeRow(client));
+      card.appendChild(clientRemoveRow(client));
 
       const wrap = el("div", "scroll users");
       const table = document.createElement("table");
@@ -892,49 +1121,129 @@
 
   const chosenPlanModel = () => ($("acPlanModel").hidden ? $("acPlanModelText").value : $("acPlanModel").value).trim();
 
-  // A workspace is still building when the route answers, so its row is polled until it is not. Ten
-  // seconds apart, three minutes at the outside, and it stops the moment the panel is left or Refresh
-  // is pressed. A page that polls for ever is a page that keeps a laptop awake all night.
-  let provisionWatch = null;
-  const stopWatchingProvision = () => {
-    if (provisionWatch != null) { clearTimeout(provisionWatch); provisionWatch = null; }
+  // ---- ONBOARD-2: the five steps, drawn live -----------------------------------------------------
+  //
+  // The invite answers before the box exists, so the card is a list of five named steps that fills
+  // itself in. Two seconds apart for the first minute, then five, to a ten minute ceiling, and it
+  // stops the moment the job finishes, the panel is left or Refresh is pressed. A page that polls for
+  // ever is a page that keeps a laptop awake all night.
+  //
+  // GREEN, AMBER AND STOPPED ARE DRAWN APART, and nothing is ever half-green. A step that is done
+  // with a caveat says the caveat under its own row in plain words; a step that stopped says the one
+  // thing to press and offers the button that does it. Every verdict is a quiet chip: a prefixed,
+  // underlined line reads as a failure even when it is a note.
+  const STEP_CHIP = { ok: "chip ok", amber: "chip locked", failed: "chip attack", running: "chip", waiting: "quiet" };
+  const STEP_WORD = { ok: "done", amber: "needs you", failed: "stopped", running: "working", waiting: "waiting" };
+
+  let stepWatch = null;
+  const stopWatchingSteps = () => {
+    if (stepWatch != null) { clearTimeout(stepWatch); stepWatch = null; }
   };
 
-  function watchProvisioning() {
-    stopWatchingProvision();
-    const deadline = Date.now() + 180_000;
-    const tick = async () => {
-      provisionWatch = null;
-      if (Date.now() > deadline) return;
-      if ($("panel-clients")?.hidden === true) return;
-      try { await loadClients(); } catch { return; }
-      if (clientsBuilding === 0) return;
-      provisionWatch = setTimeout(() => { void tick(); }, 10_000);
-    };
-    provisionWatch = setTimeout(() => { void tick(); }, 10_000);
+  /** One step's row: the label, a chip, when it was written down, and the caveat or the stop. */
+  function stepRow(step, { onRetry = null } = {}) {
+    const row = el("div", "stepRow");
+    const state = String(step.state ?? "waiting");
+    row.dataset.step = String(step.key ?? "");
+    row.dataset.state = step.stalled === true ? "stalled" : state;
+    row.appendChild(el("span", STEP_CHIP[state] ?? "quiet", STEP_WORD[state] ?? state));
+    row.appendChild(el("strong", null, String(step.label ?? "")));
+    if (step.at) {
+      const clock = el("span", "quiet", ago(step.at));
+      clock.title = when(step.at);
+      row.appendChild(clock);
+    }
+    const said = step.stalled === true
+      ? String(step.next || "This step has not written anything down for three minutes. Press Retry.")
+      : String(step.why || "");
+    if (said.length > 0) row.appendChild(el("span", "clock", said));
+    else if (step.next) row.appendChild(el("span", "clock", String(step.next)));
+    if (onRetry != null && (state === "failed" || state === "amber" || step.stalled === true)) {
+      const retry = el("button", "ghost small", "Retry");
+      retry.type = "button";
+      retry.addEventListener("click", () => { void onRetry(retry); });
+      row.appendChild(retry);
+    }
+    return row;
+  }
+
+  /** The whole strip, redrawn in place so the card does not jump under the operator's cursor. */
+  function drawSteps(host, state, { onRetry = null } = {}) {
+    clear(host);
+    for (const step of state.steps ?? []) host.appendChild(stepRow(step, { onRetry }));
+    const skippedWelcome = (state.steps ?? []).some((one) => one.key === "welcome" && one.skipped === true);
+    if (state.done === true) host.appendChild(el("p", "quiet", "All five steps are done. Their workspace is up, Titan is awake, their bots have addresses, and the welcome has gone."));
+    else if (state.stopped == null && skippedWelcome) {
+      // Every step that was asked for is done. A welcome nobody asked for is not a stop and must not
+      // be drawn as one, or the operator goes looking for a fault they turned off themselves.
+      host.appendChild(el("p", "quiet", "Their workspace is up, Titan is awake and their bots have addresses. No welcome was asked for, so send them the note from this card."));
+    } else if (state.stopped) {
+      const stopped = (state.steps ?? []).find((one) => one.key === state.stopped);
+      host.appendChild(el("p", "quiet", `Stopped at ${stopped ? stopped.label : state.stopped}. Nothing after it has run.`));
+    }
   }
 
   /**
-   * What came back, shown ONCE.
+   * Poll one workspace's steps into one element until the job is finished or the operator leaves.
+   *
+   * Only ONE of these runs at a time, because only one add is ever in front of somebody. The deadline
+   * matches the job's own: past it the strip stops polling and says so rather than spinning silently.
+   */
+  function watchSteps(slug, host) {
+    stopWatchingSteps();
+    const opened = Date.now();
+    const deadline = opened + 600_000;
+    const tick = async () => {
+      stepWatch = null;
+      if (Date.now() > deadline) {
+        host.appendChild(el("p", "quiet", "This card stopped watching after ten minutes. Refresh the panel to read where it got to."));
+        return;
+      }
+      if ($("panel-clients")?.hidden === true) return;
+      let state;
+      try { state = await api("GET", `/v1/admin/clients/${encodeURIComponent(slug)}/onboarding`); }
+      catch { return; }
+      drawSteps(host, state, { onRetry: (button) => retryOnboarding(slug, button, host) });
+      // The row in the list below carries the same five steps, so it is refreshed with them.
+      await loadClients().catch(() => {});
+      if (state.done === true || state.running !== true) {
+        if (state.done !== true && state.retryable === true) return;
+        if (state.done === true) return;
+      }
+      const every = Date.now() - opened < 60_000 ? 2_000 : 5_000;
+      stepWatch = setTimeout(() => { void tick(); }, every);
+    };
+    stepWatch = setTimeout(() => { void tick(); }, 500);
+  }
+
+  async function retryOnboarding(slug, button, host) {
+    if (button != null) button.disabled = true;
+    try {
+      const answer = await api("POST", `/v1/admin/clients/${encodeURIComponent(slug)}/onboard`, {});
+      banner(String(answer.message || `${slug} picked up where it stopped.`), true);
+      if (host != null) watchSteps(slug, host);
+      else await loadClients().catch(() => {});
+    } catch (error) { banner(String(error.message)); }
+    finally { if (button != null) button.disabled = false; }
+  }
+
+  /**
+   * What came back, shown ONCE, with the five steps under it.
    *
    * The temporary password is minted by the route, stored as a hash and readable from nowhere after
-   * this, so this card is the only sight of it there will ever be. Nothing writes it anywhere else,
-   * no re-render brings it back, and Refresh takes the card away. It is drawn as a card rather than
-   * in the banner because the next banner would replace it, and this one has to live long enough to
-   * be copied.
+   * this, so this card is the only sight of it there will ever be. It is drawn ALWAYS, whatever
+   * happens to the box, the model, the addresses or the mail: the one failure this card cannot have
+   * is a customer with an account nobody can open. Nothing writes it anywhere else, no re-render
+   * brings it back, and Refresh takes the card away.
    */
   function showNewClient(result) {
     const host = $("addClientResult");
     clear(host);
     const tenant = result.tenant ?? {};
     const name = String(tenant.name || tenant.slug || "The workspace");
-    const state = String(result.state ?? "");
+    const slug = String(result.slug || tenant.slug || "");
     const card = el("div", "newClient");
-    card.appendChild(el("strong", null, state === "running"
-      ? `${name} is up.`
-      : state === "building"
-        ? `${name} was added and the workspace is still coming up.`
-        : `${name} was added and the build did not finish. Press Provision on its row to pick it up where it stopped.`));
+    card.appendChild(el("strong", null, `${name} was created. Their computer is being built now.`));
 
     const password = String(result.temporaryPassword ?? "");
     if (password.length > 0) card.appendChild(el("p", "once", "This password is shown once. Copy it now."));
@@ -956,18 +1265,33 @@
     // What each of the two answers about themselves, in their own words, because "the plan model was
     // not applied" and "the plan model is what you asked for" look the same on a card that says
     // neither.
-    for (const [label, applied] of [["Plan model", result.planModel], ["Agent ceiling", result.ceiling]]) {
+    //
+    // `applied` is a BOOLEAN on the route. Printing it straight put the word "false" on the
+    // operator's success card once; the `??` never fired, because false is not null.
+    for (const [label, applied, asked] of [
+      ["Plan model", result.planModel, String(result.planModel?.alias ?? "").length > 0],
+      ["Agent ceiling", result.ceiling, result.ceiling?.asked != null],
+    ]) {
       if (applied == null) continue;
-      // `applied` is a BOOLEAN on the route (cp/admin.mjs's POST /v1/admin/clients answers
-      // {applied:false, why} when no plan model was asked for). Printing it straight put the word
-      // "false" on the operator's success card; the `??` never fired, because false is not null.
-      const said = applied.applied === true ? "applied" : "not applied";
-      const line = el("p", "quiet", `${label}: ${said}${applied.why ? ` -- ${applied.why}` : ""}`);
-      card.appendChild(line);
+      // "not applied yet" is only honest about something somebody ASKED for. Saying it about a
+      // field nobody filled in reads as a failure of a thing that was never going to happen.
+      const said = applied.applied === true ? "applied" : asked ? "not applied yet" : "none asked for";
+      card.appendChild(el("p", "quiet", `${label}: ${said}${applied.why ? ` -- ${applied.why}` : ""}`));
     }
-    if (result.welcomeMail && result.welcomeMail.sent !== true) {
-      card.appendChild(el("p", "quiet", `No welcome mail was sent: ${String(result.welcomeMail.why ?? "this service does not send mail yet")}. Copy the note below and send it yourself.`));
+    if (result.welcomeMail != null) {
+      const mail = result.welcomeMail;
+      card.appendChild(el("p", "quiet", mail.asked === true
+        ? `Welcome email: ${mail.overridden === true
+          ? `it goes to ${String(mail.to ?? "")} and NOT to the owner's address, because a different address was asked for`
+          : `it goes to ${String(mail.to ?? "")}`}. Replies come back to ${String(mail.replyTo ?? "the support address")}.`
+        : `Welcome email: ${String(mail.why ?? "none was asked for")}`));
     }
+
+    // The five steps, live.
+    const strip = el("div", "steps");
+    strip.id = "addClientSteps";
+    drawSteps(strip, { steps: result.steps ?? [] });
+    card.appendChild(strip);
 
     if (password.length > 0) {
       const copy = el("button", "ghost small", "Copy the welcome note");
@@ -990,11 +1314,21 @@
       card.appendChild(copy);
     }
     host.appendChild(card);
+    if (slug.length > 0) watchSteps(slug, strip);
   }
+
+  // The override field is only there when a welcome is actually going, because a field that cannot
+  // do anything is a question the operator has to answer for nothing.
+  const syncWelcomeTo = () => {
+    const row = $("acWelcomeToRow");
+    if (row != null) row.hidden = $("acWelcome")?.checked !== true;
+  };
+  $("acWelcome")?.addEventListener("change", syncWelcomeTo);
+  syncWelcomeTo();
 
   $("addClientShow").addEventListener("click", () => {
     addClientForm.hidden = !addClientForm.hidden;
-    if (!addClientForm.hidden) { fillAddClientModels(); $("acEmail").focus(); }
+    if (!addClientForm.hidden) { fillAddClientModels(); syncWelcomeTo(); $("acName").focus(); }
   });
   $("addClientCancel").addEventListener("click", () => { addClientForm.hidden = true; });
 
@@ -1002,14 +1336,16 @@
     event.preventDefault();
     const button = $("addClientSave");
     const ceiling = Number($("acCeiling").value);
+    const sendWelcome = $("acWelcome").checked === true;
     const body = {
       email: $("acEmail").value.trim(),
       company: $("acCompany").value.trim(),
       name: $("acName").value.trim(),
       planModel: chosenPlanModel(),
       ceiling: Number.isFinite(ceiling) && ceiling > 0 ? Math.round(ceiling) : null,
-      // Off, and the route answers what it did with it. See the note above this form.
-      sendWelcome: false,
+      sendWelcome,
+      // Only when there is one, and only when a welcome is going at all.
+      welcomeTo: sendWelcome ? $("acWelcomeTo").value.trim() : "",
     };
     clear($("addClientResult"));
     banner("");
@@ -1020,10 +1356,11 @@
       banner(String(result.message || `${body.company} was added.`), true);
       addClientForm.reset();
       $("acCeiling").value = "40";
+      $("acWelcome").checked = true;
+      syncWelcomeTo();
       fillAddClientModels();
       addClientForm.hidden = true;
       await loadClients().catch(() => {});
-      watchProvisioning();
     } catch (error) {
       // THE ROUTE'S OWN SENTENCE, UNCHANGED. Every refusal this form can produce -- an address that
       // already has an account, a company name with nothing in it to name a workspace after, a slug

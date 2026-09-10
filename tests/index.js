@@ -118,6 +118,7 @@ import "./cp-session.test.mjs";
 import "./cp-store.test.mjs";
 import "./cp-providers.test.mjs";
 import "./cp-provision.test.mjs";
+import "./cp-remove.test.mjs";
 import "./cp-proxy.test.mjs";
 import "./cp-server.test.mjs";
 // KEYS-1. The key door: the paste is proved before it is stored, nothing reads a value back, and the
@@ -126,6 +127,7 @@ import "./cp-secrets-door.test.mjs";
 // ADMIN-2. Adding a client from the console, and the rule that holds it to the same refusals the
 // customer's own sign-up door gives.
 import "./cp-signup.test.mjs";
+import "./cp-onboard.test.mjs";
 // SIGNIN-1. This operator's own verification gates, told apart from strangers.
 import "./cp-signins-gate.test.mjs";
 import "./control-plane-deploy.test.mjs";
@@ -181,6 +183,7 @@ import "./gate-agent.test.mjs";
 import "./login-ledger.test.mjs";
 import "./machine-room-onboarding.test.mjs";
 import "./mail-edge-routing.test.mjs";
+import "./onboard-seam.test.mjs";
 import "./onboarding-first-agent.test.mjs";
 import "./onboarding-state.test.mjs";
 import "./relay-admin-routes.test.mjs";
@@ -237,6 +240,9 @@ import "./voice-wire.test.mjs";
 import "./voice-turn.test.mjs";
 import "./voice-caps-ledger.test.mjs";
 import "./voice-socket.test.mjs";
+// VOICE-7: the labelled words on the wire -- partial, settled, confirmed, and the turns that close
+// without ever becoming a line in the conversation.
+import "./voice-transcription.test.mjs";
 // The console half: the microphone capture MEETING-1 shares, and the talk button, orb, notes and
 // Voice card as they are sliced out of the live console files.
 import "./voice-capture.test.mjs";
@@ -274,5 +280,14 @@ import "./apps-wire-shapes.test.mjs";
 import "./console-app-hooks.test.mjs";
 import "./console-approval-card.test.mjs";
 import "./console-needs-you-attributes.test.mjs";
+
+// ONBOARD-2: the welcome mail the product sends a new customer, and the relay's two new doors.
+// The link, the words, the send and the receipt on the control plane side; the product-mail door
+// and the per-slug address sweep on the relay; and the purge, which is the only route in the
+// product that can delete a customer's data.
+import "./cp-welcome.test.mjs";
+import "./relay-product-mail.test.mjs";
+import "./relay-purge.test.mjs";
+
 // SETTINGS-2: the settings surface, its rows, its words, and who is shown what.
 import "./machine-room-settings.test.mjs";

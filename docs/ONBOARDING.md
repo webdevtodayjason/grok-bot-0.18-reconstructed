@@ -1,10 +1,21 @@
-# First run: meeting Titan
+# Onboarding: building a customer, and their first minute with Titan
 
-**What this is.** The first thing a person sees when they sign in to their own instance, and the
-contract the two halves of it are built to. Titan introduces himself, asks five short questions,
-walks through what he can do, and asks what they want done first. Underneath it: one flag on the
-box, three gateway commands, two tools, one seed prompt, one dialog in the console, and a ceiling of
-a hundred agents.
+**There are TWO onboardings and this page covers both.** They are easy to confuse and they happen in
+this order:
+
+| | Whose | What it is | Where |
+|---|---|---|---|
+| **The invite** | the operator's | one press on the Clients panel builds the account, the workspace, the box, the bots' email addresses, and sends the welcome mail | sections 10 to 14, gap row ONBOARD-2, shipped 2026-09-10 |
+| **The first run** | the customer's | they open their workspace and Titan introduces himself, asks five short questions, and shows them what he can take on | sections 1 to 9, gap row ONBOARD-1, shipped 2026-09-07 |
+
+The first nine sections are the first run: one flag on the box, three gateway commands, two tools, one
+seed prompt, one dialog in the console and a ceiling of forty agents. Section 10 onward is the invite that
+gets a customer to the point of having one, the mail that tells them about it, and the Remove that
+takes them away again.
+
+**What the first run is.** The first thing a person sees when they sign in to their own workspace, and
+the contract the two halves of it are built to. Titan introduces himself, asks five short questions,
+walks through what he can do, and asks what they want done first.
 
 **Status, 2026-09-07: built and measured.** This document is the contract,
 `scripts/verify-onboarding.mjs` is the gate written to it, and the gate now runs against the
@@ -87,7 +98,6 @@ the gateway already reads and writes through `getHostSettings` and `setHostSetti
     "done": false,
     "startedAt": 1757260000000,
     "completedAt": null,
-    "agentId": "…",
     "answers": {
       "name": "Jason",
       "location": "Fort Worth, Texas",
@@ -100,7 +110,12 @@ the gateway already reads and writes through `getHostSettings` and `setHostSetti
 }
 ```
 
-`agentId` is Titan's, and it is what the console binds the dialog's conversation to.
+**The record carries no `agentId`, and nothing needs one.** This page used to say it did and that the
+console bound the dialog's conversation to it. It does not: `onboardingTitan()`
+(`ui/machine-room/app.js:7249`) finds him off the **roster**, taking the bot named Titan or failing that
+the oldest non-group bot, and `sendOnboardingMessage` sends into whatever context that picks. Which is
+the right shape, because the roster is a live read and a copied id goes stale the moment a bot is
+deleted. Corrected 2026-09-10 under ONBOARD-2.
 
 **Do not reuse `hasSeenOnboarding`.** `SandStoredSettings` already carries `hasSeenOnboarding` and
 `hasSeenOnboardingAccountScope` (`sand-settings-store.ts:26`). Those belong to the desktop app's own
@@ -214,11 +229,17 @@ window only through a control that said they were skipping, and closing the tab 
 whole first run on the next load. Both tools disappear from the toolset the moment the record reads
 `done: true`, so a finished box carries neither.
 
-### 5.6 The cap and the capability
+### 5.6 The cap, and where it really comes from
 
-`getHostStatus` gains `maxAgents` and lists `onboardingV1` among its `capabilities`, beside
-`sendAcceptanceV1`. The console reads that status at boot already, so the Add button gets the number
-it counts against with no second call.
+**`getHostStatus` carries neither `maxAgents` nor an `onboardingV1` capability.** This page used to say
+it gained both. It did not, and the claim was self-confirming: the only `onboardingV1` string anywhere
+in the tree is `scripts/verify-onboarding.mjs:289`, the gate's own fixture, so the leg that read it
+passed on a value the gate supplied itself. Measured and corrected 2026-09-10 under ONBOARD-2.
+
+The ceiling the console draws comes from **`getOnboardingState.maxAgents`**, which every box answers on
+every read, first run or not. `applyReportedCap` (`ui/machine-room/app.js:7378`) installs it on every
+load, so the roster header and the Add button draw the operator's own number rather than the built-in
+default. Measured on a fresh box on this Mac 2026-09-10: `maxAgents` 40.
 
 ## 6. The console
 
@@ -478,3 +499,438 @@ avatar). So the guard leg of this gate was passing on a stale-token 502 and woul
 passing if the guard had been deleted. `ui/server.mjs` now passes 403 through with the gateway's
 own words, 401 still answers as the deployment fault it is, `tests/relay-command-status.test.mjs`
 pins both directions, and the gate leg asserts the 403 and the guard's own text.
+
+---
+
+## 10. The invite: one press builds a customer (ONBOARD-2)
+
+Jason, 2026-09-10: *"Is the super admin panel ready in a state where I can invite a user and it will
+handle the full onboarding process, including creating the account and workspace, creating a Docker
+container for the AI agents, setting up their emails? Is the welcome email sent out?"*
+
+Until ONBOARD-2 the answer was no on both counts. The panel's **Add a client** had never built a
+tenant on the R750 (eight `client.add` rows on 2026-09-09, every one of them failing
+`duplicate_email`), the only real onboarding, Richard's on 2026-09-07, went through the CLI, and its
+welcome mail was a hand-run script that no longer exists on that server. The welcome checkbox was
+present and disabled, because the control plane sent no mail at all.
+
+### 10.1 The form
+
+The person's name, their email, the company, the plan model, the bot ceiling (default 40), **send the
+welcome email** on by default, and a quiet **send the welcome to a different address** that appears
+only when the checkbox is on. Nothing else. The workspace name is derived from the company and the
+operator never types a slug.
+
+### 10.2 It is a job, not a request
+
+`POST /v1/admin/clients` answers **202** the moment the tenant row and the account row exist, carrying
+`{tenant, account, temporaryPassword, signIn, jobId, steps}`. The card then polls
+`GET /v1/admin/clients/<slug>/onboarding` every 2 s for the first minute and every 5 s after that, to
+a 10 minute ceiling.
+
+It has to be a job, and the reason is measured. `api.titanium.bot` is behind Cloudflare (2026-09-10:
+`server: cloudflare`, `cf-ray a38fb0ce0e2ec476-AUS`), which cuts a proxied request at about 100 s. The
+route already blocked for up to `CP_BOX_READY_TIMEOUT_MS=90000` plus the Coolify calls plus two relay
+round trips; adding a Titan wait, an address sweep and a mail send to that guarantees a 524 with a
+half-built tenant behind it **and the temporary password lost with the response**, on the one screen
+where losing it costs a customer their account.
+
+**The temporary password is in that first answer and nowhere else.** It is a scrypt hash in the store
+and no route can be asked for it again. It is in no ledger row, no log line and no mail header. The
+card draws it always, whatever happens to the rest of the job.
+
+Step state lives in the **existing provisioning ledger** (`store.recordStep` and `store.listSteps`,
+free-form step names, no schema change), so a control plane restart loses nothing, a page reload
+rejoins the job, and the poll route is a pure read.
+
+### 10.3 The five steps, and the observable each one turns on
+
+The labels are Jason's own words and the card shows exactly these.
+
+| Step | What runs | What makes it green |
+|---|---|---|
+| **Creating the workspace** | `cp/signup.mjs`: the account, the slug from the company | done inside the 202. Every refusal happens here and creates nothing: bad email, empty company, duplicate email, a company whose slug will not derive, new tenants off |
+| **Building the computer** | `provisionTenant`'s eight steps, then a direct probe of the box's own `GET /health` | ledger step `ready = ok` **and** `detail.how = "gateway"`. A `how` of `coolify` is **not** accepted: a created container is not a booted host. Then `/health` at 3 s intervals to a 10 minute budget, because `source/host/main.ts` awaits `host.start()` before it binds 1340, so anything answering there means the host booted and Titan exists |
+| **Waking Titan** | the plan model is pushed **first**, then Titan is read | the model reads back from the relay's `running` **and** `listAgents` shows a bot named Titan **and** `getOnboardingState` answers `done:false` |
+| **Giving the agents their addresses** | `POST /mail/sweep` with `{slug}` | not the sweep's 200, which can be cheerfully green over a workspace it never named: `cp/mail.mjs` `directory(slug)` in the control plane's own process showing at least one active row. Titan's `agent<code>@myagents.email` is read here and goes into the mail |
+| **Sending the welcome** | `cp/welcome.mjs` mints the link, renders the mail, posts it to the relay | a Resend id in the `welcome_sends` row, shown on the client's row |
+
+**The model goes before the read, and the order is not cosmetic.** `writeBoxDefaults` writes only
+`gates.json` and `{"SAND_BACKEND_URL":""}`, so a box nobody pointed at a model has Titan awake and
+**mute**. If the model did not apply the step goes amber and the job stops before the welcome with
+"Titan is up but has no model yet, so he would not answer. Fix the model on this row, then press Send
+the welcome."
+
+**The `running` call is doing double duty.** It is the only relay call that reaches `contextOf`, which
+is the only caller of `registry.miss()`, so it forces the relay's out-of-schedule registry refresh
+instead of waiting up to its 60 s timer. That is why it goes before the sweep.
+
+Every step is one of `waiting`, `running`, `ok`, `amber` (done with a named caveat) or `failed`
+(stopped, with the one thing to press). A failed step offers **Retry**, which resumes at the first step
+that is not `ok`. A step with no ledger write for 3 minutes reads as stalled with the same Retry. A
+failed provision **keeps the account**, because a slow image pull must not cost a customer their
+existence. Nothing is ever half-green.
+
+**Measured on the R750's control-plane ledger 2026-09-07**, the only real provisioning before this
+wave: `richard-avery` ran directories through start in 0.41 s and reported `ready how gateway waitedMs
+12181`, whole box 12.6 s, with the image already on the server. **Measured on this Mac in
+`grok-bot-local-vm` 2026-09-10** on a fresh `SAND_DATA_ROOT`: host start to first `/health` answer
+1792 ms, Titan's record at 1304 ms, `getOnboardingState` answering `done:false` with `maxAgents` 40 at
+172 ms after the port opened.
+
+---
+
+## 11. The welcome mail
+
+**From** `Titanium Bot <welcome@titanium.bot>`, decided by the **relay** and never by the caller.
+**Reply-To** the operator's support address, setting `mail.welcome.replyTo`, default
+`support@titaniumcomputing.com`, read and written with `node cp/cli.mjs mail welcome-reply-to`.
+**To** the owner's address, or the override when the operator set one. One recipient, never a bcc.
+**Subject** `Your Titanium Bot workspace is ready`. Click tracking off for `titanium.bot`.
+
+### 11.1 Why the relay owns the sender
+
+Measured on the R750 2026-09-10, read only: the relay's stored Resend key is **account wide** and lists
+39 of Jason's domains, with `titanium.bot` status `verified`, region `us-east-1`. So this From sends
+today with the key already on the box, no new key and no DNS. And it is exactly why the From must never
+be a request field: a route that takes a From from its caller is a route that will one day send as
+`jason@titaniumcomputing.com` because a config value upstream was wrong. The relay holds the sender and
+the control plane sends only words.
+
+**MAIL-3's `POST /mail/send` cannot be reused**, for four independent reasons: its credential is a
+**box's** gateway token, which the control plane does not hold; `buildFrom` forces the From to the
+bot's own `agent<code>@myagents.email` and deliberately ignores a caller's; `reply_to` is hard-wired to
+that same address; and `cp/mail.mjs` `openSend` refuses an empty `agentId`, which every product mail
+has. Reusing it would also charge the new customer's own 30 an hour and 200 a day caps for their own
+welcome and put a bot-less row in their own Sent list.
+
+### 11.2 The words the customer reads
+
+Plain words for a business owner. No vendor names, no em dashes, no bullet ceremony.
+
+```
+  [header band: the Ti mark and the Titanium Bot wordmark, drawn in HTML and CSS]
+
+  Hi <first name>,
+
+  Your Titanium Bot workspace for <Company> is ready. It is a private
+  computer running a small team of bots that work for your business.
+  They have their own machine, they remember what you tell them, and you
+  can hand them real work.
+
+        [  Open your workspace  ]
+
+  That button signs you in. It works for the next 24 hours and it is only
+  for you, so please do not forward this note. After that, go to
+  console.titanium.bot and sign in with:
+
+  Email: <their email>
+  Temporary password: <password>
+
+  Write to us when you want that password changed.
+
+  Meet Titan
+  Titan is the bot that leads the others. Say hello and tell him about
+  your business. He will ask a few short questions, then show you what he
+  can take off your hands. It takes about a minute.
+
+  Your bots have their own email
+  Every bot on your workspace has a real email address. Titan's is
+  <titanAddress>. Write to him from your own mail and he will answer. The
+  rest are on the Mail page inside your workspace.
+
+  Need help?
+  Write to <support address> and a person will answer.
+
+  Titanium Bot
+  You are getting this because a workspace was set up for you.
+```
+
+**Both shapes ship: the button AND the temporary password on a quiet second line.** That is a decision
+and not a hedge. The sso link signs them in, but there is no customer-facing set-your-own-password door
+anywhere in the product (`POST /v1/accounts/{id}/password` is behind `requireAdmin`), so a mail
+promising "we will ask you to pick your own password" would be the product's first lie to a new
+customer, and a link-only mail locks them out at hour 25 with the operator as the only recovery. The
+missing door is filed as **ONBOARD-3**.
+
+### 11.3 The sign-in link, and what it actually is
+
+`cp/session.mjs` already re-exports `mintSessionToken` and `tenantSessionSecret`, and the relay already
+consumes `GET /login?sso=<token>` (`ui/server.mjs:3840` into `handleSso`, verified by `ssoVerdict`
+against that tenant's derived key). So the link is `https://<tenant.host>/login?sso=<token>` with the
+account's own `sub`, `email`, `tenant`, `host`, a fresh `jti`, `iat` now and an explicit `exp` of now
+plus 24 h. All seven required claims exist on a new row, so `ui/session-token.mjs` is not edited.
+
+Understand what this is: **a stateless bearer credential in a URL that the relay never checks for
+revocation**, that works as many times as it is clicked until `exp`, and that cannot be cancelled short
+of rotating `CP_SESSION_SECRET`, which signs the whole fleet out. Therefore 24 hours is a ceiling and
+not a target, the link is never written to the send row, the audit row, a log line, a screenshot or a
+report, and click tracking is off so a scanner does not fetch it.
+
+### 11.4 The row, and Send again
+
+Its own table, **`welcome_sends`** (tenant, email, at, outcome, resend_id, shape, actor, detail),
+deliberately not `mail_send_log`, keeping MAIL-3's split. It holds who, whom, when, the outcome and the
+provider id, and **never** the password, the link, the subject or a body. It is shown on the client's
+row with **Send again** beside it.
+
+**Send again** mints a fresh link and leaves the password alone, because the original is a scrypt hash
+nobody can ask back and changing it would lock out a customer who has already signed in. A tick **with
+a new password** calls the existing reset-password and includes it. The row's `shape` column records
+which of `link` or `link+password` went out.
+
+**Idempotency key** `welcome:<slug>:<sha256(to) first 16>:<yyyymmddhh>`, so a double press inside the
+hour cannot mail a real human twice. `ui/mail-edge.mjs:1041` `resendSend` already carries the header and
+already caps it at 256.
+
+### 11.5 Rendering, and the one line that must never be invisible
+
+Measured on this Mac 2026-09-10 (node v22.23.1, playwright-core 1.62.1, `deviceScaleFactor` 2): a 596 px
+card in a 620 px viewport, no horizontal scroll, ground `#F5F7FA` light and `#090D14` dark, card
+`#FFFFFF` and `#172232`, the button 209x46 at `#00C8F0`. The first draft rendered the **temporary
+password** at 1.11:1 in dark, invisible; fixing it took the contrast walk from 6 runs under 4.5:1 to
+zero in both schemes.
+
+Gmail ignores `prefers-color-scheme`, so every colour is set inline **as well as** in the media block
+and no element's readability lives only inside the query. The mark is drawn in HTML and CSS, never an
+image: SVG is dropped by every major client, a data URI in an `img` is stripped by Gmail, and
+`titanium.bot` hosts no raster mark (measured: `logo.png` 404s). Brand tokens Midnight `#090D14`,
+Graphite `#172232`, Titanium `#E6EBF2`, Signal Cyan `#00C8F0`, Cloud `#F5F7FA`, ink `#16181D`, quiet
+`#5B6472` light and `#C3CDDB` dark, rule `#E3E7EC`. Arial and Helvetica for the body, because web fonts
+do not load in mail.
+
+---
+
+## 12. Removing a client
+
+On the client row: **Remove**, click-again-to-confirm, then the workspace name typed to match, then a
+**delete their data** switch, default **off**. `node cp/cli.mjs tenant remove <slug> [--delete-data]
+[--yes]` is the CLI twin; it prints each effect as it lands and **exits non-zero** on the
+container-still-there state.
+
+### 12.1 The refusals, and not one of them has an effect
+
+| Refusal | When | Why it exists |
+|---|---|---|
+| `not_found` | no such slug | there is nothing to remove |
+| `adopted` | `status === "adopted"` **or** an `adopt` ledger step | a tenant this service did not build is not its to delete. On `titanium` the Coolify service behind that row **is** the live console. It reads the ledger as well as the column because `tenantPower` writes `adopted` back over a stop, so a guard reading only the column could be walked around by stopping first |
+| `operator_slug` | the slug is in `RESERVED_SLUGS` | the second layer, so `titanium` stays unremovable even if its adopt row were ever lost |
+| `confirm_required` | the typed confirm is not exactly the slug | a typo here closes a real company's doors |
+
+A refused removal is indistinguishable from never having been asked. Nothing above that line touches
+Coolify, the proxy, the relay, the directory or the store.
+
+### 12.2 The nine effects, in this order
+
+Each one is a ledger step `remove:<name>`, and one `admin_actions` row is written at the end.
+
+1. **disable-signins** - every account for the tenant is disabled first, so nobody can sign in during
+   the teardown.
+2. **addresses** - every active directory address for the slug is retired. **Nothing else ever will:**
+   the sweep only retires codes for agents missing from a roster it could *read*, and it cannot read a
+   box that no longer exists, so a removed tenant's `agent<code>@myagents.email` would keep routing for
+   ever. Retiring is permanent by design, and that is right here.
+3. **proxy-key** - the tenant's LiteLLM key is revoked **before** the container. A failed revoke carries
+   on with a sentence naming `cp/cli.mjs proxy revoke <slug>`: a box that is up and cannot reach a model
+   is visible, a box that is gone and can is not.
+4. **stop** - `POST /services/{uuid}/stop`, then a bounded wait for Coolify to stop calling the service
+   running. It does **not** wait for the container name to vanish: a stopped container keeps its name
+   (`docker ps -a` lists it), so that wait would burn the budget every time and prove nothing.
+5. **service** - `DELETE /services/{uuid}` with `delete_configurations=true`, `delete_volumes=false`,
+   `delete_connected_networks=true` and **`docker_cleanup=false`**. See section 13 for why that last one
+   changed.
+6. **container-gone** - **the step that matters.** Poll until the container name is absent, asking the
+   relay (which holds the docker socket), and accept `GET /services/{uuid}` answering 404 as a *second*
+   proof, taken only when the relay could not be asked at all. Budget 120 s. The result records **which**
+   of the two proved it. If neither does, the removal **stops here**, the tenant row is **not** deleted,
+   and the card says "Coolify took the record and the container is still running" with the command that
+   finishes it.
+7. **data** - only when the switch is on, and only after step 6 proved the container gone. The relay
+   does it: it resolves the path from its own tenant root, refuses a slug failing `validateSlug`'s shape
+   rules, refuses a reserved or operator slug, refuses a slug its registry still knows as reachable,
+   refuses anything whose realpath is not a direct child of the tenant root, measures the tree, removes
+   it and answers the bytes freed. **It never takes a path from its caller.** With the switch off the
+   card says what is true: "Their data is kept at /data/titanbot/&lt;slug&gt;. Nothing deletes it on a
+   timer."
+8. **accounts and the slug** - `store.deleteTenant` **first**, then `store.deleteAccount` for each, then
+   `store.releaseSlug` as a belt. The order is load-bearing: `deleteTenant` inserts a `retired_slugs` row
+   whenever an account still points at the slug, and `deleteAccount` clears that retirement only when the
+   tenant row is already gone and no account is left. The accounts are *disabled* at step 1 so nobody
+   signs in mid-teardown and *deleted* here so the name is genuinely free; the retirement exists to stop
+   a new company inheriting a previous customer's sign-ins, and with the sign-ins deleted there is
+   nothing to inherit.
+9. **audit-ready** - one `admin_actions` row: who, when, whether the data went, which proof the
+   container's absence rested on, and every address retired.
+
+**What the ledger keeps.** `store.deleteTenant` also deletes the slug's ledger rows, so step 8 wipes
+`remove:disable-signins` through `remove:data` on its way past. The durable record is the returned
+`effects` list and the `admin_actions` row; the one row left behind, `remove:audit-ready`, is a
+breadcrumb saying this name was removed once, which the next tenant built under it usefully carries.
+
+**There is no thirty day retention, and the card does not claim one.** There is no reaper in this
+product and nothing counts days. A card promising thirty days while nothing counts them is the product
+lying to the operator. **ONBOARD-4** is filed for a real one.
+
+`DELETE /v1/tenants/{slug}` stays untouched as the low-level door for a *stopped* tenant: it removes the
+Coolify service and the row and nothing else. `DELETE /v1/admin/clients/{slug}` is the customer-shaped
+one described above, and the two are not interchangeable.
+
+---
+
+## 13. What bites
+
+Every one of these was measured, and each one shaped a decision above.
+
+**The Cloudflare cut.** `api.titanium.bot` is proxied and cuts at about 100 s (2026-09-10: `server:
+cloudflare`, `cf-ray a38fb0ce0e2ec476-AUS`). Any onboarding built as one synchronous request returns a
+524 over a half-built tenant and loses the temporary password with the response. Hence the job.
+
+**A Coolify 200 is not a removed container.** `DELETE /api/v1/services/{uuid}` answers 200 "Service
+deletion request queued" and dispatches `DeleteResourceJob` later, whose remote block is wrapped in a
+catch that logs "Remote cleanup failed, continuing with local deletion" and deletes the local record
+anyway. So the failure that costs the most, Coolify forgetting the service while
+`titanbot-box-<uuid>` keeps running with the customer's gateway token, answers **200** and looks
+exactly like success. That is why step 6 polls and why a 404 from Coolify is only a fallback proof.
+
+**`docker_cleanup=true` prunes the whole server.** It dispatches Coolify's `CleanupDocker`: container
+prune, image prune, a broader image prune, `builder prune -af`. The R750 also runs ampcortex, anvil,
+Coolify's own stack, every other customer's box and about twenty more services, plus Jason's images.
+Fixed to `false` in ONBOARD-2.
+
+**A relay 401 does not mean a route exists.** The pre-flight for the R750 run was written to prove
+`POST /mail/product` and `POST /tenant/purge` were mounted by watching them answer 401
+unauthenticated. They do — and so does `/definitely-not-a-route-xyz` (measured on the R750
+2026-09-10, from inside the relay container). The relay refuses every unauthenticated request before
+it routes, so that probe proves only that the relay is up. A route's presence is proved with a
+credential, or by the thing it does.
+
+**A cp restart during an invite wrote into a closed database.** The invite is the first piece of work
+on this control plane that outlives the response that started it, and the shutdown closed the store
+under it: `statement has been finalized` on stderr with nothing an operator could act on, and the
+job's last ledger row — the row that says where it got to — lost. `createApp` hands out its
+`onboarding` handle now and the shutdown settles it under a five second cap before closing the store.
+
+**The control plane cannot delete a tenant's data.** Measured from inside `titanbot-cp` on the R750
+2026-09-10: cp runs as uid 1001, the box's `volumes/{data,workspace,chrome}` are 0700 owned by uid 1000,
+and both `ls` and `touch` answer Permission denied. Only the relay (root, `/data/titanbot` read-write,
+`/var/run/docker.sock`) can. That is why the purge is a relay route and why it resolves its own paths.
+
+**One prompt on a fresh box destroys the first run for ever.** `onboarding-state.ts:139` marks a box
+`done:true`, `doneReason: "existing-box"` permanently if, at the **first read**, it holds more than one
+bot or any agent with a prompted conversation. There is no error and no way back: `resetOnboarding`
+answers 403 without `SAND_TEST_HOOKS`. So every box read the invite makes is `listAgents` and
+`getOnboardingState`, **never** `sendPrompt` and never `createAgent`, and the gate fails if either
+appears. The inverse is protective: a `getOnboardingState` read on a fresh box *writes* `done:false`
+and locks the first run in, so the card doing it early is a feature.
+
+**The relay's registry is up to 60 s stale.** Only the `running` call reaches `contextOf`, the only
+caller of `registry.miss()`, so it is what forces an out-of-schedule refresh. It has to come before the
+sweep, or the sweep runs over a registry that has never heard of the new workspace.
+
+**The sweep is fleet-wide unless it is given a slug.** `mailMintSweep` walks `registry.all()` and makes
+a `listAgents` and a `setAgentMail` call into **every other customer's box**, so onboarding one client
+reaches into Richard's and Jason's, and the cost grows with the fleet. The per-slug shape is what the
+invite uses; an empty body keeps today's fleet behaviour, so `cp mail sweep` is unchanged. A 503 "a
+sweep is already running" is retry in a moment, never a failed onboarding: four tries with backoff.
+
+**`/api/health` is not a path the host serves.** The readiness wait used to probe it and counted any
+answer, which meant it counted the 404 too, so "the box is up" was a sentence about a path that does not
+exist. Corrected to `/health`, which is what the relay's own per-tenant health proxy asks
+(`ui/server.mjs:4444`), and the measured status now goes into the `ready` step's detail so a reader can
+tell a real 200 from an answer that only proved the socket was open.
+
+**The sign-in link is an unrevocable bearer.** See section 11.3. It works until `exp`, as many times as
+it is clicked, and nothing short of rotating `CP_SESSION_SECRET` cancels it.
+
+**There is no customer set-a-password door yet.** Filed as ONBOARD-3. It is why the welcome carries the
+temporary password as well as the link.
+
+**A half-provisioned orphan, and what the operator does about one.** `north-bay-roofing` is sitting on
+the R750 with 6.2 MB of directories, a gateway token, **no tenant row and no ledger rows**, which is
+exactly what a failed add used to leave behind. The recovery is the product's own and never a hand
+cleanup: press **Retry** on the card, and if the tenant cannot be finished, **Remove** it with delete
+their data on. For an orphan with no tenant row at all, `node cp/cli.mjs tenant orphans` lists the
+directories the ledger has never heard of, and the relay's purge is what deletes one.
+
+---
+
+## 14. The invite's gates
+
+```sh
+node scripts/verify-onboard.mjs --remove-only   # the removal, driven straight at cp/decommission.mjs
+node scripts/verify-onboard.mjs                 # the whole sequence as well, over the admin routes
+node --test tests/cp-remove.test.mjs tests/cp-provision.test.mjs
+```
+
+`verify-onboard.mjs` stands up a fake Coolify, a fake relay, a stub Resend and a stub box **in its own
+process**. Nothing repeatable ever touches `api.resend.com`. The sign-in link is read out of the
+captured mail, exercised against the stub relay's `/login?sso=`, and then dropped: it is never written
+to a file, a log line, a screenshot or the gate's own output.
+
+Two things the gate is built to catch rather than to confirm:
+
+- **The fake Coolify's DELETE is asynchronous, because the real one is.** `deleteDelayMs` makes the
+  container linger after the 200, and `neverRemoves` models the catch-and-continue: the record goes and
+  the container never does. Against `neverRemoves` the removal **must** report NOT ok. A gate that
+  passed there would be certifying a removal over a live container holding a customer's gateway token.
+- **The stub box counts every gateway call it is asked for.** A `sendPrompt`, a `createAgent`, a
+  `duplicateAgent` or a `startOnboarding` fails the leg, because any one of them on a fresh box ends
+  that customer's first run for ever.
+
+**Measured on this Mac 2026-09-10, node v22.23.1, the removal arm:** `verify-onboard --remove-only`
+**19 passed, 0 failed, 0 not measured**; `node --test tests/cp-remove.test.mjs` **24 passed, 0
+failed**; `tests/cp-provision.test.mjs` **35 passed, 0 failed**. A delete whose remote half landed
+150 ms late was waited for and reported `provedBy=docker` after 175 ms.
+
+The whole-sequence arm reported **not measured** with the reason on a tip where `POST
+/v1/admin/clients` was not yet the job-shaped route. On the merged tip it measures: **26 passed, 0
+failed, 0 not measured** on this Mac, 2026-09-10, node v22.23.1.
+
+Three things had to be true for that arm to measure anything at all, and none of them was obvious:
+
+- **`CP_BOX_URL_OVERRIDE`** is how a gate points the sequence's box reads at a stub. A box answers at
+  `http://titanbot-box-<uuid>:1340` on the docker bridge, which a gate running its own control-plane
+  process has no route to. It goes through `loadConfig`, **not** `process.env`, because the gate builds
+  its control plane in-process and never sets the ambient environment. It is empty on the R750 and the
+  install never writes it; a production value would send every customer's box read to one address.
+- **`tests/cp-support.mjs`'s fake relay answers `read: true`** on the ceiling and running routes,
+  because the real relay does (`ui/server.mjs`, the ceiling route and the running route both carry
+  it). It means THE BOX ANSWERED, as against the route merely working. Without it the fake looked
+  healthy while the sequence correctly read every answer as "nothing could be read back" and stopped
+  amber before the welcome.
+- **That fake's sweep mints through the control plane's own door.** The real relay mints nothing
+  itself: it reads the roster and POSTs it to `/v1/relay/mail/mint`, which writes the row that
+  `cp/mail.mjs directory(slug)` later reads. A sweep that only answered 200 left step 4 retrying to
+  its budget, which is right — step 4's green is a directory read and never the sweep's own answer.
+
+### 14.1 The seam, and why it has its own file
+
+`tests/onboard-seam.test.mjs` runs the real sequencer against the **real** welcome sender and the
+**real** removal library, with nothing stubbed between them.
+
+It exists because of what happened on the first merged tip. The wave was built as three items that
+merge topologically, and each one's suite passes standalone by injecting a double for the other two.
+All three were green and **both of the things this wave is for were broken**:
+
+- `cp/onboard.mjs` looked for a flat `sendWelcome(asked)`; `cp/welcome.mjs` ships a `createWelcome()`
+  factory whose `send()` takes the owner's address as `email` and returns the link as `signInUrl`.
+  Every customer's welcome step would have gone amber.
+- `cp/admin.mjs` looked for `removeClient`/`plan`; `cp/decommission.mjs` ships a
+  `createDecommission()` factory returning `remove`/`plan`. Remove would have answered "this control
+  plane has no removal in it" on every press.
+
+Both call sites now accept the factory shape and the flat shape, so the doubles still work and the
+product works. Three more spellings had drifted the same way: the state route emitted `key`/`state`
+while `cp/cli.mjs`'s printer and the gate read `name`/`status` (both are carried now, or `signup add`
+prints `undefined` five times and collapses the rows into one); the gate asked for `welcome: true`
+where the route reads `sendWelcome`, so it ran five steps and mailed nobody; and the gate read the
+**first** `ready` ledger row rather than the last, which is the provisioner's older opinion rather
+than the box answering.
+
+And one that a double could never have shown: the adapter's first cut took the person's name from
+`plan.name`, which is the **company** — the invite route passes `name: company` when it starts the
+job. The first line of the first thing the product ever sends a customer read **"Hi Acme,"**. The
+greeting comes off the account row now.
+
+The rule this leaves behind: **a wave built as parallel items needs one test that uses none of their
+doubles.** Three green suites proved each item correct and proved nothing about the product.

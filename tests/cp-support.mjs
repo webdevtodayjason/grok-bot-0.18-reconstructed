@@ -47,6 +47,12 @@ export async function startFakeCoolify(options = {}) {
   const calls = [];
   const services = new Map();
   const failures = new Map();
+  // The container names this host is holding, which is a different fact from the services Coolify
+  // remembers and is the whole point of the removal's container-gone step. A name goes in when the
+  // service is started and comes out when the delete's remote half really runs -- which, on the real
+  // Coolify, is later than the 200 and sometimes never.
+  const containers = new Set();
+  const timers = [];
   // Services this Coolify already had before the control plane ever spoke to it. That is what an
   // adopted tenant is: a stack that was running long before this service existed, so a test about
   // adopt needs one here to stop, start or (never) delete.
@@ -136,11 +142,45 @@ export async function startFakeCoolify(options = {}) {
       // stayStopped is a server whose containers do not come up: Coolify queues the start and
       // answers exactly the same, and the containers are still exited a minute later because the
       // image is 5.2 GB and this host has never pulled it. It is what the readiness wait is for.
-      if (route === "POST /services/{uuid}/start") { service.started = !api.stayStopped; return send(200, { message: "Service starting request queued." }); }
+      if (route === "POST /services/{uuid}/start") {
+        service.started = !api.stayStopped;
+        // The name exists from here on, whether or not the container came up: `docker ps -a` lists
+        // an exited container by name, and a name held is exactly what the removal has to see go.
+        containers.add(`titanbot-box-${service.uuid}`);
+        return send(200, { message: "Service starting request queued." });
+      }
+      // A stopped container KEEPS ITS NAME. That is not a detail: a removal that treated "stopped"
+      // as "gone" would report success over a container still sitting on the host.
       if (route === "POST /services/{uuid}/stop") { service.started = false; return send(200, { message: "Service stopping request queued." }); }
       // Coolify's own spelling, kept so a reader of this fake is not surprised by the real one.
       if (route === "POST /services/{uuid}/restart") { service.started = true; return send(200, { message: "Service restaring request queued." }); }
-      if (route === "DELETE /services/{uuid}") { services.delete(service.uuid); return send(200, { message: "Service deletion request queued." }); }
+      // DELETE IS ASYNCHRONOUS, and this fake is asynchronous because the real one is.
+      //
+      // Coolify answers 200 "Service deletion request queued" and dispatches DeleteResourceJob
+      // later. That job's remote block is wrapped in a catch that logs "Remote cleanup failed,
+      // continuing with local deletion" and deletes the LOCAL record anyway. So the worst failure
+      // in the product -- Coolify forgetting the service while titanbot-box-<uuid> keeps running
+      // with the customer's gateway token -- answers 200 and looks like success.
+      //
+      // Three behaviours, and a test picks one:
+      //   deleteDelayMs 0 (the default)  the record and the container both go at once, which is
+      //                                  what every existing test has always seen
+      //   deleteDelayMs > 0              the record goes now, the container lingers that long
+      //   neverRemoves true              the record goes and the container NEVER does. This is
+      //                                  Coolify's catch-and-continue, and a removal that reports
+      //                                  success against it is a bug the gate must catch
+      if (route === "DELETE /services/{uuid}") {
+        const name = `titanbot-box-${service.uuid}`;
+        services.delete(service.uuid);
+        if (api.neverRemoves) containers.add(name);
+        else if (api.deleteDelayMs > 0) {
+          containers.add(name);
+          const timer = setTimeout(() => containers.delete(name), api.deleteDelayMs);
+          if (typeof timer.unref === "function") timer.unref();
+          timers.push(timer);
+        } else containers.delete(name);
+        return send(200, { message: "Service deletion request queued." });
+      }
 
       return send(404, { message: "Not found." });
     });
@@ -156,6 +196,13 @@ export async function startFakeCoolify(options = {}) {
     services,
     // Set to true and a start leaves the containers where they were. See the start route.
     stayStopped: false,
+    // How long after the 200 the delete's remote half actually removes the container. 0 keeps every
+    // existing test exactly as it was.
+    deleteDelayMs: 0,
+    // Coolify's catch-and-continue: the record goes, the container never does. See the DELETE route.
+    neverRemoves: false,
+    containers,
+    containerPresent: (name) => containers.has(String(name)),
     routes: () => calls.map((call) => call.route),
     callsTo: (route) => calls.filter((call) => call.route === route),
     failOnce(route, status = 500, message = "Coolify said no") {
@@ -163,9 +210,145 @@ export async function startFakeCoolify(options = {}) {
       queued.push({ status, message });
       failures.set(route, queued);
     },
-    async close() { await new Promise((resolve) => server.close(resolve)); },
+    async close() {
+      for (const timer of timers) clearTimeout(timer);
+      await new Promise((resolve) => server.close(resolve));
+    },
   };
   return api;
+}
+
+// An in-process relay, for the routes the control plane asks it for rather than does itself.
+//
+// It answers the six doors ONBOARD-2 uses and nothing else: the tenant registry's `running`, the
+// two plan doors (`use-included` and `ceiling`), the address sweep, the product mail send, and the
+// purge that is both the container probe and the data delete. The purge reads its container view
+// from the fake Coolify it is handed, because on the real server the relay is the process with the
+// docker socket and Coolify is a different opinion of the same host.
+//
+// Every call is recorded, so a test can assert the sweep was asked once per slug rather than
+// fleet-wide, and that the removal revoked the model key before it deleted the service.
+export async function startFakeRelay(options = {}) {
+  const token = options.token ?? `fake-relay-${randomBytes(12).toString("hex")}`;
+  const coolify = options.coolify ?? null;
+  const calls = [];
+  // Tenant data trees this relay believes in, slug -> {path, bytes}. purge deletes from here.
+  const data = new Map(Object.entries(options.data ?? {}));
+  // slug -> container name, which the real relay reads off the tenant registry.
+  const names = new Map(Object.entries(options.containers ?? {}));
+  const state = {
+    // How many 503s the sweep answers before it works. Models "a sweep is already running".
+    sweepBusy: Number(options.sweepBusy ?? 0),
+    // The model label `running` reports back, which is what proves use-included took.
+    modelLabel: String(options.modelLabel ?? ""),
+    // Set to refuse the purge, so a test can watch the removal carry on and say so.
+    purgeRefusal: options.purgeRefusal ?? null,
+    // Where the control plane is, so the sweep can mint the way the real relay does. Set AFTER the
+    // control plane starts, because the control plane needs this relay's url to be built at all.
+    cpUrl: String(options.cpUrl ?? ""),
+    // The roster this relay pretends to have read out of the box before minting.
+    roster: options.roster ?? [{ id: "agent-titan", name: "Titan", isGroup: false }],
+    // Product mail sends captured here rather than posted anywhere.
+    mail: [],
+  };
+
+  const server = http.createServer((request, response) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      const url = new URL(request.url, "http://fake-relay.invalid");
+      let body = null;
+      if (chunks.length > 0) { try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { body = null; } }
+      const authorized = String(request.headers.authorization ?? "") === `Bearer ${token}`;
+      calls.push({ method: request.method, path: url.pathname, body, authorized });
+      const send = (status, payload) => {
+        const text = JSON.stringify(payload);
+        response.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(text) });
+        response.end(text);
+      };
+      if (!authorized) return send(401, { error: "unauthorized" });
+
+      const tenantAdmin = /^\/admin\/tenants\/([^/]+)\/(use-included|ceiling|running)$/.exec(url.pathname);
+      if (tenantAdmin) {
+        const slug = decodeURIComponent(tenantAdmin[1]);
+        if (tenantAdmin[2] === "use-included") { state.modelLabel = String(body?.model ?? options.modelLabel ?? "plan-included"); return send(200, { ok: true, slug, model: state.modelLabel, pinned: false }); }
+        // `read: true` IS PART OF BOTH ANSWERS ON THE REAL RELAY (ui/server.mjs: the ceiling route at
+        // :1913 and the running route at :1757 both carry it), and it means THE BOX ANSWERED as
+        // against this route merely working. Without it here, a fake relay looked healthy while the
+        // onboarding sequence correctly read every answer as "nothing could be read back" and stopped
+        // amber before the welcome -- a fake disagreeing with the thing it stands in for.
+        if (tenantAdmin[2] === "ceiling") return send(200, { ok: true, read: true, slug, maxAgents: Number(body?.maxAgents ?? 40), bots: 1, pinned: false });
+        return send(200, { ok: true, read: true, slug, model: state.modelLabel, modelLabel: state.modelLabel, running: state.modelLabel.length > 0 });
+      }
+
+      if (url.pathname === "/mail/sweep") {
+        if (state.sweepBusy > 0) { state.sweepBusy -= 1; return send(503, { ok: false, error: "sweep_running", message: "a sweep is already running" }); }
+        const slug = String(body?.slug ?? "");
+        if (slug.length === 0) return send(200, { ok: true, swept: [], scope: "fleet" });
+        // A SWEEP THAT ONLY ANSWERS MINTS NOTHING, and a fake that answers 200 over a workspace it
+        // never gave an address to is the exact shape of a green light somebody believes. The real
+        // relay does not mint either: it reads the box's roster and POSTs it to the control plane's
+        // own /v1/relay/mail/mint (ui/server.mjs's mailMintSweep), which is what puts the row in the
+        // store that cp/mail.mjs directory(slug) later reads -- and that directory read, in the
+        // control plane's own process, is what the onboarding sequence takes as step 4's green.
+        // So this fake does what the real one does, when it has been told where the control plane is.
+        if (String(state.cpUrl ?? "").length === 0) {
+          return send(200, { ok: true, asked: slug, scope: "one", swept: [{ slug, addresses: 0, minted: 0, retired: 0 }] });
+        }
+        void fetch(`${state.cpUrl}/v1/relay/mail/mint`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify({ slug, agents: state.roster }),
+        }).then(async (minted) => {
+          const answer = await minted.json().catch(() => ({}));
+          const addresses = Array.isArray(answer?.addresses) ? answer.addresses : [];
+          send(200, { ok: true, asked: slug, scope: "one", swept: [{ slug, addresses: addresses.length, minted: Number(answer?.minted ?? 0), retired: Number(answer?.retired ?? 0) }] });
+        }).catch((error) => send(200, { ok: true, asked: slug, scope: "one", swept: [{ slug, addresses: 0, minted: 0, retired: 0 }], why: String(error?.message ?? error) }));
+        return undefined;
+      }
+
+      if (url.pathname === "/mail/product") {
+        const id = `resend-${randomBytes(8).toString("hex")}`;
+        state.mail.push({ to: body?.to ?? "", subject: body?.subject ?? "", html: body?.html ?? "", text: body?.text ?? "", id });
+        return send(200, { ok: true, id });
+      }
+
+      if (url.pathname === "/tenant/purge") {
+        const slug = String(body?.slug ?? "");
+        // Which container name belongs to this workspace. The test says so, because on the real
+        // server the relay reads it off the tenant registry and this fake has none.
+        const name = String(names.get(slug) ?? "");
+        // The container view comes from the FAKE COOLIFY'S HOST SET, not from its service records,
+        // because the relay reads the docker socket and Coolify only reads its own database. Wiring
+        // those two together in a fake is how a test would miss the exact failure this step exists
+        // for: the record gone and the container still running.
+        const present = name.length > 0 && coolify != null && coolify.containerPresent(name);
+        if (body?.probeOnly === true) {
+          return send(200, { ok: true, slug, containerPresent: present, container: { name, present }, path: data.get(slug)?.path ?? "", exists: data.has(slug) });
+        }
+        if (state.purgeRefusal) return send(409, { ok: false, error: "purge_refused", message: String(state.purgeRefusal) });
+        if (present) return send(409, { ok: false, error: "still_running", message: "that workspace's container is still on this host" });
+        const row = data.get(slug);
+        data.delete(slug);
+        return send(200, { ok: true, deleted: true, slug, path: row?.path ?? "", bytesFreed: Number(row?.bytes ?? 0) });
+      }
+
+      return send(404, { error: "not_found" });
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    token,
+    url: `http://127.0.0.1:${server.address().port}`,
+    calls,
+    data,
+    names,
+    state,
+    mail: () => state.mail,
+    callsTo: (pathname) => calls.filter((call) => call.path === pathname),
+    async close() { await new Promise((resolve) => server.close(resolve)); },
+  };
 }
 
 // A control plane on a temporary everything. Returns the base url, the app (so a test can reach the
@@ -201,7 +384,18 @@ export async function startControlPlane(options = {}) {
   // The box probe always refuses, so the only thing that can answer "is it up" is the fake
   // Coolify's container status. There is no docker network in a test process, so a real probe of
   // titanbot-box-svc-1:1340 would be a name lookup that means nothing.
-  const app = createApp({ config, store, probeImpl: () => { throw new Error("there is no docker network in a test"); } });
+  // The box probe refuses by default, because there is no docker network in a test process and a real
+  // probe of titanbot-box-svc-1:1340 would be a name lookup that means nothing. WITH
+  // CP_BOX_URL_OVERRIDE SET the caller has given the box a real address, so the probe becomes a real
+  // fetch: a gate that wants to measure what the onboarding sequence reads off a box needs a probe
+  // that can actually reach one, and a refusing probe would make every box read fail for a reason
+  // that has nothing to do with the code under test.
+  const app = createApp({
+    config, store,
+    probeImpl: config.boxUrlOverride.length > 0
+      ? (options.probeImpl ?? globalThis.fetch)
+      : (options.probeImpl ?? (() => { throw new Error("there is no docker network in a test"); })),
+  });
   const server = createHttpServer(app);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -221,6 +415,11 @@ export async function startControlPlane(options = {}) {
     base, app, store, config, env, root, request,
     admin: (method, pathname, body) => request(method, pathname, { body, token: config.adminToken }),
     async dispose() {
+      // AN INVITE STILL GOING WHEN THE STORE CLOSES is a background job writing into a closed
+      // database, which surfaces as "statement has been finalized" on stderr with no line number an
+      // operator could act on. Settled first, always. ONBOARD-2 made this reachable: before it, no
+      // route on this control plane left work running after it answered.
+      await Promise.resolve(app.onboarding?.settle?.()).catch(() => {});
       await new Promise((resolve) => server.close(resolve));
       store.close();
       await rm(root, { recursive: true, force: true });

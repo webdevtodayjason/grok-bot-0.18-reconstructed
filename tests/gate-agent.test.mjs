@@ -48,6 +48,9 @@ const GATES = [
   "verify-one-console.mjs",
   "verify-one-console-browser.mjs",
   "verify-control-plane.mjs",
+  // ONBOARD-2. It signs a THROWAWAY super admin in at a live api.titanium.bot/v1/sessions to run one
+  // real onboarding, so the attempt it writes is a real row on the operator's own panel.
+  "verify-onboard-r750.mjs",
   // VOICE-1: it posts a password at a relay's own /login to get the console cookie the voice door
   // takes, and drives real Chrome through the same door. The relay is one it starts itself, but the
   // door is real and the header costs one import, so it is held to the same rule.
@@ -58,6 +61,10 @@ const GATES = [
   // phone user agent it drives Chrome with carries the name on the end, so the ledger row a minted
   // bearer writes is labelled too.
   "verify-door.mjs",
+  // VOICE-7: the only gate in the family that signs in at the REAL front door on the live server,
+  // as a throwaway customer, rather than at one it started itself. Exactly the caller SIGNIN-1 was
+  // written for, so it says its own name there.
+  "verify-voice-r750.mjs",
 ];
 
 test("the name is built from the calling file, not typed into it", () => {
@@ -109,6 +116,8 @@ const NO_LIVE_LOGIN_DOOR = new Map([
   ["verify-console-polish.mjs", "reads with a bearer; the word login is in a message about being bounced to one"],
   ["verify-job-bus.mjs", "checks that an unauthenticated call is bounced to /login and never posts a password"],
   ["verify-admin.mjs", "drives a control plane and a relay it starts itself, on a throwaway data directory"],
+  ["verify-welcome-mail.mjs", "renders the welcome mail into a browser page with setContent; the login path is a fixture inside that page and no request leaves the process"],
+  ["verify-onboard.mjs", "the sign-in link it reads out of a captured welcome is exercised against a fake relay it starts on 127.0.0.1; nothing it touches is a live door"],
 ]);
 
 test("no other gate reaches a login door without saying its own name at it", () => {

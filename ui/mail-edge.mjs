@@ -31,6 +31,11 @@ import { appendFile, chmod, chown, open, readFile, rename, stat, writeFile } fro
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { stateFile } from "./state-dir.mjs";
+// ONBOARD-2. The one thing the product-mail door at the bottom of this file needs that this
+// module did not already have: the constant-time compare every CP_RELAY_TOKEN door on the relay
+// uses. ui/auth.mjs imports node builtins and nothing else, so this adds no dependency the relay
+// does not already carry, and there is no cycle: auth.mjs knows nothing about mail.
+import { safeEqual } from "./auth.mjs";
 // MAIL-2. The half the control plane reads too, moved out whole rather than forked: the Svix
 // verification, the address readers, and the code address. Re-exported below so every caller of
 // this module -- the relay, the gate and the four mail tests -- keeps importing from one place.
@@ -86,6 +91,10 @@ export const MAIL_DEFAULTS = {
   webhookSecret: "",
   catchAllAgentId: "",
   routes: {},
+  // ONBOARD-2. Who the PRODUCT's own mail comes from on this deployment, when the operator wants
+  // something other than the built-in default. Not a secret, not shown on the mail card, and not a
+  // field the send route reads: see productFrom below for why a sender is never a request field.
+  welcomeFrom: "",
 };
 
 const asString = (value) => (typeof value === "string" ? value.trim() : "");
@@ -111,6 +120,10 @@ export function normalizeMailSettings(raw) {
     webhookSecret: typeof value.webhookSecret === "string" ? value.webhookSecret : "",
     catchAllAgentId: asString(value.catchAllAgentId),
     routes: asRoutes(value.routes),
+    // Kept through the normalize so a hand-edited mail.json survives the console saving the card:
+    // mergeMailSettings builds from this shape, so a field this function drops is a field the next
+    // save deletes.
+    welcomeFrom: asString(value.welcomeFrom),
   };
 }
 
@@ -1359,4 +1372,255 @@ export function createMailSendRoute({
   }
 
   return { handleSend };
+}
+
+// ---- POST /mail/product, the mail the PRODUCT sends (ONBOARD-2, docs/MAIL.md section 6b) -------
+//
+// A second send door beside the one above, and it exists because the one above cannot be made to do
+// this. createMailSendRoute is a BOT sending: its credential is a box's gateway token, buildFrom
+// forces the From to that bot's own agent<code>@myagents.email and ignores a caller's, reply_to is
+// hard-wired to the same address, and the control plane's openSend refuses an empty agentId. A
+// welcome mail has no bot, no box token and no agent address, and putting one through that route
+// would charge a new customer's own 30/hour and 200/day caps for their own welcome and leave a
+// bot-less row in their Sent list on their first morning.
+//
+// createMailSendRoute is NOT edited by any of this. The two doors share resendSend, sanitizeFromName
+// and the relay's stored key, and nothing else.
+//
+// THE CALLER IS THE CONTROL PLANE, holding CP_RELAY_TOKEN. There is no other caller: a box cannot
+// open this door, and neither can a person at the console.
+
+/** A welcome is a page of words. 128 KB of html is far above it and far below a mail client's cap. */
+export const PRODUCT_MAIL_BODY_LIMIT = 192 * 1024;
+export const PRODUCT_MAIL_HTML_LIMIT = 128 * 1024;
+/** The one kind this route sends today. A body naming another is refused rather than guessed at. */
+export const PRODUCT_MAIL_KINDS = new Set(["welcome"]);
+
+/**
+ * The sender, decided HERE and never read from a request.
+ *
+ * The relay's stored Resend key is account wide: measured read-only on the R750 2026-09-10 it lists
+ * 39 of the operator's domains, titanium.bot among them with status verified in us-east-1. So this
+ * From sends today with the key already on the box and no new DNS. And that is precisely why the
+ * From must never be a request field: a route that takes a sender from its caller is a route that
+ * will one day send as somebody's personal address because a config value upstream was wrong, and
+ * the recipient has no way at all to tell the difference.
+ *
+ * PRODUCT_MAIL_FROM in the relay's own environment first, because a container's environment is what
+ * an operator can set without editing a file inside it; then welcomeFrom in mail.json, the file the
+ * operator already owns; then the product's default. A value that is not a usable address falls back
+ * to the default rather than sending as something malformed.
+ */
+export const PRODUCT_MAIL_FROM_DEFAULT = "Titanium Bot <welcome@titanium.bot>";
+
+export function productFrom(settings = null, env = process.env) {
+  const wanted = asString(env?.PRODUCT_MAIL_FROM) || asString(settings?.welcomeFrom) || PRODUCT_MAIL_FROM_DEFAULT;
+  const angle = /^\s*(.*?)\s*<\s*([^<>\s]+@[^<>\s]+)\s*>\s*$/.exec(wanted);
+  const address = oneAddress(angle == null ? wanted : angle[2]);
+  if (address.length === 0) return PRODUCT_MAIL_FROM_DEFAULT;
+  // The same sanitizer the bot door uses, for the same reason: CR, LF, a quote and a backslash each
+  // end a header line or a quoted string, and this text came out of a file somebody edited.
+  const display = sanitizeFromName(angle == null ? "" : angle[1]);
+  if (display.length === 0) return address;
+  // QUOTED ONLY WHEN IT HAS TO BE. A display name of letters, digits, spaces and the ordinary
+  // punctuation of a company name is an atom run and needs no quotes, so `Titanium Bot
+  // <welcome@titanium.bot>` goes out exactly as the operator wrote it. Anything else -- a comma, a
+  // colon, a bracket, an at sign -- is a character that changes what a header means, so it gets the
+  // quotes. The bot door quotes unconditionally because a bot's name is a customer's typed string
+  // and its display always carries a bracketed workspace; this one is a value an operator set.
+  const plain = /^[A-Za-z0-9 .'&+-]+$/.test(display);
+  return plain ? `${display} <${address}>` : `"${display}" <${address}>`;
+}
+
+/** The address inside a From, whether it is bare or in angle brackets. */
+export const addressOfFrom = (from) => {
+  const angle = /<\s*([^<>\s]+@[^<>\s]+)\s*>/.exec(String(from ?? ""));
+  return oneAddress(angle == null ? from : angle[1]);
+};
+
+// The fields a caller may NOT set, each refused BY NAME rather than dropped. A bot that guesses at a
+// field is a bot; a control plane sending a sender, a bcc or a header set is a bug upstream, and a
+// bug that is silently ignored is a bug that ships.
+export const PRODUCT_MAIL_BANNED = ["from", "sender", "headers", "cc", "bcc", "attachments"];
+
+/**
+ * POST /mail/product.
+ *
+ * Everything injected, the way createMailSendRoute's is: the credential and the key resolution live
+ * in ui/server.mjs and must stay there, and the rules worth testing have to be reachable without a
+ * relay.
+ */
+export function createProductMailRoute({
+  readBody,
+  drainThenEnd,
+  // CP_RELAY_TOKEN. The same one credential /mail/sweep and the two /admin reads already take.
+  relayToken = "",
+  // async () -> the DIRECTORY OWNER's mail settings, never a tenant's. The same resolution the bot
+  // door uses and for the same reason: a customer's own mail.json has an empty apiKey.
+  ownerSettings,
+  // (settings, env) -> the From. Injected so a deployment's environment is read in one place.
+  productFrom: senderOf = productFrom,
+  fetchImpl = fetch,
+  env = process.env,
+  log = (line) => console.log(line),
+} = {}) {
+  const sendJson = (res, status, value, headers = {}) => {
+    res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store", ...headers });
+    return res.end(JSON.stringify(value));
+  };
+  const refuse = (res, status, message, error, headers = {}) =>
+    sendJson(res, status, { message, sent: false, error }, headers);
+
+  async function handleProductMail(req, res) {
+    const expected = String(relayToken ?? "");
+    // No credential configured means no door, the same answer /mail/sweep gives: a relay with no
+    // control plane has nobody who could legitimately call this.
+    if (expected.length === 0) {
+      return refuse(res, 404, "This relay has no control plane, so there is nothing to send for.", "not_found");
+    }
+    // The method refusal comes before the credential, the same order handleRelayAdmin uses: a wrong
+    // method learns nothing and charges nobody.
+    if (req.method !== "POST") return refuse(res, 405, "Send a product email with POST.", "method_not_allowed", { allow: "POST" });
+
+    const header = String(req.headers.authorization ?? "");
+    const presented = /^bearer\s+/i.test(header) ? header.replace(/^bearer\s+/i, "").trim() : "";
+    // Constant time over the value and the length, the same compare every other CP_RELAY_TOKEN door
+    // on this relay uses.
+    if (presented.length === 0 || !safeEqual(presented, expected)) {
+      return refuse(res, 401, "That credential does not open this door, so nothing was sent.", "unauthorized");
+    }
+
+    let raw;
+    try { raw = await readBody(req, PRODUCT_MAIL_BODY_LIMIT); }
+    catch (error) {
+      if (error?.code !== "BODY_TOO_LARGE") throw error;
+      return drainThenEnd(req, res, 400, { "content-type": "application/json", "cache-control": "no-store" },
+        JSON.stringify({ message: "That email is too large to send from here, so nothing was sent.", sent: false, error: "too_large" }));
+    }
+    let body;
+    try { body = JSON.parse(raw || "{}"); } catch { body = null; }
+    if (body == null || typeof body !== "object" || Array.isArray(body)) {
+      return refuse(res, 400, "That send request was not readable, so nothing was sent.", "bad_request");
+    }
+
+    for (const field of PRODUCT_MAIL_BANNED) {
+      if (body[field] != null) {
+        return refuse(res, 400,
+          `A product email's ${field} is decided by this relay and cannot be sent with the request, so nothing was sent.`,
+          "field_not_allowed");
+      }
+    }
+
+    const kind = asString(body.kind);
+    if (!PRODUCT_MAIL_KINDS.has(kind)) {
+      return refuse(res, 400, "That is not a kind of product email this relay sends, so nothing was sent.", "bad_kind");
+    }
+    const slug = asString(body.slug);
+    if (slug.length === 0) {
+      return refuse(res, 400, "That send request did not say which workspace it is for, so nothing was sent.", "bad_request");
+    }
+    // ONE RECIPIENT, and an array or a comma is a second one however it was meant. A product mail
+    // carrying a sign-in link must never be addressed to two people: that link is a bearer credential
+    // with no revocation, so a second recipient is a second key to somebody's workspace.
+    if (Array.isArray(body.to) || String(body.to ?? "").includes(",")) {
+      return refuse(res, 400, "A product email goes to exactly one address, so nothing was sent.", "too_many_recipients");
+    }
+    const to = oneAddress(body.to);
+    if (to.length === 0) {
+      return refuse(res, 400, "That send request needs exactly one recipient, written as a plain email address, so nothing was sent.", "bad_request");
+    }
+    const subject = oneLine(body.subject);
+    if (subject.length === 0) return refuse(res, 400, "That email has no subject, so nothing was sent.", "bad_request");
+    const html = typeof body.html === "string" ? body.html : "";
+    const text = typeof body.text === "string" ? body.text : "";
+    if (html.trim().length === 0 && text.trim().length === 0) {
+      return refuse(res, 400, "That email has nothing in it, so nothing was sent.", "bad_request");
+    }
+    if (Buffer.byteLength(html, "utf8") > PRODUCT_MAIL_HTML_LIMIT) {
+      return refuse(res, 400, "That email's page is larger than a product email may be, so nothing was sent.", "too_large");
+    }
+    // Two checks over the html, and both are about what a recipient's client would do with it rather
+    // than about this process. A script tag is stripped by every mail client worth the name and is
+    // evidence the page did not come from where it should have; an image over plain http is a
+    // tracking pixel or a mixed-content warning on somebody's phone, and the product's own mail
+    // draws its mark in HTML and CSS precisely so it needs no image at all.
+    if (/<script/i.test(html)) {
+      return refuse(res, 400, "That email has a script in it, so nothing was sent.", "bad_html");
+    }
+    if (/<img[^>]+src\s*=\s*["']?\s*http:/i.test(html)) {
+      return refuse(res, 400, "That email loads an image over an insecure address, so nothing was sent.", "bad_html");
+    }
+
+    const settings = await Promise.resolve().then(() => ownerSettings()).catch(() => null);
+    const apiKey = asString(settings?.apiKey);
+    if (apiKey.length === 0) {
+      return refuse(res, 503, "This console has no mail key stored yet, so nothing was sent. The operator sets one on the Email card.", "no_key");
+    }
+    const from = senderOf(settings, env);
+    const fromDomain = domainOf(addressOfFrom(from));
+
+    // THE REPLY-TO, and the one place this route bends rather than refuses.
+    //
+    // A reply address that is not a single address is the caller's bug and is refused outright. One
+    // that IS a single address but sits on another domain is DROPPED, the mail still goes, and the
+    // answer says so in plain words. The reason is measured rather than theoretical: the operator's
+    // support address is on a domain that already receives mail, while the product's From is on
+    // titanium.bot, where inbound is not switched on yet. Refusing the send over that would mean no
+    // customer ever gets a welcome on the default install, which is far worse than a missing
+    // courtesy header. The From is what a recipient sees and what is signed; Reply-To is a
+    // convenience, and the copy inside the mail names the support address in words anyway.
+    let replyTo = "";
+    let replyToWhy = "";
+    const asked = asString(body.replyTo);
+    if (asked.length > 0) {
+      const one = oneAddress(asked);
+      if (one.length === 0) {
+        return refuse(res, 400, "That reply address is not a single plain email address, so nothing was sent.", "bad_reply_to");
+      }
+      if (fromDomain.length > 0 && domainOf(one) !== fromDomain) {
+        replyToWhy = `Replies go to ${addressOfFrom(from)} rather than ${one}, because a product email only sets a reply address on its own domain.`;
+      } else {
+        replyTo = one;
+      }
+    }
+
+    // Built field by field out of what was checked above and NEVER spread from the request body.
+    const payload = {
+      from,
+      to: [to],
+      subject,
+      ...(text.length > 0 ? { text } : {}),
+      ...(html.length > 0 ? { html } : {}),
+      ...(replyTo.length > 0 ? { reply_to: replyTo } : {}),
+    };
+
+    let sent;
+    try { sent = await resendSend(fetchImpl, apiKey, payload, asString(body.idempotencyKey), env); }
+    catch (error) {
+      const status = Number(error?.status ?? 0);
+      const permanent = status >= 400 && status < 500 && status !== 408 && status !== 429;
+      // THE STATUS IS IN THE ANSWER AND THE PROVIDER'S BODY IS NOT. The control plane writes what it
+      // is told into a welcome_sends row an operator reads, and a provider's JSON in that row is how
+      // a recipient address ends up somewhere nobody meant to put one.
+      log(`mail  the ${kind} for ${slug} to ${to} did not send: HTTP ${status || "?"}`);
+      return refuse(res, 502, permanent
+        ? `The mail service would not accept that message (HTTP ${status || "?"}), so nothing was sent. Check the address it was going to.`
+        : `The mail service could not take that message just now (HTTP ${status || "?"}), so nothing was sent. Try again in a few minutes.`,
+        "send_failed");
+    }
+
+    // The kind, the workspace, the recipient and the provider's id. Never the subject, never the
+    // text, never the html, and never the key.
+    log(`mail  ${kind} for ${slug} sent to ${to} (${sent.id})`);
+    return sendJson(res, 200, {
+      message: `Sent to ${to}.`,
+      sent: true,
+      id: sent.id,
+      from,
+      to,
+      ...(replyToWhy.length > 0 ? { replyToWhy } : {}),
+    });
+  }
+
+  return { handleProductMail };
 }

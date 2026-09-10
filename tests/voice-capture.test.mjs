@@ -254,7 +254,11 @@ test("VOICE-1 capture: a MediaStream source is accepted whole, so a meeting need
   });
   assert.equal(askedForMicrophone, false, "a stream that was handed over is not asked for again");
   assert.equal(FakeAudioContext.made.at(-1).stream, stream, "and it is the stream that was connected");
-  assert.deepEqual(Object.keys(capture.stats).sort(), ["bytes", "heldFrames", "heldMs", "sent"]);
+  // mutedFrames is VOICE-7's: push to talk drops every frame between two holds, and those are counted
+  // APART from heldFrames, which is the echo gate's own number and the proof that the agent never
+  // hears himself. One counter for both would make that proof unreadable the moment anybody used the
+  // default mode.
+  assert.deepEqual(Object.keys(capture.stats).sort(), ["bytes", "heldFrames", "heldMs", "mutedFrames", "sent"]);
   assert.equal(typeof capture.stop, "function");
 });
 
