@@ -121,13 +121,20 @@ test("the network of a container being removed goes with it", () => {
 // a task this relay still believes is running whose container stopped minutes ago. The stub used to
 // answer "" to this call, which nothing made, and "" parses as a clean exit -- so the day the sweep
 // started asking, a test about NOT killing a live task went red for the right reason.
-function sweepWith({ ps = "", networks = [], rows = [], inspect = "running\t0\tfalse", dockerAvailable = async () => true } = {}) {
+function sweepWith({ ps = "", networks = [], rows = [], inspect = "running\t0\tfalse", dockerAvailable = async () => true, noContainer = false } = {}) {
   const seen = { docker: [], closed: [], rows: [] };
   const edge = createCodeEdge({
     execFile: (file, args, opts, cb) => {
       seen.docker.push(args.join(" "));
       const key2 = `${args[0]} ${args[1]}`;
       let stdout = "";
+      // A CONTAINER THAT IS NOT THERE. `docker inspect` on a name that does not exist exits 1 with
+      // "No such object", which is an ERROR to execFile and not an empty answer: the relay reads the
+      // two cases completely differently and a stub that answered "" could never tell them apart.
+      if (args[0] === "inspect" && noContainer) {
+        const error = Object.assign(new Error("Error: No such object"), { code: 1 });
+        return setImmediate(() => cb(error, "", "Error response from daemon: No such container"));
+      }
       if (args[0] === "inspect") stdout = inspect;
       else if (key2 === "ps -a") stdout = ps;
       else if (key2 === "network ls") stdout = networks.map((n) => n.name).join("\n");
@@ -223,6 +230,86 @@ test("a live task whose container has already stopped is closed by the sweep, no
   assert.equal(edge.liveCount(), 0, "so the concurrency cap does not read one high for ever");
 });
 
+test("a live task whose container is GONE is closed, its network removed, and not billed to now", async () => {
+  // MEASURED ON THE R750 2026-09-10, and the reason this leg is driven by the rows. A task started at
+  // 07:23:12Z had its container removed eight seconds later; three sweeps after that -- every one
+  // logging "removed 0 code container(s) and 0 code network(s)" -- /code/list still read
+  // state:"running", endedAt:0, and the network tbcode-<id> was still on the machine. The sweep only
+  // ever walked the containers docker returned, so a row with no container was in no leg of it at all:
+  // not the deadline branch, not the orphan branch, not the settle. adopt() then made it live again on
+  // every restart, so it could never age out, and one of the workspace's two slots was gone for good.
+  // Closing it by hand billed 3.13 minutes for a container that lived eight seconds.
+  const { edge, seen } = sweepWith({
+    ps: "",
+    networks: [{
+      id: "n9", name: `${CODE_NAME_PREFIX}999999999999`,
+      labels: { "com.titanbot.role": CODE_ROLE, "com.titanbot.task": "999999999999" },
+      members: ["titanbot-proxy-abc"],
+    }],
+    rows: [{ taskId: "999999999999", state: "running", startedAt: NOW - 188_000, deadlineAt: NOW + 1_600_000, claimId: 19, provider: "local" }],
+    noContainer: true,
+  });
+  edge.adopt("demo", [{ taskId: "999999999999", state: "running", provider: "local", deadlineAt: NOW + 1_600_000 }]);
+  const swept = await edge.sweep("the timer");
+  assert.equal(swept.lost, 1, "a row whose container is gone is closed by the sweep and by nothing else");
+  assert.equal(seen.closed.length, 1, "the claim is closed, so the slot and the ledger row are both freed");
+  assert.equal(seen.closed[0].id, 19);
+  assert.equal(seen.closed[0].outcome, "failed");
+  assert.equal(seen.rows.at(-1).state, "failed");
+  assert.equal(seen.rows.at(-1).detail, "the machine it was running on is gone",
+    "in words the bot can read to a person, with no machine name in them");
+  // NOT BILLED TO NOW. There is no FinishedAt to read, so the last honest moment is the last time this
+  // relay saw the container: this process never did (the row was adopted), so that is the task's start.
+  assert.equal(seen.closed[0].minutes, 0, "a container nobody ever saw alive must not be billed three minutes");
+  assert.equal(edge.liveCount(), 0, "so the concurrency cap does not read one high for ever");
+  // And the network goes in the SAME pass rather than leaking until somebody notices.
+  assert.ok(seen.docker.some((line) => line.startsWith(`network rm ${CODE_NAME_PREFIX}999999999999`)),
+    "a tbcode network whose task is not running any more is removed");
+});
+
+test("a task seen alive by one sweep and gone by the next is billed to when it was last seen", async () => {
+  // The same case with a sweep in between, which is the real shape on a live machine: the stamp the
+  // first pass leaves is the honest end of the task, not the moment the second pass noticed.
+  const seenAtFirst = NOW;
+  let gone = false;
+  const seen = { closed: [], rows: [] };
+  const rows = [{ taskId: "888888888888", state: "running", startedAt: NOW - 120_000, deadlineAt: NOW + 1_600_000, claimId: 20, provider: "local" }];
+  let clock = NOW;
+  const edge = createCodeEdge({
+    execFile: (file, args, opts, cb) => {
+      if (args[0] === "inspect" && gone) {
+        return setImmediate(() => cb(Object.assign(new Error("no such object"), { code: 1 }), "", "No such container"));
+      }
+      let stdout = "";
+      if (args[0] === "inspect") stdout = "running\t0\tfalse";
+      else if (`${args[0]} ${args[1]}` === "ps --filter") stdout = "titanbot-proxy-abc\n";
+      setImmediate(() => cb(null, stdout, ""));
+    },
+    readBody: async () => "{}",
+    drainThenEnd: async () => {},
+    workspaceOf: () => null,
+    taskRootFor: () => "",
+    credRootFor: () => "",
+    readTasks: async () => rows,
+    writeTask: async (slug, row) => { seen.rows.push(row); },
+    openTask: async () => ({ ok: false }),
+    closeTask: async (row) => { seen.closed.push(row); },
+    dockerAvailable: async () => true,
+    log: () => {},
+    now: () => clock,
+  });
+  edge.adopt("demo", [{ taskId: "888888888888", state: "running", provider: "local", deadlineAt: NOW + 1_600_000 }]);
+  await edge.sweep("the timer");
+  assert.equal(seen.closed.length, 0, "the container was alive, so nothing was closed");
+  // A minute later it is gone, and the clock has moved on.
+  gone = true;
+  clock = seenAtFirst + 60_000;
+  await edge.sweep("the timer");
+  assert.equal(seen.closed.length, 1);
+  assert.equal(seen.rows.at(-1).endedAt, seenAtFirst, "the last time the container was seen, not the moment it was missed");
+  assert.equal(seen.closed[0].minutes, 2);
+});
+
 test("a live task whose container really is running is left alone by that same leg", async () => {
   const { edge, seen } = sweepWith({
     ps: `${psLine("dddddddddddd", NOW + 1_700_000)}\n`,
@@ -246,6 +333,22 @@ test("a task past its deadline is closed as timed out, in the words the bot read
   assert.equal(seen.closed[0].outcome, "timed_out");
   assert.equal(seen.closed[0].minutes, 31);
   assert.equal(seen.rows[0].state, "timed_out");
+});
+
+test("a task killed for time is billed to its own limit, not to the sweep that noticed it", async () => {
+  // MEASURED ON THE R750 2026-09-10: a one minute task started 07:15:32Z with a deadline of 07:16:31Z
+  // was swept at 07:17:49Z -- 58 s past its own limit -- and the operator's row read 1.96 minutes
+  // against a one minute cap. The sweep runs once a minute and is the only enforcement there is, so the
+  // overshoot is the product's to absorb: the clock stops at the deadline the task was given.
+  const { edge, seen } = sweepWith({
+    ps: `${psLine("777777777777", NOW - 60_000)}\n`,
+    rows: [{ taskId: "777777777777", state: "running", startedAt: NOW - 120_000, deadlineAt: NOW - 60_000, claimId: 21, provider: "local" }],
+  });
+  edge.adopt("demo", [{ taskId: "777777777777", state: "running", provider: "local", deadlineAt: NOW - 60_000 }]);
+  await edge.sweep("the timer");
+  assert.equal(seen.closed[0].outcome, "timed_out");
+  assert.equal(seen.closed[0].minutes, 1, "one minute of limit, not two minutes of waiting for the sweep");
+  assert.equal(seen.rows.at(-1).endedAt, NOW - 60_000, "and the workspace's own row stops at the deadline");
 });
 
 test("a labelled container with no row of its own is still removed rather than left running", async () => {

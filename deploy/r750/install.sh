@@ -337,6 +337,33 @@ else
   say "         Run deploy/r750/sync.sh from the Mac; it ships the script."
 fi
 
+step "coding sandbox image"
+# CODE-1. The image a coding task runs in, built HERE rather than by hand. It was not in this script at
+# all and it has already gone missing once on this very server: measured 2026-09-10, `docker image
+# inspect titanbot/code-sandbox:1` answered "No such image" twenty minutes after a real task had run on
+# it, because this host's Coolify has force_docker_cleanup on and its nightly image prune spares only
+# the repos Coolify itself deploys. Every coding task on the machine was then refused with a sentence
+# telling the customer the computer had not been built, which is exactly the hand operation
+# no-hand-operations-on-the-product exists to stop. The script also leaves one never-started keeper
+# container so a prune cannot take the image between ships.
+#
+# It builds on the HOST, starts nothing, restarts nothing, and touches no container, no network and no
+# box, so it is safe here and safe to re-run on a live machine. A failure is a WARNING and not fatal:
+# the relay and the boxes are the product, and a machine with no sandbox image refuses coding tasks with
+# a plain sentence rather than breaking anything else.
+if [ -f "$ROOT/deploy/code-sandbox/install.sh" ]; then
+  if bash "$ROOT/deploy/code-sandbox/install.sh" 2>&1 | sed 's/^/    /'; then
+    say "coding sandbox image built and kept"
+  else
+    say "WARNING: the coding sandbox image did not build, so coding tasks will be refused. Read the"
+    say "         reason above, or run it again on its own:"
+    say "    bash $ROOT/deploy/code-sandbox/install.sh"
+  fi
+else
+  say "WARNING: $ROOT/deploy/code-sandbox/install.sh is missing, so no coding task can run here."
+  say "         Run deploy/r750/sync.sh from the Mac; it ships the code-sandbox directory."
+fi
+
 step "nightly snapshot"
 # BACKUP-1. There was no backup job of any kind on this server: a lost volume was a lost instance.
 # USER units, because this whole install runs as sem with no sudo. The timer needs linger to fire

@@ -114,6 +114,10 @@ export const CODE_LOG_CHARS = 8_000;
 /** The artifact list. A task that wrote four hundred files is reported as the first hundred and a
  *  count, because the list goes into a model's context. */
 export const CODE_FILES_LISTED = 100;
+/** How many rows the console is sent, and how many of those carry their log and their file list: the
+ *  strip draws four, so four are read in full and the rest are the one-line form. */
+export const CODE_CONSOLE_ROWS = 20;
+export const CODE_CONSOLE_SHOWN = 4;
 /** The tasks file's tail. A few thousand rows, which is more than any workspace's history needs. */
 export const CODE_TASKS_TAIL_BYTES = 256 * 1024;
 /** The sweep's cadence, and the mail sweep's shape: one pass at start and one on the timer. */
@@ -143,6 +147,10 @@ export const CODE_REFUSALS = {
   concurrent: "This workspace already has as many coding tasks running as it may have at once, so the task did not start.",
   daily: "This workspace has started as many coding tasks today as it may, so the task did not start.",
   cap: "That task reached its spending limit and was stopped, so the work is unfinished.",
+  // THE SAME SENTENCE UNDER THE STATE'S OWN NAME. `status` looks a finished task's state up in this
+  // table, so without this key the one state that is about money fell through to the generic "stopped
+  // before it finished" and the money was never named to the person who pays for it.
+  spend_cap: "That task reached its spending limit and was stopped, so the work is unfinished.",
   timed_out: "That task ran longer than it is allowed to and was stopped, so the work may be unfinished.",
   bad_request: "That coding request was not readable, so nothing started.",
   no_title: "A coding task needs a short title, so nothing started.",
@@ -581,6 +589,23 @@ export async function readTaskRows(file, { maxBytes = CODE_TASKS_TAIL_BYTES } = 
   } catch { return []; }
   finally { await handle?.close().catch(() => {}); }
   return foldTasks(raw);
+}
+
+/** The last bytes of any file, with the same fixed cost the tasks tail has. The console reads a
+ *  FINISHED task's log this way: `docker logs` is gone with the container, and a finished task's log
+ *  is the file the entrypoint wrote beside its artifacts. A file that is not there is "" and not a
+ *  throw, because a task that died before it opened one is a normal outcome. */
+export async function readFileTail(file, { maxBytes = CODE_LOG_CHARS * 2 } = {}) {
+  let handle = null;
+  try {
+    handle = await open(file, "r");
+    const size = (await handle.stat()).size;
+    const start = Math.max(0, size - maxBytes);
+    const buffer = Buffer.alloc(Math.min(size, maxBytes));
+    if (buffer.length > 0) await handle.read(buffer, 0, buffer.length, start);
+    return buffer.toString("utf8");
+  } catch { return ""; }
+  finally { await handle?.close().catch(() => {}); }
 }
 
 /** One row, appended. 0600 and owned like its directory, because it holds a customer's own words. */
@@ -1022,7 +1047,7 @@ export function createCodeEdge({
       });
       if (started.ok !== true) return fail(started.error === "no_e2b_key" ? "no_e2b_key" : "e2b_failed", String(started.error ?? "e2b refused"));
       record.sandboxId = started.sandboxId;
-      live.set(taskId, { slug, provider, deadlineAt: record.deadlineAt });
+      live.set(taskId, { slug, provider, deadlineAt: record.deadlineAt, seenAt: startedAt });
       await writeTask(slug, taskRow(record));
       return sendJson(res, 200, { started: true, taskId, provider, deadlineAt: record.deadlineAt, capUsd });
     }
@@ -1122,7 +1147,9 @@ export function createCodeEdge({
       return fail("no_record", begun.stderr.slice(0, 300));
     }
 
-    live.set(taskId, { slug, provider, deadlineAt: record.deadlineAt, proxy, delivery });
+    // `seenAt` is the last moment this relay knows the container existed. It starts at the start and
+    // the sweep stamps it on every pass; it is what a task whose container vanishes is billed to.
+    live.set(taskId, { slug, provider, deadlineAt: record.deadlineAt, proxy, delivery, seenAt: startedAt });
     await writeTask(slug, taskRow(record));
     log(`code  ${slug}/${taskId} started on this machine (${subnet}, ${copied} file(s) in, ${delivery})`);
     return sendJson(res, 200, { started: true, taskId, provider, deadlineAt: record.deadlineAt, capUsd });
@@ -1165,9 +1192,28 @@ export function createCodeEdge({
     const got = await docker(["inspect", "--format",
       "{{.State.Status}}\t{{.State.ExitCode}}\t{{.State.OOMKilled}}\t{{.State.FinishedAt}}", containerName(taskId)]);
     if (!got.ok) {
-      // Gone, and the row still says running: the sweep took it, or somebody did. Either way this is
-      // now a finished task and the honest state is what the row's detail already says.
-      return { state: row.state === "running" ? "failed" : String(row.state), exit: -1 };
+      // GONE FROM UNDER US. The container this row points at is not on the machine any more: somebody
+      // removed it, a daemon restart took it, or the image's own cleanup did. MEASURED ON THE R750
+      // 2026-09-10: a task whose container was removed by hand stayed `running` for ever -- the sweep
+      // only ever looked at the containers docker returned, so a row with no container was in none of
+      // its legs, and adopt() made it live again on every restart. It held one of the workspace's two
+      // slots, its network stayed on the machine and the bot was never told anything.
+      //
+      // AND THE CLOCK STOPS WHERE IT WAS LAST SEEN, not now. There is no FinishedAt to read, so
+      // billing to now is the same error the other path already fixed: the same measurement closed an
+      // 8 second container for 3.13 minutes. The sweep stamps `seenAt` every time it finds the
+      // container alive, so the last honest moment is that one, bounded by the task's own deadline.
+      const held = live.get(taskId);
+      const seen = Number(held?.seenAt ?? 0) || Number(row.startedAt ?? 0);
+      const deadline = Number(row.deadlineAt ?? 0);
+      const endedAt = deadline > 0 ? Math.min(seen, deadline) : seen;
+      return {
+        state: row.state === "running" ? "failed" : String(row.state),
+        exit: -1,
+        gone: true,
+        endedAt: endedAt > 0 ? endedAt : undefined,
+        detail: row.state === "running" ? "the machine it was running on is gone" : "",
+      };
     }
     const [status, exit, oom, finishedAt] = String(got.stdout ?? "").trim().split("\t");
     if (status === "running" || status === "created") return { state: "running", exit: 0 };
@@ -1181,19 +1227,58 @@ export function createCodeEdge({
     return { state: Number(exit ?? 0) === 0 ? "done" : "failed", exit: Number(exit ?? 0), endedAt };
   }
 
-  async function finish(slug, row, state, detail = "", { endedAt: when = 0 } = {}) {
+  /** THE CLOSED ROW IS WRITTEN BEFORE THE CONTROL PLANE IS TOLD, and the whole task closes once.
+   *
+   *  MEASURED ON THE R750 2026-09-10. The close used to await the control plane first, and that await
+   *  waits up to twenty seconds on a spend the proxy books late -- so for twenty seconds after this
+   *  relay had decided a task was finished the row still said `running`, and any status, result or
+   *  sweep landing in that window settled the same task a second time. Two byte-identical `done` rows
+   *  for one task id were in /data/titanbot/demo/state/code-tasks.jsonl, and the first status after a
+   *  task ended answered `state:"done"` beside `endedAt:0, elapsedS:0` because it read the row from
+   *  before the settle. The row goes down first, and `closing` makes a second caller wait for the
+   *  first answer instead of producing its own.
+   *
+   *  WHAT THE NEW ORDER COSTS, named rather than discovered: if this process dies between the row and
+   *  the control plane's close, the ledger claim stays open. That case already has an owner -- the
+   *  control plane's own key sweep closes a claim nothing came back about once its deadline has passed,
+   *  as `lost` -- whereas a row left saying `running` had no owner at all and was the measured failure. */
+  const closing = new Map();
+
+  async function finish(slug, row, state, detail = "", options = {}) {
+    const taskId = String(row.taskId);
+    const already = closing.get(taskId);
+    if (already != null) return already;
+    const run = closeOnce(slug, row, state, detail, options);
+    closing.set(taskId, run);
+    try { return await run; } finally { closing.delete(taskId); }
+  }
+
+  async function closeOnce(slug, row, askedState, detail, { endedAt: when = 0 } = {}) {
     const taskId = String(row.taskId);
     const held = live.get(taskId);
+    // THE SPENDING LIMIT, RECOGNISED BEFORE ANYTHING IS WRITTEN DOWN. The cap is a max_budget on the
+    // task's own key, so a task that reaches it gets no cap signal at all: the proxy refuses the
+    // agent's next call, the agent's turn dies and the container exits non-zero, which read to
+    // everyone downstream as "did not finish" with the money never named. `spend_cap` was in the state
+    // set, in the wire vocabulary, in the strip's words and in the refusal sentence, and NOTHING in the
+    // product ever wrote it; this is the only thing that does. The proxy's own budget refusal is in the
+    // agent's log, which is read here -- before the row and before the ledger, so the customer's row
+    // and the operator's row agree. The spend the close reads is the second signal, below.
+    const state = askedState === "failed" && await logSaysBudget(slug, taskId) ? "spend_cap" : askedState;
     // The container's own stop time when there is one, so the billed minutes are the minutes the
     // container really ran and not the minutes until something asked about it.
-    const endedAt = Number(when) > 0 ? Number(when) : now();
+    let endedAt = Number(when) > 0 ? Number(when) : now();
+    // A TASK KILLED FOR TIME IS BILLED TO ITS OWN LIMIT. The sweep is the only enforcement and it
+    // runs once a minute, so the kill lands up to a minute late: measured on the R750 2026-09-10, a
+    // one minute task was swept 58 s past its deadline and the operator's row read 1.96 minutes
+    // against a one minute cap. The overshoot is the product's, not the customer's.
+    const deadlineAt = Number(row.deadlineAt ?? 0);
+    if (state === "timed_out" && deadlineAt > 0) endedAt = Math.min(endedAt, deadlineAt);
     const minutes = Math.max(0, Math.round(((endedAt - Number(row.startedAt ?? endedAt)) / 60_000) * 100) / 100);
-    // The model spend, read from the per-task key at the control plane's close. /key/info was
-    // immediate and correct in measurement; /spend/logs is batch written every 10 s and produced
-    // zero rows for priced /v1/messages calls over three minutes of polling. CODE-11.
-    await Promise.resolve()
-      .then(() => closeTask({ id: Number(row.claimId ?? 0), outcome: state, minutes, detail }))
-      .catch((error) => log(`code  could not close task row ${row.claimId}: ${error?.message ?? error}`));
+    live.delete(taskId);
+    // THE ROW FIRST. Nothing after this line may leave the row saying `running`, however long the
+    // control plane takes or whether it answers at all.
+    await writeTask(slug, taskRow({ ...row, state, endedAt, detail }));
     if (String(row.provider) === "e2b") {
       // The key is asked for again rather than held. With none the sandbox stops on the timeout set
       // when it was created, which is why that timeout is set at all.
@@ -1207,9 +1292,42 @@ export function createCodeEdge({
       const credRoot = asString(credRootFor(slug));
       if (credRoot.length > 0) await rm(path.join(credRoot, `${taskId}.env`), { force: true }).catch(() => {});
     }
-    live.delete(taskId);
-    await writeTask(slug, taskRow({ ...row, state, endedAt, detail }));
-    return { state, endedAt, minutes };
+    // The model spend, read from the per-task key at the control plane's close. /key/info was
+    // immediate and correct in measurement; /spend/logs is batch written every 10 s and produced
+    // zero rows for priced /v1/messages calls over three minutes of polling. CODE-11.
+    const closed = await Promise.resolve()
+      .then(() => closeTask({ id: Number(row.claimId ?? 0), outcome: state, minutes, detail }))
+      .catch((error) => { log(`code  could not close task row ${row.claimId}: ${error?.message ?? error}`); return null; });
+    // AND THE SECOND SIGNAL: the spend the close just read reached the cap. This one is only knowable
+    // AFTER the control plane has answered, so it rewrites the workspace's row -- the ledger row keeps
+    // the outcome it was closed with, and the log line says what happened. CODE-13 is why neither
+    // signal can fire on the R750 today: an unpriced deployment books every turn at nothing, so the
+    // budget is never reached and the proxy never refuses for it.
+    let settledState = state;
+    if (state === "failed") {
+      const cap = Number(row.capUsd ?? 0);
+      const spend = Number(closed?.spendUsd);
+      if (cap > 0 && Number.isFinite(spend) && spend >= cap) {
+        settledState = "spend_cap";
+        await writeTask(slug, taskRow({ ...row, state: settledState, endedAt, detail }));
+        log(`code  ${slug}/${taskId} reached its spending limit: ${spend} of ${cap}`);
+      }
+    } else if (state !== askedState) {
+      log(`code  ${slug}/${taskId} was stopped by its spending limit, which the proxy said in its log`);
+    }
+    return { state: settledState, endedAt, minutes };
+  }
+
+  /** The proxy's own budget refusal, in the agent's log. A key over its max_budget is refused with
+   *  LiteLLM's budget sentence, which the agent prints and then dies on; the words are the only
+   *  evidence left once the container is gone, and they are read off the file rather than the
+   *  container so this works after the teardown above. */
+  async function logSaysBudget(slug, taskId) {
+    const root = asString(taskRootFor(slug, taskId));
+    if (root.length === 0) return false;
+    const text = await readFileTail(path.join(root, "agent.log"));
+    if (text.length === 0) return false;
+    return /budget[^\n]{0,80}exceed|exceed[^\n]{0,80}budget|max_budget/i.test(text);
   }
 
   async function handleStatus(req, res) {
@@ -1218,25 +1336,40 @@ export function createCodeEdge({
     const { slug, row } = asked;
     let state = String(row.state);
     let lines = [];
+    // THE STOP TIME THE SETTLE JUST DECIDED, not the one on the row that was read before it. The row
+    // in hand was loaded before this call settled anything, so on the first status after a task ends
+    // its `endedAt` is still 0 -- measured twice on the R750 2026-09-10, both answering
+    // `state:"done", endedAt:0, elapsedS:0` where a later call on the same task read 52 s and 230 s.
+    let endedAt = Number(row.endedAt ?? 0);
     if (state === "running" && String(row.provider) === "local") {
       const settled = await settleLocal(slug, row);
-      const got = await docker(["logs", "--tail", String(CODE_LOG_LINES * 2), containerName(String(row.taskId))]);
-      lines = logTail(`${got.stdout}\n${got.stderr}`, { secrets: [] });
+      // A container that is gone has no log to read, and asking for one is a docker call whose only
+      // possible answer is the same error the inspect just gave.
+      if (settled.gone !== true) {
+        const got = await docker(["logs", "--tail", String(CODE_LOG_LINES * 2), containerName(String(row.taskId))]);
+        lines = logTail(`${got.stdout}\n${got.stderr}`, { secrets: [] });
+      }
       if (settled.state !== "running") {
-        await finish(slug, row, settled.state, String(settled.detail ?? ""), { endedAt: Number(settled.endedAt ?? 0) });
-        state = settled.state;
+        const closed = await finish(slug, row, settled.state, String(settled.detail ?? ""), { endedAt: Number(settled.endedAt ?? 0) });
+        state = String(closed?.state ?? settled.state);
+        endedAt = Number(closed?.endedAt ?? 0);
       }
     } else if (state === "running") {
       const key = await Promise.resolve().then(() => e2bKeyFor(slug)).catch(() => "");
       const settled = await driver.status({ key: String(key), sandboxId: String(row.sandboxId ?? "") });
-      if (settled.ok === true && settled.state !== "running") { await finish(slug, row, "done"); state = "done"; }
+      if (settled.ok === true && settled.state !== "running") {
+        const closed = await finish(slug, row, "done");
+        state = String(closed?.state ?? "done");
+        endedAt = Number(closed?.endedAt ?? 0);
+      }
     }
+    if (state !== "running" && !(endedAt > 0)) endedAt = now();
     return sendJson(res, 200, {
       found: true,
       state,
       startedAt: Number(row.startedAt ?? 0),
-      endedAt: state === "running" ? 0 : Number(row.endedAt ?? now()),
-      elapsedS: elapsedSeconds(Number(row.startedAt ?? now()), state === "running" ? now() : Number(row.endedAt ?? now())),
+      endedAt: state === "running" ? 0 : endedAt,
+      elapsedS: elapsedSeconds(Number(row.startedAt ?? now()), state === "running" ? now() : endedAt),
       provider: String(row.provider),
       lines,
       message: state === "running"
@@ -1254,6 +1387,40 @@ export function createCodeEdge({
     return sendJson(res, 200, { stopped: true, message: CODE_REFUSALS.stopped });
   }
 
+  /** What a task left on disk, in name order. One reader for the bot's `result` and for the console's
+   *  strip, so the two can never show a person and a model different file lists. */
+  async function artifactsIn(root) {
+    const files = [];
+    if (asString(root).length === 0) return files;
+    try {
+      const entries = await readdir(root, { withFileTypes: true });
+      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (!entry.isFile()) continue;
+        if (entry.name.startsWith(".code-cred")) continue;
+        if (files.length >= CODE_FILES_LISTED) break;
+        const size = await stat(path.join(root, entry.name)).then((s) => s.size).catch(() => 0);
+        files.push({ path: entry.name, bytes: size });
+      }
+    } catch { /* the list is empty, which is an honest answer */ }
+    return files;
+  }
+
+  /** The last lines of a task's log, for a person's screen. A RUNNING local task is read off the
+   *  container; a finished one is read off the file the entrypoint wrote, because `docker logs` goes
+   *  with the container the moment the task ends. Both are redacted by logTail. */
+  async function logLinesFor(slug, row) {
+    const taskId = String(row.taskId ?? "");
+    if (String(row.provider) === "e2b") return [];
+    if (String(row.state) === "running") {
+      const got = await docker(["logs", "--tail", String(CODE_LOG_LINES * 2), containerName(taskId)], { timeoutMs: 10_000 });
+      if (got.ok) return logTail(`${got.stdout}\n${got.stderr}`, { secrets: [] });
+      // A container that is gone still has its file, which is the whole reason the entrypoint keeps one.
+    }
+    const root = asString(taskRootFor(slug, taskId));
+    if (root.length === 0) return [];
+    return logTail(await readFileTail(path.join(root, "agent.log")), { secrets: [] });
+  }
+
   /** The artifacts, where they already are, plus the summary the sandbox agent wrote. */
   async function handleResult(req, res) {
     const asked = await askedTask(req, res);
@@ -1264,8 +1431,11 @@ export function createCodeEdge({
       if (String(row.provider) === "local") {
         const settled = await settleLocal(slug, row);
         if (settled.state === "running") return sendJson(res, 200, { ready: false, message: CODE_REFUSALS.not_ready });
-        await finish(slug, row, settled.state, String(settled.detail ?? ""), { endedAt: Number(settled.endedAt ?? 0) });
-        row.state = settled.state;
+        const closed = await finish(slug, row, settled.state, String(settled.detail ?? ""), { endedAt: Number(settled.endedAt ?? 0) });
+        // The state the close settled on, which is not always the state the settle proposed: a task
+        // that died because its key was over budget goes out as `spend_cap` rather than `failed`.
+        row.state = String(closed?.state ?? settled.state);
+        row.endedAt = Number(closed?.endedAt ?? row.endedAt ?? 0);
       } else return sendJson(res, 200, { ready: false, message: CODE_REFUSALS.not_ready });
     }
     // A cloud task's files are on somebody else's machine, so they are read back over the API rather
@@ -1282,21 +1452,8 @@ export function createCodeEdge({
       });
     }
     const root = asString(taskRootFor(slug, String(row.taskId)));
-    const files = [];
-    let summary = "";
-    if (root.length > 0) {
-      try {
-        const entries = await readdir(root, { withFileTypes: true });
-        for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-          if (!entry.isFile()) continue;
-          if (entry.name.startsWith(".code-cred")) continue;
-          if (files.length >= CODE_FILES_LISTED) break;
-          const size = await stat(path.join(root, entry.name)).then((s) => s.size).catch(() => 0);
-          files.push({ path: entry.name, bytes: size });
-        }
-        summary = await readFile(path.join(root, "SUMMARY.md"), "utf8").catch(() => "");
-      } catch { /* the list is empty, which is an honest answer */ }
-    }
+    const files = await artifactsIn(root);
+    const summary = root.length === 0 ? "" : await readFile(path.join(root, "SUMMARY.md"), "utf8").catch(() => "");
     // The path the BOT reads, which is its own /workspace and not the host's /data path. A host path
     // in a model's context is a path it will try and fail to open, and then report as missing.
     const own = `/workspace/code/${String(row.taskId)}`;
@@ -1324,10 +1481,18 @@ export function createCodeEdge({
   /** Behind the console session, per tenant, and it is the SAME data the box route reads. One
    *  source, so the strip in the Computer card and the bot never disagree about what is running. */
   async function handleConsoleTasks(slug) {
-    const rows = await readTasks(slug);
-    return {
-      tasks: rows.slice(0, 20).map((row) => ({
-        taskId: String(row.taskId ?? ""),
+    const rows = (await readTasks(slug)).slice(0, CODE_CONSOLE_ROWS);
+    // THE LOG AND THE FILES ARE THE STRIP, and they were missing. The strip renders a log block and a
+    // file list and this route sent neither, so the one sentence and a Stop button were the whole of
+    // it -- and "the log strip is enough" is the stated reason no terminal was built. Only the rows
+    // the strip actually draws carry them: a log read and a directory listing apiece is a fixed cost
+    // for four rows and an unbounded one for twenty.
+    const tasks = [];
+    for (const [at, row] of rows.entries()) {
+      const taskId = String(row.taskId ?? "");
+      const detailed = at < CODE_CONSOLE_SHOWN;
+      tasks.push({
+        taskId,
         title: String(row.title ?? ""),
         state: String(row.state ?? ""),
         provider: String(row.provider ?? ""),
@@ -1336,8 +1501,22 @@ export function createCodeEdge({
         elapsedS: elapsedSeconds(Number(row.startedAt ?? 0), Number(row.endedAt ?? 0) > 0 ? Number(row.endedAt) : now()),
         // In plain words, because this is a person's screen. No provider name, no vendor.
         where: String(row.provider) === "e2b" ? "a cloud computer" : "this computer",
-        path: `/workspace/code/${String(row.taskId ?? "")}`,
-      })),
+        path: `/workspace/code/${taskId}`,
+        lines: detailed ? await logLinesFor(slug, row) : [],
+        files: detailed && isFinished(String(row.state)) ? await artifactsIn(asString(taskRootFor(slug, taskId))) : [],
+      });
+    }
+    // CAN THIS INSTALLATION RUN ONE AT ALL. The strip has a line for the answer being no -- a customer's
+    // own instance with no container engine in front of the relay -- and could never draw it, because
+    // nothing ever sent the field. CODE-5.
+    const conf = settings(slug);
+    const available = conf.provider === "e2b" ? true : await dockerAvailable();
+    return {
+      tasks,
+      available,
+      message: available
+        ? ""
+        : `${CODE_REFUSALS.not_available} A cloud coding computer can run it instead once the operator sets one up.`,
     };
   }
 
@@ -1370,6 +1549,7 @@ export function createCodeEdge({
    *  process's memory does not survive the restart that ends every ship. */
   async function sweep(why = "the timer") {
     if (!await dockerAvailable()) return { ok: true, containers: 0, networks: 0, why: "no docker on this relay" };
+    await noteImage();
     const ps = await docker(["ps", "-a", "--filter", `label=${CODE_ROLE_LABEL}`, "--format", "{{.ID}}\t{{.Names}}\t{{.Labels}}"]);
     const containers = [];
     for (const line of String(ps.stdout ?? "").split("\n")) {
@@ -1400,7 +1580,16 @@ export function createCodeEdge({
       networks.push({ id, name, labels, members: memberText.split(" ").filter((m) => m.length > 0) });
     }
     const decided = sweepDecisions({ containers, networks, live: new Set(live.keys()), nowMs: now() });
-    const proxy = decided.remove.length + decided.removeNetworks.length > 0 ? await proxyContainer() : "";
+    // Asked for at most once, and only if something really has to be detached from a network. A
+    // sweep on a quiet machine must cost nothing, and the legs below can each be the first one to
+    // need it.
+    let proxyAsked = false;
+    let proxyName = "";
+    const proxyOnce = async () => {
+      if (!proxyAsked) { proxyAsked = true; proxyName = await proxyContainer(); }
+      return proxyName;
+    };
+    const removedNetworks = new Set();
     for (const container of decided.remove) {
       log(`code  sweeping ${container.name} (${container.reason})`);
       // The claim is closed FIRST, because a container removed with its row left open is an hour
@@ -1411,13 +1600,6 @@ export function createCodeEdge({
         container.reason === "timed_out" ? "past its time limit" : "this relay restarted while it was running");
       else await docker(["rm", "-f", container.name]);
     }
-    for (const network of decided.removeNetworks) {
-      if (proxy.length > 0) await docker(["network", "disconnect", "-f", network.name, proxy]);
-      const gone = await docker(["network", "rm", network.name]);
-      if (!gone.ok && !/not found|no such network/i.test(gone.stderr)) {
-        log(`code  could not remove ${network.name}: ${gone.stderr.slice(0, 120)}`);
-      }
-    }
     // A TASK WHOSE CONTAINER HAS ALREADY STOPPED. This is the case a deadline never catches and an
     // orphan check never sees: the row still says running, this relay still has it live, and the
     // container exited minutes ago. Nothing else closes it -- /code/list, which is what the bot's
@@ -1426,24 +1608,74 @@ export function createCodeEdge({
     // bot was never told anything at all. Measured on the R750 2026-09-10: a task exited 2 in its
     // first second and the strip still read "running, 9m 38s" ten minutes later. This is the only
     // real wall clock, so settling here is its job.
+    //
+    // AND THIS LEG IS DRIVEN BY THE ROWS, NOT BY DOCKER, which is the second half of the same lesson.
+    // Everything above iterates the containers docker returned, so a task whose container has been
+    // REMOVED is in none of them: not the deadline branch, not the orphan branch, and not a `keep`.
+    // MEASURED ON THE R750 2026-09-10: a task's container was removed eight seconds after it started
+    // and three sweeps later -- each one logging "removed 0 code container(s)" -- /code/list still
+    // read `state:"running", endedAt:0`, its network was still on the machine, and one of the
+    // workspace's two slots was gone for good, because adopt() re-adds a running row as live on every
+    // restart so it never ages out either. Walking `live` finds both cases with one inspect apiece.
     let settled = 0;
-    for (const container of decided.keep) {
-      const labels = container.labels ?? {};
-      const taskId = String(labels["com.titanbot.task"] ?? "");
-      const slug = String(labels["com.titanbot.tenant"] ?? "");
-      if (taskId.length === 0 || slug.length === 0 || !live.has(taskId)) continue;
+    let lost = 0;
+    for (const [taskId, held] of [...live.entries()]) {
+      const slug = String(held?.slug ?? "");
+      if (slug.length === 0 || String(held?.provider ?? "local") !== "local") continue;
       const rows = await readTasks(slug);
       const row = rows.find((r) => String(r.taskId) === taskId);
-      if (row == null || String(row.state) !== "running" || String(row.provider) !== "local") continue;
+      // A row that is no longer running, or is not there at all, is nothing this map should still be
+      // holding: it is a slot the workspace cannot use and an orphan the next pass would misread.
+      if (row == null || String(row.state) !== "running") { live.delete(taskId); continue; }
       const got = await settleLocal(slug, row);
-      if (got.state === "running") continue;
-      log(`code  ${slug}/${taskId} stopped on its own (${got.state}, exit ${got.exit}); closing its row`);
+      if (got.state === "running") { live.set(taskId, { ...held, seenAt: now() }); continue; }
+      log(got.gone === true
+        ? `code  ${slug}/${taskId} has no container on this machine any more; closing its row`
+        : `code  ${slug}/${taskId} stopped on its own (${got.state}, exit ${got.exit}); closing its row`);
       await finish(slug, row, got.state, String(got.detail ?? ""), { endedAt: Number(got.endedAt ?? 0) });
-      settled += 1;
+      if (got.gone === true) lost += 1; else settled += 1;
     }
-    log(`code  sweep (${why}) removed ${decided.remove.length} code container(s) and ${decided.removeNetworks.length} code network(s)`
-      + (settled > 0 ? ` and closed ${settled} finished task(s)` : ""));
-    return { ok: true, containers: decided.remove.length, networks: decided.removeNetworks.length, settled };
+    // THE NETWORKS LAST, and decided twice: once against the live set this pass started with, and
+    // once against what the legs above left, so a network whose task was closed a moment ago goes now
+    // rather than in a minute. `finish` -> `teardown` has usually taken it already, which is why a
+    // "no such network" answer is not worth a line.
+    const after = sweepDecisions({ containers: [], networks, live: new Set(live.keys()), nowMs: now() });
+    for (const network of [...decided.removeNetworks, ...after.removeNetworks]) {
+      if (removedNetworks.has(network.name)) continue;
+      removedNetworks.add(network.name);
+      const proxy = await proxyOnce();
+      if (proxy.length > 0) await docker(["network", "disconnect", "-f", network.name, proxy]);
+      const gone = await docker(["network", "rm", network.name]);
+      if (!gone.ok && !/not found|no such network/i.test(gone.stderr)) {
+        log(`code  could not remove ${network.name}: ${gone.stderr.slice(0, 120)}`);
+      }
+    }
+    log(`code  sweep (${why}) removed ${decided.remove.length} code container(s) and ${removedNetworks.size} code network(s)`
+      + (settled > 0 ? ` and closed ${settled} finished task(s)` : "")
+      + (lost > 0 ? ` and closed ${lost} task(s) whose container was gone` : ""));
+    return { ok: true, containers: decided.remove.length, networks: removedNetworks.size, settled, lost };
+  }
+
+  /** IS THE SANDBOX IMAGE STILL ON THIS MACHINE, said once each time the answer changes.
+   *
+   *  MEASURED ON THE R750 2026-09-10: the image was simply GONE -- `docker image inspect` answered
+   *  "No such image" twenty minutes after a task had run on it. Coolify's own docker cleanup runs on
+   *  this server four times a night with force_docker_cleanup on, and its image prune keeps only the
+   *  repos Coolify itself deploys; a tag used by no container between tasks is exactly what a prune
+   *  takes. The install script now leaves one never-started keeper container so the prune skips the
+   *  image, and deploy/r750/install.sh builds it on every ship -- but a sweep that says the image is
+   *  absent is what makes the next surprise visible in the relay's own log before a customer finds it
+   *  as "The coding computer has not been built on this machine yet". */
+  let imageKnownMissing = null;
+  async function noteImage() {
+    const image = String(CODE_DEFAULTS.image);
+    const got = await docker(["image", "inspect", "--format", "{{.Id}}", image], { timeoutMs: 10_000 });
+    const missing = !got.ok;
+    if (missing === imageKnownMissing) return;
+    imageKnownMissing = missing;
+    log(missing
+      ? `code  ${image} is NOT on this machine, so every coding task will be refused. Build it: bash deploy/code-sandbox/install.sh`
+      : `code  ${image} is on this machine`);
   }
 
   /** What this process believes is running, so a restart's first sweep can tell an orphan from a
@@ -1451,6 +1683,8 @@ export function createCodeEdge({
   function adopt(slug, rows) {
     for (const row of rows) {
       if (String(row.state) !== "running") continue;
+      // NO `seenAt` HERE ON PURPOSE. After a restart this process has never seen the container, so the
+      // last honest moment it can bill a vanished task to is the task's own start.
       live.set(String(row.taskId), { slug, provider: String(row.provider), deadlineAt: Number(row.deadlineAt ?? 0) });
     }
   }

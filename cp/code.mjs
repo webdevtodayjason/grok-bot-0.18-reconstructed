@@ -23,7 +23,7 @@
 // customer's; they stay in the tenant's own tasks file on the relay, beside the task directory they
 // describe. This table is who ran what, for how long, on whose subscription, and what happened.
 import { SECRET_SETTINGS } from "./store.mjs";
-import { PLAN_MODEL_PREFIX, TENANT_ALLOWED_ROUTES } from "./proxy.mjs";
+import { PLAN_MODEL_PREFIX } from "./proxy.mjs";
 
 // ---- the two aliases, frozen --------------------------------------------------------------------
 //
@@ -76,7 +76,7 @@ export const isCodeTaskAlias = (alias) => {
 };
 
 /**
- * THE DOORS A TASK KEY CARRIES, and the two that are on this list and nowhere else.
+ * THE DOORS A TASK KEY CARRIES, WRITTEN OUT ONE BY ONE.
  *
  * /v1/messages and /v1/messages/count_tokens are deliberately ABSENT from TENANT_ALLOWED_ROUTES in
  * cp/proxy.mjs and they stay absent: putting them there would hand every box on the bridge an
@@ -84,13 +84,27 @@ export const isCodeTaskAlias = (alias) => {
  * and a door nobody would notice being used. They ride a per-task key, which exists for minutes and
  * is revoked at the end of the task.
  *
- * The tenant list is spread rather than re-typed, so a route the providers wave adds for a customer
- * is a route a coding task gets too and neither list can drift.
+ * THE TENANT LIST IS DELIBERATELY NOT REUSED, and this is the whole reason the list is a literal.
+ * It used to be spread in here so the two could not drift, and what came with it was egress: the
+ * tenant list carries the proxy's /tinyfish/fetch and /tinyfish/search pass-throughs and the /mcp
+ * mount. MEASURED INSIDE A LIVE SANDBOX ON THE R750 2026-09-10: on a task key, the proxy's refusal
+ * for a disallowed route enumerated the tinyfish paths as allowed, and POST /tinyfish/fetch was not
+ * refused at all -- it was relayed upstream and came back with that service's own request id. The
+ * only thing between the sandbox and arbitrary web fetches was an operator step nobody had finished.
+ * A sandbox is sold to the customer and described to the agent as a machine with no internet access
+ * at all, so every route that can reach the web is a route this key must not have. A route the
+ * providers wave adds for a customer is therefore NOT added here: if a coding task ever needs one,
+ * it is named on this list on purpose, by somebody who has read what it reaches.
  */
 export const CODE_TASK_ROUTES = Object.freeze([
-  ...TENANT_ALLOWED_ROUTES,
+  // The Anthropic wire, which is the wire the coding agent speaks.
   "/v1/messages",
   "/v1/messages/count_tokens",
+  // And the OpenAI-shaped pair plus the model list, for an agent that speaks that one instead.
+  "/v1/chat/completions",
+  "/chat/completions",
+  "/v1/models",
+  "/models",
 ]);
 
 // ---- the settings, with a global form and a per-workspace one -----------------------------------
@@ -240,15 +254,21 @@ export function createCodeTasks({ store, proxy, now = () => Date.now(), spendWai
   // The rollup, in one pass. COUNT(minutes) and COUNT(spend_usd) count the rows that HAVE one, which
   // is where minutesUnmeasured and spendUnmeasured come from; SUM over all NULLs answers NULL rather
   // than 0, which is the distinction this whole file exists to keep.
+  //
+  // THE OPERATOR'S OWN SELFTEST IS NOT ONE OF THE CUSTOMER'S TASKS. `code selftest` mints a real key,
+  // runs one real turn and leaves a real row, which is the point of it -- but the line Jason bills a
+  // customer from must not carry engineering's own runs. MEASURED ON THE R750 2026-09-10: `code spend`
+  // read "demo 8 task(s)" and one of the eight was `cp-selftest`. The detail listings still show it,
+  // because there it is the truth about what ran; only the per-tenant rollup leaves it out.
   const ROLLUP = "SELECT tenant, COUNT(*) AS tasks,"
     + " SUM(CASE WHEN ended_at = '' THEN 1 ELSE 0 END) AS running,"
     + " SUM(minutes) AS minutes, COUNT(minutes) AS minutes_measured,"
     + " SUM(spend_usd) AS spend_usd, COUNT(spend_usd) AS spend_measured,"
     + " SUM(CASE WHEN provider = 'e2b' THEN 1 ELSE 0 END) AS e2b_tasks,"
     + " GROUP_CONCAT(DISTINCT provider) AS providers"
-    + " FROM code_task";
+    + " FROM code_task WHERE outcome != 'selftest'";
   const rollupAll = db.prepare(`${ROLLUP} GROUP BY tenant ORDER BY tenant`);
-  const rollupForTenant = db.prepare(`${ROLLUP} WHERE tenant = ? GROUP BY tenant`);
+  const rollupForTenant = db.prepare(`${ROLLUP} AND tenant = ? GROUP BY tenant`);
   const selectOpen = db.prepare("SELECT * FROM code_task WHERE tenant = ? AND ended_at = ''");
   const selectOpenAll = db.prepare("SELECT * FROM code_task WHERE ended_at = ''");
   const countToday = db.prepare("SELECT COUNT(*) AS n FROM code_task WHERE tenant = ? AND started_at >= ?");

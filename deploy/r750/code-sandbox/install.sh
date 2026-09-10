@@ -59,6 +59,34 @@ else
 fi
 ELAPSED=$(( $(date +%s) - START ))
 
+# ONE NEVER-STARTED CONTAINER, SO THE IMAGE CANNOT BE PRUNED AWAY.
+#
+# MEASURED ON THE R750 2026-09-10: `docker image inspect titanbot/code-sandbox:1` answered "No such
+# image" about twenty minutes after a real task had run on it, so every coding task on the machine was
+# refused with "The coding computer has not been built on this machine yet" and the only cure was a
+# person running this script by hand. The cause is the server's own housekeeping: this host runs
+# Jason's Coolify, whose row has force_docker_cleanup on and a nightly schedule, and its image prune
+# spares only the repos Coolify itself deploys. A sandbox image is referenced by no container between
+# tasks, which is exactly what a prune takes.
+#
+# `docker image prune -a` skips any image a container references, running or not, so one created and
+# never started container is the whole fix. It costs nothing: it has no process, no network and no
+# mount, it is never started, and the relay never lists it (the relay lists by the role label, which
+# this does not carry).
+step "keeper"
+KEEPER="titanbot-code-image-keeper"
+if [ -n "$(docker ps -aq --filter "name=^${KEEPER}$")" ]; then
+  # Recreated rather than left alone: after a rebuild the old one holds the PREVIOUS image id, which is
+  # then the thing the prune spares while the new one goes.
+  docker rm -f "$KEEPER" >/dev/null 2>&1 || true
+fi
+if docker create --name "$KEEPER" "$IMAGE" true >/dev/null 2>&1; then
+  say "$KEEPER created and never started, so an image prune cannot take $IMAGE"
+else
+  say "WARNING: could not create $KEEPER, so a docker cleanup on this host can prune $IMAGE and every"
+  say "         coding task will then be refused until this script runs again."
+fi
+
 step "what was built"
 SIZE="$(docker image inspect "$IMAGE" --format '{{.Size}}' 2>/dev/null || echo 0)"
 SIZE_MB=$(( SIZE / 1000 / 1000 ))
@@ -71,3 +99,6 @@ say "agent    ${AGENT:-could not be read}"
 say ""
 say "Nothing was started and nothing was restarted. The relay makes one container from this image per"
 say "coding task and removes it when the task ends. $ROOT is untouched."
+say ""
+say "deploy/r750/install.sh runs this script, so a ship always restores the image. It is still safe to"
+say "run on its own at any time, which is what to do if the relay logs that the image is not here."

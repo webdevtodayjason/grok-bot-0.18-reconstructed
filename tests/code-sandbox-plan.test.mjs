@@ -410,4 +410,37 @@ test("sync.sh ships the sandbox image directory, because the Dockerfile's contex
   assert.match(invocation, /\|\s*claude -p/, "the prompt goes in on a pipe");
   assert.ok(!/<\s*\/dev\/null/.test(invocation),
     "and nothing redirects the agent's stdin away from that pipe, which is what made every task fail");
+
+  // THE LOG REACHES THE CONTAINER'S OWN STREAM AS WELL AS THE FILE. The relay reads a RUNNING task's
+  // log with `docker logs`, which is the container's streams and nothing else: measured on the R750
+  // 2026-09-10, `docker logs` on a live mid-turn container printed nothing at all, because stderr went
+  // only into a file. Every status answer then carried an empty log, and the log strip is the stated
+  // reason no terminal was built.
+  assert.match(entry, /tail -n \+1 -F "\$LOG" >&2/, "the log is followed onto the container's own stream");
+  assert.match(entry, /kill "\$LOG_TAIL"/, "and the follower is stopped when the agent is done");
+});
+
+test("a ship rebuilds the sandbox image, and one keeper container makes it un-prunable", () => {
+  // MEASURED ON THE R750 2026-09-10: `docker image inspect titanbot/code-sandbox:1` answered "No such
+  // image" twenty minutes after a real task had run on it. The image was built by a script no deploy
+  // step called, and this host's Coolify has force_docker_cleanup on with a nightly image prune that
+  // spares only the repos Coolify itself deploys -- so the coding feature had already gone dead in
+  // production and the only cure was a person running the build by hand, which is the hand operation
+  // no-hand-operations-on-the-product exists to stop.
+  const deploy = readFileSync(path.join(repo, "deploy/r750/install.sh"), "utf8");
+  assert.match(deploy, /bash "\$ROOT\/deploy\/code-sandbox\/install\.sh"/,
+    "a ship builds the sandbox image, so a prune between ships is repaired by the next one");
+
+  const build = readFileSync(path.join(repo, "deploy/r750/code-sandbox/install.sh"), "utf8");
+  // `docker image prune -a` skips any image a container references, running or not. One created and
+  // never started container is the whole defence, and it must be recreated on a rebuild or it goes on
+  // holding the previous image id while the new one is pruned.
+  assert.match(build, /docker create --name "\$KEEPER" "\$IMAGE"/, "one never-started container holds the image");
+  assert.match(build, /docker rm -f "\$KEEPER"/, "and it is recreated on a rebuild, not left on the old image");
+  assert.ok(!/docker start "\$KEEPER"/.test(build), "the keeper is never started; it is a reference and not a process");
+
+  // And the relay says so in its own log when the image is missing, so the next prune is visible
+  // before a customer finds it.
+  const edge = readFileSync(path.join(repo, "ui/code-edge.mjs"), "utf8");
+  assert.match(edge, /is NOT on this machine, so every coding task will be refused/);
 });

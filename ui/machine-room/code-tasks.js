@@ -48,9 +48,19 @@
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
-  /** Which computer, in words a person reads. No vendor, no product, no image tag. */
-  function whereWords(provider) {
-    return String(provider || "local") === "cloud" ? "a cloud sandbox" : "a machine beside this box";
+  /** Which computer, in words a person reads. No vendor, no product, no image tag.
+   *
+   *  THE RELAY'S OWN SENTENCE WINS. /code/tasks already says where a job ran in the same plain words
+   *  this strip needs, and this used to ignore that field and test the provider itself -- against a
+   *  value the relay has never sent, so a job on somebody else's machine would have been labelled as a
+   *  machine beside this box. One vocabulary, in one place. The fallback is for a relay that answers
+   *  rows without the field, and it asks only whether the provider is the local one: a provider this
+   *  file has never heard of is still not this machine, and naming each cloud here is how the two
+   *  vocabularies drifted apart in the first place. */
+  function whereWords(task) {
+    const said = task && typeof task.where === "string" ? task.where.trim() : "";
+    if (said.length > 0) return said;
+    return String((task && task.provider) || "local") === "local" ? "a machine beside this box" : "a cloud sandbox";
   }
 
   /** How long it has been going, or how long it took. Minutes and seconds, never a raw epoch. */
@@ -189,8 +199,8 @@
   function taskMarkup(task) {
     const title = String((task && task.title) || "").trim() || "A coding job";
     const head = isRunning(task)
-      ? `${escapeHtml(title)} — ${escapeHtml(stateWords(task.state))} on ${escapeHtml(whereWords(task.provider))}, ${escapeHtml(elapsedWords(task))} so far`
-      : `${escapeHtml(title)} — ${escapeHtml(stateWords(task.state))} on ${escapeHtml(whereWords(task.provider))} after ${escapeHtml(elapsedWords(task))}`;
+      ? `${escapeHtml(title)} — ${escapeHtml(stateWords(task.state))} on ${escapeHtml(whereWords(task))}, ${escapeHtml(elapsedWords(task))} so far`
+      : `${escapeHtml(title)} — ${escapeHtml(stateWords(task.state))} on ${escapeHtml(whereWords(task))} after ${escapeHtml(elapsedWords(task))}`;
     const stop = isRunning(task)
       ? `<button type="button" class="code-task-stop" data-code-task-stop="${escapeHtml(String(task.taskId || ""))}" style="${STOP_STYLE}">Stop</button>`
       : "";
@@ -206,10 +216,13 @@
     // CODE-5. The install with no container engine in front of it. A quiet line that says what is and
     // is not possible here, and offers the other road -- never a dead Stop button and never a zero.
     if (!state.available) {
+      const said = typeof state.message === "string" && state.message.trim().length > 0
+        ? state.message.trim()
+        : "Coding jobs cannot run on this installation. A cloud sandbox can be switched on for this"
+          + " workspace if you want one.";
       return `<div class="code-tasks-strip" id="${STRIP_ID}" style="${STRIP_STYLE}">`
         + `<strong>Coding</strong>`
-        + `<span class="code-tasks-absent">Coding jobs cannot run on this installation. A cloud sandbox`
-        + ` can be switched on for this workspace if you want one.</span>`
+        + `<span class="code-tasks-absent">${escapeHtml(said)}</span>`
         + `</div>`;
     }
     const rows = Array.isArray(state.tasks) ? state.tasks : [];

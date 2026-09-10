@@ -84,6 +84,20 @@ $PROMPT"
 # reads EOF gets an answer immediately rather than hanging. The prompt stays on stdin rather than
 # becoming an argument because it is the customer's own words and any process can read another's
 # argument list (MARKET-17).
+#
+# AND THE LOG GOES TO BOTH PLACES. The agent's progress lines are the whole of what a person sees on
+# the Coding strip and what `status` hands the bot, and the relay reads a RUNNING task's log with
+# `docker logs` -- which is the container's own streams. With stderr redirected into a file and nothing
+# else, those streams were empty: measured on the R750 2026-09-10, `docker logs` on a live mid-turn
+# container printed nothing at all, so every status answer carried an empty log and "the log strip is
+# enough" was a strip with no log in it. A `tail -F` on the file, writing to this process's own stderr,
+# puts the same lines in both: the file stays the record a finished task is read from, and the
+# container stream carries them while it runs. /bin/sh has no process substitution, which is why this
+# is a background tail rather than a tee.
+: > "$LOG"
+tail -n +1 -F "$LOG" >&2 2>/dev/null &
+LOG_TAIL=$!
+
 set +e
 printf '%s' "$PREAMBLE" | claude -p \
   --output-format json \
@@ -92,6 +106,11 @@ printf '%s' "$PREAMBLE" | claude -p \
   > "$TRANSCRIPT" 2> "$LOG"
 CODE=$?
 set -e
+
+# A second for the tail to catch the last lines before it is killed. The file is complete either way;
+# this is only about the container stream, which is what a status call in the same second reads.
+sleep 1
+kill "$LOG_TAIL" 2>/dev/null || true
 
 # The summary is the agent's job, but a task that died before writing one still has to answer the
 # person with a sentence rather than with silence.

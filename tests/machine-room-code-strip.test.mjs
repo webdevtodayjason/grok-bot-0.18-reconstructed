@@ -122,6 +122,23 @@ test("CODE-1: every end state is drawn in words, never as its own machine name",
   }
 });
 
+test("CODE-1: a job on somebody else's machine is drawn with the relay's own sentence", async () => {
+  // The strip used to test the provider itself, against a value the relay has never sent: its
+  // vocabulary is the local one and the cloud one, and the strip compared against a third word, so
+  // every cloud job would have read "a machine beside this box" on the customer's screen. The relay
+  // already computes the sentence, and tests/code-edge-routes.test.mjs pins the field it comes in.
+  const strip = await loadStrip();
+  strip._state.asked = true;
+  strip._state.available = true;
+  strip._state.tasks = [task({ provider: "e2b", where: "a cloud computer" })];
+  assert.match(strip._stripMarkup(), /on a cloud computer/, "the relay's own words, not a second copy of them here");
+  // And with a relay that sends no sentence at all, anything that is not this machine is a cloud one.
+  strip._state.tasks = [task({ provider: "e2b" })];
+  assert.match(strip._stripMarkup(), /a cloud sandbox/);
+  strip._state.tasks = [task({ provider: "local" })];
+  assert.match(strip._stripMarkup(), /a machine beside this box/);
+});
+
 test("CODE-1: an install with no container engine draws the refusal line and offers the other road", async () => {
   const strip = await loadStrip();
   strip._state.asked = true;

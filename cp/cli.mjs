@@ -1608,7 +1608,18 @@ async function codeCap(args) {
   const conf = answer?.settings ?? {};
   out(`${slug}: $${Number(conf.capUsd ?? 0).toFixed(2)} and ${conf.wallClockMinutes} minutes a task, `
     + `${conf.concurrent} at once, ${conf.daily} a day, ${conf.cpus} cpu and ${conf.memoryGb} GB`);
-  out("the cap is a hard budget on the task's own key, so a runaway task is stopped rather than reported");
+  // THE CLOCK AND THE MONEY ARE NOT THE SAME PROMISE, and this used to read as though they were.
+  // The clock is enforced by the relay's sweep, which runs once a minute, so a task is stopped within
+  // a minute of its limit rather than at it, and the minutes on this ledger include that overshoot.
+  // The dollar cap is a max_budget on the task's own key, which only ever fires when the coding model
+  // carries per-token prices at the proxy: on a deployment with no prices the proxy books every turn
+  // at nothing, the budget is never reached, and the only real limit is the clock. That is the state
+  // of this machine today (CODE-13), so the sentence names the verb that answers it rather than
+  // claiming a runaway task is stopped.
+  out(`the clock is enforced by the relay's sweep every minute, so a task is stopped within a minute of its ${conf.wallClockMinutes} and the minutes billed include that`);
+  out("the dollar cap is a hard budget on the task's own key, and it only bites when the coding model carries per-token prices at the proxy");
+  out("  which is priced and which is not: node cp/cli.mjs code deployment ensure --dry-run  (it says priced, or NOT PRICED)");
+  out("  unpriced, the dollar cap never fires and the time limit is the only limit there is");
 }
 
 /**

@@ -235,11 +235,29 @@ test("a task key carries the Anthropic doors, one model, a hard cap and its own 
     // as the model refusing to work -- the failure that is indistinguishable from a bad model.
     assert.ok(body.allowed_routes.includes("/v1/messages"), "the task key cannot speak the Anthropic wire");
     assert.ok(body.allowed_routes.includes("/v1/messages/count_tokens"), "the agent cannot count its own context");
-    // And the tenant's own doors, so a coding agent is not a second-class citizen on the proxy.
-    for (const route of TENANT_ALLOWED_ROUTES) {
-      assert.ok(body.allowed_routes.includes(route), `the task key lost the tenant door ${route}`);
+    // And the model doors, so an agent that speaks the other wire is not a second-class citizen.
+    for (const route of ["/v1/chat/completions", "/chat/completions", "/v1/models", "/models"]) {
+      assert.ok(body.allowed_routes.includes(route), `the task key lost the model door ${route}`);
     }
     assert.deepEqual([...body.allowed_routes].sort(), [...CODE_TASK_ROUTES].sort(), "the door list is not the frozen one");
+
+    // NO ROUTE ON THIS KEY REACHES THE WEB, which is the one thing a sandbox key must not have, and the
+    // reason this list is a literal rather than the tenant list plus two. MEASURED INSIDE A LIVE SANDBOX
+    // ON THE R750 2026-09-10: the task key's allowed routes carried the proxy's web fetch and search
+    // pass-throughs, and a POST to the fetch one was not refused -- it was relayed upstream and came back
+    // with that service's own request id, from a container the product describes to the agent and to the
+    // customer as having no internet access at all.
+    for (const route of body.allowed_routes) {
+      assert.ok(!/tinyfish|mcp/i.test(String(route)),
+        `${route} is egress: a coding sandbox key must not carry a route that reaches the web`);
+    }
+    // And the tenant list is NOT the source of this one. A route the providers wave adds for a customer
+    // must not silently become a door a sandbox holds.
+    for (const route of TENANT_ALLOWED_ROUTES) {
+      if (/tinyfish|mcp/i.test(route)) {
+        assert.ok(!CODE_TASK_ROUTES.includes(route), `${route} came back onto the task key's list`);
+      }
+    }
 
     // ONE MODEL. A key that could run plan-zai would let a coding task spend the customer's own
     // inference plan through a door that has no per-turn cap on it.

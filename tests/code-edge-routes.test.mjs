@@ -491,6 +491,95 @@ test("list is this workspace's own tasks and carries no instructions", async () 
   assert.ok(!JSON.stringify(res.body).includes("python"), "a list goes into a model's context on every poll");
 });
 
+test("two status calls on a just-exited task close it once and both carry its real elapsed time", async () => {
+  // MEASURED TWICE ON THE R750 2026-09-10. The close used to await the control plane -- whose spend read
+  // waits up to twenty seconds -- BEFORE it wrote the closed row, so for those twenty seconds the row
+  // still said running and anything that asked settled the same task again. Two byte-identical `done`
+  // rows per task id were in the workspace's ledger, and the first status after a task ended answered
+  // `state:"done"` beside `endedAt:0, elapsedS:0` because it reported the row from before the settle.
+  let closes = 0;
+  let clock = Date.now();
+  const made = await edgeWith({
+    now: () => clock,
+    // The shape of the real close: slow, and safe to call twice because the other side answers already.
+    closeTask: async (row) => {
+      closes += 1;
+      await new Promise((resolve) => { setTimeout(resolve, 30); });
+      return { ok: true, id: row.id };
+    },
+  }, { dockerAnswers: { inspect: (args) => ({ stdout: `exited\t0\tfalse\t${new Date(clock).toISOString()}\n`, args }) } });
+  const started = fakeRes();
+  await made.edge.handleStart(fakeReq(GOOD), started);
+  const taskId = started.body.taskId;
+  // Fifty-two seconds later the container has exited, which is the measured shape of the case.
+  clock += 52_000;
+  // Both in flight at once, which is exactly the window: the bot's watcher polls while a sweep tick lands.
+  const first = fakeRes();
+  const second = fakeRes();
+  await Promise.all([
+    made.edge.handleStatus(fakeReq({ agentId: "a_titan", taskId }), first),
+    made.edge.handleStatus(fakeReq({ agentId: "a_titan", taskId }), second),
+  ]);
+  assert.equal(closes, 1, "one task, one close, however many callers found it finished at once");
+  for (const res of [first, second]) {
+    assert.equal(res.body.state, "done");
+    assert.ok(res.body.endedAt > 0, "a finished task never answers with a zero stop time");
+    assert.equal(res.body.elapsedS, 52, "nor with a zero elapsed, which reads as a task that never ran");
+  }
+  const done = made.seen.rows.filter((row) => row.state === "done");
+  assert.equal(done.length, 1, "and the workspace's ledger carries one closed row, not two identical ones");
+});
+
+test("a task whose key ran out of budget is reported as the spending limit and not as a failure", async () => {
+  // THE PRODUCER THE CAP NEVER HAD. `spend_cap` was declared in the state set, carried in the wire
+  // vocabulary, and rendered by the strip and by the bot's own sentence -- and nothing in the product
+  // ever wrote it. A key over its max_budget produces a plain non-zero exit: the proxy refuses the
+  // agent's next call, the turn dies, the container exits, and the money was never named.
+  const made = await edgeWith({
+    closeTask: async () => ({ ok: true, spendUsd: 2.4 }),
+  }, { dockerAnswers: { inspect: { stdout: "exited\t1\tfalse\n" } } });
+  const started = fakeRes();
+  await made.edge.handleStart(fakeReq(GOOD), started);
+  const res = fakeRes();
+  await made.edge.handleStatus(fakeReq({ agentId: "a_titan", taskId: started.body.taskId }), res);
+  assert.equal(res.body.state, "spend_cap", "a task stopped by its budget is not a task that merely did not finish");
+  assert.equal(res.body.message, CODE_REFUSALS.spend_cap);
+  assert.equal(made.seen.rows.at(-1).state, "spend_cap", "and the workspace's own row says the same");
+});
+
+test("the proxy's budget refusal in the log is the other way the spending limit is recognised", async () => {
+  // The spend read is the first signal and it is not always there: an unpriced deployment books nothing,
+  // so the only evidence left is what the proxy said to the agent before the turn died. CODE-13.
+  const closed = [];
+  const made = await edgeWith({
+    closeTask: async (row) => { closed.push(row); return { ok: true, spendUsd: null }; },
+  }, { dockerAnswers: { inspect: { stdout: "exited\t1\tfalse\n" } } });
+  const started = fakeRes();
+  await made.edge.handleStart(fakeReq(GOOD), started);
+  const taskId = started.body.taskId;
+  await writeFile(path.join(made.root, "demo", "workspace", "code", taskId, "agent.log"),
+    "API Error: 400 {\"error\":{\"message\":\"Budget has been exceeded for this key\"}}\n");
+  const res = fakeRes();
+  await made.edge.handleStatus(fakeReq({ agentId: "a_titan", taskId }), res);
+  assert.equal(res.body.state, "spend_cap");
+  // AND THE OPERATOR'S LEDGER SAYS THE SAME WORD. The log is readable before anything is written down,
+  // so the customer's row and the control plane's row cannot disagree about why a task stopped.
+  assert.equal(closed[0].outcome, "spend_cap");
+  // One row, not a `failed` one rewritten: the state was known before the first write.
+  assert.equal(made.seen.rows.filter((row) => row.state === "failed").length, 0);
+});
+
+test("a task that failed for any other reason is still reported as a failure", async () => {
+  const made = await edgeWith({
+    closeTask: async () => ({ ok: true, spendUsd: 0.08 }),
+  }, { dockerAnswers: { inspect: { stdout: "exited\t1\tfalse\n" } } });
+  const started = fakeRes();
+  await made.edge.handleStart(fakeReq(GOOD), started);
+  const res = fakeRes();
+  await made.edge.handleStatus(fakeReq({ agentId: "a_titan", taskId: started.body.taskId }), res);
+  assert.equal(res.body.state, "failed", "eight cents of a two dollar cap is not a task that ran out of money");
+});
+
 // ---- the console's own read ---------------------------------------------------------------------
 
 test("the console reads the same rows and says where it ran in plain words", async () => {
@@ -501,6 +590,13 @@ test("the console reads the same rows and says where it ran in plain words", asy
   assert.equal(shown.tasks.length, 1);
   assert.equal(shown.tasks[0].where, "this computer", "no vendor name and no container word on a person's screen");
   assert.equal(shown.tasks[0].path, `/workspace/code/${started.body.taskId}`);
+  // THE FOUR FIELDS THE STRIP DRAWS. It renders a log block, a file list and a refusal line, and this
+  // route used to send none of the three: one sentence and a Stop button were the whole strip, while
+  // "the log strip is enough" is the stated reason no terminal was built at all.
+  assert.deepEqual(shown.tasks[0].lines, ["working"], "a running job's last log lines");
+  assert.deepEqual(shown.tasks[0].files, [], "a running job has nothing to list yet");
+  assert.equal(shown.available, true);
+  assert.equal(shown.message, "");
   const settings = made.edge.handleConsoleSettings("demo");
   assert.equal(settings.internet, false);
   assert.equal(settings.where, "this computer");
@@ -508,6 +604,36 @@ test("the console reads the same rows and says where it ran in plain words", asy
   const stopped = await made.edge.handleConsoleStop("demo", started.body.taskId);
   assert.equal(stopped.stopped, true);
   assert.equal(made.seen.closed[0].outcome, "stopped");
+});
+
+test("a finished job hands the console its file list and the log off the file the container left", async () => {
+  const made = await edgeWith({}, { dockerAnswers: { inspect: { stdout: "exited\t0\tfalse\n" } } });
+  const started = fakeRes();
+  await made.edge.handleStart(fakeReq(GOOD), started);
+  const taskId = started.body.taskId;
+  const dir = path.join(made.root, "demo", "workspace", "code", taskId);
+  await writeFile(path.join(dir, "primes.py"), "print(2)\n");
+  await writeFile(path.join(dir, "agent.log"), "running the test\n3 passed\n");
+  // The settle that ends the task, through the route the bot uses.
+  await made.edge.handleStatus(fakeReq({ agentId: "a_titan", taskId }), fakeRes());
+
+  const shown = await made.edge.handleConsoleTasks("demo");
+  assert.equal(shown.tasks[0].state, "done");
+  assert.ok(shown.tasks[0].files.some((file) => file.path === "primes.py"), "a finished job lists what it wrote");
+  assert.ok(shown.tasks[0].files.find((file) => file.path === "primes.py").bytes > 0);
+  // `docker logs` is gone with the container, so a finished job's log is the file beside its artifacts.
+  assert.deepEqual(shown.tasks[0].lines, ["running the test", "3 passed"]);
+});
+
+test("an installation that cannot run one says so in the field the strip reads", async () => {
+  // CODE-5, and the line was unreachable: nothing ever sent `available`, so the strip's own refusal
+  // sentence could never be drawn and a customer's own instance showed an empty Coding strip instead.
+  const made = await edgeWith({ dockerAvailable: async () => false });
+  const shown = await made.edge.handleConsoleTasks("demo");
+  assert.equal(shown.available, false);
+  assert.equal(shown.message, `${CODE_REFUSALS.not_available} A cloud coding computer can run it instead once the operator sets one up.`,
+    "the same sentence the start route refuses with, so the strip and the bot say one thing");
+  assert.match(shown.message, /cloud/, "a refusal that offers nothing is a dead end");
 });
 
 // ---- the E2B driver, against a stub -------------------------------------------------------------

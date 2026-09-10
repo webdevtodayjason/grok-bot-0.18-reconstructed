@@ -20,8 +20,8 @@ task"* and later *"Coding task finished"*, and the only nouns an owner meets are
 |---|---|
 | **One task** | one container, one network, one directory, one model credential, one row on the operator's ledger |
 | **Where the files go** | `/workspace/code/<taskId>` inside the bot's own box — the same directory the sandbox writes into, so **there is no copy-back at all** |
-| **How long** | 30 minutes of wall clock, enforced off the container's own deadline label |
-| **How much** | a hard spending cap per task, enforced by the model credential itself |
+| **How long** | 30 minutes of wall clock, enforced off the container's own deadline label by the sweep. The sweep runs once a minute, so the real ceiling is **the limit plus up to a minute**; a task killed for time is billed **to its limit** and not to the moment the sweep noticed |
+| **How much** | a hard spending cap per task, enforced by the model credential itself — and it only bites on a **priced** model. On an unpriced deployment every turn books nothing, the budget is never reached and the clock is the only limit there is (**CODE-13**) |
 | **How many** | 2 running at once and 20 a day per workspace |
 | **How big** | 2 CPUs, 2 GB of memory, 512 processes |
 | **Internet** | **none.** Not narrowed, not filtered: absent. So no `git clone`, no `npm install`, no `pip install` |
@@ -62,10 +62,24 @@ POST /code/list    {agentId}        -> {tasks:[{taskId,title,state,startedAt,end
 
 `state` is one of `running`, `done`, `failed`, `timed_out`, `stopped`, `spend_cap`.
 
-Console-facing, behind the session, scoped to the session's own tenant: `GET /code/tasks`,
-`POST /code/tasks/stop {taskId}`, `GET /code/settings`. These read the **same rows** the box routes
-read, so the strip in the Computer card and the bot can never disagree about what is running. No new
-gateway command, so none of the void-RPC class of failure.
+Console-facing, behind the session, scoped to the session's own tenant:
+
+```
+GET  /code/tasks        -> {tasks:[{taskId,title,state,provider,startedAt,endedAt,elapsedS,where,
+                                    path,lines[],files:[{path,bytes}]}], available, message}
+POST /code/tasks/stop   {taskId} -> {stopped,message}
+GET  /code/settings     -> {minutes,capUsd,concurrent,where,internet}
+```
+
+These read the **same rows** the box routes read, so the strip in the Computer card and the bot can
+never disagree about what is running. No new gateway command, so none of the void-RPC class of failure.
+
+`lines` and `files` are carried only for the rows the strip actually draws (the first four): a log read
+and a directory listing apiece is a fixed cost for four and an unbounded one for twenty. A **running**
+local task's lines come from the container's own stream; a **finished** one's come from `agent.log`
+beside its artifacts, because the stream goes with the container. `available` is false on an
+installation with no container engine in front of the relay, and `message` is then the sentence the
+strip draws — the same sentence `/code/start` refuses with.
 
 Relay to control plane, `CP_RELAY_TOKEN`:
 
@@ -330,6 +344,13 @@ Every one of these cost somebody an afternoon, or would have.
 | **Minutes are the container's, not the waiting's** | **measured on the R750 2026-09-10:** a container that exited after about a second went onto the operator's ledger as **16.78 minutes**, because the clock ran until the sweep noticed. `State.FinishedAt` is the end of a task |
 | **A root box cannot run the agent, and a non-root one cannot own the directory** | the two constraints look symmetrical and are not. **Measured on the R750 2026-09-10, in both directions:** with `--user 1000` on a root-owned directory the agent failed on its first write; with `--user 0` it failed with `--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons`. The artifacts only need to be READABLE by the box, and a root box reads anything, so a root box maps to the image's own `USER 1000:1000` and a non-root box keeps its uid |
 | **A pipe and a redirect cannot both feed one stdin** | the entrypoint piped the prompt into the agent and then wrote `< /dev/null` after the pipe, so the redirect won. **Measured on the R750 2026-09-10:** every task died with `Error: Input must be provided either through stdin or as a prompt argument when using --print`, and the test guarding it asserted the redirect was PRESENT — it pinned the bug. Once the agent has read its prompt, stdin is at EOF, which is all a child process needed anyway |
+| **Coolify's docker cleanup prunes the sandbox image** | the image is built by a script, and the script was called by no deploy step. **Measured on the R750 2026-09-10:** `docker image inspect titanbot/code-sandbox:1` answered *No such image* twenty minutes after a real task had run on it, because this host's Coolify row carries `force_docker_cleanup` with a nightly schedule and its image prune spares only the repos Coolify itself deploys. Every task on the machine was then refused with "The coding computer has not been built on this machine yet", and the only cure was a person running the build by hand. Two lines fixed it: `deploy/r750/install.sh` builds the image on every ship, and the build leaves **one never-started keeper container**, because `docker image prune -a` skips any image a container references. The relay's sweep also says in its own log when the image is absent, so the next surprise is visible before a customer finds it |
+| **The tenant route list is egress** | the per-task key's `allowed_routes` was the tenant list plus the two Anthropic routes, and the tenant list carries the proxy's web fetch and search pass-throughs and the `/mcp` mount. **Measured inside a live sandbox on the R750 2026-09-10:** the proxy enumerated those paths as allowed on a task key, and a POST to the fetch one was **not refused** — it was relayed upstream and came back with that service's own request id. The only thing between the sandbox and arbitrary web fetches was an operator step nobody had finished. The list is now a literal of six model routes, the tenant list is deliberately not reused, and a test asserts no route containing `tinyfish` or `mcp` is ever on a task key |
+| **A task whose container vanishes is in no leg of a docker-driven sweep** | not the deadline branch, not the orphan branch, not the settle. **Measured on the R750 2026-09-10:** a container removed eight seconds after its task started left the row reading `running, endedAt:0` three sweeps later — each logging "removed 0 code container(s)" — its network still on the machine, and one of the workspace's two slots gone for good, because `adopt` re-adds a running row as live on every restart so it never ages out. Closing it by hand billed **3.13 minutes for a container that lived 8 seconds**. The settle leg is driven by the **rows** now, one `inspect` apiece, and a vanished task is closed as failed with *the machine it was running on is gone*, billed to the last moment the sweep saw the container alive |
+| **`docker logs` is empty when the entrypoint redirects** | the agent's streams went into files in the task directory, so the container's own streams were empty: **measured on the R750 2026-09-10**, `docker logs` on a live mid-turn container printed nothing at all and every status answer carried `lines:[]`. The log strip being enough is the stated reason no terminal was built, so the entrypoint follows the log file onto its own stderr as well, and the console route sends the lines it draws |
+| **A close that tells the control plane first is a close that happens twice** | the row stayed `running` for the twenty seconds the spend read waits, so any status, result or sweep in that window settled the same task again. **Measured twice on the R750 2026-09-10:** two byte-identical `done` rows per task id in the workspace ledger, and a first status answering `state:"done"` beside `endedAt:0, elapsedS:0`. The closed row is written **first**, a second caller waits on the first close instead of making its own, and status reports the stop time the settle decided rather than the row it read before it |
+| **The spending cap had no producer** | `spend_cap` was in the state set, in the wire vocabulary, in the strip's words and in the refusal sentence, and **nothing ever wrote it**: a key over its budget produces a plain non-zero exit, so the money was reported as "did not finish". The close now writes `spend_cap` when the spend it read reaches the cap or when the proxy's budget refusal is in the agent's log — and on an unpriced deployment neither can happen, which is why `code cap` says the clock is the only limit there rather than claiming a runaway task is stopped |
+| **The operator's own selftest was on the customer's line** | `code selftest` leaves a real ledger row, which is the point of it. **Measured on the R750 2026-09-10:** `code spend` read "demo 8 task(s)" and one of the eight was `cp-selftest`, on the same rollup the admin Spend panel draws — the number Jason bills from. The rollup excludes `outcome='selftest'`; the detail listings still show it, because there it is the truth about what ran |
 | **The deployment can be unpriced** | **measured on the R750 2026-09-10:** `plan-zai` there carries no per-token prices, so `plan-zai-code` is created unpriced, every dollar figure reads *not measured*, and `max_budget` counts a spend that is never booked — **the $2 cap cannot bite until that plan model is priced**. `code deployment ensure` says `NOT PRICED` in those words when it happens. **CODE-13** |
 
 ## 12. The sweep, which is the only real wall clock
@@ -342,6 +363,20 @@ It force-removes anything past its own deadline label or orphaned, **closes its 
 container removed with its row left open is an hour nobody is billed for and a bot waiting on a task
 that will never answer), removes every task network with nothing of ours in it, disconnects the proxy
 from it, and never touches `titanbot-net` or the proxy's own Coolify network.
+
+**It is driven by the rows as well as by docker**, which is the half that was missing. Everything
+above walks the containers docker returns, so a task whose container has been **removed** is in none of
+it; the settle leg walks what this relay believes is live instead, one `inspect` apiece, and closes
+both cases — a container that has stopped, and a container that is not there any more. It stamps the
+moment it last saw each live container, which is what a vanished task is billed to, and it decides the
+networks twice so a network whose task it has just closed goes in the same pass rather than a minute
+later. It also says once, in the relay's own log, whether the sandbox image is on the machine.
+
+**A task killed for time is billed to its limit.** The sweep is the only enforcement and it runs once a
+minute, so the kill lands up to a minute late: measured on the R750 2026-09-10, a one minute task was
+swept 58 s past its deadline and the operator's row read 1.96 minutes against a one minute cap. The
+overshoot is the product's and not the customer's, so the clock stops at the deadline the task was
+given — or at the container's own `FinishedAt` when that is earlier.
 
 Before the first sweep the relay reads every workspace's rows and adopts what they say is running.
 Without that a restart during a 30 minute task kills the task, which is a worse failure than the one
@@ -365,7 +400,10 @@ Nothing here is a migration, so each piece reverts on its own:
 - the relay's routes answer a plain refusal;
 - the `plan-zai-code` deployment is deleted by one CLI verb without touching `plan-zai`;
 - the `box-isolation.sh` block is one guarded block that reverts and re-applies on the timer;
-- the image is a tag nothing else references;
+- the image is a tag nothing else references, built by `deploy/code-sandbox/install.sh` — which
+  `deploy/r750/install.sh` now calls on every ship, so a ship always restores it, and which leaves one
+  never-started `titanbot-code-image-keeper` container so this host's nightly docker cleanup cannot
+  prune it. Both revert by removing the tag and that container;
 - the ledger table is additive and read by one panel block.
 
 No box is recreated and the relay is only restarted, never redeployed.

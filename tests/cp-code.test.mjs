@@ -354,6 +354,31 @@ test("the rollup carries nulls through as counts and never sums them as zero", a
   } finally { await proxy.close(); store.close(); }
 });
 
+test("the operator's own selftest is not one of the customer's tasks on the Spend line", async () => {
+  const proxy = await startMintProxy();
+  const { store, tasks } = ledgerOn(proxy);
+  try {
+    // MEASURED ON THE R750 2026-09-10: `code spend` read "demo 8 task(s), 25.6 minute(s)" and one of
+    // the eight was `cp-selftest`, the go/no-go verb's own row. The admin Spend panel draws from this
+    // same rollup, so engineering's runs were on the line Jason bills a customer from.
+    const real = await tasks.openTask({ slug: "demo", agentId: "a_titan", taskId: "t1" });
+    await tasks.closeTask({ id: real.id, outcome: "done", minutes: 10 });
+    const mine = await tasks.openTask({ slug: "demo", agentId: "cp-selftest", taskId: "selftest-abc" });
+    await tasks.closeTask({ id: mine.id, outcome: "selftest", minutes: 0.04 });
+
+    const [row] = tasks.rollup("demo");
+    assert.equal(row.tasks, 1, "a selftest must not move the customer's task count");
+    assert.equal(row.minutes, 10, "nor its minutes");
+    // And the same over every workspace, which is the shape the panel asks for.
+    const all = tasks.rollup("");
+    assert.equal(all.length, 1);
+    assert.equal(all[0].tasks, 1);
+    // The detail listing still shows it, because there it is the truth about what ran on the machine.
+    assert.ok(tasks.listTasks("demo").some((one) => one.outcome === "selftest"),
+      "the selftest row is still in the ledger; only the rollup leaves it out");
+  } finally { await proxy.close(); store.close(); }
+});
+
 test("a workspace whose every spend was unreadable rolls up to null and not to zero", async () => {
   const proxy = await startMintProxy();
   const { store, tasks } = ledgerOn(proxy);
