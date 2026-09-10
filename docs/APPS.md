@@ -1416,3 +1416,57 @@ nothing in this section changes except which sender the edge picks.
 **A pending card of every kind on the R750.** The live leg made a real `box-handoff` and read it
 through both new routes. The other five kinds were measured on grok-bot-local-vm only, because each one
 needs a model to reach for a particular tool and the card decision is the same code for all six.
+
+### 16. The review pass over this section, and what the live host said about it
+
+Six conditions, filed together as **PUSH-7**, all fixed at **`9e2512e`**. One was a blocker and the rest
+were a wire that said less than it should have.
+
+**A revoked bearer kept the card stream it was already holding.** `GET /push/events` authenticated once,
+at connect, and never again, so a revoked laptop went on receiving every pending card in the workspace —
+title, agent, entry id and deep link — for as long as it held the connection, which the 25 s heartbeat
+kept alive indefinitely. Revoke is the lost-laptop control and section 2 sells it as one. The relay now
+re-reads the caller's credential before every projection and on every heartbeat, with a **fresh**
+device-session read rather than the memoised one (an SSE request lives as long as the tray, so the memo
+would answer with the row as it was at connect for ever), and closes the connection when the credential
+is gone or the check throws. **Fail closed**, because the shell reopens through the door where the
+credential is checked properly. Beside it, a **15-minute** hard lifetime so a relay whose reader is the
+default still bounds how long a credential's reach outlives the credential.
+
+**The desktop transport honoured neither switch** the settings route exists to hold, while the vendor path
+refuses a muted kind and holds a quiet one with one catch-up — one customer, one set of switches, two
+different answers. The decision is that **the stream is the list and the tray is the surface that stays
+silent**: every pending card still arrives, and `quiet` with `quietUntil` joins `muted` on the row so the
+shell knows. Stream rules 5 and 6 above say so, and so does "Expiry, quiet hours and the badge".
+
+**The other four:** the title is called fixed in two places and for four of the six kinds a model wrote it
+(corrected in the attribute table, the bullet under it and the relay's own comment); a body that was not
+JSON at all was the one refusal without `field` and with an `error` that is not `bad_request`, on the
+settings route and the device route alike; a quiet window whose `from` equals its `to` stored with 200 and
+then held nothing, for ever, silently; and this document gave the whole-suite number twice for one machine
+with two different values and no commit on either.
+
+**Measured on grok-bot-local-vm (this Mac), 2026-09-10, at `9e2512e`:** `npm test` **2,808 pass, 0 fail** in
+33.7 s. `node scripts/verify-push.mjs --host` **59 pass, 0 fail, 1 skip** (the same skip, the mint door),
+with the revoked tray's stream **ending 0.6 s after the revoke**, **0 frames** on it afterwards, and the
+tray beside it untouched — 2 streams open before, 1 after, which is the half that proves a revoke reaches
+one connection and not every tray on the workspace.
+
+**Measured on the R750 through `https://console.titanium.bot`, 2026-09-10 15:56Z to 15:57Z**, shipped with
+`deploy/r750/sync.sh --no-install` from the clean tree at this commit (host bundle `35937d3480ed`), relay
+restarted **last**, **no box swapped** and **no control plane rebuilt**. A **throwaway customer account on
+the demo workspace**, removed afterwards with every device row and bearer it made. Never Jason's account
+and never Richard's.
+
+| Leg | Measured |
+| --- | --- |
+| a bearer opens `GET /push/events`, then is revoked | **200 `text/event-stream`**; `DELETE /auth/devices/<id>` answered **200**, the same bearer then **401** on `GET /push/pending`, and the relay **ended the held stream 11.0 s later** (the slow refresh's own cadence) with **0 card frames** on it after the revoke. Before this ship the same bearer's stream delivered a card **5 s after** the revoke |
+| a row inside a live quiet window | `quietHours` saved as **15:00 to 16:00 UTC** with the offset at 0 at UTC hour 15; `GET /push/pending` answered **badge 1** over 9 agents in **637 bytes**, and the row carried **`quiet: true`** with **`quietUntil` 2026-09-10T16:00:00.000Z** — **14 keys**, the two new ones included, where the frame measured before the fix had 15 keys and none matching /quiet/i |
+| a body that is not JSON | **400**, `error` **bad_request** and `field` **body**, on `PUT /push/settings` **and** on `POST /push/devices`, where both answered `error` "that was not JSON" with no field before |
+| `quietHours` on, from 9, to 9 | **400 naming `quietHours.to`** and nothing stored (read back off at 22 to 7), where it was 200 and stored before. And it is the **merged** window that is checked: a real 23-to-6 window saved 200, then a patch moving only `to` onto the stored `from` was **400** |
+| the three page attributes, real Chrome at 1440x900 | **11 pass, 0 fail** on a real **widget** card: `data-needs-you-card` naming the same `<agent>:<entry>` the route names, `data-card-kind` `widget`, `data-talk-button` on exactly one element, `data-needs-you-count="1"` beside the pill text "1 needs you", no page error. And `data-title` carried the model's own sentence — `Shall I proceed with CANARY-o0cc3v?` — byte for byte what `GET /push/pending` answered, which is the thing the attribute table now says out loud |
+
+**One thing this run left behind, and it is PUSH-6's.** The throwaway account's device rows were removed
+with it, but its per-person **settings** row stays in the tenant's `push.json` keyed on a sub that no
+longer has an account, because nothing removes one. That is exactly the condition PUSH-6 is filed for,
+owner the next push wave, and this run made one more of them rather than fixing it out of scope.
