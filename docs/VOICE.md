@@ -1,0 +1,393 @@
+# Talking to your team (VOICE-1)
+
+You press a button in the console and talk. The head of your team answers out loud. It is the same
+conversation you type in, the same memory, the same people, the same approvals: nothing about voice
+is a second assistant with its own ideas.
+
+> **Three sentences in the original design note are wrong, and this document is where that is
+> recorded** rather than in a comment somebody walks past.
+>
+> 1. "Since both providers speak the same wire, one bridge serves both." Not as of September 2026.
+>    The two vendors take different session frames and one of them refuses the other's outright. One
+>    transport, two session builders. Section 3.
+> 2. "It speaks the reply as it streams." Not reachable on this product's host. The reply arrives as
+>    one finished message, 5.5 to 25 seconds after the question and 50.6 on a cold box, with no
+>    partial text to speak. What carries that silence is the acknowledgement. Section 5.
+> 3. "xAI is cheaper." Its realtime model is **$0.08 a minute** of audio. The $0.05 figure that gets
+>    quoted belongs to a model that is deprecated. xAI is still the default, for **predictability**
+>    rather than for the headline rate. Section 7.
+
+---
+
+## 1. What it is
+
+The realtime model is a **mouth and ears, and not a second brain.** It has exactly one tool, which
+puts what you said into your team lead's conversation and hands back the reply. It cannot search, it
+cannot read a file, it cannot reach another workspace, and it has no memory of its own. Everything it
+appears to know, it got by asking your team lead.
+
+That is a decision and not a limitation we have not got round to. A realtime model that could search
+would answer from outside your team's memory, in your team lead's voice, and you would have no way to
+tell which answers were which.
+
+What you get:
+
+- A **talk button** beside the message box, and an orb beside it that shows off, listening, thinking
+  or speaking.
+- **Press to start, press to stop.** There is no wake word and nothing is ever listening on its own.
+- Everything spoken lands in the **same conversation you type in**, marked as spoken, and it is there
+  on your phone afterwards.
+- A **held action** is read out as a question. "Send it?" A yes closes it through the same approval
+  you would have clicked, and never a second one.
+- **Your microphone is held shut while your team is speaking**, plus a third of a second for the room
+  to go quiet. Section 8 is why.
+
+What it is not, in this release: no hotkey in a desktop app, no wake word, nothing always-on, no
+meeting transcription (that is MEETING-1 and shares only the capture code), voice for your team lead
+and not for every bot you own, and no interrupting mid-sentence on speakers.
+
+---
+
+## 2. Where the key goes, and why not the other three places
+
+**A realtime key is per workspace and you write it on your own Voice card**, under Settings in your
+own console. It is write-only: the card shows whether a key is set and never what it is, and no route
+on this product reads one back. The relay reads it off its own disk when it dials and sends it to the
+vendor as an `Authorization` header — never in a URL, never in a websocket subprotocol (proxies log
+those), never in a log line, never in a ledger row. A test sweeps for its bytes.
+
+This is the same door your Email settings already use, which has been in production since
+September 2026.
+
+Three places it deliberately does **not** go:
+
+- **Not the super-admin Providers panel.** Those keys are global to the whole install, they live at
+  the metering proxy as credentials, they read back masked, and that file's own rules forbid a key
+  value in any answer with a test that plants one and sweeps every route for it. There is no
+  per-workspace row there for a per-workspace key to live in. The panel does carry two realtime
+  cards, and they are **labels only** — see section 10.
+- **Not the endpoints catalog.** That is the input to the *chat* model resolver: it fetches a model
+  list against every row and pins the winner into your box. A realtime row there would be offered to
+  you as a chat model and would fail every message you sent.
+- **Not an environment variable on the relay or in your box.** One value shared by every customer is
+  the thing this whole product was rebuilt to stop.
+
+### The browser path, refused on purpose
+
+Both vendors ship a way for a browser to hold the socket itself — a short-lived client secret, and on
+one of them WebRTC, which that vendor actively recommends for browsers. Both are faster to build and
+both are refused here.
+
+They put a real credential in the browser, they bypass the minutes ledger, and they make the daily
+cap unenforceable. The relay holding the socket and counting the seconds **is** the reason this bridge
+exists. The cost is that we own the jitter and the playback, and that is a real cost. We are paying it
+knowingly.
+
+---
+
+## 3. The two providers, and why a URL swap is not a provider swap
+
+Both speak a family of events with the same names. They do **not** take the same session frame.
+
+| | xAI (the default) | OpenAI |
+|---|---|---|
+| Session frame | flat: `session.voice`, `session.turn_detection` at the top level, no `session.type` | typed: `session.type: "realtime"`, `audio.output.voice`, `audio.input.transcription` |
+| The other one's frame | — | **refuses it**: `Unknown parameter: 'session.voice'` |
+| `OpenAI-Beta` header | not used | must **not** be sent on the GA endpoint |
+| What you heard, as text | cumulative and self-correcting | incremental deltas |
+| Turn-taking controls | turn detection only | also `turn_detection.interrupt_response` |
+| Budget telemetry | **none at all** | `rate_limits.updated` every turn |
+
+Two consequences worth spelling out:
+
+- **What you said is normalised to replace-the-whole-line** before it reaches the page. On one vendor
+  the transcript is cumulative with corrections, so appending each update writes the sentence over
+  and over.
+- **On xAI, holding the microphone shut is the only defence** against your team hearing itself. The
+  other vendor has a switch for it; xAI documents no equivalent. Section 8.
+
+`REALTIME_VENDORS` in `cp/voice.mjs` is the authoritative table: the wire shape, the address, the
+default model, the voices and the published price with the date it was read. The CLI, your Voice card
+and this document all name those rows.
+
+---
+
+## 4. Who answers
+
+Your team lead, resolved by the relay and never named by the model. In order: the agent you chose on
+the Voice card; an agent whose email localpart is `titan`; the first worker on the roster; and if none
+of those exists, a refusal in one plain sentence.
+
+**The model never says which workspace or which agent.** Both come from your signed-in session. A
+model-supplied agent id would be a cross-tenant read through an open microphone.
+
+---
+
+## 5. The honest latency, and the silence in the middle
+
+Measured on `grok-bot-local-vm`, September 2026, against the real host:
+
+| hop | what | measured |
+|---|---|---|
+| T0→T1 | you stop talking → the vendor decides it was a turn and calls the tool | vendor's |
+| T1→T2 | the tool call reaches the host | **ours, 6–14 ms** |
+| T2→T3 | **your team lead thinks** | **5.5–9.0 s** for a short question, **15–25 s** when it touches a shell, **50.6 s** on the first turn of a cold box |
+| T3 | the reply is noticed | ours, ≤450 ms at a 400 ms poll |
+| T3→T4 | the first sentence goes back to the vendor | **ours, ≤20 ms** |
+| T5→T6 | the first sample is audible | **ours, ≤120 ms** |
+
+**T2→T3 is the whole of it, and it is not ours.** The host emits the reply as one complete message:
+there is no partial text, no growing message, nothing to speak early. It deliberately drops the
+reply-sending step from every surface a console can read (`roster-projection.ts:420` projects fifteen
+other cases and not that one), so "speaks the reply as it streams" is not a thing this product can do
+today, and nothing in this release claims it.
+
+What covers that silence is the realtime model's own acknowledgement — "on it" — and, past twenty
+seconds, at most two "still going" nudges driven off the roster actually saying the turn is running
+rather than off a bare timer. The relay then splits the finished reply into sentences and hands back
+the first one immediately, so speech starts on a sentence rather than on a paragraph.
+
+**VOICE-3** is the one host-side change that would make it real streaming: project that one step the
+way the other fifteen are projected. It is filed, with its line number.
+
+One more measured oddity, because it shapes the design: one prompt produced **two** replies seven
+seconds apart under a single attempt id. So later messages of the same attempt go on an announcement
+queue and are spoken between turns, never on top of one.
+
+---
+
+## 6. The caps, and who can change them
+
+| | default | counted on |
+|---|---|---|
+| one session | **30 minutes** | wall clock |
+| one workspace, one day | **120 minutes** | wall clock, UTC day |
+
+**Wall clock, not audio seconds**, because a minute of wall clock is the only number you can predict
+before you start talking. A provider bills on audio seconds, and the ledger records both.
+
+**You cannot raise your own cap.** Your Voice card writes your key; the minutes live on the control
+plane behind the operator's own credential. A customer raising their own daily cap is unbounded spend
+on somebody else's invoice, and it would be one request away if the number lived beside the key.
+
+The operator changes them:
+
+```
+node cp/cli.mjs voice policy <slug>
+node cp/cli.mjs voice cap <slug> --day-minutes 240 [--session-minutes 45] [--vendors xai,openai]
+node cp/cli.mjs voice cap <slug> --vendors none        # voice off for that workspace, in one word
+```
+
+`--vendors none` is the deliberate off switch, and it is a word rather than a zero for a reason: a
+minutes field that reads zero is far more likely to be a typo than a decision, so a zero falls back to
+the default instead of silently switching a customer off. A provider list that names nothing this
+product knows falls back the same way.
+
+**The relay enforces on its own clock**, on a ten second tick, against its own ledger on its own disk.
+It reads the numbers from the control plane, cached a minute, and falls back to the defaults when the
+control plane cannot be reached — which is also how it behaves on a developer machine, where there is
+no control plane at all. A control-plane outage costs a line on the Spend panel and never a cap.
+
+Neither vendor's own warnings are relied on. xAI emits no budget telemetry at all, documents no
+concurrency or duration limit, and the "25 minutes" people quote belongs to a different API. Our clock
+is the only cap there is.
+
+---
+
+## 7. What it costs
+
+Read 2026-09-09 from each vendor's own pricing page. **Vendor pages, not analysis.**
+
+| | model | audio | other |
+|---|---|---|---|
+| xAI | `grok-voice-think-fast-2.0` | **$0.08 a minute** ($4.80 an hour) | **$0.004 per billable message** we send |
+| xAI | `grok-voice-think-fast-1.0` | $0.05 a minute | **deprecated** — this is the number that gets quoted |
+| OpenAI | `gpt-realtime-2.1` | $32.00 in / $64.00 out per million tokens | $0.40 per million text in |
+| OpenAI | `gpt-realtime-2.1-mini` | $10.00 in / $20.00 out per million | $0.30 per million text in |
+
+Any **per-minute** figure for OpenAI is third-party analysis: that vendor publishes tokens, not
+minutes, and this product does not convert one into the other and present it as a price.
+
+**xAI is the default for predictability, not for being cheaper.** A flat rate per minute, no context
+re-billing, and a tool result costs nothing. Two disciplines fall out of that and both are in the
+code:
+
+- Your team lead's reply goes back as tool-result messages, which are **free** on xAI. Nudges are
+  bounded because each one is a billed message rather than just a word.
+- On OpenAI the base instructions are written **once** when the socket opens and are byte-identical
+  for its whole life. Rewriting them invalidates the cached prefix and re-bills the entire
+  conversation every turn. That was the single most expensive thing the reference implementation did.
+
+---
+
+## 8. Speakers, and your team hearing itself
+
+If the voice comes out of speakers rather than headphones, it goes into the room and back into an open
+microphone. The vendor's turn detection reads that as you talking: it cancels the reply it is halfway
+through and transcribes its own words as your next instruction.
+
+From the reference implementation's own session log, on a machine whose microphone and line out were
+the same interface:
+
+```
+reply  'OH-mah, OH-mah, OH-mah.'
+error  response cancelled: turn_detected
+heard  '어마'                    <- its own name, back through the microphone
+reply  'Yes, I'm here.'
+```
+
+And later its own sentence came back as two of the user's turns. **A fragment that transcribes as an
+instruction is not merely noise**: one arrived as `'Бела.'` and pressed CTRL+R.
+
+So the microphone is **held shut while your team is speaking, plus 350 ms** for the room to go quiet.
+That is the default and there is nothing to configure.
+
+**It is held on both sides.** The page stops capturing, so nothing is even sent; and the relay drops
+any audio that arrives inside the same window, so a patched page cannot make the model hear itself.
+The dropped-frame count is a number on the server, asserted by a test with no browser in it, and it
+ends up on the session's ledger row.
+
+The one thing it costs is interrupting mid-sentence, which on speakers never worked anyway, because
+the interruption was coming from the speakers. On headphones it is still off in this release, and
+turning it back on is not a setting: it is the defence described above.
+
+When the audio is queued, "is the queue empty" is not the question. The model sends a reply far faster
+than it is spoken, so how long sound will still be in the room is booked from the **bytes** handed
+over, not from whether the player is idle.
+
+---
+
+## 9. What is written down, and what is not
+
+One line per session, in your own workspace's state directory, and one row on the control plane for
+the operator's Spend panel. A row holds: the session, the workspace, the agent, the vendor and model,
+when it started and ended, wall seconds, audio seconds in and out, billable messages, how many turns
+went to your team, how many microphone frames the echo gate dropped, and why it ended.
+
+**No transcript, no audio, no key, nothing anybody said.** The readable record of what was said is
+your conversation, on your own volume, in your own console. A count of dropped frames is not a
+recording of them.
+
+**The row is claimed before the socket is dialled**, not written when it closes. A row written on
+close does not exist for a relay that crashed or a tab closed mid-sentence — and the daily cap is read
+out of those same rows, so getting it backwards is unbounded spend rather than a missing report. A
+session that is running right now counts at **what it has run so far**, which is the only way an
+afternoon-long session counts toward the day at all.
+
+Two details that are easy to get wrong and were, here, before they were measured:
+
+- **A session that crosses midnight counts against both days, for the part that falls inside each.**
+  The first version of this counted a session against the day its row was dated, so one that started
+  at 23:59:30 and was still going at 00:05 counted against *neither*: today's sum only looked at rows
+  dated today, and that row belongs to yesterday. A workspace could be talking, spending its minutes,
+  and counting against no day at all.
+- **A close that arrives twice leaves the settled row alone.** The relay reports the close best effort
+  and retries, so a timeout after the write lands means it arrives again. The second one answers "yes,
+  already done" and changes nothing. Before that guard a replay carrying a different number simply
+  overwrote the first — and the daily cap is read out of these rows, so a number that can change after
+  the fact is a cap that can.
+
+The operator reads it:
+
+```
+node cp/cli.mjs voice usage [<slug>] [--day 2026-09-09]
+```
+
+**Every column says which meter it is.** Wall clock is what the caps count. Audio seconds in and out
+are what a provider's invoice is built from, and they do not add up to wall clock. Billable messages
+are the flat per-message fee on one vendor and nothing at all on the other. One "minutes" column would
+reconcile against neither invoice, so there is no single minutes column.
+
+With nothing ever reported, the Spend panel and the CLI both say **not measured, in words**. Never
+"0 minutes". A zero from a meter nobody has ever read looks exactly like a zero from a meter that was
+read, and the wrong one of those is the one that looks like data.
+
+### Where the numbers travel
+
+The relay reports each row open and each row closed to the control plane, best effort. The relay's own
+file on its own disk is the enforcement truth. The control plane's copy is the Spend line. The relay
+and the control plane do share a volume on the production server today, and a direct read of that file
+would work — it is named here as the fallback and is deliberately **not** built, because it couples the
+control plane to the relay's on-disk layout, and a door between them is the pattern this product
+already states.
+
+---
+
+## 10. The two realtime cards on the Providers panel
+
+The super-admin Providers panel lists `xai-realtime` and `openai-realtime`. **They are labels.** They
+offer no model, hold no key, mint nothing at the metering proxy, and feed nothing the relay reads.
+They exist so the one panel an operator goes to when they want to know what this product can talk to
+does not look like it has never heard of realtime, and so the key-file slot names are written down
+where every other vendor's are.
+
+Measured on this Mac 2026-09-09: both rows answer **zero models and zero keys**, and a key pasted into
+one is **refused and not stored** — the address is a websocket, so the panel's proof step cannot
+complete against it:
+
+```
+xai-realtime     409  xAI realtime (voice) would not accept that key, so nothing was stored.
+                      xAI realtime (voice) could not be reached (fetch failed)
+```
+
+Nothing is stored and nothing leaks, which is what matters. But "could not be reached" is a misleading
+reason for a control that can never succeed, and a realtime key does not belong there anyway.
+**VOICE-4** makes those two cards read-only and says where the key actually goes. Until then: use your
+workspace's Voice card.
+
+---
+
+## 11. Proving it
+
+```
+node --test tests/cp-voice.test.mjs                     # the caps, the ledger, the doors, the presets
+timeout 300 node scripts/verify-voice.mjs --leg cp       # the control plane half, end to end
+timeout 300 node scripts/verify-voice.mjs --leg relay    # an accepted socket and a row before the dial
+timeout 300 node scripts/verify-voice.mjs --leg nokey     # no key: one plain sentence
+timeout 300 node scripts/verify-voice.mjs --leg caps      # a spent day: a refusal in words
+timeout 300 node scripts/verify-voice.mjs --leg origin    # a cross-origin upgrade: refused in words
+timeout 300 node scripts/verify-voice.mjs --leg browser   # real Chrome, a WAV as the microphone
+```
+
+One leg per run: the live legs hold the host's one active agent, and every gate here fits a 300 second
+ceiling.
+
+**A refusal is never a dead socket.** Measured on this Mac 2026-09-09: an unknown upgrade path on this
+relay answers zero bytes with no status line at all, cookie or not, and real Chrome reports only an
+error event at 16 ms with no close code — indistinguishable from the relay being down. So every
+refusal, for any reason, is: accept the upgrade, send **one plain sentence**, say goodbye, close
+cleanly. Four of the legs above exist to hold that line.
+
+**There are no `.played` ranges to check, and that is a design decision rather than a missing test.**
+Playback is Web Audio — the audio is decoded into buffers and scheduled off the socket's message
+handler, because draining a player inline is what froze the reference implementation's entire event
+loop, tool calls included, for the length of every spoken reply. There is no media element, so there
+is no `.played`. The evidence instead is the audio clock advancing, an analyser hearing real energy
+rather than a silent buffer, bytes actually queued, and the held-frame counts from both the page and
+the server.
+
+**No key is ever pasted by a gate.** The vendor in every leg is a stub that speaks the event shape.
+Setting a key over ssh would be exactly the by-hand operation this product is being rebuilt to end;
+the mechanism is the Voice card.
+
+---
+
+## 12. The sentences a person reads, word for word
+
+Nothing below names a vendor, a model, a setting, a tool or a protocol. Every one of them is something
+you can act on.
+
+- No key yet: **"There is no voice key for this workspace yet. Add one under Settings, on the Voice
+  card, and the talk button will work."**
+- Voice switched off for the workspace: **"Voice is not switched on for this workspace yet."**
+- The day is spent: **"This workspace has used all the voice time it has for today, so nothing was
+  started. It starts again in 9 hours."**
+- The session cap: **"That is half an hour of talking. Press the button again to start another."**
+- No microphone permission: **"Your browser has not given this page the microphone. Allow it in the
+  address bar and press the button again."**
+- No team lead to talk to: **"There is nobody on this workspace's team to talk to yet."**
+- The team did not answer: **"I could not get an answer that time. It is still in your conversation,
+  so nothing was lost."**
+- Two things waiting at once: **"Two things are waiting on you. I will not guess which — say which
+  one, or open it on screen."**
+- A held action that already closed: **"That one already closed."**

@@ -138,7 +138,44 @@ export const PROVIDER_PRESETS = Object.freeze({
     curated: Object.freeze(["qwen3.8-max"]),
     bootstrapEnv: Object.freeze(["QWEN_API_KEY"]),
   }),
+  // VOICE-1. The two realtime vendors, as rows on this panel and NOTHING MORE.
+  //
+  // READ THIS BEFORE WIRING ANYTHING TO THEM. A spoken session does not go through the proxy and
+  // never will: it is a websocket carrying audio frames, LiteLLM has no deployment shape for one,
+  // and the key it needs is PER WORKSPACE rather than global. The key a spoken session dials with is
+  // written through the customer's own console into that workspace's own state file and read off the
+  // relay's own disk; cp/voice.mjs REALTIME_VENDORS is the authoritative table, and that is what the
+  // CLI, the Voice card and docs/VOICE.md all name.
+  //
+  // So these rows feed nothing the relay reads. They exist so that the one panel an operator goes to
+  // when they want to know what this product can talk to does not look like it has never heard of
+  // realtime, and so the ~/.api_keys slot names are written down in the same place every other
+  // vendor's are. `kind: "realtime"` is not a LiteLLM prefix and is not used as one.
+  //
+  // curated is EMPTY and catalogPath is ABSENT on purpose: an empty curated list plus no catalog is
+  // what makes these two offer no model anywhere, and tests/cp-voice.test.mjs asserts exactly that
+  // against providerList(). If a later change ever does surface a model from them, the right answer
+  // is to DELETE both rows rather than patch the panel around them, because they are cosmetic.
+  "xai-realtime": Object.freeze({
+    name: "xAI realtime (voice)",
+    kind: "realtime",
+    baseUrl: "wss://api.x.ai/v1/realtime",
+    catalogPath: "",
+    curated: Object.freeze([]),
+    bootstrapEnv: Object.freeze(["XAI_API_KEY"]),
+  }),
+  "openai-realtime": Object.freeze({
+    name: "OpenAI realtime (voice)",
+    kind: "realtime",
+    baseUrl: "wss://api.openai.com/v1/realtime",
+    catalogPath: "",
+    curated: Object.freeze([]),
+    bootstrapEnv: Object.freeze(["OPENAI_API_KEY"]),
+  }),
 });
+
+/** The preset ids that are realtime vendors rather than chat providers, so a caller can tell. */
+export const REALTIME_PRESET_IDS = Object.freeze(["xai-realtime", "openai-realtime"]);
 
 /**
  * The vendor's own plan window, per provider, and what is honestly knowable about it.

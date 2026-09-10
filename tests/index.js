@@ -208,6 +208,10 @@ import "./mail-directory.test.mjs";
 import "./mail-send-route.test.mjs";
 import "./cp-mail-send.test.mjs";
 
+// VOICE-1: talking to your team. The control plane half -- the vendor table, the caps a customer
+// cannot raise, and the minutes ledger whose row is claimed before the provider socket opens.
+import "./cp-voice.test.mjs";
+
 // BOTS-4: the write path behind Add on a catalog row. The host verb that seeds an agent's own
 // remembered facts and refuses one over the store's ceiling rather than storing it short, and the
 // console module that mints the bot, seeds it, installs its playbooks, creates its jobs switched

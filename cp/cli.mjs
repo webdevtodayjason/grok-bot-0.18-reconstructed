@@ -27,6 +27,9 @@
 //   node cp/cli.mjs mail senders <slug> | allow <slug> <address> | only <slug> on|off
 //   node cp/cli.mjs mail sends <slug>
 //   node cp/cli.mjs mail sweep
+//   node cp/cli.mjs voice policy <slug>
+//   node cp/cli.mjs voice cap <slug> --day-minutes N [--session-minutes N] [--vendors xai,openai|none]
+//   node cp/cli.mjs voice usage [<slug>] [--day YYYY-MM-DD]
 //   node cp/cli.mjs feedback list|show|approve|suppress|close|issue|digest|github-token
 //   node cp/cli.mjs marketplace list
 //   node cp/cli.mjs marketplace verify [--row <id>] [--fixtures] [--write]
@@ -90,6 +93,11 @@ const VALUED_FLAGS = new Set([
   // "subscription two" the thing being acted on.
   "--label", "--slot", "--confirm", "--provider", "--vendor-model", "--served-by", "--context",
   "--vision-fallback", "--keys", "--file", "--total", "--unit", "--window", "--reset",
+  // VOICE-1. The voice verbs' four. Without these, `voice usage --day 2026-09-09` reads that date as
+  // the workspace name and answers about a workspace nobody has ever had, which looks exactly like a
+  // workspace that has not talked. Caught on this Mac 2026-09-09 by a gate that passed for the wrong
+  // reason: both readings gave an empty answer.
+  "--day-minutes", "--session-minutes", "--vendors", "--day",
 ]);
 const positional = (args) => {
   const values = [];
@@ -1366,6 +1374,9 @@ const USAGE = [
   "node cp/cli.mjs mail senders <slug> | allow <slug> <address> | only <slug> on|off",
   "node cp/cli.mjs mail sends <slug>",
   "node cp/cli.mjs mail sweep",
+  "node cp/cli.mjs voice policy <slug>",
+  "node cp/cli.mjs voice cap <slug> --day-minutes N [--session-minutes N] [--vendors xai,openai|none]",
+  "node cp/cli.mjs voice usage [<slug>] [--day YYYY-MM-DD]",
   "node cp/cli.mjs feedback list [--tier critical|quality|observation] [--state new|approved|filed|suppressed|closed] [--tenant <slug>] [--since 7d]",
   "node cp/cli.mjs feedback show <id>",
   "node cp/cli.mjs feedback approve|suppress|close <id>",
@@ -1383,6 +1394,9 @@ const USAGE = [
   "proxy mint is the only way the operator's own workspace gets a key, because an adopted row is never re-provisioned.",
   "mail list shows the address each bot answers at. A code is minted once and never reused; retire kills one for good.",
   "mail sweep goes through the relay, because the roster lives inside a box and only the relay can read one.",
+  "voice cap is the only way the minutes change. A customer's Voice card writes their realtime key and can never raise their own limit.",
+  "voice usage reports wall clock, audio seconds and billable events separately and says which each is. One minutes column reconciles against neither provider's invoice.",
+  "voice cap --vendors none switches voice off for one workspace in one word, and their talk button says so in plain words rather than failing.",
   "account promote makes somebody a super admin, which opens the console at /admin.",
   "feedback lists what the agents reported and their operators chose to send. Both gates already happened: approve, file or suppress.",
   "feedback github-token reads the token off the terminal, proves it against the repository, and prints a length and a hash. Never an argument.",
@@ -1502,6 +1516,88 @@ async function mailSends(args) {
   out("a row reading `sending` is one nothing came back about, which counts against the cap until it does");
 }
 
+// VOICE-1. The three voice verbs: what a workspace's limits are, changing them, and what it spent
+// talking. docs/VOICE.md.
+//
+// ALL THREE GO OVER THE API through askAdmin, for the reason written above the mail verbs: on the
+// R750 these rows are inside the control plane container and this is typed on a Mac, so a verb that
+// opened the store would answer "nothing yet" over a live ledger and nothing would error.
+//
+// AND THE CAP IS HERE RATHER THAN IN A CUSTOMER'S CONSOLE, which is the whole reason these verbs
+// exist. A cap a customer can raise is not a cap. Their own Voice card writes the realtime KEY for
+// their workspace and nothing else; the minutes are admin_settings rows behind the operator bearer.
+// No route on this service lets a customer session touch one, and tests/cp-voice asserts it.
+async function voicePolicy(args) {
+  const slug = positional(args)[0] ?? "";
+  if (slug.length === 0) die("node cp/cli.mjs voice policy <slug>");
+  const answer = await askAdmin("GET", `/v1/voice/usage?slug=${encodeURIComponent(slug)}`);
+  const policy = answer?.policy ?? {};
+  out(`${slug}: ${policy.dayMinutes ?? "?"} minutes a day, ${policy.sessionMinutes ?? "?"} minutes a session`);
+  out(`providers allowed: ${(Array.isArray(policy.vendors) ? policy.vendors : []).join(", ") || "none, so voice is off for this workspace"}`);
+  out(`today (${policy.day ?? "?"}): ${Math.round(Number(policy.dayUsedSeconds ?? 0) / 60)} of ${policy.dayMinutes ?? "?"} minutes used`
+    + `${Number(policy.openSessions ?? 0) > 0 ? `, ${policy.openSessions} session(s) open right now and counted at what they have run so far` : ""}`);
+  out(`the day gives its minutes back at ${policy.resetsAt ?? "midnight UTC"}`);
+  out("these are WALL CLOCK minutes, which is the only number a person can predict. A provider bills on audio seconds, which `voice usage` reports separately.");
+  out("the relay re-reads this within a minute; a session already running keeps the numbers it started with");
+}
+
+async function voiceCap(args) {
+  const slug = positional(args)[0] ?? "";
+  if (slug.length === 0) die("node cp/cli.mjs voice cap <slug> --day-minutes N [--session-minutes N] [--vendors xai,openai|none]");
+  const body = { slug };
+  const day = flag(args, "--day-minutes");
+  const session = flag(args, "--session-minutes");
+  const vendors = flag(args, "--vendors");
+  if (day != null) body.dayMinutes = day;
+  if (session != null) body.sessionMinutes = session;
+  if (vendors != null) body.vendors = vendors;
+  if (day == null && session == null && vendors == null) {
+    die("name at least one of --day-minutes, --session-minutes or --vendors. Nothing was changed.");
+  }
+  const answer = await askAdmin("POST", "/v1/voice/caps", body);
+  const policy = answer?.policy ?? {};
+  out(`${slug}: ${policy.dayMinutes} minutes a day, ${policy.sessionMinutes} minutes a session`);
+  out(`providers allowed: ${(Array.isArray(policy.vendors) ? policy.vendors : []).join(", ") || "none, so voice is off for this workspace"}`);
+  if (Array.isArray(policy.vendors) && policy.vendors.length === 0) {
+    out("that workspace's talk button now answers, in words, that voice is not switched on for them. It does not look broken and it does not look like an error.");
+  }
+  out("the relay picks this up within a minute. A session already running keeps the cap it started with, so nothing in flight is cut off mid-sentence.");
+}
+
+async function voiceUsage(args) {
+  const slug = positional(args)[0] ?? "";
+  const day = flag(args, "--day");
+  const query = new URLSearchParams();
+  if (slug.length > 0) query.set("slug", slug);
+  if (day != null && String(day).length > 0) query.set("day", String(day));
+  const suffix = query.toString();
+  const answer = await askAdmin("GET", `/v1/voice/usage${suffix.length > 0 ? `?${suffix}` : ""}`);
+  const window = answer?.window ?? {};
+  const when = String(window.day ?? "").length > 0 ? `on ${window.day}` : `in ${window.month ?? "this month"}`;
+  if (answer?.everMeasured !== true) {
+    out(`not measured: ${answer?.why ?? "nothing has reported a voice session yet"}`);
+    out("that is not nought minutes. Nobody has talked to their team on this install yet.");
+    return;
+  }
+  const rows = Array.isArray(answer.tenants) ? answer.tenants : [];
+  if (rows.length === 0) {
+    out(`no workspace talked ${when} UTC; earlier windows have rows`);
+    return;
+  }
+  // THREE METERS AND EVERY COLUMN SAYS WHICH. A single "minutes" number reconciles against neither
+  // vendor's invoice: one bills audio sent-or-received plus a flat fee per billable text message, the
+  // other bills audio tokens with the whole prefix re-read every turn.
+  out(`${pad("workspace", 22)}${pad("wall", 10)}${pad("heard", 10)}${pad("spoken", 10)}${pad("events", 8)}${pad("sessions", 10)}${pad("handed over", 13)}open`);
+  for (const row of rows) {
+    out(`${pad(row.slug, 22)}${pad(`${Math.round(row.wallSeconds / 60)}m`, 10)}${pad(`${Math.round(row.audioInSeconds / 60)}m`, 10)}`
+      + `${pad(`${Math.round(row.audioOutSeconds / 60)}m`, 10)}${pad(row.billedItemEvents, 8)}${pad(row.sessions, 10)}${pad(row.toolCalls, 13)}${row.open}`);
+  }
+  out("wall is the clock the caps count and the only number a person can predict.");
+  out("heard and spoken are AUDIO seconds, which is what a provider's invoice is built from. They do not add up to wall and are not meant to.");
+  out("events are billable text messages to the provider: a flat fee each on the default one, and a result handed back from the team is free.");
+  out("handed over is how many times what somebody said went into their team's conversation. open counts sessions still running, measured at what they have run so far.");
+}
+
 async function mailSweep() {
   const answer = await askRelay("POST", "/mail/sweep");
   for (const row of Array.isArray(answer?.swept) ? answer.swept : []) {
@@ -1544,6 +1640,9 @@ const commands = {
   "mail only": mailOnly,
   "mail sends": mailSends,
   "mail sweep": mailSweep,
+  "voice policy": voicePolicy,
+  "voice cap": voiceCap,
+  "voice usage": voiceUsage,
   "feedback list": feedbackList,
   "feedback show": feedbackShow,
   "feedback approve": feedbackDecide("approve"),

@@ -1184,9 +1184,16 @@ test("a provider with no key and no deployment comes off, and its catalog goes w
 
     const after = await call("GET", "/v1/admin/providers");
     assert.equal(after.body.providers.some((row) => row.id === "qwen-plan"), false, "the card is still on the panel");
-    // The three built-ins are untouched, which is the whole difference between removing a leftover
-    // and removing a provider.
-    assert.deepEqual(after.body.providers.map((row) => row.id).sort(), ["minimax", "qwen", "zai"]);
+    // The built-ins are untouched, which is the whole difference between removing a leftover and
+    // removing a provider. The list is spelled out rather than derived, so a preset that vanished
+    // would fail here too.
+    //
+    // VOICE-1 added the last two. They are realtime VOICE vendors and they are cards on this panel and
+    // nothing else: they offer no model, hold no key, and mint nothing at the proxy, because a spoken
+    // session does not go through it and its key is per workspace. tests/cp-voice.test.mjs asserts that
+    // inertness; here they are just two more ids a removal must not disturb.
+    assert.deepEqual(after.body.providers.map((row) => row.id).sort(),
+      ["minimax", "openai-realtime", "qwen", "xai-realtime", "zai"]);
 
     // And the change is on the record like every other change here.
     const record = store.listAdminActions({ limit: 10 }).find((row) => row.action === "provider.remove");

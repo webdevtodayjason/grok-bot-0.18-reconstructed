@@ -1337,6 +1337,77 @@
       tr.appendChild(key);
       body.appendChild(tr);
     }
+    await loadVoiceSpend();
+  }
+
+  // ---- VOICE-1: what each workspace spent talking ----------------------------------------------
+  //
+  // A BLOCK UNDER THE TABLE AND NOT A SEVENTH COLUMN. rowSpanning(6) above and every row build in
+  // loadSpend depend on that six, and a spoken minute is not a dollar anyway: nothing in this product
+  // prices voice yet, so a number in the money table would be read as money.
+  //
+  // THREE METERS, AND EVERY LINE SAYS WHICH. Wall clock is what the caps count and what a person can
+  // predict; audio seconds in and out are what a vendor's invoice is built from; billable text events
+  // are a flat fee each on the default provider and free for a tool result. A single "minutes" figure
+  // reconciles against neither invoice, so there is no single figure here.
+  //
+  // NOT MEASURED IS WORDS, NEVER 0 MINUTES, for the reason written over the table above after a real
+  // screenshot bug: a zero from a meter nobody has ever reported looks exactly like a zero from a
+  // meter that was read, and the wrong one of those is the one that looks like data.
+  const minutesWords = (seconds) => {
+    const whole = Math.max(0, Math.round(Number(seconds) || 0));
+    if (whole < 60) return `${whole} second${whole === 1 ? "" : "s"}`;
+    const minutes = Math.round(whole / 60);
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  };
+
+  async function loadVoiceSpend() {
+    // The block makes its own node on first load and reuses it afterwards, so this adds nothing to
+    // cp/admin/index.html and no class that admin.css has never heard of: h3, p.quiet and strong are
+    // all already styled, which is why there is no new rule in that file either.
+    const host = $("spendVoice") ?? (() => {
+      const node = document.createElement("div");
+      node.id = "spendVoice";
+      document.querySelector("#panel-spend")?.appendChild(node);
+      return node;
+    })();
+    clear(host);
+    host.appendChild(el("h3", null, "Voice"));
+
+    let answer = null;
+    try { answer = await api("GET", "/v1/voice/usage"); }
+    catch (error) {
+      host.appendChild(el("p", "quiet", `Not measured: ${String(error?.message ?? error)}`));
+      return;
+    }
+    if (answer?.everMeasured !== true) {
+      host.appendChild(el("p", "quiet",
+        `Not measured: ${String(answer?.why ?? "no voice session has been reported to this service yet")}.`
+        + " Nobody has talked to their team yet, which is not the same thing as nought minutes."));
+      return;
+    }
+    const month = String(answer?.window?.month ?? "");
+    host.appendChild(el("p", "quiet",
+      `One line per workspace for ${month || "this window"} UTC. Wall clock is what the caps count;`
+      + " audio seconds are what a provider bills on; billable events are the flat per-message fee on"
+      + " the default provider and are free for a tool result."));
+    const tenants = Array.isArray(answer.tenants) ? answer.tenants : [];
+    if (tenants.length === 0) {
+      host.appendChild(el("p", "quiet", "No workspace has talked this month. Earlier months have rows."));
+      return;
+    }
+    for (const line of tenants) {
+      const row = el("p", "quiet");
+      row.appendChild(el("strong", null, line.slug));
+      row.appendChild(text(
+        ` ${minutesWords(line.wallSeconds)} of wall clock`
+        + ` · ${minutesWords(line.audioInSeconds)} heard and ${minutesWords(line.audioOutSeconds)} spoken (a provider's meter)`
+        + ` · ${line.billedItemEvents} billable event${line.billedItemEvents === 1 ? "" : "s"}`
+        + ` · ${line.sessions} session${line.sessions === 1 ? "" : "s"}`
+        + `, ${line.toolCalls} handed to the team`
+        + (line.open > 0 ? ` · ${line.open} still open, counted at what it has run so far` : "")));
+      host.appendChild(row);
+    }
   }
 
   // ---- panel 6: providers, keys and plan models ------------------------------------------------

@@ -46,6 +46,7 @@ import { mintSessionToken, tenantOfUnverifiedToken, tenantSessionSecret, verifyS
 import { openStore, burnPasswordTime, normalizeEmail } from "./store.mjs";
 import { createAdminApi } from "./admin.mjs";
 import { createMailDirectory, createMailSends, mailDomain } from "./mail.mjs";
+import { createVoiceLog } from "./voice.mjs";
 import { INTAKE_BYTES as FEEDBACK_BODY_BYTES, normalizeReport } from "./feedback.mjs";
 import { createProxyClient, includedModelRows } from "./proxy.mjs";
 import {
@@ -588,6 +589,12 @@ export function createApp(options = {}) {
   // holds no Resend key: the relay does the sending and this says whether it may and writes down
   // that it did.
   const mailSends = createMailSends({ store, now });
+  // VOICE-1. The minutes ledger and the caps behind spoken work, beside the mail pair and over the
+  // same store. It holds no realtime key and opens no socket to a provider: the relay holds both,
+  // reads the workspace's own key off its own disk, and counts the seconds on its own clock. This
+  // answers the policy the relay starts that clock against and writes down what the session came to.
+  // cp/voice.mjs carries the reasoning.
+  const voice = createVoiceLog({ store, config, now });
 
   // Its own file, handed the pieces this one already owns, so there is one store, one Coolify
   // client and one session verifier in this process rather than two. It mounts below, before the
@@ -1068,6 +1075,96 @@ export function createApp(options = {}) {
       const asked = Number.parseInt(String(url.searchParams.get("limit") ?? ""), 10);
       const limit = Number.isFinite(asked) && asked > 0 ? Math.min(asked, 500) : 50;
       return json(response, 200, { slug, caps: mailSends.sendCaps(slug), rows: mailSends.listSends(slug, limit) });
+    }
+
+    // ---- spoken sessions (VOICE-1, docs/VOICE.md) ------------------------------------------------
+    //
+    // Three relay routes and two operator routes, and the split is the whole design: the relay is
+    // told NUMBERS and reports ROWS, and the operator is the only one who can change a number.
+    //
+    // WHAT DOES NOT CROSS THIS LINE IN EITHER DIRECTION: the workspace's realtime key. It is written
+    // through the customer's own console into that workspace's own state file and read off the
+    // relay's own disk when it dials, and it travels to the vendor as an Authorization header and
+    // nowhere else. No route here takes one, answers one or could be made to log one. That is why the
+    // key is NOT on the super-admin Providers panel: those keys are global, they live at LiteLLM as
+    // credentials, they read back masked, and cp/PROVIDERS-ROUTES.md section 5 has a test that sweeps
+    // every GET route in that file for a planted key's bytes. A per-workspace realtime key has no row
+    // there to live in.
+    //
+    // The method refusal comes first on every one of them, the way the mail send pair does: a wrong
+    // method charges nobody and learns nothing.
+    if (segments[1] === "relay" && segments[2] === "voice" && segments[3] === "policy" && segments.length === 4) {
+      if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
+      if (!requireRelay(request, response)) return undefined;
+      const slug = String(url.searchParams.get("slug") ?? "").trim();
+      if (slug.length === 0) return json(response, 400, { error: "bad_request", message: "Name the workspace." });
+      return json(response, 200, voice.policy(slug));
+    }
+
+    // The claim and the settle, shaped exactly like the mail send pair above and for the same reason:
+    // the claim happens BEFORE the provider socket opens and the outcome is only known after. A row
+    // written on close does not exist for a relay that crashed or a tab closed mid-sentence, and the
+    // day cap is read out of these same rows.
+    if (segments[1] === "relay" && segments[2] === "voice" && segments[3] === "usage" && segments.length === 5) {
+      if (method !== "POST") return json(response, 405, { error: "method_not_allowed" });
+      if (!requireRelay(request, response)) return undefined;
+      if (segments[4] === "open") {
+        const answer = voice.openSession({
+          slug: body.slug, sessionId: body.sessionId, agentId: body.agentId, vendor: body.vendor, model: body.model,
+        });
+        // 429 on a cap and 400 on a malformed claim, so the relay passes the sentence on word for
+        // word rather than inventing one of its own. A vendor this workspace may not use is 403 and
+        // says the same plain thing a person can act on, which is nothing about a vendor.
+        if (answer.ok) return json(response, 200, answer);
+        if (answer.error === "day_cap") return json(response, 429, answer);
+        if (answer.error === "voice_off" || answer.error === "vendor_not_allowed") return json(response, 403, answer);
+        return json(response, 400, answer);
+      }
+      if (segments[4] === "close") {
+        const answer = voice.closeSession(body ?? {});
+        return json(response, answer.ok ? 200 : (answer.error === "not_found" ? 404 : 400), answer);
+      }
+    }
+
+    // The operator's read, and it is HERE rather than under /v1/admin for the structural reason
+    // written over the mail send log above: cp/admin.mjs claims every /v1/admin/* path and answers
+    // 404 to anything it does not match itself, so a route added under that prefix has to be added
+    // inside that file, and that file belongs to another wave this week. It is still a super admin
+    // route -- requireAdmin, and the relay's own credential does not open it. The Spend panel fetches
+    // it with the admin bearer through the same api() helper it uses for everything else.
+    //
+    // NO SLUG MEANS EVERY WORKSPACE, which is the one place this differs from /v1/mail/sends: the
+    // Spend panel draws one line per tenant, so a read that demanded a slug would need one fetch per
+    // customer to fill one table.
+    if (segments[1] === "voice" && segments[2] === "usage" && segments.length === 3) {
+      if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
+      if (!requireAdmin(request, response)) return undefined;
+      const slug = String(url.searchParams.get("slug") ?? "").trim();
+      const day = String(url.searchParams.get("day") ?? "").trim();
+      if (day.length > 0 && !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+        return json(response, 400, { error: "bad_request", message: "A day is YYYY-MM-DD, in UTC." });
+      }
+      return json(response, 200, voice.usage({ slug, day }));
+    }
+
+    // And the operator's WRITE, which is the thing that has no customer-reachable twin anywhere in
+    // this product. A customer raising their own day cap is unbounded spend on somebody else's
+    // invoice, so the minutes live in admin_settings behind this one bearer and the customer's own
+    // Voice card writes the KEY and nothing else.
+    if (segments[1] === "voice" && segments[2] === "caps" && segments.length === 3) {
+      if (method !== "POST") return json(response, 405, { error: "method_not_allowed" });
+      if (!requireAdmin(request, response)) return undefined;
+      // The actor on the settings row. This door is the admin BEARER rather than a person's session,
+      // so there is no address to record: what is knowable is that the operator token was presented
+      // and which surface presented it, and writing down a name nobody proved would be worse than
+      // writing down the truth.
+      const actor = `operator via ${String(request.headers["x-titanbot-via"] ?? "api")}`;
+      const answer = voice.setCaps(body.slug, {
+        dayMinutes: body.dayMinutes ?? null,
+        sessionMinutes: body.sessionMinutes ?? null,
+        vendors: body.vendors ?? null,
+      }, actor);
+      return json(response, answer.ok ? 200 : 400, answer);
     }
 
     // ---- a problem report, forwarded by a console (FEEDBACK-1) ---------------------------------

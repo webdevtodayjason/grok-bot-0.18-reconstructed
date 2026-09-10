@@ -348,6 +348,50 @@ CREATE TABLE IF NOT EXISTS feedback (
 );
 CREATE INDEX IF NOT EXISTS feedback_at ON feedback (at);
 CREATE INDEX IF NOT EXISTS feedback_state ON feedback (state);
+-- VOICE-1. One row per spoken session, claimed when the session is authorised and BEFORE the relay
+-- dials a provider, settled when it ends.
+--
+-- No TENANT_MIGRATIONS entry, for the reason written over admin_actions and feedback above:
+-- db.exec(SCHEMA) runs on every open and CREATE TABLE IF NOT EXISTS makes a table that is not there.
+-- Only a new COLUMN on a table that already exists needs an ALTER, and this is a whole new table.
+--
+-- state is 'open' from the moment the row is claimed and 'closed' when the relay reports the
+-- outcome. An open row is not an error: it is what a session that is happening right now looks like,
+-- and the day cap counts it at its CURRENT elapsed, which is the only way a session in flight counts
+-- toward the day at all. A row left open by a relay that crashed counts its whole wall clock against
+-- that day, which is the safe direction.
+--
+-- BOTH METERS ARE COLUMNS, and that is deliberate rather than redundant. wall_seconds is what the
+-- caps count and what a person can predict; audio_in_seconds and audio_out_seconds are what a
+-- vendor's invoice is built from; billed_item_events is the flat per-event text fee one vendor
+-- charges and the other does not. One "minutes" column reconciles against neither invoice.
+--
+-- WHAT IS NOT IN HERE: no transcript, no audio, no key, nothing anybody said. held_frames is a COUNT
+-- of microphone frames the echo gate dropped, which is the only evidence that gate ran that survives
+-- the session, and a count of frames is not a recording of them.
+CREATE TABLE IF NOT EXISTS voice_sessions (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id         TEXT NOT NULL,
+  tenant             TEXT NOT NULL,
+  agent_id           TEXT NOT NULL DEFAULT '',
+  vendor             TEXT NOT NULL DEFAULT '',
+  model              TEXT NOT NULL DEFAULT '',
+  started_at         TEXT NOT NULL,
+  ended_at           TEXT NOT NULL DEFAULT '',
+  state              TEXT NOT NULL DEFAULT 'open',
+  wall_seconds       INTEGER NOT NULL DEFAULT 0,
+  audio_in_seconds   INTEGER NOT NULL DEFAULT 0,
+  audio_out_seconds  INTEGER NOT NULL DEFAULT 0,
+  billed_item_events INTEGER NOT NULL DEFAULT 0,
+  tool_calls         INTEGER NOT NULL DEFAULT 0,
+  held_frames        INTEGER NOT NULL DEFAULT 0,
+  close_reason       TEXT NOT NULL DEFAULT ''
+);
+-- The day cap reads (tenant, started_at) and nothing else, so that is the index.
+CREATE INDEX IF NOT EXISTS voice_sessions_tenant ON voice_sessions (tenant, started_at);
+-- UNIQUE, so a relay that retries its claim after a timeout gets the row it already has rather than
+-- a second row counting the same minutes twice. The relay mints the session id, so it is the handle.
+CREATE UNIQUE INDEX IF NOT EXISTS voice_sessions_session ON voice_sessions (session_id);
 `;
 
 /**
@@ -604,6 +648,47 @@ export function openStore(options = {}) {
   // optional and a prepared statement per combination is eight statements for one list. The values
   // are still bound and never interpolated: the only thing built is which `AND` clauses are in the
   // string, and each clause's placeholder is filled from the argument list below.
+  // VOICE-1. The claim, the settle, and the two reads the caps and the Spend line are built from.
+  //
+  // ON CONFLICT DO NOTHING rather than OR REPLACE: a relay retrying a claim after a timeout must get
+  // back the row it already has, with its original started_at intact. OR REPLACE would move the
+  // start forward and give the session its whole session cap again on every retry, which is a cap
+  // anybody can reset by making the network flap.
+  const openVoiceRow = statement(
+    "INSERT INTO voice_sessions (session_id, tenant, agent_id, vendor, model, started_at, state)"
+    + " VALUES (?, ?, ?, ?, ?, ?, 'open') ON CONFLICT(session_id) DO NOTHING");
+  const selectVoiceBySession = statement("SELECT * FROM voice_sessions WHERE session_id = ?");
+  const closeVoiceRow = statement(
+    "UPDATE voice_sessions SET state = 'closed', ended_at = ?, wall_seconds = ?, audio_in_seconds = ?,"
+    + " audio_out_seconds = ?, billed_item_events = ?, tool_calls = ?, held_frames = ?, close_reason = ?"
+    + " WHERE session_id = ?");
+  // The window is matched on the ISO prefix of started_at, which is why that column is TEXT: a day is
+  // the first ten characters and a month the first seven, so one index serves both and there is no
+  // second representation of "when" to keep in step with the first.
+  const selectVoiceByTenantPrefix = statement("SELECT * FROM voice_sessions WHERE tenant = ? AND started_at LIKE ? ORDER BY started_at, id");
+  const selectVoiceByTenant = statement("SELECT * FROM voice_sessions WHERE tenant = ? ORDER BY started_at, id");
+  const selectVoiceByPrefix = statement("SELECT * FROM voice_sessions WHERE started_at LIKE ? ORDER BY tenant, started_at, id");
+  const selectVoiceAll = statement("SELECT * FROM voice_sessions ORDER BY tenant, started_at, id");
+  const countVoiceRows = statement("SELECT COUNT(*) AS n FROM voice_sessions");
+  const voiceRow = (record) => (record == null ? null : {
+    id: Number(record.id),
+    sessionId: String(record.session_id ?? ""),
+    tenant: String(record.tenant ?? ""),
+    agentId: String(record.agent_id ?? ""),
+    vendor: String(record.vendor ?? ""),
+    model: String(record.model ?? ""),
+    startedAt: String(record.started_at ?? ""),
+    endedAt: String(record.ended_at ?? ""),
+    state: String(record.state ?? ""),
+    wallSeconds: Number(record.wall_seconds ?? 0),
+    audioInSeconds: Number(record.audio_in_seconds ?? 0),
+    audioOutSeconds: Number(record.audio_out_seconds ?? 0),
+    billedItemEvents: Number(record.billed_item_events ?? 0),
+    toolCalls: Number(record.tool_calls ?? 0),
+    heldFrames: Number(record.held_frames ?? 0),
+    closeReason: String(record.close_reason ?? ""),
+  });
+
   const insertFeedback = statement("INSERT INTO feedback (at, tenant, agent, agentName, tier, category, title, body, payload, state, issueUrl, decidedAt, decidedBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, '')");
   const selectFeedbackRow = statement("SELECT * FROM feedback WHERE id = ?");
   const countFeedbackRow = statement("SELECT COUNT(*) AS n FROM feedback");
@@ -1151,6 +1236,56 @@ export function openStore(options = {}) {
     countAgentMailSends(tenant, agentId, since = "") {
       return sendWindow(countAgentSendRows.get(String(tenant ?? ""), String(agentId ?? ""), String(since))).count;
     },
+
+    // ---- spoken sessions (VOICE-1) ---------------------------------------------------------------
+
+    /**
+     * The claim, made before the relay dials a provider. Answers the row's id, whether this call
+     * wrote it or a retry of the same session id found it already there.
+     */
+    openVoiceSession({ sessionId, tenant, agentId = "", vendor = "", model = "", at = new Date().toISOString() }) {
+      const session = String(sessionId ?? "");
+      openVoiceRow.run(session, String(tenant ?? ""), String(agentId), String(vendor), String(model), String(at));
+      return Number(selectVoiceBySession.get(session)?.id ?? 0);
+    },
+
+    /** One row by the handle the relay minted. Null when nothing claimed it. */
+    getVoiceSession(sessionId) { return voiceRow(selectVoiceBySession.get(String(sessionId ?? ""))); },
+
+    /** The settle. It updates the claimed row rather than writing a second one. */
+    closeVoiceSession(sessionId, {
+      endedAt = new Date().toISOString(),
+      wallSeconds = 0,
+      audioInSeconds = 0,
+      audioOutSeconds = 0,
+      billedItemEvents = 0,
+      toolCalls = 0,
+      heldFrames = 0,
+      closeReason = "",
+    } = {}) {
+      closeVoiceRow.run(
+        String(endedAt), Number(wallSeconds) || 0, Number(audioInSeconds) || 0, Number(audioOutSeconds) || 0,
+        Number(billedItemEvents) || 0, Number(toolCalls) || 0, Number(heldFrames) || 0,
+        String(closeReason).slice(0, 200), String(sessionId ?? ""),
+      );
+    },
+
+    /**
+     * Rows for a window. `day` is a YYYY-MM-DD and `month` a YYYY-MM, both matched on the ISO prefix
+     * of started_at; naming neither is every row this tenant ever had. A day wins over a month when
+     * both are given, because a day is the narrower question.
+     */
+    listVoiceSessions({ tenant = null, day = null, month = null } = {}) {
+      const prefix = String(day ?? "").length > 0 ? `${day}%` : (String(month ?? "").length > 0 ? `${month}%` : "");
+      const who = tenant == null ? null : String(tenant);
+      if (who != null && prefix.length > 0) return selectVoiceByTenantPrefix.all(who, prefix).map(voiceRow);
+      if (who != null) return selectVoiceByTenant.all(who).map(voiceRow);
+      if (prefix.length > 0) return selectVoiceByPrefix.all(prefix).map(voiceRow);
+      return selectVoiceAll.all().map(voiceRow);
+    },
+
+    /** Whether this table has ever held a row, which is what "not measured" is drawn from. */
+    countVoiceSessions() { return Number(countVoiceRows.get()?.n ?? 0); },
 
     // ---- login failures ------------------------------------------------------------------------
 
