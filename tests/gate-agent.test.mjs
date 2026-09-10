@@ -37,7 +37,7 @@ import { GATE_AGENT_PREFIX, gateUserAgent } from "../scripts/gate-agent.mjs";
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sourceOf = (name) => readFileSync(path.join(repo, "scripts", name), "utf8");
 
-// The four gates that actually knock at a login door on a live box. The other 42 are deliberately
+// The gates that actually knock at a login door on a live box. The others are deliberately
 // untouched and the reasons are worth keeping next to the list: verify-browser-tools serves its own
 // fixture login page from its own fixture server, verify-console-polish and verify-job-bus and
 // verify-mail carry bearer tokens, verify-admin drives a control plane and a relay it starts
@@ -48,6 +48,10 @@ const GATES = [
   "verify-one-console.mjs",
   "verify-one-console-browser.mjs",
   "verify-control-plane.mjs",
+  // VOICE-1: it posts a password at a relay's own /login to get the console cookie the voice door
+  // takes, and drives real Chrome through the same door. The relay is one it starts itself, but the
+  // door is real and the header costs one import, so it is held to the same rule.
+  "verify-voice.mjs",
 ];
 
 test("the name is built from the calling file, not typed into it", () => {

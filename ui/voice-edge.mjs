@@ -628,7 +628,10 @@ export function voiceSettingsShape(settings, { vendors = null, agents = [], sess
     voice: value.voice.length > 0 ? value.voice : vendorOf(value.vendor).voice,
     agentId: value.agentId,
     apiKeySet: value.apiKey.length > 0,
-    vendors: vendors ?? VENDOR_IDS.map((id) => ({ id, model: VENDORS[id].model, voice: VENDORS[id].voice })),
+    // `label` is what the Voice card puts in the Service dropdown -- ui/machine-room/voice.js reads
+    // `one.label` and an absent one renders a row of empty options, which is a control a person
+    // cannot use. The labels in VENDORS name no vendor on purpose; docs/VOICE.md names them.
+    vendors: vendors ?? VENDOR_IDS.map((id) => ({ id, label: VENDORS[id].label, model: VENDORS[id].model, voice: VENDORS[id].voice })),
     agents,
     sessionCapSeconds,
     dayCapSeconds,
@@ -1157,12 +1160,23 @@ export function wrapBrowserSocket(socket, { onBinary = () => {}, onJson = () => 
     get closed() { return closed; },
     sendJson(object) { write(encodeFrame(OPCODE.text, Buffer.from(JSON.stringify(object), "utf8"))); },
     sendBinary(buffer) { write(encodeFrame(OPCODE.binary, buffer)); },
-    /** One plain sentence the person reads. Never a vendor name, never a tool name. */
-    note(text) { api.sendJson({ t: "note", text: String(text) }); },
+    /** One plain sentence the person reads. Never a vendor name, never a tool name. The optional
+     *  `reason` is the page's own condition vocabulary ("no-key", "day-cap", "session-cap",
+     *  "line-dropped"); it decides whether the row offers a way forward, and an unmapped condition
+     *  is sent as "" on purpose so the page leaves our sentence exactly as written. */
+    note(text, reason = "") { api.sendJson({ t: "note", text: String(text), reason: String(reason) }); },
     state(value) { api.sendJson({ t: "state", value }); },
-    /** A close carries a code AND a reason, because the page reads event.reason. */
-    bye(reason, code = 1000) {
-      api.sendJson({ t: "bye", reason: String(reason) });
+    /**
+     * A close carries a code AND a reason, because the page reads event.reason.
+     *
+     * The JSON frame's `reason` is the page's CONDITION, not our prose: it is what retitles the
+     * sentence we already sent so a missing key can offer the card that fixes it. The prose stays on
+     * `detail` and on the close frame, which is what an operator reads in a log. The page also knows
+     * close codes 4001..4004 for a relay that dies mid-call without getting a frame out; this bridge
+     * always writes the note, the bye and the close together on the live socket, so it closes 1000.
+     */
+    bye(reason, code = 1000, condition = "") {
+      api.sendJson({ t: "bye", reason: String(condition), detail: String(reason) });
       write(encodeClose(code, reason));
       closed = true;
       // The frames have to reach the browser before the FIN, or Chrome reports onerror with no
@@ -1199,13 +1213,13 @@ export function wrapBrowserSocket(socket, { onBinary = () => {}, onJson = () => 
 }
 
 /** The 101, then one sentence, then goodbye. This is what EVERY voice refusal looks like. */
-export function acceptAndSay(socket, key, sentence, reason = "refused") {
+export function acceptAndSay(socket, key, sentence, reason = "refused", condition = "") {
   try {
     socket.write(handshakeResponse(key));
     const browser = wrapBrowserSocket(socket);
     browser.state("off");
-    browser.note(sentence);
-    browser.bye(reason);
+    browser.note(sentence, condition);
+    browser.bye(reason, 1000, condition);
   } catch { try { socket.destroy(); } catch { /* already gone */ } }
 }
 
@@ -1394,7 +1408,7 @@ export function makeVoiceSession({
       log(`voice provider error: ${JSON.stringify(event?.error ?? {}).slice(0, 240)}`);
       // A session refused before a single word was said cannot recover by itself, and silence is
       // the void answer this console has already been burned by.
-      if (meter.toolCalls === 0 && meter.audioOutBytes === 0) return void close("the voice service refused this session", SENTENCE.providerRefused);
+      if (meter.toolCalls === 0 && meter.audioOutBytes === 0) return void close("the voice service refused this session", SENTENCE.providerRefused, "no-key");
       return undefined;
     }
     if (type === "session.updated") { browser?.state("listening"); return undefined; }
@@ -1454,13 +1468,13 @@ export function makeVoiceSession({
     return undefined;
   };
 
-  async function close(reason, sentence = "") {
+  async function close(reason, sentence = "", condition = "") {
     if (stopping) return;
     stopping = true;
     if (tick != null) clearInterval(tick);
-    if (sentence.length > 0) browser?.note(sentence);
+    if (sentence.length > 0) browser?.note(sentence, condition);
     browser?.state("off");
-    browser?.bye(reason);
+    browser?.bye(reason, 1000, condition);
     try { provider?.close(1000, "done"); } catch { /* already gone */ }
     await ledger.settle(rowNow("closed", reason)).catch((error) => log(`voice could not settle the ledger: ${error?.message ?? error}`));
   }
@@ -1515,7 +1529,7 @@ export function makeVoiceSession({
         provider = dialProviderSocket({ vendorId: vendor.id, apiKey: settings.apiKey, model, url: providerUrl, WebSocketImpl });
       } catch (error) {
         log(`voice could not dial: ${error?.message ?? error}`);
-        void close("the relay could not open a voice line", SENTENCE.providerGone);
+        void close("the relay could not open a voice line", SENTENCE.providerGone, "line-dropped");
         return undefined;
       }
       provider.addEventListener("open", () => {
@@ -1535,7 +1549,7 @@ export function makeVoiceSession({
         // the person can fix themselves.
         const refused = meter.toolCalls === 0 && meter.audioOutBytes === 0 && secondsNow() < 10;
         log(`voice provider closed ${event?.code ?? ""} ${String(event?.reason ?? "").slice(0, 120)}`);
-        void close("the voice service closed the line", refused ? SENTENCE.providerRefused : SENTENCE.providerGone);
+        void close("the voice service closed the line", refused ? SENTENCE.providerRefused : SENTENCE.providerGone, refused ? "no-key" : "line-dropped");
       });
 
       // The relay's own clock, on a ten second tick, and never a provider's warning: xAI emits no
@@ -1544,8 +1558,8 @@ export function makeVoiceSession({
       // can predict, and docs/VOICE.md says so.
       tick = setInterval(() => {
         const spent = secondsNow();
-        if (spent >= sessionCapSeconds) { void close("the session cap", SENTENCE.sessionCap); return; }
-        if (spent >= dayRemainingSeconds) { void close("the day cap", SENTENCE.dayCap); return; }
+        if (spent >= sessionCapSeconds) { void close("the session cap", SENTENCE.sessionCap, "session-cap"); return; }
+        if (spent >= dayRemainingSeconds) { void close("the day cap", SENTENCE.dayCap, "day-cap"); return; }
         void ledger.touch(rowNow("open")).catch(() => {});
       }, capTickMs);
       tick.unref?.();
@@ -1657,7 +1671,7 @@ export function makeVoiceEdge({
     if (origin === false) return acceptAndSay(socket, key, SENTENCE.badOrigin, "a cross-origin upgrade");
 
     const settings = await readVoiceSettings(settingsFile);
-    if (settings.apiKey.length === 0) return acceptAndSay(socket, key, SENTENCE.noKey, "no realtime key");
+    if (settings.apiKey.length === 0) return acceptAndSay(socket, key, SENTENCE.noKey, "no realtime key", "no-key");
     if (!settings.enabled) return acceptAndSay(socket, key, SENTENCE.notEnabled, "voice is switched off");
 
     const caps = await policy.for(t.slug);
@@ -1667,7 +1681,7 @@ export function makeVoiceEdge({
 
     const used = daySecondsUsed(await readVoiceLedger(ledgerFile), now(), { openCapSeconds: caps.sessionCapSeconds });
     const remaining = caps.dayCapSeconds - used;
-    if (remaining <= 0) return acceptAndSay(socket, key, SENTENCE.dayCap, "the day cap");
+    if (remaining <= 0) return acceptAndSay(socket, key, SENTENCE.dayCap, "the day cap", "day-cap");
 
     const agents = await call("listAgents", {}).then((answer) => (Array.isArray(answer?.agents) ? answer.agents : [])).catch(() => []);
     const agent = resolveVoiceAgent(agents, settings);

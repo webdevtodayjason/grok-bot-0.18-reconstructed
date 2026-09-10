@@ -37,7 +37,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,7 +47,10 @@ import { gateUserAgent } from "./gate-agent.mjs";
 
 const exec = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const UA = gateUserAgent(import.meta.url);
+// The name this gate knocks with. tests/gate-agent.test.mjs enforces both this exact derivation and
+// the constant's name for every gate that posts a password at a login door, because a gate that
+// reaches one without the header writes ledger rows nobody can tell from a stranger's.
+const GATE_AGENT = gateUserAgent(import.meta.url);
 const MACHINE = process.env.GATE_MACHINE ?? `${os.hostname()} (${os.platform()} ${os.arch()})`;
 const GATEWAY = process.env.SAND_GATEWAY_URL ?? "http://127.0.0.1:1340";
 
@@ -114,7 +117,7 @@ for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => { onExit();
 const ask = async (url, init = {}) => {
   const response = await fetch(url, {
     ...init,
-    headers: { "user-agent": UA, accept: "application/json", ...(init.headers ?? {}) },
+    headers: { "user-agent": GATE_AGENT, accept: "application/json", ...(init.headers ?? {}) },
     signal: AbortSignal.timeout(Number(init.timeoutMs ?? 10_000)),
   });
   const text = await response.text();
@@ -365,6 +368,12 @@ async function startRelay({ port, voiceJson, stubUrl, policyUrl = "", relayToken
   const password = randomBytes(18).toString("hex");
   writeFileSync(authFile, `${JSON.stringify(newAuthRecord(password), null, 2)}\n`, { mode: 0o600 });
   const stateDir = path.join(dir, "state");
+  // The workspace's realtime settings live in the relay's own state directory as voice.json, beside
+  // mail.json -- ui/server.mjs:634, stateFile("voice.json"). There is no environment variable for
+  // that path ON PURPOSE: the key is inside that file, and a file path override is one edit away from
+  // a key in a compose file. So a leg that wants a planted key writes it where the relay will look.
+  mkdirSync(stateDir, { recursive: true });
+  if (voiceJson) copyFileSync(voiceJson, path.join(stateDir, "voice.json"));
   const child = spawn(process.execPath, [path.join(repoRoot, "ui", "server.mjs")], {
     cwd: repoRoot,
     env: {
@@ -381,7 +390,6 @@ async function startRelay({ port, voiceJson, stubUrl, policyUrl = "", relayToken
       GROK_BOT_VOICE_WS_BASE: stubUrl,
       ...(policyUrl ? { CP_URL: policyUrl } : {}),
       ...(relayToken ? { CP_RELAY_TOKEN: relayToken } : {}),
-      ...(voiceJson ? { GROK_BOT_VOICE_SETTINGS_FILE: voiceJson } : {}),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -421,7 +429,7 @@ async function openVoiceSocket(base, { cookie = "", origin = "", timeoutMs = 15_
         "Connection: Upgrade",
         `Sec-WebSocket-Key: ${key}`,
         "Sec-WebSocket-Version: 13",
-        `User-Agent: ${UA}`,
+        `User-Agent: ${GATE_AGENT}`,
         ...(origin ? [`Origin: ${origin}`] : []),
         ...(cookie ? [`Cookie: ${cookie}`] : []),
         "", "",
@@ -483,7 +491,7 @@ async function openVoiceSocket(base, { cookie = "", origin = "", timeoutMs = 15_
 async function signIn(relay) {
   const response = await fetch(`${relay.base}/login`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded", "user-agent": UA },
+    headers: { "content-type": "application/x-www-form-urlencoded", "user-agent": GATE_AGENT },
     body: new URLSearchParams({ password: relay.password }).toString(),
     redirect: "manual",
     signal: AbortSignal.timeout(10_000),
@@ -526,7 +534,7 @@ async function legRelay() {
   const rows = (await asAdmin(cp, "GET", "/v1/voice/usage")).body?.tenants ?? [];
   check(rows.length > 0, "the control plane has a row for this session", JSON.stringify(rows.map((one) => one.slug)));
   check((rows[0]?.open ?? 0) >= 1 || (rows[0]?.sessions ?? 0) >= 1, "and it exists whether or not the session has ended", JSON.stringify(rows[0] ?? null));
-  info(`the stub saw ${stub.events?.length ?? 0} event(s); the claim is the row above and not one of them`);
+  info(`the stub was dialled ${stub.events.requests.length} time(s) and saw ${stub.events.inbound.length} message(s); the claim is the row above and not one of them`);
   return;
 }
 
@@ -558,7 +566,7 @@ async function legNoKey() {
     check(!sentence.toLowerCase().includes(word), `the sentence does not say ${word}`, JSON.stringify(sentence));
   }
   check(socket.closedWith != null, "then bye and a close the page can read", String(socket.closedWith));
-  check(stub.events?.length === 0 || stub.events == null, "and the vendor was never dialled", `stub saw ${stub.events?.length ?? 0} event(s)`);
+  check(stub.events.requests.length === 0, "and the vendor was never dialled", `the stub was asked for ${stub.events.requests.length} upgrade(s)`);
   return;
 }
 
@@ -594,7 +602,7 @@ async function legCaps() {
   const said = socket.notes.join(" ");
   check(socket.notes.length >= 1, "a note arrives", JSON.stringify(socket.notes));
   check(/voice time|today|not switched on/i.test(said), "saying in plain words what ran out and when it comes back", JSON.stringify(said));
-  check(stub.events?.length === 0 || stub.events == null, "and the vendor was never dialled", `stub saw ${stub.events?.length ?? 0} event(s)`);
+  check(stub.events.requests.length === 0, "and the vendor was never dialled", `the stub was asked for ${stub.events.requests.length} upgrade(s)`);
   return;
 }
 
@@ -659,9 +667,11 @@ async function legBrowser() {
   requireTheOtherItems(true);
   const cp = await startControlPlane();
   const { startStubRealtime } = await import(STUB_REALTIME);
-  // The stub speaks the OpenAI event shape, accepts audio, emits one function call for the only tool
-  // there is, and speaks whatever comes back as audio deltas.
-  const stub = await startStubRealtime({ toolCall: { name: "titan", arguments: JSON.stringify({ message: "what is the team working on" }) } });
+  // The stub speaks the vendor's own event shape, accepts audio, and is DRIVEN from here rather than
+  // scripted: emitToolCall and speak are called below, after the bridge's session.update has actually
+  // reached it. Waiting on the page's `ready` frame instead is the trap item A hit three times -- that
+  // frame reaches the browser BEFORE the dial completes, so an event emitted on it lands on the floor.
+  const stub = await startStubRealtime({});
   cleanups.push(() => { try { stub.close(); } catch { /* gone */ } });
 
   const dir = mkdtempSync(path.join(os.tmpdir(), "voice-gate-browser-"));
@@ -690,7 +700,7 @@ async function legBrowser() {
     ],
   });
   cleanups.push(() => { try { browser.close(); } catch { /* gone */ } });
-  const context = await browser.newContext({ userAgent: UA, permissions: ["microphone"] });
+  const context = await browser.newContext({ userAgent: GATE_AGENT, permissions: ["microphone"] });
   const page = await context.newPage();
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(String(error)));
@@ -721,9 +731,31 @@ async function legBrowser() {
   check(seen, "the orb is on the page and being watched");
   const pressed = Date.now();
   await button.click();
-  // Long enough for the whole round trip: the stub's function call, the relay's sendPrompt, a real
-  // reply off the local box (measured 5.5 to 25 seconds there), and the audio back.
-  await page.waitForFunction(() => (window.__voiceGateStates ?? []).includes("speaking"), null, { timeout: 120_000 })
+
+  // THE DIAL HAS TO LAND BEFORE THE STUB CAN SAY ANYTHING. events.sessions grows when the bridge's
+  // session.update is ACCEPTED, which is the first moment an emitted event reaches real code.
+  await stub.waitFor((events) => events.sessions.length > 0, { timeoutMs: 30_000, label: "the bridge's session.update" })
+    .catch(() => {});
+  check(stub.events.sessions.length > 0, "the relay dialled the vendor and its session was accepted",
+    `${stub.events.requests.length} dial(s), ${stub.events.sessions.length} session(s) in ${Date.now() - pressed} ms on ${MACHINE}`);
+  check(stub.events.sessions[0]?.tools?.length === 1, "offering exactly one tool and no search of its own",
+    JSON.stringify((stub.events.sessions[0]?.tools ?? []).map((one) => one.name ?? one?.function?.name)));
+
+  // The person has stopped talking, and the model decides to ask the team. Both are the vendor's
+  // events, which is why the stub emits them and the bridge only reacts.
+  stub.emitSpeechStopped();
+  const callId = stub.emitToolCall({ name: "titan", args: { message: "what is the team working on" } });
+
+  // Titan's own thinking time, which is not ours: MEASURED on grok-bot-local-vm 5.5 to 25 seconds for a
+  // short question and 50.6 on the first turn of a cold box, so the ceiling here is the bridge's own
+  // TURN_WAIT_CAP of 120 seconds and not a guess.
+  await stub.waitFor((events) => events.toolOutputs.length > 0, { timeoutMs: 130_000, label: "the team's reply handed back" })
+    .catch(() => {});
+  const appendsBeforeSpeaking = stub.events.appendFrames;
+  // Now the model speaks the reply it was handed. The page has to hold the microphone for all of it.
+  const spokenText = String(stub.events.toolOutputs[0]?.output ?? "the team is working on this gate");
+  await stub.speak(spokenText.slice(0, 400));
+  await page.waitForFunction(() => (window.__voiceGateStates ?? []).includes("speaking"), null, { timeout: 60_000 })
     .catch(() => {});
   const states = await page.evaluate(() => window.__voiceGateStates ?? []);
   info(`orb states in order: ${states.join(" -> ")}`);
@@ -732,17 +764,24 @@ async function legBrowser() {
   }
 
   step("what the vendor heard, and what the team was asked");
-  check((stub.audioFrames ?? 0) > 0, "the microphone reached the vendor through the relay", `${stub.audioFrames ?? 0} frame(s)`);
-  check((stub.toolCalls ?? []).length === 1, "and exactly one tool call was dispatched, once", JSON.stringify((stub.toolCalls ?? []).map((one) => one.name)));
-  check((stub.toolOutputs ?? []).length >= 1, "with a result handed back as function_call_output", `${(stub.toolOutputs ?? []).length}`);
-  const replied = String((stub.toolOutputs ?? [])[0]?.output ?? "");
+  check(stub.events.appendFrames > 0, "the microphone reached the vendor through the relay", `${stub.events.appendFrames} frame(s), ${stub.events.appendBytes} bytes on ${MACHINE}`);
+  const mine = stub.events.toolOutputs.filter((one) => one.call_id === callId);
+  // ONE call_id arrives on three surfaces in the shape this stub emits, and the dedupe is the thing
+  // being measured: one output for it means one sendPrompt, not three.
+  check(mine.length === 1, "and the one call_id was answered exactly once, not once per surface", `${mine.length} output(s) for ${callId}`);
+  check(stub.events.billableItems === 0, "with the reply handed back free rather than as a billed text item", String(stub.events.billableItems));
+  const replied = String(mine[0]?.output ?? "");
   check(replied.length > 0, "carrying a real reply from the box rather than an empty string", `${replied.length} characters`);
   info(`the reply began: ${JSON.stringify(replied.slice(0, 120))}`);
 
   step("the mic was held shut while the reply was spoken, proved from BOTH sides");
   const stats = await page.evaluate(() => (window.__voice?.stats?.() ?? null));
   check(Number(stats?.heldFrames ?? 0) > 0, "the page dropped frames in the held window", JSON.stringify(stats));
-  check((stub.appendsDuringPlayback ?? 0) === 0, "and nothing it did send reached the vendor during playback", String(stub.appendsDuringPlayback ?? 0));
+  // BOTH SIDES, because a patched page that stopped holding would otherwise go unnoticed: the page's
+  // own dropped count above, and here the vendor's frame count across the window the reply was spoken
+  // in. The relay drops anything arriving inside the same window, so this number may not grow.
+  check(stub.events.appendFrames === appendsBeforeSpeaking, "and not one frame reached the vendor while the reply was being spoken",
+    `${appendsBeforeSpeaking} before, ${stub.events.appendFrames} after, on ${MACHINE}`);
 
   step("playback, and why there are no .played ranges to look at");
   // A DESIGN DECISION AND NOT A TEST DETAIL. Playback is Web Audio -- PCM16 deltas decoded into

@@ -211,6 +211,18 @@ import "./cp-mail-send.test.mjs";
 // VOICE-1: talking to your team. The control plane half -- the vendor table, the caps a customer
 // cannot raise, and the minutes ledger whose row is claimed before the provider socket opens.
 import "./cp-voice.test.mjs";
+// The relay half: the websocket codec the bridge hand-rolls, the two vendors' session shapes, the
+// one tool's round trip into Titan's own conversation, the caps and the ledger row claimed before
+// the dial, and the real relay answering an upgrade on /voice/socket.
+import "./voice-frames.test.mjs";
+import "./voice-wire.test.mjs";
+import "./voice-turn.test.mjs";
+import "./voice-caps-ledger.test.mjs";
+import "./voice-socket.test.mjs";
+// The console half: the microphone capture MEETING-1 shares, and the talk button, orb, notes and
+// Voice card as they are sliced out of the live console files.
+import "./voice-capture.test.mjs";
+import "./machine-room-voice.test.mjs";
 
 // BOTS-4: the write path behind Add on a catalog row. The host verb that seeds an agent's own
 // remembered facts and refuses one over the store's ceiling rather than storing it short, and the

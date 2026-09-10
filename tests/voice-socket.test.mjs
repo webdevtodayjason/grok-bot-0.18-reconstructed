@@ -187,6 +187,19 @@ test("the relay comes up, and the voice door answers on it", async (t) => {
       const close = frames.find((frame) => frame.t === "close");
       assert.equal(close?.code, 1000, "a clean close");
       assert.ok(String(close?.reason ?? "").length > 0, "carrying a reason the page reads off event.reason");
+
+      // THE SEAM BETWEEN THE RELAY AND THE PAGE, and the one integration defect this wave had.
+      // ui/machine-room/voice.js reads `reason` off the note frame and off the bye frame as its OWN
+      // condition vocabulary, and "no-key" is the single condition that draws the control opening the
+      // Voice card. Without it the page painted the relay's sentence, then painted "the line dropped"
+      // over the top of it on the close -- so the very first press on a workspace with nothing set up
+      // led a person nowhere. The prose stays on `detail` and on the close frame; the condition is
+      // what the page needs, and it must be a word that file knows.
+      assert.equal(note.reason, "no-key", "the note names the condition the page draws a control for");
+      assert.equal(bye.reason, "no-key", "and the bye names it too, so a trailing close cannot retitle it away");
+      assert.match(String(bye.detail ?? ""), /realtime key/, "with the operator's prose kept on detail");
+      const vocabulary = new Set(["", "no-microphone", "no-key", "day-cap", "session-cap", "box-not-running", "line-dropped"]);
+      assert.ok(vocabulary.has(note.reason), "and it is a condition ui/machine-room/voice.js can render");
     });
 
     await t.test("a foreign Origin is refused in words on an accepted socket", async () => {

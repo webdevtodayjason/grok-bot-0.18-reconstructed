@@ -2195,6 +2195,11 @@ const voiceDeps = {
   log: (line) => console.log(line),
   relayBase: RELAY?.cpUrl ?? "",
   relayToken: RELAY?.relayToken ?? "",
+  // The ONE override, and it is an ADDRESS, never a key: GROK_BOT_MAIL_API_BASE is the same shape for
+  // mail (ui/mail-edge.mjs:588), and scripts/verify-voice.mjs points a spawned relay at its own stub
+  // vendor with it. A realtime KEY is never an environment variable on either side of this -- it lives
+  // in the workspace's own voice.json and reaches the vendor as a header.
+  providerUrl: String(process.env.GROK_BOT_VOICE_WS_BASE ?? "").trim(),
 };
 
 // ---- agent email (MAIL-1, docs/MAIL.md) -------------------------------------------------------
