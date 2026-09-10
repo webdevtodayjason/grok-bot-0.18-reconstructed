@@ -391,6 +391,51 @@ test("VOICE-1 card: a key that is set reads as set and never as a value", async 
   assert.match(fields.get("[data-voice-agent]").innerHTML, /value="agent-1" selected>Titan</);
 });
 
+test("VOICE-1 card: what a real settings answer puts IN the card's fields names no vendor either", async () => {
+  // The sentence sweep was never the whole card. MEASURED on this Mac 2026-09-10: the relay's own
+  // settings answer prefilled Model with `grok-voice-latest` and the Service dropdown read "the
+  // cheaper realtime service", so the two strings the day-cap test sweeps its refusals for -- a
+  // vendor's name and its model id -- were sitting in a text input on the customer's own card, put
+  // there by the product rather than typed by them. This leg reads the REAL answer shape and sweeps
+  // what paintCard writes, not only the sentences.
+  const { voiceSettingsShape } = await import("../ui/voice-edge.mjs");
+  const { voice } = await loadVoice();
+  const fields = new Map();
+  const root = { querySelector: (selector) => fields.get(selector) ?? null };
+  for (const selector of ["[data-voice-key-note]", "[data-voice-enabled-note]", "[data-voice-usage]"]) fields.set(selector, { textContent: "" });
+  for (const selector of ["[data-voice-model]", "[data-voice-voice]"]) fields.set(selector, { value: "" });
+  for (const selector of ["[data-voice-vendor]", "[data-voice-agent]"]) fields.set(selector, { innerHTML: "" });
+  fields.set("[data-voice-enabled]", { attributes: {}, setAttribute(k, v) { this.attributes[k] = v; } });
+
+  // A workspace that has never touched Model or Voice, which is every workspace on its first day.
+  const shape = voiceSettingsShape({}, { sessionCapSeconds: 1800, dayCapSeconds: 7200, dayUsedSeconds: 0, agents: [] });
+  assert.equal(shape.model, "", "the answer prefills no model");
+  assert.equal(shape.voice, "", "and no voice");
+  voice._paintCard(root, shape);
+  // The WORDS on screen, which for the dropdown is the option text and never the form value: the id
+  // is what the page posts back and a person never reads it.
+  const optionText = [...String(fields.get("[data-voice-vendor]").innerHTML).matchAll(/>([^<]*)</g)].map((m) => m[1]).join(" ");
+  const onTheCard = [
+    fields.get("[data-voice-model]").value,
+    fields.get("[data-voice-voice]").value,
+    optionText,
+    fields.get("[data-voice-key-note]").textContent,
+    fields.get("[data-voice-enabled-note]").textContent,
+    fields.get("[data-voice-usage]").textContent,
+  ].join(" ");
+  for (const leak of ["xai", "x\\.ai", "openai", "grok", "gpt-", "realtime", "websocket", "socket", "pcm",
+    "session\\.update", "function_call", "titan\\(", "sendPrompt", "token", "api", "upgrade", "undefined"]) {
+    assert.doesNotMatch(onTheCard, new RegExp(leak, "i"), `"${leak}" reached the Voice card's own fields`);
+  }
+  assert.equal(fields.get("[data-voice-model]").value, "", "Model is empty, and the placeholder says the service's own");
+  assert.match(voice._voiceCardMarkup(), /placeholder="The service's own"/);
+  // And the Service dropdown offers a billing shape rather than a comparison this product says it
+  // cannot make (docs/VOICE.md 7: tokens are not converted into minutes and presented as a price).
+  assert.match(optionText, /minute you talk/);
+  assert.match(optionText, /not by the minute/);
+  assert.doesNotMatch(optionText, /cheap/i);
+});
+
 // ------------------------------------------------------------------ the source legs
 test("VOICE-1 source: the module is loaded beside its siblings and before app.js", async () => {
   const index = await read("ui/machine-room/index.html");

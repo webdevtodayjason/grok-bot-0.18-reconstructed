@@ -15,6 +15,10 @@
 //   --leg nokey     an empty voice.json: the upgrade is ACCEPTED, one plain sentence arrives, then bye.
 //   --leg caps      a one-minute policy: a refusal in words over an accepted socket.
 //   --leg origin    a cross-origin upgrade: refused in words, not with a destroyed socket.
+//   --leg refused   a vendor that answers 401 to the upgrade, and an address with nothing behind it:
+//                   ONE plain sentence, a clean 1000 close, and a SETTLED ledger row on each. This is
+//                   the path a customer with a typo'd key takes, and before 2026-09-10 it produced no
+//                   sentence at all -- a listening orb and a live microphone until the session cap.
 //   --leg browser   real Chrome with a WAV file as the microphone, the talk button, all four orb
 //                   states, a real reply from the local box read back and heard, the mic proved held
 //                   from BOTH sides, the spoken row with its chip, and the seven-stamp hop ledger.
@@ -54,7 +58,7 @@ const GATE_AGENT = gateUserAgent(import.meta.url);
 const MACHINE = process.env.GATE_MACHINE ?? `${os.hostname()} (${os.platform()} ${os.arch()})`;
 const GATEWAY = process.env.SAND_GATEWAY_URL ?? "http://127.0.0.1:1340";
 
-const LEGS = ["cp", "relay", "nokey", "caps", "origin", "browser"];
+const LEGS = ["cp", "relay", "nokey", "caps", "origin", "refused", "browser"];
 const leg = (() => {
   const at = process.argv.indexOf("--leg");
   return at === -1 ? "" : String(process.argv[at + 1] ?? "");
@@ -75,6 +79,7 @@ if (process.argv.includes("--help") || process.argv.includes("-h") || leg.length
     "  nokey    an empty voice.json answers one plain sentence over an ACCEPTED socket.",
     "  caps     a one minute policy refuses in words.",
     "  origin   a cross-origin upgrade is refused in words, never by a destroyed socket.",
+    "  refused  a vendor that answers 401, and an address with nothing behind it: one sentence each.",
     "  browser  real Chrome, a WAV file as the microphone, the orb, the transcript, the hop ledger.",
     "",
     "Env: SAND_PROFILE_DIRS (the live legs), SAND_GATEWAY_URL, GATE_MIC_WAV,",
@@ -672,6 +677,82 @@ async function legOrigin() {
   return;
 }
 
+/**
+ * A vendor that will not take the call, which is the first thing a pasted key does when it is wrong.
+ *
+ * TWO ARMS, because the two failures are indistinguishable on the wire and both were silent:
+ *   A. the vendor answers `HTTP/1.1 401` to the upgrade.
+ *   B. nothing is listening at the address at all.
+ * MEASURED on this Mac (node v22.23.1): each fires ONE error event carrying "Received network error
+ * or non-101 status code" and NEVER a close, so the relay's close listener never ran, the sentence
+ * was unreachable, the ledger row stayed open and counting, and the orb sat on "listening" with the
+ * microphone live until the thirty minute session cap. Each arm asserts the same three things the
+ * nokey leg does: the sentence, the clean close, and the row.
+ */
+async function legRefused() {
+  console.log(`verify-voice --leg refused on ${MACHINE}`);
+  requireTheOtherItems(false);
+  const { readVoiceLedger } = await import(path.join(repoRoot, "ui", "voice-edge.mjs"));
+  const http = await import("node:http");
+
+  // A. A vendor that refuses the upgrade. This is a real socket answering a real status line.
+  const refuser = http.createServer((request, response) => { response.writeHead(200); response.end("this is not a websocket"); });
+  refuser.on("upgrade", (request, socket) => { socket.end("HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n"); });
+  await new Promise((resolve) => refuser.listen(0, "127.0.0.1", resolve));
+  cleanups.push(() => { try { refuser.close(); } catch { /* gone */ } });
+  const refuserUrl = `ws://127.0.0.1:${refuser.address().port}/v1/realtime`;
+
+  // B. An address with nothing behind it. Port 9 is discard and refuses on this machine.
+  const arms = [
+    { label: "the vendor answers 401 to the upgrade, which is a key that is wrong", url: refuserUrl, port: 0 },
+    { label: "nothing is listening at the vendor's address at all", url: "ws://127.0.0.1:9/v1/realtime", port: 1 },
+  ];
+
+  for (const arm of arms) {
+    step(arm.label);
+    const dir = mkdtempSync(path.join(os.tmpdir(), "voice-gate-refused-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const voiceJson = path.join(dir, "voice.json");
+    // A fake key. This gate holds no real one and never will: the mechanism is the Voice card.
+    writeFileSync(voiceJson, `${JSON.stringify({ enabled: true, apiKey: `gate-not-a-real-key-${randomBytes(8).toString("hex")}`, vendor: "xai" })}\n`, { mode: 0o600 });
+    const relay = await startRelay({
+      port: Number(process.env.VOICE_GATE_PORT ?? 7793) + 4 + arm.port,
+      voiceJson, stubUrl: arm.url,
+    });
+    const session = await signIn(relay);
+    const t0 = Date.now();
+    const socket = await openVoiceSocket(relay.base, { cookie: session.cookie, origin: relay.base, timeoutMs: 20_000 });
+    const waited = Date.now() - t0;
+    check(socket.accepted, "the upgrade is accepted rather than destroyed", `${socket.statusLine || "no status line at all"} on ${MACHINE}`);
+    check(socket.notes.length >= 1, "and ONE sentence reaches the page", `${JSON.stringify(socket.notes)} after ${waited} ms on ${MACHINE}`);
+    const sentence = socket.notes.at(-1) ?? "";
+    check(/did not answer/i.test(sentence) && /Voice card/i.test(sentence),
+      "saying in plain words that the service did not answer, and where to check the key", JSON.stringify(sentence));
+    for (const word of ["xai", "openai", "grok", "websocket", "socket", "401", "upgrade", "undefined", "null"]) {
+      check(!sentence.toLowerCase().includes(word), `the sentence does not say ${word}`, JSON.stringify(sentence));
+    }
+    // The gate's reader records the `bye` frame's own reason first and the close frame after it, so
+    // what is asserted here is that BOTH arrived: a condition the page can act on, and a real close.
+    const bye = socket.frames.map((one) => { try { return JSON.parse(one); } catch { return null; } }).find((one) => one?.t === "bye");
+    check(bye != null && String(bye.reason).length > 0, "then bye, carrying the condition the page paints", JSON.stringify(bye ?? socket.frames.slice(-2)));
+    check(socket.closedWith != null, "and a close the page can read rather than a dead socket", `${String(socket.closedWith)} after ${waited} ms`);
+    // THE ROW IS SETTLED. An open row counts toward the day cap, so a silent failure used to spend a
+    // customer's minutes and inflate the operator's Spend line for as long as the tab stayed open.
+    const ledgerFile = path.join(relay.stateDir, "voice-minutes.jsonl");
+    let rows = [];
+    for (let i = 0; i < 40; i += 1) {
+      rows = await readVoiceLedger(ledgerFile);
+      if (rows.some((row) => row.state === "closed")) break;
+      await sleep(100);
+    }
+    check(rows.length === 1, "one ledger row for the one press", JSON.stringify(rows.map((row) => row.state)));
+    check(rows[0]?.state === "closed", "and it is SETTLED rather than left open and counting", JSON.stringify(rows[0] ?? null));
+    check(String(rows[0]?.closeReason ?? "").length > 0, "with a reason on it", JSON.stringify(rows[0]?.closeReason));
+    info(`the whole refusal took ${waited} ms on ${MACHINE}, against a ${30 * 60} s session cap that used to be the only thing that ended it`);
+  }
+  return;
+}
+
 // ---- leg: browser --------------------------------------------------------------------------------
 
 const PW_DIR = process.env.GROK_BOT_PLAYWRIGHT_DIR
@@ -946,6 +1027,7 @@ try {
   else if (leg === "nokey") await legNoKey();
   else if (leg === "caps") await legCaps();
   else if (leg === "origin") await legOrigin();
+  else if (leg === "refused") await legRefused();
   else if (leg === "browser") await legBrowser();
 } catch (error) {
   failures += 1;

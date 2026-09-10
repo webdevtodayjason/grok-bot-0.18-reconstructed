@@ -286,10 +286,24 @@ export function voiceInstructions(agentName = "Titan") {
 export const VENDORS = {
   xai: {
     id: "xai",
-    /** Not shown to a person. docs/VOICE.md names the vendors; the page never does. */
-    label: "the cheaper realtime service",
+    /**
+     * What the Service dropdown on the Voice card says, and it is a BILLING SHAPE and not a
+     * comparison. It said "the cheaper realtime service" until 2026-09-10, which is a price claim
+     * docs/VOICE.md 7 states this product cannot make: one vendor publishes minutes and the other
+     * publishes tokens, and converting one into the other and calling the answer cheaper is the
+     * thing that document refuses to do. A person picking between two services can act on how they
+     * are billed; they cannot act on our arithmetic.
+     */
+    label: "flat rate for each minute you talk",
     url: "wss://api.x.ai/v1/realtime",
-    model: "grok-voice-latest",
+    /**
+     * PINNED, and the same string cp/voice.mjs REALTIME_VENDORS.xai.defaultModel carries, which
+     * tests/cp-voice.test.mjs now asserts. It read `grok-voice-latest` until 2026-09-10 while the
+     * authoritative table and the price in docs/VOICE.md 7 both named this one, so the model the
+     * relay dialled was not the model the document priced. A moving alias is also the one way a
+     * vendor can change what a minute costs without anything here changing.
+     */
+    model: "grok-voice-think-fast-2.0",
     voice: "eve",
     transcription: { mode: "cumulative", model: "grok-transcribe" },
     /** xAI emits neither conversation.item.done nor rate_limits.updated, so never wait on either. */
@@ -316,7 +330,8 @@ export const VENDORS = {
   },
   openai: {
     id: "openai",
-    label: "the other realtime service",
+    /** The other billing shape, in words a person can act on and with no comparison in it either. */
+    label: "charged by how much is said, not by the minute",
     url: "wss://api.openai.com/v1/realtime",
     model: "gpt-realtime-2.1",
     voice: "marin",
@@ -624,14 +639,22 @@ export function voiceSettingsShape(settings, { vendors = null, agents = [], sess
   return {
     enabled: value.enabled,
     vendor: value.vendor,
-    model: value.model.length > 0 ? value.model : vendorOf(value.vendor).model,
-    voice: value.voice.length > 0 ? value.voice : vendorOf(value.vendor).voice,
+    // EXACTLY WHAT THE WORKSPACE SET, and empty when it set nothing. These used to fall back to the
+    // vendor's own default, and the Voice card writes the answer straight into two text inputs, so a
+    // customer who had never touched either field read a vendor's product name back off their own
+    // card. The relay already falls back to the vendor default when the field is empty, so an empty
+    // string here is the whole of "use the service's own", and the card says that in a placeholder.
+    model: value.model,
+    voice: value.voice,
     agentId: value.agentId,
     apiKeySet: value.apiKey.length > 0,
     // `label` is what the Voice card puts in the Service dropdown -- ui/machine-room/voice.js reads
     // `one.label` and an absent one renders a row of empty options, which is a control a person
     // cannot use. The labels in VENDORS name no vendor on purpose; docs/VOICE.md names them.
-    vendors: vendors ?? VENDOR_IDS.map((id) => ({ id, label: VENDORS[id].label, model: VENDORS[id].model, voice: VENDORS[id].voice })),
+    // No model and no voice name on these rows either: the page draws the label and nothing else,
+    // and a vendor's model id on the wire to a customer's browser is one careless template away
+    // from being on their screen.
+    vendors: vendors ?? VENDOR_IDS.map((id) => ({ id, label: VENDORS[id].label })),
     agents,
     sessionCapSeconds,
     dayCapSeconds,
@@ -663,6 +686,22 @@ export const FIRST_NUDGE_MS = 20000;
 export const ANNOUNCE_GAP_MS = 8000;
 /** How often the relay checks its own clock against the caps. */
 export const CAP_TICK_MS = 10000;
+/**
+ * How long a dial may stay silent before the person is told. MEASURED on this Mac (node v22.23.1): a
+ * failed upgrade fires `error` and NEVER `close`, and a black-holed address fires neither for at
+ * least four seconds, so without this a wrong key left the microphone open and the orb listening
+ * until the session cap ticked half an hour later. A real open on a healthy vendor is well inside
+ * this; the number is a ceiling on silence and not a latency budget.
+ */
+export const DIAL_WATCHDOG_MS = 8000;
+/**
+ * How much audio a page may be ahead of the wall clock. The caps count WALL seconds, and a page can
+ * push audio as fast as its uplink allows: MEASURED on this Mac, 3000 frames (14.4 MB, five minutes
+ * of audio) reached the vendor in 0.15 s of wall clock, against which every cap on screen read
+ * green. One frame is 100 ms, so three seconds of slack absorbs ordinary jitter and a tab coming
+ * back from being backgrounded, and anything beyond it is a patched or broken page.
+ */
+export const AUDIO_LEAD_SECONDS = 3;
 
 /**
  * One session's row. No transcript, no audio, no secret -- ui/mail-edge.mjs:513's rule for its own
@@ -742,17 +781,31 @@ export const dayStartMs = (nowMs = Date.now()) => Date.UTC(
  */
 export function daySecondsUsed(rows, nowMs = Date.now(), { openCapSeconds = SESSION_CAP_SECONDS } = {}) {
   const start = dayStartMs(nowMs);
+  const end = start + 86_400_000;
   let total = 0;
   for (const row of rows ?? []) {
     const startedMs = Date.parse(row?.startedAt ?? "");
-    if (!Number.isFinite(startedMs) || startedMs < start) continue;
-    if (row?.state === "closed") { total += Math.max(0, Number(row.wallSeconds) || 0); continue; }
-    // An open row is CLAMPED to the session cap, because a row can be open for two reasons: the
-    // session is running (and the relay's own tick will close it at the cap), or the relay died
-    // before it could settle. Left unclamped the second case accrues time for the rest of the day
-    // and silently eats a workspace's whole allowance after one restart -- which would be this
-    // wave's own caps locking a customer out over a fault they cannot see.
-    total += Math.min(Math.max(0, Math.round((nowMs - startedMs) / 1000)), Math.max(0, openCapSeconds));
+    if (!Number.isFinite(startedMs)) continue;
+    // A CLOSED row counts its whole wall clock against the day it STARTED on, which is the day an
+    // operator reading the ledger looks for it under.
+    if (row?.state === "closed") {
+      if (startedMs < start) continue;
+      total += Math.max(0, Number(row.wallSeconds) || 0);
+      continue;
+    }
+    // AN OPEN ROW IS CLIPPED TO TODAY, whichever day it started on, which is the same window
+    // cp/voice.mjs openSecondsInWindow clips to. A row dated yesterday was skipped outright here
+    // until 2026-09-10, so a session started at 23:59:30 and still running at 00:05 counted against
+    // NEITHER day: MEASURED on this Mac, 300 seconds of it inside today read as nought and the next
+    // session was handed a whole fresh day. docs/VOICE.md 9 promises both halves count, and this is
+    // the half that is the enforcement truth.
+    const from = Math.max(startedMs, start);
+    const to = Math.min(nowMs, end);
+    // And still CLAMPED to the session cap, because a row is open for two reasons: the session is
+    // running (and the relay's own tick will close it at the cap), or the relay died before it could
+    // settle. Left unclamped the second case accrues for the rest of the day and silently eats a
+    // workspace's whole allowance after one restart.
+    total += Math.min(Math.max(0, Math.round((to - from) / 1000)), Math.max(0, openCapSeconds));
   }
   return total;
 }
@@ -767,7 +820,7 @@ export function daySecondsUsed(rows, nowMs = Date.now(), { openCapSeconds = SESS
  */
 export function makeVoicePolicy({ relayBase = "", relayToken = "", fetchImpl = null, now = () => Date.now(), ttlMs = 60000, timeoutMs = 4000, log = () => {} } = {}) {
   const cache = new Map();
-  const fallback = { sessionCapSeconds: SESSION_CAP_SECONDS, dayCapSeconds: DAY_CAP_SECONDS, vendors: VENDOR_IDS, source: "the relay's own constants" };
+  const fallback = { sessionCapSeconds: SESSION_CAP_SECONDS, dayCapSeconds: DAY_CAP_SECONDS, vendors: VENDOR_IDS, openSessions: 0, source: "the relay's own constants" };
   return {
     async for(slug) {
       const key = String(slug ?? "");
@@ -787,6 +840,12 @@ export function makeVoicePolicy({ relayBase = "", relayToken = "", fetchImpl = n
           sessionCapSeconds: Number(body.sessionCapSeconds) > 0 ? Math.round(Number(body.sessionCapSeconds)) : SESSION_CAP_SECONDS,
           dayCapSeconds: Number(body.dayCapSeconds) > 0 ? Math.round(Number(body.dayCapSeconds)) : DAY_CAP_SECONDS,
           vendors: Array.isArray(body.vendors) && body.vendors.length > 0 ? body.vendors.filter((id) => VENDORS[id] != null) : VENDOR_IDS,
+          // How many rows the control plane still has OPEN for this workspace. cp/voice.mjs has
+          // always computed it and this side dropped it on the floor. It is carried and LOGGED and
+          // is deliberately NOT what refuses a second call: a row left open by a relay that died is
+          // exactly this number, and refusing on it would lock a workspace out of voice over a
+          // fault nobody can see. The live-session set in makeVoiceEdge is the one that refuses.
+          openSessions: Number.isFinite(Number(body.openSessions)) ? Math.max(0, Math.round(Number(body.openSessions))) : 0,
           source: "the control plane",
         }))
         .catch((error) => { log(`voice policy for ${key} fell back to the constants: ${error?.message ?? error}`); return null; });
@@ -1283,7 +1342,17 @@ const SENTENCE = {
   sessionCap: "That is the time limit for one conversation. Press the button again to start a fresh one.",
   dayCap: "This workspace has used its voice time for today. It resets at midnight UTC.",
   providerRefused: "The voice service would not take that key. Check it on the Voice card in Settings.",
+  // A DIAL THAT NEVER OPENED, which is what a wrong key and an unreachable address BOTH look like
+  // from here. MEASURED on this Mac (node v22.23.1): a vendor answering 401 to the upgrade and a
+  // vendor with nothing listening produce the same single error event, "Received network error or
+  // non-101 status code", with no close event and no status code of any kind; a black-holed address
+  // produces nothing at all for at least four seconds. So one sentence covers both causes and names
+  // the thing a person can actually check. It was silence until 2026-09-10.
+  providerSilent: "The voice service did not answer. Check the key on the Voice card in Settings, then press the button again.",
   providerGone: "The voice line dropped. Press the button again.",
+  // One call at a time per workspace. The day cap is a number read from the ledger, so N sockets
+  // opened together each read the same remaining day and the cap multiplies by N.
+  alreadyInCall: "This workspace is already in a call. Stop that one and press the button again.",
   busy: "I could not start a voice session just now. Try again in a moment.",
 };
 
@@ -1312,6 +1381,10 @@ export function makeVoiceSession({
   // that proving the cap closes the line is a deterministic assertion rather than a wall-clock wait
   // that passes alone and flakes in a full bundle.
   capTickMs = CAP_TICK_MS,
+  // How long the dial may stay silent before the person is told. A test shortens it.
+  dialWatchdogMs = DIAL_WATCHDOG_MS,
+  /** Called once, after the row is settled, so the edge can forget this session. */
+  onClosed = () => {},
   log = () => {},
 }) {
   const vendor = vendorOf(settings.vendor);
@@ -1332,6 +1405,11 @@ export function makeVoiceSession({
   let stopping = false;
   let tick = null;
   let rateLimitWaits = 0;
+  /** Whether the provider socket ever opened, which is what tells a refused dial from a dropped line. */
+  let opened = false;
+  let dialWatch = null;
+  /** The caps this session was authorised under, kept so the audio ceiling and the tick can read them. */
+  let capSeconds = SESSION_CAP_SECONDS;
 
   const secondsNow = () => Math.max(0, Math.round((now() - startedMs) / 1000));
   const bytesToSeconds = (bytes) => Math.round(bytes / (AUDIO_RATE * 2));
@@ -1508,12 +1586,30 @@ export function makeVoiceSession({
     if (stopping) return;
     stopping = true;
     if (tick != null) clearInterval(tick);
+    if (dialWatch != null) clearTimeout(dialWatch);
     if (sentence.length > 0) browser?.note(sentence, condition);
     browser?.state("off");
     browser?.bye(reason, 1000, condition);
     try { provider?.close(1000, "done"); } catch { /* already gone */ }
     await ledger.settle(rowNow("closed", reason)).catch((error) => log(`voice could not settle the ledger: ${error?.message ?? error}`));
+    // The edge forgets this session here, so "what is live right now" is a truthful answer and the
+    // one-call-at-a-time check reads it. Every finished session used to be retained for the life of
+    // the relay process, with its socket wrappers, its gate and its meter.
+    try { onClosed(session); } catch (error) { log(`voice could not release the session: ${error?.message ?? error}`); }
   }
+
+  /**
+   * A dial that never opened, which is a wrong key or an address nothing answers at.
+   *
+   * Both look the SAME from here and neither arrives as a close: MEASURED on this Mac, node fires one
+   * `error` with "Received network error or non-101 status code" for a 401 upgrade AND for a refused
+   * connection, and fires nothing at all for a black hole. So this one path carries all three, the
+   * watchdog covers the silent case, and the sentence names the thing a person can check.
+   */
+  const dialNeverOpened = (why) => {
+    if (stopping || opened) return;
+    void close(why, SENTENCE.providerSilent, "no-key");
+  };
 
   const session = {
     sessionId,
@@ -1529,7 +1625,8 @@ export function makeVoiceSession({
     close,
 
     /** Attach the accepted browser socket, dial the provider, and run until something closes. */
-    start(socket, key, { sessionCapSeconds, dayRemainingSeconds }) {
+    start(socket, key, { sessionCapSeconds, dayRemainingSeconds, dayRemainingNow = null }) {
+      capSeconds = Math.max(1, Math.round(Number(sessionCapSeconds) || SESSION_CAP_SECONDS));
       socket.write(handshakeResponse(key));
       browser = wrapBrowserSocket(socket, {
         log,
@@ -1538,6 +1635,18 @@ export function makeVoiceSession({
           // the same window anyway is DROPPED here, so a patched page cannot make the model hear
           // itself and the held count is a server-side number with no browser in it.
           if (!gate.admit(payload.byteLength)) return;
+          // THE METER THE VENDOR BILLS ON IS AUDIO SECONDS, AND THE CAPS COUNT WALL SECONDS, so the
+          // audio has its own ceiling beside the wall one and the page does not get to set the rate.
+          // MEASURED on this Mac before this: 3000 frames, 14,400,000 bytes, five minutes of audio
+          // forwarded in 0.15 s of wall clock, the settled row reading wallSeconds 0 and
+          // audioInSeconds 300, every cap on screen green. Two rules, both server-side:
+          //   1. no more audio than the session's own wall cap, ever;
+          //   2. no further ahead of the wall clock than AUDIO_LEAD_SECONDS, so a page cannot send a
+          //      day of audio in a minute. A frame dropped here is counted, and it is counted as a
+          //      held frame because that is the one number a person's own page reports too.
+          const seconds = bytesToSeconds(meter.audioInBytes + payload.byteLength);
+          if (seconds > capSeconds) { meter.browserHeld += 1; return; }
+          if (seconds > secondsNow() + AUDIO_LEAD_SECONDS) { meter.browserHeld += 1; return; }
           meter.audioInBytes += payload.byteLength;
           sendProvider({ type: "input_audio_buffer.append", audio: payload.toString("base64") });
         },
@@ -1561,6 +1670,11 @@ export function makeVoiceSession({
       });
       browser.state("listening");
 
+      // ARMED BEFORE THE DIAL, cleared on the provider's own `open`. A failed upgrade does not close
+      // and a black hole says nothing at all, so this is the only thing between a wrong key and half
+      // an hour of open microphone.
+      dialWatch = setTimeout(() => { dialWatch = null; dialNeverOpened("the voice line never opened"); }, dialWatchdogMs);
+      dialWatch.unref?.();
       try {
         provider = dialProviderSocket({ vendorId: vendor.id, apiKey: settings.apiKey, model, url: providerUrl, WebSocketImpl });
       } catch (error) {
@@ -1569,6 +1683,8 @@ export function makeVoiceSession({
         return undefined;
       }
       provider.addEventListener("open", () => {
+        opened = true;
+        if (dialWatch != null) { clearTimeout(dialWatch); dialWatch = null; }
         // Written ONCE, byte-identical for the life of the socket: rewriting the instructions
         // invalidates the cached prefix and re-bills the whole conversation every turn.
         sendProvider(buildSession(vendor.id, { instructions: voiceInstructions(agent.agentName || "Titan"), voice, model, tools: [titanTool()] }));
@@ -1578,7 +1694,18 @@ export function makeVoiceSession({
         try { parsed = JSON.parse(typeof event.data === "string" ? event.data : String(event.data)); } catch { parsed = null; }
         if (parsed != null) onProviderEvent(parsed);
       });
-      provider.addEventListener("error", () => { if (!stopping) log("voice provider socket errored"); });
+      provider.addEventListener("error", () => {
+        if (stopping) return;
+        log("voice provider socket errored");
+        // LOG-ONLY UNTIL 2026-09-10, and this is the one path a customer with a typo'd key actually
+        // hits: the upgrade fails, node fires error and NEVER close, and the page sat on a listening
+        // orb with a live microphone and an open ledger row until the session cap. Measured.
+        if (!opened) return dialNeverOpened("the voice line never opened");
+        if (meter.toolCalls === 0 && meter.audioOutBytes === 0) {
+          return void close("the voice service refused this session", SENTENCE.providerRefused, "no-key");
+        }
+        return void close("the voice line errored", SENTENCE.providerGone, "line-dropped");
+      });
       provider.addEventListener("close", (event) => {
         if (stopping) return;
         // A close on a socket that never spoke a word is a refused key, and that is the one thing
@@ -1592,11 +1719,32 @@ export function makeVoiceSession({
       // rate_limits.updated, documents no duration or concurrency cap, and the "25 minutes" people
       // quote belongs to a different API. WALL seconds, because that is the only number a person
       // can predict, and docs/VOICE.md says so.
+      let ticking = false;
       tick = setInterval(() => {
         const spent = secondsNow();
         if (spent >= sessionCapSeconds) { void close("the session cap", SENTENCE.sessionCap, "session-cap"); return; }
-        if (spent >= dayRemainingSeconds) { void close("the day cap", SENTENCE.dayCap, "day-cap"); return; }
-        void ledger.touch(rowNow("open")).catch(() => {});
+        // THE DAY IS RE-READ, not trusted from the open-time snapshot. `dayRemainingSeconds` was a
+        // number taken once when the socket was accepted, so N sockets opened together each got the
+        // whole remaining day and the cap multiplied by N: MEASURED on this Mac, ten sockets against
+        // a 20 s day cap were all accepted and authorised 200 s between them. The fresh read counts
+        // every open row including this one, so sessions that opened together converge on the same
+        // budget and the first to cross it is the first to be closed.
+        if (dayRemainingNow == null) {
+          if (spent >= dayRemainingSeconds) { void close("the day cap", SENTENCE.dayCap, "day-cap"); return; }
+          void ledger.touch(rowNow("open")).catch(() => {});
+          return;
+        }
+        if (ticking) return;
+        ticking = true;
+        void Promise.resolve()
+          .then(() => dayRemainingNow())
+          .then((left) => {
+            if (stopping) return undefined;
+            if (Number.isFinite(left) && left <= 0) { void close("the day cap", SENTENCE.dayCap, "day-cap"); return undefined; }
+            return ledger.touch(rowNow("open")).catch(() => {});
+          })
+          .catch((error) => log(`voice could not re-read the day: ${error?.message ?? error}`))
+          .finally(() => { ticking = false; });
       }, capTickMs);
       tick.unref?.();
       return undefined;
@@ -1621,11 +1769,26 @@ export function makeVoiceEdge({
   WebSocketImpl = null,
   providerUrl = "",
   capTickMs = CAP_TICK_MS,
+  // How long a silent dial is waited on. A test and a gate shorten it so that proving the sentence
+  // arrives is an assertion rather than an eight second wall-clock wait.
+  dialWatchdogMs = DIAL_WATCHDOG_MS,
   newSessionId = () => `vs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
 }) {
   const settingsFile = t.voiceSettingsFile;
   const ledgerFile = t.voiceLedgerFile;
   const sessions = new Set();
+  /**
+   * An upgrade that has passed the one-call-at-a-time check and has not yet put its session in the
+   * set. Without it the check is useless: the rest of handleUpgrade awaits a ledger read, a roster
+   * read and a claim, so ten presses arriving together ALL pass the check before any of them adds
+   * anything -- MEASURED on this Mac, nine of ten sockets still got in with the set check alone.
+   */
+  let starting = false;
+  /** The sessions that are really still running. A stopped one is forgotten on its own close. */
+  const liveSessions = () => {
+    for (const one of [...sessions]) if (one.stopped) sessions.delete(one);
+    return sessions.size;
+  };
 
   const ledgerFor = (sessionId) => ({
     sessionId,
@@ -1708,36 +1871,66 @@ export function makeVoiceEdge({
     if (settings.apiKey.length === 0) return acceptAndSay(socket, key, SENTENCE.noKey, "no realtime key", "no-key");
     if (!settings.enabled) return acceptAndSay(socket, key, SENTENCE.notEnabled, "voice is switched off");
 
-    const caps = await policy.for(t.slug);
-    if (!caps.vendors.includes(settings.vendor)) {
-      return acceptAndSay(socket, key, "That voice service is not available on this console.", "the vendor is not allowed here");
+    // ONE CALL AT A TIME FOR A WORKSPACE, and the reservation is taken HERE, in the same tick as the
+    // check. The day cap is a number read off the ledger a few lines below, so N sockets opened
+    // together would each read the same remaining day and the cap would multiply by N: MEASURED on
+    // this Mac before this, ten sockets against a 20 s day cap were every one accepted, each told it
+    // had the whole 20 s, and 200 s was authorised against a 20 s cap. The live set is what decides
+    // and not the control plane's open-row count, because a row left open by a relay that died is
+    // exactly that number and refusing on it would lock a workspace out over a fault nobody sees.
+    if (starting || liveSessions() > 0) {
+      const openAtCp = Number((await policy.for(t.slug))?.openSessions ?? 0);
+      log(`voice ${t.slug} already holds ${liveSessions() + (starting ? 1 : 0)} live session(s) here and the control plane has ${openAtCp} row(s) open, so this press was refused in words`);
+      return acceptAndSay(socket, key, SENTENCE.alreadyInCall, "this workspace is already in a call", "line-dropped");
     }
+    starting = true;
+    try {
+      const caps = await policy.for(t.slug);
+      if (!caps.vendors.includes(settings.vendor)) {
+        return acceptAndSay(socket, key, "That voice service is not available on this console.", "the vendor is not allowed here");
+      }
 
-    const used = daySecondsUsed(await readVoiceLedger(ledgerFile), now(), { openCapSeconds: caps.sessionCapSeconds });
-    const remaining = caps.dayCapSeconds - used;
-    if (remaining <= 0) return acceptAndSay(socket, key, SENTENCE.dayCap, "the day cap", "day-cap");
+      const used = daySecondsUsed(await readVoiceLedger(ledgerFile), now(), { openCapSeconds: caps.sessionCapSeconds });
+      const remaining = caps.dayCapSeconds - used;
+      if (remaining <= 0) return acceptAndSay(socket, key, SENTENCE.dayCap, "the day cap", "day-cap");
 
-    const agents = await rosterOf(call);
-    const agent = resolveVoiceAgent(agents, settings);
-    if (agent.agentId.length === 0) return acceptAndSay(socket, key, `${SENTENCE.noAgent} Reason: ${agent.why}.`, "no agent");
-    log(`voice ${t.slug} talks to ${agent.agentName || agent.agentId}: ${agent.why}`);
+      const agents = await rosterOf(call);
+      const agent = resolveVoiceAgent(agents, settings);
+      if (agent.agentId.length === 0) return acceptAndSay(socket, key, `${SENTENCE.noAgent} Reason: ${agent.why}.`, "no agent");
+      log(`voice ${t.slug} talks to ${agent.agentName || agent.agentId}: ${agent.why}`);
 
-    const sessionId = newSessionId();
-    const ledger = ledgerFor(sessionId);
-    const session = makeVoiceSession({ t, settings, policy, agent, call, ledger, sessionId, now, WebSocketImpl, providerUrl, capTickMs, log });
-    // THE ROW EXISTS BEFORE THE PROVIDER HEARS A BYTE. A row written on close does not exist for a
-    // crashed relay or a tab closed mid-sentence, and the day cap is read from this same file.
-    try { t.ensureDir(); await ledger.claim(session.row("open", "")); }
-    catch (error) {
-      log(`voice could not claim a ledger row: ${error?.message ?? error}`);
-      return acceptAndSay(socket, key, SENTENCE.busy, "the ledger would not take the claim");
+      const sessionId = newSessionId();
+      const ledger = ledgerFor(sessionId);
+      const session = makeVoiceSession({
+        t, settings, policy, agent, call, ledger, sessionId, now, WebSocketImpl, providerUrl, capTickMs, log,
+        dialWatchdogMs,
+        onClosed: (one) => { sessions.delete(one); },
+      });
+      // THE ROW EXISTS BEFORE THE PROVIDER HEARS A BYTE. A row written on close does not exist for a
+      // crashed relay or a tab closed mid-sentence, and the day cap is read from this same file.
+      try { t.ensureDir(); await ledger.claim(session.row("open", "")); }
+      catch (error) {
+        log(`voice could not claim a ledger row: ${error?.message ?? error}`);
+        return acceptAndSay(socket, key, SENTENCE.busy, "the ledger would not take the claim");
+      }
+      sessions.add(session);
+      session.start(socket, key, {
+        sessionCapSeconds: Math.min(caps.sessionCapSeconds, remaining),
+        dayRemainingSeconds: remaining,
+        // What is left of the day RIGHT NOW, re-read from the ledger on every tick rather than taken
+        // from the number above. Every open row counts, this one included, which is what makes two
+        // sessions that opened together converge instead of each spending a whole day.
+        dayRemainingNow: async () => {
+          const spent = daySecondsUsed(await readVoiceLedger(ledgerFile), now(), { openCapSeconds: caps.sessionCapSeconds });
+          return caps.dayCapSeconds - spent;
+        },
+      });
+      return session;
+    } finally {
+      // The reservation ends here whatever happened: a session that got in is in the set by now, and
+      // one that was refused must not hold the next press out.
+      starting = false;
     }
-    sessions.add(session);
-    session.start(socket, key, {
-      sessionCapSeconds: Math.min(caps.sessionCapSeconds, remaining),
-      dayRemainingSeconds: remaining,
-    });
-    return session;
   }
 
   return { handleSettings, handleUpgrade, get sessions() { return [...sessions]; } };

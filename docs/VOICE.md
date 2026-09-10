@@ -134,7 +134,14 @@ Measured on `grok-bot-local-vm`, September 2026, against the real host:
 | T2→T3 | **your team lead thinks** | **5.5–9.0 s** for a short question, **15–25 s** when it touches a shell, **50.6 s** on the first turn of a cold box |
 | T3 | the reply is noticed | ours, ≤450 ms at a 400 ms poll |
 | T3→T4 | the first sentence goes back to the vendor | **ours, ≤20 ms** |
-| T5→T6 | the first sample is audible | **ours, ≤120 ms** |
+| T5→T6 | the first sample is audible | **not measured** — see below |
+
+**T5→T6 is not on this ledger and cannot be**, and it carried a number (≤120 ms) until 2026-09-10
+that nothing had ever measured. The first sample becoming audible is the page's, playback is Web Audio,
+and a Web Audio path has no `.played` to read a time off — section 11 says so in the gate's own words.
+The evidence for that hop is what the gate really collects: the audio clock advancing, an analyser RMS
+of 0.18 on real energy rather than a silent buffer, and the bytes queued. Every other number in this
+table names the machine it was measured on; that one was borrowing the caption's authority.
 
 **T2→T3 is the whole of it, and it is not ours.** The host emits the reply as one complete message:
 there is no partial text, no growing message, nothing to speak early. It deliberately drops the
@@ -162,6 +169,24 @@ queue and are spoken between turns, never on top of one.
 |---|---|---|
 | one session | **30 minutes** | wall clock |
 | one workspace, one day | **120 minutes** | wall clock, UTC day |
+| one workspace at a time | **one call** | live sockets on the relay |
+| audio a page may send | **the session's own cap**, and never more than three seconds ahead of the clock | audio seconds |
+
+**One call at a time for a workspace.** Press Talk in a second tab and it reads *"This workspace is
+already in a call. Stop that one and press the button again."* The day cap is a number read off the
+ledger when a socket is accepted, so without this N tabs opened together each read the same remaining
+day and the cap multiplied by N — measured on this Mac at ten tabs against a twenty second day cap, all
+ten accepted and two hundred seconds authorised. The reservation is taken in the same instant as the
+check, because the accept path then reads a ledger, a roster and writes a claim, and nine of ten still
+got in when only the set of live sessions was consulted.
+
+**The audio has its own ceiling.** The caps count wall seconds and a vendor bills audio seconds, and a
+page sets the rate it sends at: measured on this Mac, 14.4 MB (five minutes of audio) reached the vendor
+in 0.15 s of wall clock with every cap on screen reading green. So the relay holds a session to its own
+cap in audio as well, drops anything more than three seconds ahead of the wall clock, and counts what it
+dropped as a held frame. Real capture sends 100 ms at a time and is never ahead; a page that is has been
+patched or is broken, and neither needs forwarding. **VOICE-5** is still the row for caps in money rather
+than in minutes.
 
 **Wall clock, not audio seconds**, because a minute of wall clock is the only number you can predict
 before you start talking. A provider bills on audio seconds, and the ledger records both.
@@ -200,10 +225,16 @@ Read 2026-09-09 from each vendor's own pricing page. **Vendor pages, not analysi
 
 | | model | audio | other |
 |---|---|---|---|
-| xAI | `grok-voice-think-fast-2.0` | **$0.08 a minute** ($4.80 an hour) | **$0.004 per billable message** we send |
+| xAI | `grok-voice-think-fast-2.0` — **the one the relay dials** | **$0.08 a minute** ($4.80 an hour) | **$0.004 per billable message** we send |
 | xAI | `grok-voice-think-fast-1.0` | $0.05 a minute | **deprecated** — this is the number that gets quoted |
 | OpenAI | `gpt-realtime-2.1` | $32.00 in / $64.00 out per million tokens | $0.40 per million text in |
 | OpenAI | `gpt-realtime-2.1-mini` | $10.00 in / $20.00 out per million | $0.30 per million text in |
+
+The relay dialled a moving alias (`grok-voice-latest`) until 2026-09-10 while this table priced the
+pinned model, so the model being billed was not the model being quoted. Both sides now name the same
+string, `cp/voice.mjs` is the one table it comes from, and `tests/cp-voice.test.mjs` fails if the two
+drift apart again. A moving alias is also how a vendor changes what a minute costs without anything
+here changing.
 
 Any **per-minute** figure for OpenAI is third-party analysis: that vendor publishes tokens, not
 minutes, and this product does not convert one into the other and present it as a price.
@@ -280,7 +311,16 @@ Two details that are easy to get wrong and were, here, before they were measured
   The first version of this counted a session against the day its row was dated, so one that started
   at 23:59:30 and was still going at 00:05 counted against *neither*: today's sum only looked at rows
   dated today, and that row belongs to yesterday. A workspace could be talking, spending its minutes,
-  and counting against no day at all.
+  and counting against no day at all. **This was true of the control plane's copy and not of the
+  relay's own file until 2026-09-10** — the file that is the enforcement truth — so the fix was half
+  applied while this paragraph read as though it were whole. Both halves now clip an open row to the
+  day being asked about, whichever day it started on, and both still clamp it to the session cap.
+- **A row left open by a relay that went away is clamped, and then settled.** A relay restart mid-call
+  leaves a claim nobody will close. Both sides clamp such a row to the session cap, so it cannot grow,
+  and the control plane settles anything older than that cap when it starts, with the reason *the relay
+  went away* on the row. Unclamped, one orphan read 143 hours on the Spend line while the same
+  service's day number read nought — measured on this Mac before the clamp — and it refused that
+  workspace's voice for whole days.
 - **A close that arrives twice leaves the settled row alone.** The relay reports the close best effort
   and retries, so a timeout after the write lands means it arrives again. The second one answers "yes,
   already done" and changes nothing. Before that guard a replay carrying a different number simply
@@ -346,6 +386,7 @@ timeout 300 node scripts/verify-voice.mjs --leg relay    # an accepted socket an
 timeout 300 node scripts/verify-voice.mjs --leg nokey     # no key: one plain sentence
 timeout 300 node scripts/verify-voice.mjs --leg caps      # a spent day: a refusal in words
 timeout 300 node scripts/verify-voice.mjs --leg origin    # a cross-origin upgrade: refused in words
+timeout 300 node scripts/verify-voice.mjs --leg refused    # a vendor that says 401, and one that is not there
 timeout 300 node scripts/verify-voice.mjs --leg browser   # real Chrome, a WAV as the microphone
 ```
 
@@ -356,7 +397,15 @@ ceiling.
 relay answers zero bytes with no status line at all, cookie or not, and real Chrome reports only an
 error event at 16 ms with no close code — indistinguishable from the relay being down. So every
 refusal, for any reason, is: accept the upgrade, send **one plain sentence**, say goodbye, close
-cleanly. Four of the legs above exist to hold that line.
+cleanly. Five of the legs above exist to hold that line.
+
+**A vendor that will not take the call is one of those refusals, and it was silence until 2026-09-10.**
+Measured on this Mac (node v22.23.1): a vendor answering 401 to the upgrade and an address with nothing
+behind it produce the *same* single error event — "Received network error or non-101 status code" — with
+no close event and no status code, and a black-holed address produces nothing at all for seconds. Before
+the fix, a typo'd key left the orb listening, the microphone live, the ledger row open and the Spend line
+counting until the thirty minute session cap. Now the dial is watched for eight seconds, the error path
+closes the same way a close does, and the person reads one sentence. `--leg refused` holds both arms.
 
 **There are no `.played` ranges to check, and that is a design decision rather than a missing test.**
 Playback is Web Audio — the audio is decoded into buffers and scheduled off the socket's message
@@ -424,7 +473,12 @@ From the relay, on the socket it accepted:
   fresh one."**
 - The day is spent: **"This workspace has used its voice time for today. It resets at midnight UTC."**
 - A key the vendor would not take: **"The voice service would not take that key. Check it on the Voice
-  card in Settings."**
+  card in Settings."** This is a vendor that accepted the line and then dropped it without a word.
+- The line never opened at all, which a wrong key and an unreachable service both look like from here:
+  **"The voice service did not answer. Check the key on the Voice card in Settings, then press the
+  button again."** This one also draws the control that opens the card.
+- Already talking in another tab: **"This workspace is already in a call. Stop that one and press the
+  button again."**
 - The line went away: **"The voice line dropped. Press the button again."**
 - Could not start at all: **"I could not start a voice session just now. Try again in a moment."**
 

@@ -1582,7 +1582,7 @@ export function createApp(options = {}) {
     }
   }
 
-  return { config, store, client, handle: guarded, refreshBoxPeers, boxPeers, reconcileFallbacks, marketplaceVerificationState };
+  return { config, store, client, handle: guarded, refreshBoxPeers, boxPeers, reconcileFallbacks, marketplaceVerificationState, voice };
 }
 
 export function createHttpServer(app) {
@@ -1640,6 +1640,19 @@ async function main() {
   // screenshot outage rather than a slow page. It reads first and writes only what is missing, so
   // on an ordinary boot it writes nothing and prints one line saying so.
   void reconcileFallbacksAtBoot(app);
+  // VOICE-1, once at boot and never on a timer. A relay that was restarted mid-call leaves a claimed
+  // row nobody will ever close, and an open row counts toward that workspace's day: unsettled, one
+  // such row refuses that customer's voice for the rest of the day and inflates the Spend line for
+  // ever. Rows younger than the session cap are left alone, because they may really be running.
+  try {
+    const settled = app.voice.reconcileOpen();
+    if (settled.closed.length === 0) process.stdout.write(`voice: ${settled.why}\n`);
+    else {
+      process.stdout.write(`voice: settled ${settled.closed.length} session row(s) left open by a relay that went away (${settled.closed.map((one) => `${one.slug} ${one.wallSeconds}s`).join(", ")})\n`);
+    }
+  } catch (error) {
+    process.stdout.write(`voice: the open-session sweep could not run (${String(error?.message ?? error).split("\n")[0]})\n`);
+  }
   // MARKET-26. Weekly, and once at boot, on the peer timer's own pattern above: unref'd so it never
   // holds a shutdown open, and swallowing its own failures so a vendor's documentation site being
   // down is never this service being down. Off entirely when the operator says so, because the one

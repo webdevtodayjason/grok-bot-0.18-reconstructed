@@ -154,11 +154,18 @@ cat <<'NEXT'
 
        curl -s https://api.titanium.bot/v1/health
 
-  3. Claim the instance that already exists, and add yourself an account on it. The account step
-     asks for the password on the terminal, so nobody else ever sees it:
+  3. Claim the instance that already exists, once. An adopted row with no box recorded is the
+     normal shape of your own workspace: the relay builds that entry from its own environment.
 
        node cp/cli.mjs tenant adopt titanium p927bfqm83ioloibamlvyd7g console.titanium.bot
-       node cp/cli.mjs account add you@example.com titanium --name "Your Name"
+
+     You sign in to your own console with the INSTANCE PASSWORD, not with an account. An account on
+     the `titanium` workspace cannot sign in today and reads "That workspace is not available right
+     now": that slug has no derived session key on the relay on purpose, which is SIGNIN-2 in
+     docs/GAP-ANALYSIS.md. `account add` is for a customer workspace, and it asks for the password
+     on the terminal so nobody else ever sees it:
+
+       node cp/cli.mjs account add them@example.com <their-workspace> --name "Their Name"
 
   docs/TENANCY.md section 9 is the same list with the reasoning.
 NEXT

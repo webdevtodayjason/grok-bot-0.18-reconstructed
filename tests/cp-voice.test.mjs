@@ -58,6 +58,9 @@ import {
   voiceSetting,
 } from "../cp/voice.mjs";
 import { PROVIDER_PRESETS, REALTIME_PRESET_IDS } from "../cp/proxy.mjs";
+// The relay's own copy of the vendor table, imported for ONE purpose: to pin the two tables
+// together. The relay does not import this file at runtime and must not -- they are two services.
+import { VENDORS as RELAY_VENDORS } from "../ui/voice-edge.mjs";
 import { startControlPlane } from "./cp-support.mjs";
 import { startFakeProxy } from "./cp-proxy-support.mjs";
 
@@ -728,4 +731,81 @@ test("providerList offers no model from the realtime rows and nothing mints a cr
     assert.equal(pasted.text.includes("xai-not-a-real-key-0123456789"), false);
     assert.equal(after.text.includes("xai-not-a-real-key-0123456789"), false);
   } finally { await cp.dispose(); await proxy.close(); }
+});
+
+// ---- the two tables cannot drift -----------------------------------------------------------------
+
+test("the model the relay dials is the model this table prices, for every vendor", () => {
+  // They disagreed until 2026-09-10: this table said `grok-voice-think-fast-2.0` and carried the
+  // price for it, while the relay dialled `grok-voice-latest` -- a model nothing here priced and a
+  // moving alias a vendor can repoint under us. docs/VOICE.md 7 quotes this table, so the document
+  // was pricing a model the product never asked for. Nothing compared them, so either could drift.
+  for (const id of REALTIME_VENDOR_IDS) {
+    assert.equal(RELAY_VENDORS[id]?.model, REALTIME_VENDORS[id].defaultModel,
+      `${id}: the relay dials ${RELAY_VENDORS[id]?.model} and this table prices ${REALTIME_VENDORS[id].defaultModel}`);
+    assert.ok(REALTIME_VENDORS[id].voices.includes(RELAY_VENDORS[id].voice),
+      `${id}: the relay asks for the voice ${RELAY_VENDORS[id].voice}, which is not on this table's list`);
+    assert.equal(RELAY_VENDORS[id].url, REALTIME_VENDORS[id].url, `${id}: two addresses for one vendor`);
+  }
+  assert.deepEqual(Object.keys(RELAY_VENDORS), [...REALTIME_VENDOR_IDS], "and the same vendors in the same order");
+  // The label a customer reads says how they are billed and makes no comparison: docs/VOICE.md 7
+  // states this product does not convert one vendor's tokens into the other's minutes, so "cheaper"
+  // is a claim it cannot make -- and that label was the only thing telling the two options apart.
+  for (const id of REALTIME_VENDOR_IDS) {
+    const label = String(RELAY_VENDORS[id].label);
+    assert.doesNotMatch(label, /cheap|cheaper|better|best|fast/i, `${id}: "${label}" is a comparison, not a billing shape`);
+    for (const leak of ["xai", "x.ai", "openai", "grok", "gpt", "realtime"]) {
+      assert.equal(label.toLowerCase().includes(leak), false, `${id}: the Service dropdown says ${leak}`);
+    }
+  }
+});
+
+// ---- a relay that went away ----------------------------------------------------------------------
+
+test("a row left open by a relay that went away is clamped to the session cap on both reads", () => {
+  // MEASURED on this Mac 2026-09-10 before this: one claimed-never-closed row read 3,600 s after an
+  // hour, refused that workspace's next call on the day cap after six and a half hours, and after
+  // three days the Spend line said 143 hours while the policy's own day number said nought. Two
+  // figures off one service, 143 hours apart, about the same row. The relay has always clamped.
+  const store = memory();
+  const clock = clockFrom(NOON);
+  try {
+    const voice = createVoiceLog({ store, now: clock.now });
+    voice.openSession({ slug: "demo", sessionId: "orphan", vendor: "xai" });
+    const capSeconds = SESSION_CAP_MINUTES * 60;
+
+    clock.advance(60 * 60_000);
+    assert.equal(voice.policy("demo").dayUsedSeconds, capSeconds, "an hour later it is worth one session, not an hour");
+    assert.equal(voice.usage({ slug: "demo" }).tenants[0].wallSeconds, capSeconds, "and the Spend line says the same number");
+
+    clock.advance(6 * 60 * 60_000);
+    assert.equal(voice.policy("demo").dayUsedSeconds, capSeconds);
+    assert.equal(voice.usage({ slug: "demo" }).tenants[0].wallSeconds, capSeconds);
+    // And the workspace is NOT locked out of the rest of its day by one orphan.
+    const next = voice.openSession({ slug: "demo", sessionId: "after", vendor: "xai" });
+    assert.equal(next.ok, true, `a fresh press was refused: ${next.error} ${next.message ?? ""}`);
+  } finally { store.close(); }
+});
+
+test("the open-session sweep settles what cannot still be running and leaves what can", () => {
+  const store = memory();
+  const clock = clockFrom(NOON);
+  try {
+    const voice = createVoiceLog({ store, now: clock.now });
+    voice.openSession({ slug: "demo", sessionId: "orphan", vendor: "xai" });
+    clock.advance(40 * 60_000);
+    voice.openSession({ slug: "demo", sessionId: "fresh", vendor: "xai" });
+
+    const swept = voice.reconcileOpen();
+    assert.deepEqual(swept.closed.map((one) => one.sessionId), ["orphan"], "only the one past the session cap");
+    const settled = store.getVoiceSession("orphan");
+    assert.equal(settled.state, "closed");
+    assert.equal(settled.wallSeconds, SESSION_CAP_MINUTES * 60, "counted at the longest it was allowed to run");
+    assert.equal(settled.closeReason, "the relay went away", "and the Spend line says what happened");
+    assert.equal(store.getVoiceSession("fresh").state, "open", "a call that may really be running is left alone");
+    // Idempotent: a second sweep settles nothing and says so in words.
+    const again = voice.reconcileOpen();
+    assert.deepEqual(again.closed, []);
+    assert.match(again.why, /no voice row was left open/);
+  } finally { store.close(); }
 });

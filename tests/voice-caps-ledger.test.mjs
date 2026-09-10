@@ -180,6 +180,27 @@ test("an abandoned OPEN row is clamped to the session cap, so one relay restart 
   assert.equal(daySecondsUsed(live, now), 300);
 });
 
+test("a session that crossed midnight counts against today, for the part that falls inside it", () => {
+  // docs/VOICE.md 9 promises both halves of such a session count. cp/voice.mjs did that and THIS
+  // side did not: a row dated yesterday was skipped outright, so the enforcement truth -- the relay's
+  // own file -- counted 300 seconds of a live session as nought and handed the next press a whole
+  // fresh day. MEASURED on this Mac before the fix at exactly this shape.
+  const now = Date.parse("2026-09-10T00:05:00.000Z");
+  const crossing = [{ sessionId: "midnight", startedAt: "2026-09-09T23:59:30.000Z", state: "open" }];
+  assert.equal(daySecondsUsed(crossing, now), 300, "the five minutes that fall inside today are today's");
+  // Yesterday's half is yesterday's, and nothing counts a second time.
+  assert.equal(daySecondsUsed(crossing, Date.parse("2026-09-09T23:59:40.000Z")), 10);
+  // An open row from days ago counts only TODAY'S slice of itself, because the window is clipped
+  // before the session cap is applied -- the cap is an upper bound on the slice, not the slice.
+  const ancient = [{ sessionId: "ancient", startedAt: "2026-09-08T12:00:00.000Z", state: "open" }];
+  assert.equal(daySecondsUsed(ancient, now), 300);
+  // And late in the day that clamp is what stops such a row eating the whole allowance.
+  assert.equal(daySecondsUsed(ancient, Date.parse("2026-09-10T23:00:00.000Z")), SESSION_CAP_SECONDS);
+  // A CLOSED row still counts against the day it started on, which is where an operator looks for it.
+  const closed = [{ sessionId: "yesterday", startedAt: "2026-09-09T23:00:00.000Z", state: "closed", wallSeconds: 600 }];
+  assert.equal(daySecondsUsed(closed, now), 0);
+});
+
 // ---- the policy ----------------------------------------------------------------------------------
 
 test("the policy falls back to the relay's own constants when the control plane is unreachable", async () => {
@@ -296,7 +317,7 @@ test("a save sets, clears or KEEPS the key, so the card can save the rest of the
 // (tests/helpers/stub-realtime.mjs, which item C's gate imports) and adding a second shared file
 // would put a file in two waves' hands for the sake of thirty lines.
 
-async function openSocket({ dir, settings, stub = null, gateway = null, WebSocketImpl = null, origin = null, relay = {}, capTickMs = undefined }) {
+async function openSocket({ dir, settings, stub = null, gateway = null, WebSocketImpl = null, origin = null, relay = {}, capTickMs = undefined, dialWatchdogMs = undefined }) {
   await writeVoiceSettings(settings, { file: path.join(dir, "voice.json") });
   const logLines = [];
   const t = {
@@ -312,6 +333,7 @@ async function openSocket({ dir, settings, stub = null, gateway = null, WebSocke
     t, call, policy: makeVoicePolicy(relay), providerUrl: stub?.url ?? "ws://127.0.0.1:9/never",
     WebSocketImpl, log: (line) => logLines.push(String(line)),
     ...(capTickMs == null ? {} : { capTickMs }),
+    ...(dialWatchdogMs == null ? {} : { dialWatchdogMs }),
   });
   const server = net.createServer();
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -349,8 +371,25 @@ async function openSocket({ dir, settings, stub = null, gateway = null, WebSocke
     }
     throw new Error(`timed out waiting for ${label}. frames: ${JSON.stringify(frames.json).slice(0, 500)} relay: ${logLines.join(" | ").slice(0, 400)}`);
   };
+  /** A second press on the same relay, so "one call at a time" can be measured rather than reasoned about. */
+  const again = async () => {
+    const second = new WebSocketClient(`ws://127.0.0.1:${port}/voice/socket`);
+    const seen = { json: [], closed: null };
+    second.on("message", (data, isBinary) => {
+      if (isBinary) return;
+      try { seen.json.push(JSON.parse(String(data))); } catch { /* not JSON */ }
+    });
+    second.on("close", (code, reason) => { seen.closed = { code, reason: String(reason) }; });
+    await new Promise((resolve, reject) => {
+      second.on("open", resolve);
+      second.on("error", reject);
+      const timer = setTimeout(() => reject(new Error("the second socket never opened")), 6000);
+      timer.unref();
+    });
+    return { socket: second, seen };
+  };
   return {
-    client, frames, edge, settle, closed, logLines,
+    client, frames, edge, settle, closed, logLines, again, ledgerFile: t.voiceLedgerFile,
     of: (kind) => frames.json.filter((f) => f.t === kind),
     ledger: () => (existsSync(t.voiceLedgerFile) ? readFileSync(t.voiceLedgerFile, "utf8") : ""),
     close: async () => { client.terminate(); await new Promise((resolve) => server.close(resolve)); },
@@ -631,6 +670,182 @@ test("a planted key's bytes appear in no URL, no ledger line, no log line and no
     assert.ok(!session.ledger().includes(head));
     assert.ok(!JSON.stringify(session.frames.json).includes(head));
     assert.ok(!session.logLines.join("\n").includes(head));
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- a vendor that will not take the call --------------------------------------------------------
+
+/** A dial that fires `error` and never `close`, which is what node really does on a failed upgrade. */
+class ErroringDial {
+  constructor(url) {
+    this.url = String(url);
+    this.readyState = 0;
+    this.listeners = new Map();
+    // Measured on this Mac (node v22.23.1): a 401 upgrade and a refused connection both arrive as
+    // ONE error event carrying "Received network error or non-101 status code", and no close event
+    // of any kind ever follows.
+    setTimeout(() => {
+      for (const fn of this.listeners.get("error") ?? []) fn({ message: "Received network error or non-101 status code." });
+    }, 10).unref?.();
+  }
+  addEventListener(kind, fn) {
+    if (!this.listeners.has(kind)) this.listeners.set(kind, []);
+    this.listeners.get(kind).push(fn);
+  }
+  send() { /* never open */ }
+  close() { this.readyState = 3; }
+}
+
+/** A dial that says NOTHING at all, which is what a black-holed address does. Only the watchdog sees it. */
+class SilentDial {
+  constructor(url) { this.url = String(url); this.readyState = 0; }
+  addEventListener() {}
+  send() { /* never open */ }
+  close() { this.readyState = 3; }
+}
+
+test("a vendor that refuses the dial is one plain sentence, a clean close and a settled row", async () => {
+  // THE ONE PATH A CUSTOMER WITH A TYPO'D KEY ACTUALLY HITS. The provider error listener was log-only
+  // and node fires no close on a failed upgrade, so MEASURED on this Mac before this fix: no sentence
+  // at all, the browser socket still open after 15 s, the ledger row still open and the orb still
+  // listening -- with a live microphone -- until the thirty minute session cap.
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-refused-"));
+  let session = null;
+  try {
+    session = await openSocket({ dir, settings: { enabled: true, vendor: "xai", apiKey: PLANTED_KEY }, WebSocketImpl: ErroringDial });
+    const closed = await session.closed;
+    assert.equal(closed.code, 1000, "closed cleanly, because a destroyed socket reads as the relay being down");
+    const note = session.of("note")[0];
+    assert.ok(note != null, `no sentence reached the page: ${JSON.stringify(session.frames.json)}`);
+    assert.match(note.text, /did not answer/i);
+    assert.equal(note.reason, "no-key", "so the row still draws the control that opens the Voice card");
+    assert.deepEqual(session.of("state").map((one) => one.value).slice(-1), ["off"], "and the orb stops saying it is listening");
+    // The settle is a file write and the close frame does not wait for it, so this waits for the row.
+    await session.settle(() => (session.ledger().match(/"state":"closed"/g) ?? []).length > 0, "the settled row");
+    const rows = await readVoiceLedger(session.ledgerFile);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].state, "closed", "the row is settled rather than left open and counting");
+    assert.equal(rows[0].closeReason, "the voice line never opened");
+    assert.ok(!session.ledger().includes(PLANTED_KEY));
+  } finally {
+    await session?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a dial that says nothing at all is caught by the watchdog, not by the session cap", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-silent-"));
+  let session = null;
+  try {
+    session = await openSocket({
+      dir, settings: { enabled: true, vendor: "xai", apiKey: PLANTED_KEY },
+      WebSocketImpl: SilentDial, dialWatchdogMs: 150,
+    });
+    const closed = await session.closed;
+    assert.equal(closed.code, 1000);
+    assert.match(session.of("note")[0]?.text ?? "", /did not answer/i);
+    await session.settle(() => (session.ledger().match(/"state":"closed"/g) ?? []).length > 0, "the settled row");
+    const rows = await readVoiceLedger(session.ledgerFile);
+    assert.equal(rows[0].state, "closed");
+    assert.equal(rows[0].closeReason, "the voice line never opened");
+  } finally {
+    await session?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- one call at a time, and the audio a page may push -------------------------------------------
+
+test("a second press while a call is live is refused in words, and the set forgets a finished call", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-onecall-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  let session = null;
+  try {
+    session = await openSocket({ dir, settings: { enabled: true, vendor: "xai", apiKey: PLANTED_KEY }, stub });
+    await session.settle(() => session.of("ready").length === 1, "the first call");
+    assert.equal(session.edge.sessions.length, 1);
+
+    const second = await session.again();
+    await session.settle(() => second.seen.json.some((one) => one.t === "note"), "the second press being answered");
+    const note = second.seen.json.find((one) => one.t === "note");
+    assert.match(note.text, /already in a call/i);
+    assert.equal(second.seen.json.some((one) => one.t === "ready"), false, "and no second session was opened");
+    // ONE ROW, not two: a refused press must not spend anything either.
+    assert.equal((await readVoiceLedger(session.ledgerFile)).length, 1);
+
+    // And when the first call ends the set forgets it, so the next press gets in. The set was
+    // append-only until 2026-09-10 and held every finished session for the life of the process.
+    session.client.close(1000, "done");
+    await session.settle(() => session.edge.sessions.length === 0, "the finished session being released");
+    const third = await session.again();
+    await session.settle(() => third.seen.json.some((one) => one.t === "ready" || one.t === "note"), "the third press");
+    assert.ok(third.seen.json.some((one) => one.t === "ready"), `the next press was refused: ${JSON.stringify(third.seen.json)}`);
+    try { third.socket.terminate(); } catch { /* gone */ }
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("audio arriving faster than realtime is DROPPED and counted, because that is the meter a vendor bills", async () => {
+  // MEASURED on this Mac before this: 3000 frames, 14,400,000 bytes -- five minutes of audio --
+  // forwarded to the vendor in 0.15 s of wall clock, the settled row reading wallSeconds 0 and
+  // audioInSeconds 300, and every cap on screen green. The caps count wall seconds; this is the
+  // ceiling on the other meter.
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-flood-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  let session = null;
+  try {
+    session = await openSocket({ dir, settings: { enabled: true, vendor: "xai", apiKey: PLANTED_KEY }, stub });
+    await session.settle(() => stub.events.sessions.length > 0, "the session frame");
+    const frames = 600; // a minute of audio, offered in a fraction of a second
+    for (let i = 0; i < frames; i += 1) session.client.send(Buffer.alloc(FRAME_BYTES, 0x40));
+    await session.settle(() => stub.events.appendFrames > 0, "the first frame through");
+    // Settle: the pacer admits about three seconds of audio (the lead) and drops the rest.
+    await new Promise((resolve) => { const timer = setTimeout(resolve, 400); timer.unref(); });
+    assert.ok(stub.events.appendFrames < frames / 4,
+      `${stub.events.appendFrames} of ${frames} frames reached the vendor, which is not a ceiling`);
+    const admittedSeconds = stub.events.appendBytes / (AUDIO_RATE * 2);
+    assert.ok(admittedSeconds <= 6, `${admittedSeconds} s of audio was admitted in under a second of wall clock`);
+    session.client.close(1000, "done");
+    await session.settle(() => (session.ledger().match(/"state":"closed"/g) ?? []).length > 0, "the settled row");
+    const rows = await readVoiceLedger(session.ledgerFile);
+    assert.ok(rows[0].heldFrames > frames / 2, `the dropped frames are counted: heldFrames=${rows[0].heldFrames}`);
+    assert.ok(rows[0].audioInSeconds <= 6, `and the audio meter is bounded: ${rows[0].audioInSeconds} s`);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the day cap is re-read while a call runs, so a session cannot outlive a day spent elsewhere", async () => {
+  // The day was a snapshot taken when the socket was accepted and never read again. Two sockets
+  // opened together each got the whole remaining day; one call at a time closes most of that, and
+  // this closes the rest -- a row spent by anything else on this workspace now ends the live call.
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-dayreread-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  let session = null;
+  try {
+    session = await openSocket({
+      dir, settings: { enabled: true, vendor: "xai", apiKey: PLANTED_KEY }, stub, capTickMs: 40,
+    });
+    await session.settle(() => session.of("ready").length === 1, "the call");
+    // Somebody else's spend lands in the ledger while this call is running: the whole day, closed.
+    await appendVoiceLedger(voiceLedgerRow({
+      sessionId: "vs_elsewhere", slug: "acme", vendor: "xai", startedAt: new Date().toISOString(),
+      state: "closed", endedAt: new Date().toISOString(), wallSeconds: DAY_CAP_SECONDS + 5,
+    }), { file: session.ledgerFile });
+    const closed = await session.closed;
+    assert.equal(closed.code, 1000);
+    const note = session.of("note").at(-1);
+    assert.match(note?.text ?? "", /voice time for today/i);
+    assert.equal(note?.reason, "day-cap");
   } finally {
     await session?.close();
     await stub.close();

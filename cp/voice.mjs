@@ -218,12 +218,21 @@ export function createVoiceLog({ store, config = null, now = () => Date.now() } 
    * So an open row contributes the part of its elapsed time that lies inside the window being asked
    * about, whichever day it started on, and the caller asks about rows from the day before as well.
    */
-  const openSecondsInWindow = (row, from, to, at) => {
+  const openSecondsInWindow = (row, from, to, at, capSeconds = 0) => {
     const started = Date.parse(row.startedAt);
     if (!Number.isFinite(started)) return 0;
     const begin = Math.max(started, from);
     const end = Math.min(at, to);
-    return Math.max(0, Math.round((end - begin) / 1000));
+    const inside = Math.max(0, Math.round((end - begin) / 1000));
+    // CLAMPED TO THE SESSION CAP, the same clamp ui/voice-edge.mjs daySecondsUsed applies, and for
+    // the same reason: a row is open either because the session is running -- in which case the
+    // relay's own tick ends it at the cap -- or because the relay went away before it could settle.
+    // Unclamped, the second case accrues for ever. MEASURED on this Mac 2026-09-10 before this: one
+    // row claimed and never closed read 3,600 s an hour later, refused that workspace's next call by
+    // the day cap after six and a half hours, and after three days the Spend line said 143 hours
+    // while the policy's own day number said nought -- two figures off one service, 143 hours apart.
+    // reconcileOpen below settles such a row; this is what the numbers say until it runs.
+    return capSeconds > 0 ? Math.min(inside, capSeconds) : inside;
   };
 
   /** Midnight UTC at the start of a YYYY-MM-DD. */
@@ -238,6 +247,7 @@ export function createVoiceLog({ store, config = null, now = () => Date.now() } 
   const daySeconds = (slug, day, at) => {
     const from = dayStart(day);
     const to = from + 86_400_000;
+    const capSeconds = caps(slug).sessionMinutes * 60;
     let seconds = 0;
     let open = 0;
     // This day's rows, and YESTERDAY's, because an open row from yesterday is still running today.
@@ -248,7 +258,7 @@ export function createVoiceLog({ store, config = null, now = () => Date.now() } 
           // Every open row in either day is open RIGHT NOW, whichever day it started on, so it counts
           // as one open session and contributes the part of itself that lies inside this day.
           open += 1;
-          seconds += openSecondsInWindow(row, from, to, at);
+          seconds += openSecondsInWindow(row, from, to, at, capSeconds);
           continue;
         }
         // A closed row counts its whole reported wall clock against the day it STARTED on, which is
@@ -267,6 +277,47 @@ export function createVoiceLog({ store, config = null, now = () => Date.now() } 
     vendors: REALTIME_VENDORS,
 
     caps,
+
+    /**
+     * Settle every row that cannot still be running, and say how many. Called once when this service
+     * starts, on the pattern the fallback reconcile at cp/server.mjs boot already uses.
+     *
+     * WHY A ROW IS LEFT OPEN AT ALL: the relay claims before it dials and settles on close, so a
+     * relay that is restarted -- three times during this wave's own ship -- leaves rows nobody will
+     * ever close. MEASURED on this Mac 2026-09-10, one such row read 3,600 s after an hour, refused
+     * that workspace's next call on the day cap after six and a half hours, and after three days the
+     * Spend line said 143 hours while the policy's day number said nought. The clamp above stops the
+     * number growing; this stops the row pretending to be live, and the Spend line then says what
+     * happened rather than counting.
+     *
+     * A row younger than the session cap is LEFT ALONE, because it may really be running: this
+     * service cannot see the relay's sockets, and the cap is the longest a session can legitimately
+     * be open for.
+     */
+    reconcileOpen({ at = now() } = {}) {
+      const closed = [];
+      for (const row of store.listVoiceSessions({})) {
+        if (row.state !== "open") continue;
+        const started = Date.parse(row.startedAt);
+        if (!Number.isFinite(started)) continue;
+        const capSeconds = caps(row.tenant).sessionMinutes * 60;
+        const elapsed = Math.max(0, Math.round((at - started) / 1000));
+        if (elapsed <= capSeconds) continue;
+        store.closeVoiceSession(row.sessionId, {
+          endedAt: new Date(started + capSeconds * 1000).toISOString(),
+          // What it can honestly be said to have cost: the longest it was allowed to run for.
+          wallSeconds: capSeconds,
+          audioInSeconds: Number(row.audioInSeconds) || 0,
+          audioOutSeconds: Number(row.audioOutSeconds) || 0,
+          billedItemEvents: Number(row.billedItemEvents) || 0,
+          toolCalls: Number(row.toolCalls) || 0,
+          heldFrames: Number(row.heldFrames) || 0,
+          closeReason: "the relay went away",
+        });
+        closed.push({ sessionId: row.sessionId, slug: row.tenant, wallSeconds: capSeconds });
+      }
+      return { closed, why: closed.length === 0 ? "no voice row was left open by a relay that went away" : "" };
+    },
 
     /**
      * What the relay is told before it dials, and the only thing it is told. Numbers and an
@@ -432,6 +483,13 @@ export function createVoiceLog({ store, config = null, now = () => Date.now() } 
         ? windowFrom + 86_400_000
         : (month.length > 0 ? Date.parse(`${utcMonth(Date.parse(`${month}-01T00:00:00.000Z`) + 32 * 86_400_000)}-01T00:00:00.000Z`) : Number.MAX_SAFE_INTEGER);
       const byTenant = new Map();
+      // One settings read per tenant rather than one per row: a month of rows for one workspace would
+      // otherwise ask the same two settings questions a thousand times.
+      const capCache = new Map();
+      const capFor = (tenant) => {
+        if (!capCache.has(tenant)) capCache.set(tenant, caps(tenant).sessionMinutes * 60);
+        return capCache.get(tenant);
+      };
       for (const row of rows) {
         const key = row.tenant;
         if (!byTenant.has(key)) {
@@ -453,8 +511,10 @@ export function createVoiceLog({ store, config = null, now = () => Date.now() } 
         if (row.state === "open") {
           line.open += 1;
           // Clipped to the window being reported, the same way the day cap clips, so the two numbers
-          // agree: a session running across a boundary is not reported twice at its full length.
-          line.wallSeconds += openSecondsInWindow(row, windowFrom, windowTo, at);
+          // agree: a session running across a boundary is not reported twice at its full length. And
+          // clamped to that workspace's own session cap, because the Spend line and the cap must not
+          // be able to disagree about the same row -- they did, by 143 hours, before this clamp.
+          line.wallSeconds += openSecondsInWindow(row, windowFrom, windowTo, at, capFor(row.tenant));
         } else {
           line.wallSeconds += Number(row.wallSeconds) || 0;
         }

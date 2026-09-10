@@ -629,15 +629,22 @@ argument.
 
 ### Your own account
 
-Jason's instance is the tenant `titanium`, adopted rather than built. Run this **on the R750** so
-the password is typed on the machine that stores its hash:
+Jason's instance is the tenant `titanium`, adopted rather than built, and **you sign in to it with
+the instance password**. That is deliberate and it is also the only door that works there today: an
+account on the `titanium` workspace cannot sign in. MEASURED on the R750 2026-09-10, a throwaway
+account on `titanium` posting the real sign-in form reads **503 "That workspace is not available
+right now"**, while the byte-identical throwaway on `demo` is signed in at once. The reason is the
+session key, not the account and not adoption: `operatorEntry` in `ui/tenant-registry.mjs` gives the
+operator's own entry an empty `sessionKey` on purpose, because the master that derives it never
+leaves the control plane, so `accountVerdict` cannot verify a token claiming that slug. **SIGNIN-2**
+in `docs/GAP-ANALYSIS.md` owns the decision and the change.
+
+So `account add` is for a customer workspace:
 
     ssh dell-remote
     cd /home/sem/titanbot
     export CP_ADMIN_TOKEN="$(grep '^CP_ADMIN_TOKEN=' cp.env | cut -d= -f2-)"
-    node cp/cli.mjs account add jason@webdevtoday.com titanium --name "Jason Brashear"
-
-The console password on that instance keeps working, and that is deliberate.
+    node cp/cli.mjs account add somebody@their-company.com <their-workspace> --name "Their Name"
 
 ---
 
@@ -1432,7 +1439,7 @@ node cp/cli.mjs tenant adopt titanium p927bfqm83ioloibamlvyd7g console.titanium.
 
 # 4. an account on it. Run this ON the R750 so the password is typed on the machine that keeps its
 #    hash. It asks twice and echoes neither. Section 11.
-ssh dell-remote      # then: cd /home/sem/titanbot && node cp/cli.mjs account add ... titanium
+ssh dell-remote      # then: cd /home/sem/titanbot && node cp/cli.mjs account add ... <a customer workspace>
 
 # 5. rehearse a customer, then build them
 node cp/cli.mjs signup add owner@acmeroofing.com "Acme Roofing" --dry-run
