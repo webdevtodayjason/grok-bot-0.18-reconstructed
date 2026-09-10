@@ -1266,16 +1266,21 @@ export function createApp(options = {}) {
     // The operator's read, and it is HERE rather than under /v1/admin for the structural reason
     // written over the mail send log above: cp/admin.mjs claims every /v1/admin/* path and answers
     // 404 to anything it does not match itself, so a route added under that prefix has to be added
-    // inside that file, and that file belongs to another wave this week. It is still a super admin
-    // route -- requireAdmin, and the relay's own credential does not open it. The Spend panel fetches
-    // it with the admin bearer through the same api() helper it uses for everything else.
+    // inside that file, and that file belongs to another wave this week.
+    //
+    // THE GUARD IS admin.requireSuperAdmin AND NOT THIS FILE'S requireAdmin (ADMIN-4). The Spend
+    // panel calls this route, and a browser does not hold the operator bearer: it holds a session
+    // token from POST /v1/sessions. requireAdmin compares the bearer to CP_ADMIN_TOKEN only, so this
+    // route answered the panel 401 -- and cp/admin/admin.js's api() signs the person out on ANY 401,
+    // which threw every super admin back to the door about two seconds after they signed in.
+    // requireSuperAdmin takes EITHER credential, so the operator's CLI keeps working unchanged.
     //
     // NO SLUG MEANS EVERY WORKSPACE, which is the one place this differs from /v1/mail/sends: the
     // Spend panel draws one line per tenant, so a read that demanded a slug would need one fetch per
     // customer to fill one table.
     if (segments[1] === "voice" && segments[2] === "usage" && segments.length === 3) {
       if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
-      if (!requireAdmin(request, response)) return undefined;
+      if (!admin.requireSuperAdmin(request, response).ok) return undefined;
       const slug = String(url.searchParams.get("slug") ?? "").trim();
       const day = String(url.searchParams.get("day") ?? "").trim();
       if (day.length > 0 && !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
@@ -1286,16 +1291,21 @@ export function createApp(options = {}) {
 
     // And the operator's WRITE, which is the thing that has no customer-reachable twin anywhere in
     // this product. A customer raising their own day cap is unbounded spend on somebody else's
-    // invoice, so the minutes live in admin_settings behind this one bearer and the customer's own
+    // invoice, so the minutes live in admin_settings behind a super admin door and the customer's own
     // Voice card writes the KEY and nothing else.
+    //
+    // Same guard as its read above, and for the same reason (ADMIN-4): the read and the write of one
+    // operator number are one pair, and a pair split across two doors is how the next panel control
+    // added here gets the outage back. No customer-reachable credential opens either one.
     if (segments[1] === "voice" && segments[2] === "caps" && segments.length === 3) {
       if (method !== "POST") return json(response, 405, { error: "method_not_allowed" });
-      if (!requireAdmin(request, response)) return undefined;
-      // The actor on the settings row. This door is the admin BEARER rather than a person's session,
-      // so there is no address to record: what is knowable is that the operator token was presented
-      // and which surface presented it, and writing down a name nobody proved would be worse than
-      // writing down the truth.
-      const actor = `operator via ${String(request.headers["x-titanbot-via"] ?? "api")}`;
+      const guard = admin.requireSuperAdmin(request, response);
+      if (!guard.ok) return undefined;
+      // The actor on the settings row: the signed-in super admin's own address when a person did it,
+      // and the token plus the surface that presented it when the operator's CLI did. Writing down a
+      // name nobody proved would be worse than writing down the truth, which is why the bearer case
+      // stays a description of the bearer rather than a person.
+      const actor = guard.account?.email ?? `operator via ${String(request.headers["x-titanbot-via"] ?? "api")}`;
       const answer = voice.setCaps(body.slug, {
         dayMinutes: body.dayMinutes ?? null,
         sessionMinutes: body.sessionMinutes ?? null,
