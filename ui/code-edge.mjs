@@ -44,7 +44,7 @@
 // Nothing here imports anything outside node builtins: the relay image has no node_modules at all.
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFile, chmod, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, chown, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 // ---- the numbers, all of them named ------------------------------------------------------------
@@ -467,8 +467,14 @@ export function sweepDecisions({ containers = [], networks = [], live = new Set(
     if (labels["com.titanbot.role"] !== CODE_ROLE) continue;
     if (network.name === SHARED_NETWORK) continue;
     const taskId = String(labels["com.titanbot.task"] ?? "");
-    const sandboxStillThere = (network.members ?? []).some((member) => String(member).startsWith(CODE_NAME_PREFIX));
-    if (sandboxStillThere && live.has(taskId) && !remove.some((c) => c.taskId === taskId)) continue;
+    // A LIVE TASK KEEPS ITS NETWORK, full stop. This used to also require a sandbox container to be
+    // an active endpoint on it, and an endpoint is exactly what a container is not between `docker
+    // create` and `docker start` -- a sweep tick landing in that window pulled the network out from
+    // under a task that was about to run. It also fired for a task whose container had merely
+    // stopped, tearing the network down before anything had read the exit code. Removing a live
+    // task's network is never this loop's job: `finish` -> `teardown` does it, and the settle leg
+    // below is what turns a stopped container into a finished task.
+    if (live.has(taskId) && !remove.some((c) => c.taskId === taskId)) continue;
     removeNetworks.push({ ...network, taskId });
   }
   return { remove, keep, removeNetworks };
@@ -802,13 +808,20 @@ export function createCodeEdge({
 
   /** The run uid, read once per task from the box itself. The tenant root is uid 1001 while
    *  volumes/workspace is uid 1000, so guessing either one produces an artifact the box cannot open
-   *  half the time. 1000 is the default because that is what the box image's own user is. */
+   *  half the time. 1000 is the default because that is what the box image's own user is.
+   *
+   *  ZERO IS AN ANSWER, NOT AN ABSENCE. The R750's own boxes run as root, so `id -u` says 0, and an
+   *  earlier `uid > 0` here threw that away and fell back to 1000. Measured on the R750 2026-09-10:
+   *  the demo box answered 0, the task directory was made root-owned, the container was given
+   *  --user 1000:1000, and the first thing the agent inside did was fail with "cannot create
+   *  /task/SUMMARY.md: Permission denied". A box that runs as root is the normal case here, not the
+   *  odd one. Only a value that is not a number at all falls back. */
   async function runUidOf(slug) {
     const box = asString(boxOf(slug));
     if (box.length === 0) return 1000;
     const got = await docker(["exec", box, "id", "-u"], { timeoutMs: 10_000 });
     const uid = Number(String(got.stdout ?? "").trim());
-    return Number.isInteger(uid) && uid > 0 ? uid : 1000;
+    return Number.isInteger(uid) && uid >= 0 ? uid : 1000;
   }
 
   /** Every subnet docker already holds, in one call. */
@@ -916,10 +929,17 @@ export function createCodeEdge({
     if (taskRoot.length === 0) return deny(res, 409, "not_available");
 
     const uid = await runUidOf(slug);
+    // ONE VALUE OWNS BOTH HALVES. The directory the task writes into and the user the container runs
+    // as have to be the same number, or the agent's very first write fails inside its own mount.
+    // They used to come from two places -- `ownLikeParent` for the directory and `runUidOf` for
+    // --user -- and on the R750 2026-09-10 they disagreed: the directory came out 0:0 (the relay's
+    // own uid, because its parent was made the same way) while the container was given 1000:1000.
+    // `ownTo` chowns to the resolved run uid, so the two can no longer drift apart.
+    const ownTo = (file) => chown(file, uid, uid).catch(() => {});
     try {
       await mkdir(taskRoot, { recursive: true, mode: 0o700 });
       await chmod(taskRoot, 0o700).catch(() => {});
-      await ownLikeParent(taskRoot);
+      await ownTo(taskRoot);
     } catch (error) {
       log(`code  ${slug} could not make a task directory: ${error?.message ?? error}`);
       return deny(res, 503, "no_record");
@@ -943,7 +963,7 @@ export function createCodeEdge({
         return deny(res, 400, "too_much_file");
       }
       await writeFile(path.join(taskRoot, file.name), got.stdout, { mode: 0o600 });
-      await ownLikeParent(path.join(taskRoot, file.name));
+      await ownTo(path.join(taskRoot, file.name));
       copied += 1;
       copiedBytes += got.stdout.length;
     }
@@ -953,7 +973,7 @@ export function createCodeEdge({
     await writeFile(path.join(taskRoot, "task.json"), `${JSON.stringify({
       taskId, title, instructions, files: copy.files.map((f) => f.name), createdAt: new Date(startedAt).toISOString(),
     }, null, 2)}\n`, { mode: 0o600 });
-    await ownLikeParent(path.join(taskRoot, "task.json"));
+    await ownTo(path.join(taskRoot, "task.json"));
 
     // CLAIM BEFORE THE CONTAINER EXISTS. An unstarted task is recoverable; an unbilled container
     // hour is not, and "every task is on the record" is the whole justification for this route.
@@ -1060,7 +1080,9 @@ export function createCodeEdge({
       const credFile = path.join(credRoot, `${taskId}.env`);
       await mkdir(credRoot, { recursive: true, mode: 0o700 });
       await writeFile(credFile, credentialEnv(String(claim.key ?? "")), { mode: 0o600 });
-      await ownLikeParent(credFile);
+      // The same one value again: a 0600 file the run uid does not own is a credential the task
+      // cannot read, which reads on screen as the model refusing rather than as a mount that failed.
+      await chown(credFile, uid, uid).catch(() => {});
       // The whole plan again with the read-only credential mount on it, under a second name, and the
       // first container removed. Rebuilt through createArgs rather than spliced out of the argv above,
       // because an argv edited by index is the kind of thing that silently drops --cap-drop.
@@ -1370,8 +1392,32 @@ export function createCodeEdge({
         log(`code  could not remove ${network.name}: ${gone.stderr.slice(0, 120)}`);
       }
     }
-    log(`code  sweep (${why}) removed ${decided.remove.length} code container(s) and ${decided.removeNetworks.length} code network(s)`);
-    return { ok: true, containers: decided.remove.length, networks: decided.removeNetworks.length };
+    // A TASK WHOSE CONTAINER HAS ALREADY STOPPED. This is the case a deadline never catches and an
+    // orphan check never sees: the row still says running, this relay still has it live, and the
+    // container exited minutes ago. Nothing else closes it -- /code/list, which is what the bot's
+    // watcher polls, reads the rows as they are -- so before this leg existed a task that died in
+    // its first second sat on the Coding strip saying "running" until its half hour was up and the
+    // bot was never told anything at all. Measured on the R750 2026-09-10: a task exited 2 in its
+    // first second and the strip still read "running, 9m 38s" ten minutes later. This is the only
+    // real wall clock, so settling here is its job.
+    let settled = 0;
+    for (const container of decided.keep) {
+      const labels = container.labels ?? {};
+      const taskId = String(labels["com.titanbot.task"] ?? "");
+      const slug = String(labels["com.titanbot.tenant"] ?? "");
+      if (taskId.length === 0 || slug.length === 0 || !live.has(taskId)) continue;
+      const rows = await readTasks(slug);
+      const row = rows.find((r) => String(r.taskId) === taskId);
+      if (row == null || String(row.state) !== "running" || String(row.provider) !== "local") continue;
+      const got = await settleLocal(slug, row);
+      if (got.state === "running") continue;
+      log(`code  ${slug}/${taskId} stopped on its own (${got.state}, exit ${got.exit}); closing its row`);
+      await finish(slug, row, got.state, String(got.detail ?? ""));
+      settled += 1;
+    }
+    log(`code  sweep (${why}) removed ${decided.remove.length} code container(s) and ${decided.removeNetworks.length} code network(s)`
+      + (settled > 0 ? ` and closed ${settled} finished task(s)` : ""));
+    return { ok: true, containers: decided.remove.length, networks: decided.removeNetworks.length, settled };
   }
 
   /** What this process believes is running, so a restart's first sweep can tell an orphan from a

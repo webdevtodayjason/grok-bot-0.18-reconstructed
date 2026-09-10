@@ -180,10 +180,23 @@ test("the named files are copied in, numbered when two share a name, and owned l
   const dir = path.join(root, "demo", "workspace", "code", res.body.taskId);
   assert.deepEqual((await readdir(dir)).sort(), ["app-2.py", "app.py", "task.json"]);
   assert.equal(await readFile(path.join(dir, "app.py"), "utf8"), "print('a')\n");
-  // Owned like the parent, because the tenant root is one uid and volumes/workspace is another, and a
-  // root-owned artifact is one the box can never open.
-  assert.ok(seen.owned.includes(dir));
-  assert.ok(seen.owned.includes(path.join(dir, "app.py")));
+});
+
+test("the directory's owner and the container's --user are the same one number", async () => {
+  // THE INVARIANT, and the bug it is here for. These two used to come from two places: the directory
+  // was chowned like its PARENT and --user came from the box's own `id -u`. Measured on the R750
+  // 2026-09-10 they disagreed -- directory 0:0, container 1000:1000 -- and the first thing the agent
+  // inside did was fail with "cannot create /task/SUMMARY.md: Permission denied", which reaches a
+  // person as a coding job that did nothing and said nothing. One value now owns both halves.
+  for (const boxUid of ["0", "1000", "1001"]) {
+    const { res, seen } = await start(GOOD, {}, { dockerAnswers: { exec: (args) => (args.includes("id") ? { stdout: `${boxUid}\n` } : { stdout: "" }) } });
+    assert.equal(res.status, 200);
+    const create = seen.docker.find((args) => args[0] === "create");
+    const at = create.indexOf("--user");
+    assert.ok(at > 0, "the container is always given a user");
+    assert.equal(create[at + 1], `${boxUid}:${boxUid}`,
+      `a box whose own id -u is ${boxUid} gets a task that runs as ${boxUid}; zero is an answer, not an absence`);
+  }
 });
 
 // ---- the refusals, in order ---------------------------------------------------------------------

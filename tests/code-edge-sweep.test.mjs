@@ -116,14 +116,20 @@ test("the network of a container being removed goes with it", () => {
 
 // ---- the sweep against a daemon that answers ----------------------------------------------------
 
-function sweepWith({ ps = "", networks = [], rows = [], dockerAvailable = async () => true } = {}) {
+// `inspect` answers "running" by default, because that is what a container a live row points at IS.
+// It is a parameter rather than a constant because the sweep's last leg exists for the other answer:
+// a task this relay still believes is running whose container stopped minutes ago. The stub used to
+// answer "" to this call, which nothing made, and "" parses as a clean exit -- so the day the sweep
+// started asking, a test about NOT killing a live task went red for the right reason.
+function sweepWith({ ps = "", networks = [], rows = [], inspect = "running\t0\tfalse", dockerAvailable = async () => true } = {}) {
   const seen = { docker: [], closed: [], rows: [] };
   const edge = createCodeEdge({
     execFile: (file, args, opts, cb) => {
       seen.docker.push(args.join(" "));
       const key2 = `${args[0]} ${args[1]}`;
       let stdout = "";
-      if (key2 === "ps -a") stdout = ps;
+      if (args[0] === "inspect") stdout = inspect;
+      else if (key2 === "ps -a") stdout = ps;
       else if (key2 === "network ls") stdout = networks.map((n) => n.name).join("\n");
       else if (key2 === "network inspect") {
         const name = args.at(-1);
@@ -194,6 +200,40 @@ test("adopt is what keeps a restart from killing its own live tasks", async () =
   const swept = await edge.sweep("this relay started");
   assert.equal(swept.containers, 0);
   assert.equal(seen.closed.length, 0);
+});
+
+test("a live task whose container has already stopped is closed by the sweep, not left saying running", async () => {
+  // MEASURED ON THE R750 2026-09-10, and the reason this leg exists. A task failed in its first
+  // second (the container could not write its own mount), and nothing closed it: the deadline was
+  // half an hour away, the relay still had it live so it was no orphan, and /code/list -- which is
+  // what the bot's watcher polls -- reads the rows as they are. The Coding strip said "running,
+  // 9m 38s" ten minutes after the container had exited 2, and the bot was never told anything.
+  const { edge, seen } = sweepWith({
+    ps: `${psLine("cccccccccccc", NOW + 1_700_000)}\n`,
+    rows: [{ taskId: "cccccccccccc", state: "running", startedAt: NOW - 90_000, claimId: 13, provider: "local" }],
+    inspect: "exited\t2\tfalse",
+  });
+  edge.adopt("demo", [{ taskId: "cccccccccccc", state: "running", provider: "local", deadlineAt: NOW + 1_700_000 }]);
+  const swept = await edge.sweep("the timer");
+  assert.equal(swept.settled, 1, "the sweep is the only real wall clock, so settling is its job");
+  assert.equal(seen.closed.length, 1, "the control plane's row is closed, so the minutes are billed");
+  assert.equal(seen.closed[0].id, 13);
+  assert.equal(seen.closed[0].outcome, "failed");
+  assert.equal(seen.rows.at(-1).state, "failed", "and the workspace's own row stops saying running");
+  assert.equal(edge.liveCount(), 0, "so the concurrency cap does not read one high for ever");
+});
+
+test("a live task whose container really is running is left alone by that same leg", async () => {
+  const { edge, seen } = sweepWith({
+    ps: `${psLine("dddddddddddd", NOW + 1_700_000)}\n`,
+    rows: [{ taskId: "dddddddddddd", state: "running", startedAt: NOW - 90_000, claimId: 14, provider: "local" }],
+    inspect: "running\t0\tfalse",
+  });
+  edge.adopt("demo", [{ taskId: "dddddddddddd", state: "running", provider: "local", deadlineAt: NOW + 1_700_000 }]);
+  const swept = await edge.sweep("the timer");
+  assert.equal(swept.settled, 0);
+  assert.equal(seen.closed.length, 0);
+  assert.equal(edge.liveCount(), 1);
 });
 
 test("a task past its deadline is closed as timed out, in the words the bot reads", async () => {
