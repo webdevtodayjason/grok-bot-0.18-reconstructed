@@ -47,6 +47,7 @@ import { openStore, burnPasswordTime, normalizeEmail } from "./store.mjs";
 import { createAdminApi } from "./admin.mjs";
 import { createMailDirectory, createMailSends, mailDomain } from "./mail.mjs";
 import { createVoiceLog } from "./voice.mjs";
+import { createCodeTasks } from "./code.mjs";
 import { INTAKE_BYTES as FEEDBACK_BODY_BYTES, normalizeReport } from "./feedback.mjs";
 import { createProxyClient, includedModelRows } from "./proxy.mjs";
 import {
@@ -596,6 +597,12 @@ export function createApp(options = {}) {
   // cp/voice.mjs carries the reasoning.
   const voice = createVoiceLog({ store, config, now });
 
+  // CODE-1. The coding task ledger, the per-task credential and the coding deployment, beside the
+  // mail send log and over the same store for the same reason: the relay runs the container and this
+  // service owns everything that can be revoked or billed. It is handed the proxy client this process
+  // already built, so there is one client and one master key in here rather than two.
+  const codeTasks = createCodeTasks({ store, proxy, now });
+
   // Its own file, handed the pieces this one already owns, so there is one store, one Coolify
   // client and one session verifier in this process rather than two. It mounts below, before the
   // operator-token routes, and every route inside it refuses anything that is not a super admin.
@@ -1059,6 +1066,77 @@ export function createApp(options = {}) {
         const answer = mailSends.closeSend(body.id, body.outcome, body.resendId, body.detail);
         return json(response, answer.ok ? 200 : 400, answer);
       }
+    }
+
+    // ---- a coding task's credential and its ledger (CODE-1, docs/CODE.md) ----------------------
+    //
+    // Beside the mail send routes above, behind the same one credential, in the same order and with
+    // the same refusals: the method first so a wrong method charges nobody, then CP_RELAY_TOKEN and
+    // deliberately not the admin token. The relay is the only thing that reaches this, because it is
+    // the only thing holding that credential -- a box holds neither, which is what keeps a control
+    // plane credential out of a container a customer's agents run as root in.
+    //
+    // TWO ROUTES AND NOT ONE, the mail shape, and here the reason is money rather than mail: the
+    // claim is taken BEFORE the container exists, because an unstarted task is recoverable and an
+    // unbilled container-hour is not. `open` answers with the task's OWN credential, which is the
+    // only thing on this service that hands a key out, and it hands out one that is capped, scoped to
+    // one model and revoked by `close`.
+    if (segments[1] === "relay" && segments[2] === "code" && segments[3] === "task" && segments.length === 5) {
+      if (method !== "POST") return json(response, 405, { error: "method_not_allowed" });
+      if (!requireRelay(request, response)) return undefined;
+      if (segments[4] === "open") {
+        const answer = await codeTasks.openTask({
+          slug: body.slug, agentId: body.agentId, taskId: body.taskId, provider: body.provider,
+        });
+        // 429 on a cap and 400 on a malformed claim, so the relay can pass the sentence on word for
+        // word rather than inventing one of its own. Anything else that stopped the task from
+        // starting is a 502: it is this side's failure and not the caller's.
+        if (answer.ok) return json(response, 200, answer);
+        if (answer.error === "rate_limited") return json(response, 429, answer);
+        if (answer.error === "bad_request") return json(response, 400, answer);
+        return json(response, 502, answer);
+      }
+      if (segments[4] === "close") {
+        const answer = await codeTasks.closeTask({
+          id: body.id, outcome: body.outcome, minutes: body.minutes, detail: body.detail,
+        });
+        return json(response, answer.ok ? 200 : (answer.error === "not_found" ? 404 : 400), answer);
+      }
+    }
+
+    // The operator's read, and the two settings writes. They are HERE, at /v1/code, and NOT under
+    // /v1/admin, for the same structural reason /v1/mail/sends is: cp/admin.mjs claims every
+    // /v1/admin/* path and answers 404 to anything it does not match itself, so a route added under
+    // that prefix has to be added inside that file -- and that file belongs to another wave.
+    //
+    // The guard is the admin API's OWN requireSuperAdmin rather than this file's requireAdmin, and
+    // that is deliberate: requireAdmin takes the operator bearer only, and the super admin console is
+    // a BROWSER holding a session. A route the panel cannot read is a panel that draws nothing. This
+    // guard takes either, it looks the super_admin flag up in the store on every request, and the
+    // relay's own credential does not open it.
+    if (segments[1] === "code" && segments[2] === "tasks" && segments.length === 3) {
+      if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
+      if (!admin.requireSuperAdmin(request, response).ok) return undefined;
+      const slug = String(url.searchParams.get("slug") ?? "").trim();
+      const asked = Number.parseInt(String(url.searchParams.get("limit") ?? ""), 10);
+      const limit = Number.isFinite(asked) && asked > 0 ? Math.min(asked, 500) : 50;
+      return json(response, 200, {
+        measuredAt: new Date(now()).toISOString(),
+        slug,
+        // The per-workspace rollup the Spend panel draws its one quiet line from, and the rows
+        // themselves when a workspace is named. Both carry nulls through as nulls.
+        tenants: codeTasks.rollup(slug),
+        rows: slug.length > 0 ? codeTasks.listTasks(slug, limit) : [],
+        settings: slug.length > 0 ? codeTasks.settings(slug) : codeTasks.settings(""),
+      });
+    }
+
+    if (segments[1] === "code" && segments[2] === "settings" && segments.length === 3) {
+      if (method !== "POST") return json(response, 405, { error: "method_not_allowed" });
+      const guard = admin.requireSuperAdmin(request, response);
+      if (!guard.ok) return undefined;
+      const answer = codeTasks.setSettings({ ...body, actor: guard.account?.email ?? "the operator token" });
+      return json(response, answer.ok ? 200 : 400, answer);
     }
 
     // The operator's own read of that log. It is HERE, at /v1/mail/sends, and NOT under /v1/admin,

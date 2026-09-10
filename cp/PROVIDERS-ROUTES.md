@@ -405,3 +405,102 @@ words wherever it is drawn. It raises the same 80 percent chip the allowance use
 
 With nothing set, `total` is `null`, `pct` is `null` and `why` tells the operator to read the total
 and the reset off the vendor's page. The page should draw no bar at all rather than a bar at zero.
+
+---
+
+## 11. The Anthropic surface, which exists on this proxy and is not on the tenant list
+
+CODE-1 needs a coding agent, and a coding agent speaks the Anthropic wire: `POST /v1/messages` with
+`x-api-key` and `anthropic-version`, not `chat/completions`. The deployed proxy **does** register
+that surface, and it is deliberately absent from `TENANT_ALLOWED_ROUTES` (`cp/proxy.mjs`).
+
+**What is measured about it, against LiteLLM v1.100.0, which is the build the R750 runs:**
+
+| leg | answer |
+| --- | --- |
+| `/v1/messages` registered on the proxy | **yes** |
+| on an `openai/<model>` deployment | the proxy drives the vendor's **`/responses`** endpoint; the Anthropic surface comes back **HTTP 200 carrying an error body**, which a model narrates as itself refusing |
+| declared **`hosted_vllm/<the same model>`** against the same `api_base` and the same credential | **correct.** Text, system, tools, `tool_use` and `tool_result` round trip, the full SSE sequence arrives, and `count_tokens` answers |
+| a key minted with `TENANT_ALLOWED_ROUTES` | **403** on `/v1/messages`, "Virtual key is not allowed to call this route" |
+
+So the vendor prefix on `plan-zai-code` is a **routing choice made for LiteLLM's translation
+behaviour** and says nothing about the upstream, which is the same Z.AI endpoint `plan-zai` uses.
+Tidying it to `openai/` to match the row it was derived from breaks every coding task into a 200 with
+an error inside it, and nothing goes red. `tests/cp-code-key.test.mjs` asserts the string for that
+reason.
+
+**Why the two paths are not on the tenant list and will not be put there.** The one-line version of
+this feature is adding `/v1/messages` and `/v1/messages/count_tokens` to `TENANT_ALLOWED_ROUTES`. That
+hands **every box on the bridge** an Anthropic door on the operator's own subscriptions, with no
+per-task cap and nothing to revoke. They ride a **per-task key instead** (`cp/code.mjs`
+`CODE_TASK_ROUTES` = the tenant list plus those two), minted per coding task with:
+
+- `key_alias` `titanbot-<slug>-code-<taskId>`, so a tenant revoke can never take a task key and a
+  task revoke can never take the box's key. `cp/proxy.mjs deleteKeyByAlias` posts `titanbot-<slug>`
+  and nothing else.
+- `models` exactly `[plan-zai-code]`.
+- **`max_budget` always and never `soft_budget`**, whatever `CP_PROXY_ENFORCE` says. A soft budget by
+  LiteLLM's own definition never fails a request, and a cap that cannot stop a runaway coding agent is
+  a reading rather than a stop. Observe mode is a deliberate half measure for a *tenant's allowance*;
+  it governs nothing here.
+- no MCP grant and no rpm limit: a sandbox has no egress, so a web tool on this key is a door to
+  nowhere.
+
+`plan-zai-code` also carries **its own `timeout` and `stream_timeout` of 600**, because
+`litellm_settings.request_timeout` is **60** (`deploy/coolify/proxy-config/config.yaml`) and nobody
+restarts the proxy to change it. A coding turn longer than a minute would otherwise come back as a
+provider error. It carries **no `tb_customer_visible` key**, so it can never appear in a customer's
+Settings: `normalizeDeployment` defaults an unknown row to not visible, which is what that default is
+for.
+
+**Spend on a task key is read from `GET /key/info`, before the revoke, and the read has to WAIT.**
+
+The merged design said `/key/info` was "immediate and correct". **Measured on this Mac against the
+deployed image, it is correct and it is not immediate.** A turn the per-token prices say cost
+**$0.1211** read back as `spend 0` at +7 ms and at every second out to +12 s, and came back as exactly
+**0.1211 at +15 s**: a key's own spend is booked by the same batch writer `/spend/logs` is filled
+from (`proxy_batch_write_at`, ten seconds on this install).
+
+So `readSpend` polls to a bounded budget (**20 s**, sized off that 15), stops at the first figure
+above zero, and on timeout records **NULL** with the reason. **A zero is never written**, because on a
+screen it is indistinguishable from a task that cost nothing — which is the same rule the Spend panel
+already keeps about an unmeasured workspace. A task that genuinely made no model call also ends as
+null, and that is honest: from the control plane those two are the same observation.
+
+Two consequences the relay has to know about, and they are why the close is shaped the way it is:
+
+- **`POST /v1/relay/code/task/close` can take up to about twenty seconds.** A relay that gives up
+  early and retries is fine: the row's `ended_at` is written **before** the wait, so the retry hits the
+  already-settled guard and answers `{ok: true, already: true}` at once rather than starting a second
+  wait against the same key.
+- A close interrupted mid-wait leaves a **closed row with `spend_usd` null and `revoked` 0**, which is
+  exactly the shape `sweepTaskKeys` picks up: it finds the key still at the proxy against a closed row
+  and revokes it. That is the recovery path, and it is the reason the row is closed first.
+
+`/spend/logs` is still not used for this. In the same measurement it carried **no rows at all** for
+priced `/v1/messages` calls through three minutes of polling, and it carries no key alias on the rows
+it does hold for them.
+
+```
+POST /v1/relay/code/task/open   { slug, agentId, taskId, provider? }
+  -> 200 { ok, id, key, alias, model, provider, capUsd, minutesCap, cpus, memoryGb, e2bKey? }
+  -> 429 { error: "rate_limited", scope, cap, message }      a cap; no row written
+  -> 400 { error: "bad_request", message }                   a malformed claim
+  -> 502 { error: "no_credential" | "no_provider", message }  this side could not do its job
+POST /v1/relay/code/task/close  { id, outcome, minutes, detail }
+  -> 200 { ok, id, spendUsd, spendWhy, revoked, revokeWhy }
+GET  /v1/code/tasks[?slug=&limit=]   requireSuperAdmin   { measuredAt, tenants[], rows[], settings }
+POST /v1/code/settings               requireSuperAdmin   { ok, written[], settings }
+```
+
+`/v1/code` and not `/v1/admin/code`, for the reason §9 gives about `/v1/mail/sends`: `cp/admin.mjs`
+claims every `/v1/admin/*` path and 404s what it does not match itself. The guard is that file's own
+`requireSuperAdmin` rather than `cp/server.mjs`'s `requireAdmin`, because the super admin console is a
+browser holding a session and `requireAdmin` takes the operator bearer only — a route the panel cannot
+read is a panel that draws nothing.
+
+**The E2B account is write only.** It is an `admin_settings` row whose name `cp/code.mjs` adds to
+`SECRET_SETTINGS` at import, so `listSettings` hands the name back and never the value. It leaves this
+service in exactly one place: inside an `open` answer for a workspace set to `e2b`. No route reads it,
+no panel renders it, no verb prints it, and `code e2b-key` takes it on stdin and prints a length and a
+sha256 prefix.

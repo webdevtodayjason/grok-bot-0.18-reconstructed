@@ -30,6 +30,14 @@
 //   node cp/cli.mjs voice policy <slug>
 //   node cp/cli.mjs voice cap <slug> --day-minutes N [--session-minutes N] [--vendors xai,openai|none]
 //   node cp/cli.mjs voice usage [<slug>] [--day YYYY-MM-DD]
+//   node cp/cli.mjs code tasks [<slug>] [--limit n]
+//   node cp/cli.mjs code spend [<slug>]
+//   node cp/cli.mjs code keys sweep [--dry-run]
+//   node cp/cli.mjs code deployment ensure [--dry-run]
+//   node cp/cli.mjs code provider <slug> local|e2b
+//   node cp/cli.mjs code e2b-key
+//   node cp/cli.mjs code cap <slug> [--usd n] [--minutes n] [--concurrent n] [--daily n]
+//   node cp/cli.mjs code selftest --tenant <slug>
 //   node cp/cli.mjs feedback list|show|approve|suppress|close|issue|digest|github-token
 //   node cp/cli.mjs marketplace list
 //   node cp/cli.mjs marketplace verify [--row <id>] [--fixtures] [--write]
@@ -62,6 +70,7 @@ import { TENANT_ALLOWED_ROUTES, createProxyClient, proxyKeyAlias, tenantRoutesFo
 import { tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken } from "./session.mjs";
 import { openStore } from "./store.mjs";
 import { mailDomain } from "./mail.mjs";
+import { createCodeTasks } from "./code.mjs";
 import { buildDigest } from "./feedback.mjs";
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -98,6 +107,9 @@ const VALUED_FLAGS = new Set([
   // workspace that has not talked. Caught on this Mac 2026-09-09 by a gate that passed for the wrong
   // reason: both readings gave an empty answer.
   "--day-minutes", "--session-minutes", "--vendors", "--day",
+  // CODE-1. Everything the coding verbs take a value for. A flag missing from this set has its
+  // VALUE read as a positional, so `code cap demo --usd 5` would act on the workspace "5".
+  "--limit", "--usd", "--minutes", "--concurrent", "--daily", "--cpus", "--memory", "--tenant",
 ]);
 const positional = (args) => {
   const values = [];
@@ -1377,6 +1389,14 @@ const USAGE = [
   "node cp/cli.mjs voice policy <slug>",
   "node cp/cli.mjs voice cap <slug> --day-minutes N [--session-minutes N] [--vendors xai,openai|none]",
   "node cp/cli.mjs voice usage [<slug>] [--day YYYY-MM-DD]",
+  "node cp/cli.mjs code tasks [<slug>] [--limit n]",
+  "node cp/cli.mjs code spend [<slug>]",
+  "node cp/cli.mjs code keys sweep [--dry-run]",
+  "node cp/cli.mjs code deployment ensure [--dry-run]",
+  "node cp/cli.mjs code provider <slug> local|e2b",
+  "node cp/cli.mjs code e2b-key",
+  "node cp/cli.mjs code cap <slug> [--usd n] [--minutes n] [--concurrent n] [--daily n]",
+  "node cp/cli.mjs code selftest --tenant <slug>",
   "node cp/cli.mjs feedback list [--tier critical|quality|observation] [--state new|approved|filed|suppressed|closed] [--tenant <slug>] [--since 7d]",
   "node cp/cli.mjs feedback show <id>",
   "node cp/cli.mjs feedback approve|suppress|close <id>",
@@ -1401,9 +1421,288 @@ const USAGE = [
   "feedback lists what the agents reported and their operators chose to send. Both gates already happened: approve, file or suppress.",
   "feedback github-token reads the token off the terminal, proves it against the repository, and prints a length and a hash. Never an argument.",
   "marketplace verify re-reads the vendor documentation the marketing rows depend on. It fetches pages and starts no browser, so it spends nothing.",
+  "code tasks and code spend read the coding task ledger. A task carries no title and no instructions here: those are the customer's and they stay in their workspace.",
+  "code keys sweep, code deployment ensure and code selftest run in this container: they need CP_PROXY_MASTER_KEY, which reaches two places and a browser is not one.",
+  "code selftest mints one real per-task key, runs ONE turn on the coding model, reads its spend, revokes it and proves the same key is then refused. It spends a few cents of the plan.",
+  "code e2b-key reads the cloud sandbox account from stdin and never from an argument. Nothing reads it back: it is handed to a task and nowhere else.",
   "marketplace verify --write also stamps the corrected dates back into source/shared/marketplace/catalog.ts, which is how a flip reaches a customer at the next release.",
   "CP_ADMIN_TOKEN and CP_PUBLIC_URL come from the environment.",
 ].join("\n");
+
+// ---- coding tasks (CODE-1, docs/CODE.md) --------------------------------------------------------
+//
+// WHICH OF THESE GO OVER HTTP AND WHICH DO NOT, and it is the same split the proxy verbs make for
+// the same reason. `code tasks`, `code spend`, `code provider`, `code cap` and `code e2b-key` go
+// over the api: on the R750 the ledger is inside the control plane container and the operator types
+// this on a Mac, so a verb that opened the store would answer "no coding tasks yet" over a live
+// ledger and nothing would error -- which is exactly what `mail list` did on 2026-09-09 over a live
+// directory of nine. `code keys sweep`, `code deployment ensure` and `code selftest` need
+// CP_PROXY_MASTER_KEY, which reaches two places and a browser is not one of them, so they run in
+// process against the same store the service has open.
+
+const codeLedger = () => {
+  const store = openLedger();
+  return { store, tasks: createCodeTasks({ store, proxy: proxyClient() }) };
+};
+
+/** A dollar figure, or the words. NEVER a zero standing in for a number nobody read. */
+const usd = (value) => (value === null || value === undefined ? "not measured" : `$${Number(value).toFixed(4)}`);
+
+async function codeTasksVerb(args) {
+  const slug = positional(args)[0] ?? "";
+  const limit = Number.parseInt(String(flag(args, "--limit") ?? ""), 10);
+  const query = [slug.length > 0 ? `slug=${encodeURIComponent(slug)}` : "", Number.isFinite(limit) && limit > 0 ? `limit=${limit}` : ""]
+    .filter((one) => one.length > 0).join("&");
+  const answer = await api("GET", `/v1/code/tasks${query.length > 0 ? `?${query}` : ""}`);
+  const rows = Array.isArray(answer?.rows) ? answer.rows : [];
+  if (slug.length === 0) {
+    const tenants = Array.isArray(answer?.tenants) ? answer.tenants : [];
+    if (tenants.length === 0) {
+      out("no coding tasks yet");
+      out("a bot starts one itself; `code tasks <slug>` shows one workspace's");
+      return;
+    }
+    out(`${pad("workspace", 22)}${pad("tasks", 8)}${pad("running", 9)}${pad("minutes", 10)}${pad("spend", 14)}providers`);
+    for (const row of tenants) {
+      out(`${pad(row.slug, 22)}${pad(row.tasks, 8)}${pad(row.running, 9)}`
+        + `${pad(row.minutesUnmeasured > 0 ? `${row.minutes}+` : row.minutes, 10)}`
+        + `${pad(row.spendUnmeasured >= row.tasks ? "not measured" : usd(row.spendUsd), 14)}${(row.providers ?? []).join(", ")}`);
+      if (row.e2bNote) out(`  note: ${row.e2bNote}`);
+      if (row.minutesUnmeasured > 0) out(`  ${row.minutesUnmeasured} of these carry no minutes, so the total is at least that much and not exactly it`);
+    }
+    return;
+  }
+  if (rows.length === 0) {
+    out(`${slug} has started no coding tasks`);
+    return;
+  }
+  out(`${pad("started", 26)}${pad("task", 22)}${pad("provider", 10)}${pad("min", 7)}${pad("spend", 14)}${pad("outcome", 12)}bot`);
+  for (const row of rows) {
+    out(`${pad(row.startedAt, 26)}${pad(row.taskId, 22)}${pad(row.provider, 10)}`
+      + `${pad(row.minutes === null ? "-" : row.minutes, 7)}${pad(usd(row.spendUsd), 14)}${pad(row.outcome, 12)}${row.agentId || "(unknown)"}`);
+    if (row.detail) out(`  ${row.detail}`);
+  }
+  const conf = answer?.settings ?? {};
+  out(`${rows.length} task(s); the caps are $${Number(conf.capUsd ?? 0).toFixed(2)} and ${conf.wallClockMinutes ?? "?"} minutes a task, `
+    + `${conf.concurrent ?? "?"} at once and ${conf.daily ?? "?"} a day`);
+  out("there is no title and no instructions in this ledger: those are the customer's and they stay in their workspace");
+  out("a row whose spend reads `not measured` is one the proxy could not be asked about, which is not the same as a task that cost nothing");
+}
+
+async function codeSpend(args) {
+  const slug = positional(args)[0] ?? "";
+  const answer = await api("GET", `/v1/code/tasks${slug.length > 0 ? `?slug=${encodeURIComponent(slug)}` : ""}`);
+  const tenants = (Array.isArray(answer?.tenants) ? answer.tenants : []).filter((row) => slug.length === 0 || row.slug === slug);
+  if (tenants.length === 0) return out(slug.length > 0 ? `${slug} has started no coding tasks` : "no coding tasks yet");
+  let dollars = 0;
+  let unmeasured = 0;
+  for (const row of tenants) {
+    const measured = row.tasks - row.spendUnmeasured;
+    out(`${pad(row.slug, 22)}${row.tasks} task(s), ${row.minutes} minute(s), `
+      + `${measured === 0 ? "spend not measured" : `${usd(row.spendUsd)} over ${measured} of them`}`);
+    if (row.e2bNote) out(`  note: ${row.e2bNote}`);
+    dollars += Number(row.spendUsd ?? 0);
+    unmeasured += Number(row.spendUnmeasured ?? 0);
+  }
+  // A TOTAL THAT LEFT ROWS OUT SAYS SO. Summing across workspaces turns every unmeasured task into
+  // a zero, and a total that quietly dropped three of them reads exactly like a quiet week.
+  out(`total ${usd(dollars)} read off the per-task keys`);
+  if (unmeasured > 0) out(`${unmeasured} task(s) are not in that total, because nothing could be read about what their key spent`);
+  return undefined;
+}
+
+async function codeKeys(args) {
+  const [what] = positional(args);
+  if (what !== "sweep") die("node cp/cli.mjs code keys sweep [--dry-run]");
+  requireProxyConfigured();
+  const dryRun = hasFlag(args, "--dry-run");
+  const { store, tasks } = codeLedger();
+  try {
+    const answer = await tasks.sweepTaskKeys({ dryRun });
+    if (!answer.ok) out(`the proxy's key list could not be read: ${answer.why}`);
+    for (const alias of answer.orphans) {
+      out(`${dryRun ? "would delete" : answer.deleted.includes(alias) ? "deleted" : "COULD NOT DELETE"} ${alias}`);
+    }
+    for (const row of answer.closed) out(`${dryRun ? "would close" : "closed"} ${row.tenant} task ${row.taskId} as lost`);
+    if (answer.orphans.length === 0 && answer.closed.length === 0) {
+      out("nothing orphaned: every coding key at the proxy belongs to a task that is still running, and every claim has been settled");
+    }
+    if (!dryRun && answer.orphans.length > answer.deleted.length) {
+      out("a coding key that would not delete is a live credential on your own subscriptions. Run this again, and if it persists look at the proxy.");
+    }
+  } finally { store.close(); }
+}
+
+async function codeDeployment(args) {
+  const [what] = positional(args);
+  if (what !== "ensure") die("node cp/cli.mjs code deployment ensure [--dry-run]");
+  requireProxyConfigured();
+  const dryRun = hasFlag(args, "--dry-run");
+  const { store, tasks } = codeLedger();
+  try {
+    const answer = await tasks.ensureCodingDeployment({ dryRun });
+    if (!answer.ok) {
+      if (answer.exists === true) {
+        out(answer.why);
+        for (const id of answer.deployments ?? []) out(`  deployment ${id}`);
+        return;
+      }
+      die(answer.why);
+    }
+    const plan = answer.plan;
+    out(`${dryRun ? "would create" : "created"} ${plan.alias} as ${plan.vendorModel}`);
+    out(`  derived from ${plan.from.alias} (${plan.from.provider || "no provider recorded"}), deployment ${plan.from.id}`);
+    out(`  same endpoint and the same credential slot; its own timeout is ${plan.params.timeout} seconds, because the proxy's global one is 60 and the proxy is not restarted for this`);
+    out(`  ${plan.priced ? "priced per token the same as the row it came from" : "NOT PRICED, so every dollar figure about a coding task will read as not measured"}`);
+    if (plan.from.poolSize > 1) {
+      out(`  note: ${plan.from.alias} is a pool of ${plan.from.poolSize}; the coding model rides one of them, so a coding task spends one subscription`);
+    }
+    out("  the vendor prefix is hosted_vllm/ on purpose: it is what makes the Anthropic wire work through this proxy. Changing it to openai/ makes every coding task answer 200 with an error inside it.");
+    if (!dryRun) out(`  nothing else moved: ${plan.from.alias} is untouched and the proxy was not restarted`);
+  } finally { store.close(); }
+  return undefined;
+}
+
+async function codeProvider(args) {
+  const [slug, provider] = positional(args);
+  if (!slug || !["local", "e2b"].includes(String(provider))) die("node cp/cli.mjs code provider <slug> local|e2b");
+  const answer = await api("POST", "/v1/code/settings", { slug, provider });
+  const conf = answer?.settings ?? {};
+  out(`${slug}: coding tasks run ${conf.provider === "e2b" ? "on a cloud sandbox" : "on this system's own computer"}`);
+  if (conf.provider === "e2b" && conf.e2bKeySet !== true) {
+    out("WARNING: nobody has given this system a cloud sandbox account yet, so a task will be refused with a sentence saying so. `code e2b-key` sets it.");
+  }
+  if (conf.provider === "e2b") {
+    out("note: a cloud sandbox cannot reach this system's own metering, so its model spend is E2B's bill and is not attributed per workspace");
+  }
+}
+
+async function codeE2bKey() {
+  const value = await readSecret("E2B key: ");
+  const answer = await api("POST", "/v1/code/settings", { e2bKey: value });
+  out(`stored: ${evidenceLine(value)}`);
+  out((answer?.settings ?? {}).e2bKeySet === true
+    ? "the control plane holds a cloud sandbox account now"
+    : "the control plane did not keep it, which is a bug");
+  out("nothing reads it back: no listing, no panel and no verb. It is handed to a task that needs it and nowhere else.");
+}
+
+async function codeCap(args) {
+  const [slug] = positional(args);
+  if (!slug) die("node cp/cli.mjs code cap <slug> [--usd n] [--minutes n] [--concurrent n] [--daily n] [--cpus n] [--memory n]");
+  const body = { slug };
+  for (const [name, field] of [["--usd", "capUsd"], ["--minutes", "wallClockMinutes"], ["--concurrent", "concurrent"],
+    ["--daily", "daily"], ["--cpus", "cpus"], ["--memory", "memoryGb"]]) {
+    const raw = flag(args, name);
+    if (raw === null) continue;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) die(`${name} has to be a number greater than zero, so nothing was changed`);
+    body[field] = value;
+  }
+  if (Object.keys(body).length === 1) die("name at least one of --usd, --minutes, --concurrent, --daily, --cpus or --memory");
+  const answer = await api("POST", "/v1/code/settings", body);
+  const conf = answer?.settings ?? {};
+  out(`${slug}: $${Number(conf.capUsd ?? 0).toFixed(2)} and ${conf.wallClockMinutes} minutes a task, `
+    + `${conf.concurrent} at once, ${conf.daily} a day, ${conf.cpus} cpu and ${conf.memoryGb} GB`);
+  out("the cap is a hard budget on the task's own key, so a runaway task is stopped rather than reported");
+}
+
+/**
+ * THE WAVE'S GO/NO-GO, and a product mechanism rather than an ssh session.
+ *
+ * It mints a REAL per-task key, posts ONE /v1/messages turn on the coding model against the live
+ * pool, prints what came back, reads the spend off /key/info, revokes the key and proves the same
+ * key is then refused. Every one of those five is something the local provider cannot work without,
+ * so running them together in one verb is the difference between "the ship is good" and "the ship
+ * looked good".
+ *
+ * It costs a few cents of the plan and it leaves a real ledger row, because it really ran.
+ */
+async function codeSelftest(args) {
+  requireProxyConfigured();
+  const slug = String(flag(args, "--tenant") ?? positional(args)[0] ?? "").trim();
+  if (slug.length === 0) die("node cp/cli.mjs code selftest --tenant <slug>");
+  const { store, tasks } = codeLedger();
+  const taskId = `selftest-${Date.now().toString(36)}`;
+  try {
+    if (store.getTenant(slug) == null) die(`there is no workspace called ${slug} in the ledger`);
+    const conf = tasks.settings(slug);
+    out(`workspace ${slug}, model ${conf.model}, cap $${Number(conf.capUsd).toFixed(2)}`);
+
+    const opened = await tasks.openTask({ slug, agentId: "cp-selftest", taskId, provider: "local" });
+    if (!opened.ok) die(`the task would not open: ${opened.message}${opened.detail ? ` (${opened.detail})` : ""}`);
+    out(`minted ${opened.alias}, ${evidenceLine(opened.key)}`);
+
+    // ONE turn on the Anthropic wire, which is the wire Claude Code speaks. x-api-key rather than a
+    // bearer, because that is the header the agent inside a sandbox will really send.
+    const started = Date.now();
+    const response = await askMessages(conf.model, opened.key, {
+      max_tokens: 64,
+      system: "Answer in one word.",
+      messages: [{ role: "user", content: "Reply with the single word ok." }],
+    }, 120_000);
+    const elapsed = Date.now() - started;
+    out(`POST /v1/messages answered ${response.status} in ${elapsed} ms`);
+    if (response.status !== 200) {
+      out(`  ${String(response.text).slice(0, 300)}`);
+    } else {
+      const parsed = response.body ?? {};
+      const said = (Array.isArray(parsed.content) ? parsed.content : [])
+        .filter((part) => part?.type === "text").map((part) => part.text).join(" ").trim();
+      out(`  stop_reason ${String(parsed.stop_reason ?? "(none)")}, model ${String(parsed.model ?? "(none)")}`);
+      out(`  in ${Number(parsed.usage?.input_tokens ?? 0)} tokens, out ${Number(parsed.usage?.output_tokens ?? 0)}, said ${JSON.stringify(said.slice(0, 80))}`);
+    }
+
+    const closed = await tasks.closeTask({
+      id: opened.id,
+      outcome: response.status === 200 ? "selftest" : "failed",
+      minutes: Math.round((elapsed / 60_000) * 100) / 100,
+      detail: response.status === 200 ? "" : `the one turn answered ${response.status}`,
+    });
+    out(`spend off /key/info: ${usd(closed.spendUsd)}${closed.spendWhy ? ` (${closed.spendWhy})` : ""}`);
+    out(`revoked: ${closed.revoked ? "yes" : `NO -- ${closed.revokeWhy}`}`);
+
+    // And the one assertion the whole credential design rests on: the key is dead.
+    const after = await askMessages(conf.model, opened.key, { max_tokens: 8, messages: [{ role: "user", content: "ok" }] }, 30_000);
+    out(`the same key after the revoke: ${after.status}${after.status === 401 ? " (refused, which is the answer)" : " -- EXPECTED 401"}`);
+
+    if (response.status !== 200 || !closed.revoked || after.status !== 401) {
+      die("this is a NO-GO: the local provider has no coding agent without a clean turn on this wire, a revoke that lands and a key that is then refused.", 2);
+    }
+    out("GO: one turn on the Anthropic wire, the spend read, the key revoked and then refused.");
+  } finally { store.close(); }
+}
+
+/** One Anthropic-shaped request at the proxy, on a task key. Never throws; a failure is a status 0. */
+async function askMessages(model, key, body, timeoutMs) {
+  try {
+    const response = await fetch(`${config.proxyUrl}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "x-api-key": String(key),
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+        "user-agent": "titanbot-gate/cp-code-selftest",
+      },
+      body: JSON.stringify({ model: String(model), ...body }),
+      signal: AbortSignal.timeout(Number(timeoutMs)),
+    });
+    const text = await response.text();
+    let parsed = null;
+    if (text.length > 0) { try { parsed = JSON.parse(text); } catch { parsed = null; } }
+    return { status: response.status, text, body: parsed };
+  } catch (error) {
+    return { status: 0, text: String(error?.message ?? error), body: null };
+  }
+}
+
+
+// The MAIL section follows, and tests/cp-mail.test.mjs reads this file as TEXT from
+// `async function mailList` to the dispatch table and asserts that nothing in that span opens the
+// sqlite store. That is a real rule (a mail verb that opened the store answered "nothing sent yet"
+// over a live log on the R750) and the span is how it is enforced, so ANY NEW VERB SECTION GOES
+// ABOVE THIS LINE. The coding verbs are here for exactly that reason: three of them have to open the
+// store, because they need CP_PROXY_MASTER_KEY and the ledger in the same process.
 
 // ---- the per-bot mail directory (MAIL-2, docs/MAIL.md) -------------------------------------------
 //
@@ -1643,6 +1942,14 @@ const commands = {
   "voice policy": voicePolicy,
   "voice cap": voiceCap,
   "voice usage": voiceUsage,
+  "code tasks": codeTasksVerb,
+  "code spend": codeSpend,
+  "code keys": codeKeys,
+  "code deployment": codeDeployment,
+  "code provider": codeProvider,
+  "code e2b-key": codeE2bKey,
+  "code cap": codeCap,
+  "code selftest": codeSelftest,
   "feedback list": feedbackList,
   "feedback show": feedbackShow,
   "feedback approve": feedbackDecide("approve"),

@@ -1281,14 +1281,66 @@
 
   const spendHeadline = (answer) => ({ ...spendChips(answer)[0], key: "spend", label: "Spend this month" });
 
+  // CODE-1. What a workspace's coding tasks cost, as ONE QUIET LINE inside the Client cell of the
+  // Spend table and not as a seventh column: a column would mean editing cp/admin/index.html and the
+  // literal 6 in three rowSpanning calls, and three waves are in this file this week.
+  //
+  // It is its own fetch rather than a field on /v1/admin/spend, because that route lives in
+  // cp/admin.mjs and this wave does not edit that file. A second request on one panel is the cost of
+  // that, and it is paid on a panel the operator opens rather than on anything a customer waits for.
+  //
+  // THE PANEL'S OWN HONESTY RULE IS KEPT. A read that failed says so and why; a task whose key could
+  // not be asked about is counted and named rather than summed as a zero; and an E2B task says its
+  // model spend is not metered here at all. None of those three ever draws $0.00.
+  async function codeLines() {
+    try {
+      const answer = await api("GET", "/v1/code/tasks");
+      const byTenant = new Map();
+      for (const row of Array.isArray(answer?.tenants) ? answer.tenants : []) byTenant.set(String(row.slug), row);
+      return { ok: true, byTenant };
+    } catch (error) {
+      return { ok: false, why: String(error?.message ?? error), byTenant: new Map() };
+    }
+  }
+
+  /**
+   * One line of words about one workspace's coding tasks, or nothing at all when it has had none.
+   *
+   * A FAILED READ IS SAID ONCE, on the panel's own note below, and not on every row: the failure is
+   * about the whole read rather than about one client, and six copies of one sentence down a column
+   * is the noise that makes a person stop reading the column.
+   */
+  function codeLine(code, slug) {
+    if (code.ok !== true) return null;
+    const row = code.byTenant.get(String(slug));
+    if (row == null) return null;
+    const measured = Number(row.tasks) - Number(row.spendUnmeasured ?? 0);
+    const parts = [`${row.tasks} coding task${Number(row.tasks) === 1 ? "" : "s"}`, `${row.minutes} minute${Number(row.minutes) === 1 ? "" : "s"}`];
+    // A dollar figure only where a key was really read. Where none was, the words say which, because
+    // "$0.21" beside four tasks of which two were never measured is a number an operator would
+    // budget against.
+    parts.push(measured > 0 ? `${dollars(row.spendUsd)}${measured < Number(row.tasks) ? ` over ${measured} of them` : ""}` : "spend not measured");
+    const node = el("div", "quiet", parts.join(", "));
+    const notes = [];
+    if (Number(row.running) > 0) notes.push(`${row.running} running now`);
+    if (row.e2bNote) notes.push(row.e2bNote);
+    if (Number(row.minutesUnmeasured ?? 0) > 0) notes.push(`${row.minutesUnmeasured} carry no minutes, so that total is a floor`);
+    if (notes.length > 0) node.title = notes.join("; ");
+    return node;
+  }
+
   async function loadSpend() {
     const answer = await api("GET", "/v1/admin/spend");
+    const code = await codeLines();
     summarise("panel-spend", spendChips(answer), spendHeadline(answer));
     const body = document.querySelector("#spend tbody");
     clear(body);
-    $("spendNote").textContent = answer.configured
+    $("spendNote").textContent = (answer.configured
       ? `${answer.note} Month is ${answer.window.month} UTC.${answer.enforced ? "" : " This server is in observe mode, so an allowance is recorded and nothing is stopped."}`
-      : `Not measured: ${answer.why}`;
+      : `Not measured: ${answer.why}`)
+      // CODE-1. Coding tasks are a line under each client in the table. When THAT read failed the
+      // words say so here, once, rather than a zero or a silent gap where minutes should be.
+      + (code.ok === true ? "" : ` Sandbox minutes not measured: ${code.why}.`);
     if (answer.clients.length === 0) {
       body.appendChild(rowSpanning(6, "No customers yet."));
       return;
@@ -1298,6 +1350,10 @@
       const who = document.createElement("td");
       who.appendChild(el("strong", null, client.name || client.slug));
       who.appendChild(el("div", "quiet", client.slug));
+      // CODE-1's one additive line. Nothing at all for a workspace that has run no coding task: an
+      // empty row of zeroes on every client would be five-sixths noise.
+      const coding = codeLine(code, client.slug);
+      if (coding != null) who.appendChild(coding);
       tr.appendChild(who);
 
       // A ZERO FROM A PROXY NOBODY ASKED IS NOT A ZERO. With no proxy configured this route still

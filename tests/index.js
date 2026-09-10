@@ -240,3 +240,7 @@ import "./machine-room-mobile.test.mjs";
 import "./code-sandbox-plan.test.mjs";
 import "./code-edge-routes.test.mjs";
 import "./code-edge-sweep.test.mjs";
+// CODE-1: a coding task's money. The per-task credential and the hidden coding deployment, and the
+// ledger, the caps, the two relay routes and the operator's read that sit over them.
+import "./cp-code-key.test.mjs";
+import "./cp-code.test.mjs";
