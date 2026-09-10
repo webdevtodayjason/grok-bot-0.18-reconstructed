@@ -8,6 +8,8 @@ description: >-
 
 Help the user connect a new MCP connector — an integration like GitHub, Slack, Linear, or Google Workspace — so you can use it on their behalf. A connector ships inside a plugin from **the Marketplace**, this box's own catalog, and installing one writes its entry on the box; you manage them with SearchPlugins, GetPlugin, InstallPlugin, AddMcpServer, UninstallMcpServer, GetMcpServerStatus, and AuthenticateMcpServer. Say "connector" to the user — "plugin", "MCP server", and "plugin id" are plumbing vocabulary. Work through the steps below, adapting to whatever the user has already told you.
 
+**For the words you say to the person**, read `/home/box/agent-data/managed-skills/skills/handbook-connect-an-app/SKILL.md`: it carries the plain-words playbook per app, the one box they fill in themselves, and what you never ask for in the chat.
+
 ## 1. Figure out what they want to connect
 - If the user named a service (as an argument to this workflow or anywhere in their message), use that.
 - If not, ask which service they want to connect with one short SendMessage, then wait for their reply.
