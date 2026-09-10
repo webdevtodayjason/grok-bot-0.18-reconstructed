@@ -1177,3 +1177,581 @@ test("VOICE-1 in a real browser: the button is on screen, a mouse can press it, 
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+// ================================================================== VOICE-7
+//
+// Jason, 2026-09-10 11:09: "a semi-transparent modal over the current chat window where that is
+// being built out. We see the words being created, and when it's done, that just becomes the next
+// line ... Also the talk button should be either: press it and it's on, so it's a toggle, on or
+// off; or press and hold to talk and let go. That should be a setting for the user."
+//
+// The panel's state machine and the two modes, driven with no browser through the same fake window
+// the rest of this file uses. What only a browser can answer -- that the footer does not move and
+// that a thumb can hold a 38 px circle -- is scripts/verify-voice.mjs --leg overlay.
+
+/** The stub worklet's port, so a test can hand the capture a block of samples by hand. */
+let capturePort = null;
+
+/** A window with a document that has a body, which is what makes the observer run. */
+const fakeDocument = (extra = {}) => ({
+  readyState: "complete",
+  body: { dataset: {} },
+  activeElement: { tagName: "BODY" },
+  querySelector: () => null,
+  getElementById: () => null,
+  addEventListener: () => {},
+  ...extra,
+});
+const fakeAudioWindow = () => ({
+  MutationObserver: class { observe() {} },
+  requestAnimationFrame: (fn) => setTimeout(fn, 0),
+  AudioContext: class {
+    constructor() { this.audioWorklet = { addModule: async () => {} }; this.currentTime = 0; }
+    createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+    createAnalyser() { return { fftSize: 2048, connect() {}, getFloatTimeDomainData() {} }; }
+    close() {}
+  },
+  AudioWorkletNode: class { constructor() { this.port = {}; capturePort = this.port; } disconnect() {} },
+  Blob: class {}, URL: { createObjectURL: () => "blob:x", revokeObjectURL: () => {} },
+  navigator: { mediaDevices: { getUserMedia: async () => ({ getTracks: () => [] }) } },
+});
+
+/** A voice with a socket that opens, a microphone that works, and a record of what reached the wire. */
+async function loadTalking(extra = {}) {
+  const sent = { frames: 0, json: [] };
+  class OpenSocket {
+    constructor() { this.readyState = 1; this.handlers = {}; setTimeout(() => this.handlers.open?.({}), 0); }
+    addEventListener(name, fn) { this.handlers[name] = fn; }
+    send(payload) {
+      sent.frames += 1;
+      if (typeof payload === "string") { try { sent.json.push(JSON.parse(payload)); } catch { /* audio */ } }
+    }
+    close() { this.readyState = 3; }
+  }
+  const loaded = await loadVoice({ window: { __voiceSocketClass: OpenSocket, ...fakeAudioWindow(), ...extra } });
+  return { ...loaded, sent };
+}
+
+test("VOICE-7 panel: open, partials that REPLACE, and a final that dissolves into exactly one row", async () => {
+  const { voice } = await loadVoice();
+  const { makeCaption } = await import("../ui/voice-edge.mjs");
+
+  // BOTH VENDORS FIRST, through the relay's own normaliser, because the panel is only allowed to be
+  // this simple if replace-whole is true on either wire. One service's transcript is cumulative with
+  // its own corrections; the other's is a delta that later deltas may revise.
+  const cumulative = makeCaption("cumulative");
+  const incremental = makeCaption("incremental");
+  const xai = [cumulative.apply({ transcript: "open" }), cumulative.apply({ transcript: "open the" }), cumulative.apply({ transcript: "open the box" })];
+  const openai = [incremental.apply({ delta: "open" }), incremental.apply({ delta: " the" }), incremental.apply({ delta: " box" })];
+  assert.deepEqual(xai, ["open", "open the", "open the box"]);
+  assert.deepEqual(openai, ["open", "open the", "open the box"], "the page sees the same three strings on either service");
+
+  for (const words of [xai, openai]) {
+    frame(voice, { t: "hear-begin", turn: 1, itemId: "item_user" });
+    assert.equal(voice._state.heard.open, true, "the panel is up as soon as the person starts talking");
+    assert.equal(voice._state.heard.text, "", "with no words yet, which is also all a service that sends none ever gives us");
+    for (const one of words) frame(voice, { t: "hear", turn: 1, text: one, final: false });
+    // REPLACED, never appended. Appending would read "openopen theopen the box".
+    assert.equal(voice._state.heard.text, "open the box");
+    assert.equal(voice._state.heard.phase, "partial");
+
+    // The settled transcript is STILL a partial: it races the model's tool call, and dissolving here
+    // would flash the panel back open a moment later.
+    frame(voice, { t: "hear", turn: 1, text: "open the box", final: true });
+    assert.equal(voice._state.heard.open, true);
+
+    // The bytes that went to the agent. A different model produced them, which is exactly why the
+    // panel's last paint has to be this one and not the transcript above.
+    frame(voice, { t: "heard-confirmed", turn: 1, text: "open the box for me", nonce: "voice:s1:1", landed: true });
+    frame(voice, { t: "hear-end", turn: 1, reason: "sent" });
+    assert.equal(voice._state.heard.text, "open the box for me", "the last words a person reads are the ones that became the row");
+    assert.equal(voice._state.lastHeard, "open the box for me");
+    assert.equal(voice._state.lastNonce, "voice:s1:1");
+    await new Promise((resolve) => setTimeout(resolve, 260));
+    assert.equal(voice._state.heard.open, false, "and then it is gone");
+    // KEPT AFTER IT HAS GONE. The row lands through the ordinary transcript poll seconds later, and
+    // proving the two are the same bytes needs the words to outlive the node they were drawn in.
+    assert.equal(voice._state.lastHeard, "open the box for me");
+  }
+});
+
+test("VOICE-7 panel: a late frame from the previous turn never paints over the new one", async () => {
+  // One service does not guarantee that a completed transcript for one utterance arrives before the
+  // next utterance's words, and says to reconcile on its item id. The relay stamps every frame with
+  // its own utterance counter, which is that reconciliation.
+  const { voice } = await loadVoice();
+  frame(voice, { t: "hear-begin", turn: 1, itemId: "item_user" });
+  frame(voice, { t: "hear", turn: 1, text: "open the box", final: false });
+  frame(voice, { t: "heard-confirmed", turn: 1, text: "open the box", nonce: "voice:s1:1", landed: true });
+  frame(voice, { t: "hear-end", turn: 1, reason: "sent" });
+  await new Promise((resolve) => setTimeout(resolve, 260));
+
+  frame(voice, { t: "hear-begin", turn: 2, itemId: "item_user" });
+  frame(voice, { t: "hear", turn: 2, text: "what time is it", final: false });
+  // The previous turn's settled transcript, arriving late.
+  frame(voice, { t: "hear", turn: 1, text: "open the box", final: true });
+  assert.equal(voice._state.heard.text, "what time is it", "an older turn painted over a newer one");
+  // And a stale FINAL cannot dissolve the panel that is up either.
+  frame(voice, { t: "heard-confirmed", turn: 1, text: "open the box", nonce: "voice:s1:1", landed: true });
+  frame(voice, { t: "hear-end", turn: 1, reason: "sent" });
+  assert.equal(voice._state.heard.open, true);
+  assert.equal(voice._state.lastHeard, "open the box", "and the row that did land keeps its words");
+});
+
+test("VOICE-7 panel: the three turns that produce no row still take it away", async () => {
+  // An empty utterance, a yes that closed a card, and a confirm arriving in the same turn as its own
+  // question. Each now sends its own final frame with lands:false. Without them the panel sits over
+  // the conversation with somebody's half sentence in it and nothing ever arrives to finish the turn.
+  for (const one of [
+    { text: "", lands: false, why: "not-caught" },
+    { text: "yes", lands: false, why: "answered-a-card" },
+    { text: "yes", lands: false, why: "same-turn" },
+  ]) {
+    const { voice } = await loadVoice();
+    frame(voice, { t: "hear-begin", turn: 1, itemId: "item_user" });
+    frame(voice, { t: "hear", turn: 1, text: "yes", final: false });
+    frame(voice, { t: "hear-end", turn: 1, reason: one.why });
+    await new Promise((resolve) => setTimeout(resolve, 260));
+    assert.equal(voice._state.heard.open, false, `a ${one.why} turn left the panel up`);
+  }
+});
+
+test("VOICE-7 panel: nothing the agent says ever opens it, and his speaking closes it", async () => {
+  const { voice } = await loadVoice();
+  // His reply is the strip's own line. Until this split both went through one field, so his answer
+  // painted over her sentence mid-turn.
+  frame(voice, { t: "said", text: "I have asked him and he is on it." });
+  assert.equal(voice._state.heard.open, false, "the agent's words opened a panel that is meant to be the person's");
+  assert.equal(voice._state.caption, "I have asked him and he is on it.");
+
+  // And if the echo gate ever slipped, words arriving while he speaks would be his own coming back
+  // through the speakers. A panel is not where anybody should find that out.
+  frame(voice, { t: "hear-begin", turn: 1, itemId: "item_user" });
+  frame(voice, { t: "hear", turn: 1, text: "half a sentence", final: false });
+  assert.equal(voice._state.heard.open, true);
+  frame(voice, { t: "state", value: "speaking" });
+  assert.equal(voice._state.heard.open, false, "no panel while the agent is speaking; the orb is the only sign");
+  // And nothing can open one while he is still speaking either.
+  frame(voice, { t: "hear-begin", turn: 2, itemId: "item_user" });
+  assert.equal(voice._state.heard.open, false);
+});
+
+test("VOICE-7 panel: a turn that simply stops has something that takes the panel away", async () => {
+  // Three no-row turns send their own final frame, but a service that stops mid-turn sends nothing at
+  // all. A panel with somebody's words in it may not sit over their conversation forever.
+  const { voice } = await loadVoice();
+  assert.equal(voice._HEARD_STALE_MS, 8000);
+  const source = await read("ui/machine-room/voice.js");
+  const machine = source.slice(source.indexOf("function armStale"), source.indexOf("function paintOverlay"));
+  assert.match(machine, /function overlayOpen[\s\S]*armStale\(\)/, "opening the panel arms the timer");
+  assert.match(machine, /function overlayPartial[\s\S]*armStale\(\)/, "and every word puts it back");
+  assert.match(machine, /function overlayConfirmed[\s\S]*disarmStale\(\)/, "and the bytes being known takes it away");
+  assert.match(machine, /function overlayEnd[\s\S]*disarmStale\(\)/, "and so does the turn ending");
+  assert.match(machine, /function closeOverlay[\s\S]*disarmStale\(\)/);
+});
+
+test("VOICE-7 panel: an older relay that sends only the three-in-one frame still shows the words", async () => {
+  // A relay restart mid-call leaves an old page against a new relay, and a new page against an old
+  // relay. The second one is this: the `heard` frame VOICE-1 shipped, carrying the partial transcript,
+  // the settled one and the agent's own tool argument under a single shape, with nothing to tell them
+  // apart. A person who is talking and seeing nothing is worse than a panel the stale timer has to
+  // take away, so it still drives the panel.
+  const { voice } = await loadVoice();
+  frame(voice, { t: "heard", text: "open the box" });
+  assert.equal(voice._state.heard.open, true, "the words are still shown");
+  assert.equal(voice._state.heard.text, "open the box");
+
+  // AND IT IS DROPPED THE MOMENT A LABELLED FRAME PROVES IT DOES NOT HAVE TO BE READ. The relay sends
+  // both for this release, and painting both would put the same words on screen twice.
+  const fresh = await loadVoice();
+  frame(fresh.voice, { t: "hear-begin", turn: 1, itemId: "item_user" });
+  frame(fresh.voice, { t: "hear", turn: 1, text: "what time is it", final: false });
+  frame(fresh.voice, { t: "heard", text: "something else entirely" });
+  assert.equal(fresh.voice._state.heard.text, "what time is it",
+    "the old frame painted over the labelled one it is meant to defer to");
+});
+
+test("VOICE-7 panel: no title, no icon, no close control, nothing that reads as a failure", async () => {
+  // host-notes-read-as-errors.md, and it is the reason this is not a dialog. A sheet over somebody's
+  // conversation with machine wording on it gets read as something going wrong.
+  const { voice } = await loadVoice();
+  const markup = voice._overlayMarkup();
+  assert.match(markup, /class="voice-overlay"/);
+  assert.match(markup, /aria-live="polite"/, "the words reach a screen reader as they firm up");
+  assert.match(markup, /hidden/, "and it starts away");
+  for (const wrong of ["<h1", "<h2", "<h3", "<button", 'role="dialog"', 'role="alert"', "aria-modal", "Error", "Warning", "Failed"]) {
+    assert.ok(!markup.includes(wrong), `${wrong} reached the panel, and it is neither a dialog nor a failure`);
+  }
+  assert.equal(voice._LISTENING_WORD, "Listening", "one plain word before the first one arrives, never a condition name");
+  const styles = await read("ui/machine-room/styles.css");
+  assert.match(styles, /\.voice-overlay:not\(\[hidden\]\)/, "[hidden] loses to an author display rule, which this file has been bitten by three times");
+  assert.match(styles, /--glass-strong/, "the panel is the console's own glass rather than a new colour");
+  assert.match(styles, /--blur-soft/);
+  assert.match(styles, /prefers-reduced-motion[\s\S]*?\.voice-overlay-panel \{ transition: none/,
+    "reduced motion skips the dissolve the way the orb animations already do");
+  assert.match(styles, /\.voice-talk \{\n  touch-action: none;/, "a hold on a 38 px circle is otherwise a long-press menu");
+});
+
+test("VOICE-7 panel: it is mounted over the conversation and NEVER inside the footer's grid", async () => {
+  // This is the whole of the footer proof and it is architectural rather than fought for. An element
+  // inserted before #composer becomes a grid item of .control-shelf and adds a row to the footer,
+  // which is the measured cause of VOICE-6. Nothing this panel does is inside that grid.
+  const source = await read("ui/machine-room/voice.js");
+  const mount = source.slice(source.indexOf("function mountOverlay"), source.indexOf("function spaceMayTalk"));
+  assert.match(mount, /querySelector\("\.conversation-space"\)/);
+  assert.ok(!mount.includes('getElementById("composer")'), "the panel found its way into the composer's own row");
+  assert.ok(!mount.includes("beforebegin"), "beforebegin on #composer is exactly what makes an element a grid item of the shelf");
+  const html = await read("ui/machine-room/index.html");
+  assert.match(html, /<section class="conversation-space"/, "the host this panel mounts into is gone");
+});
+
+// ------------------------------------------------------------------ the two talk modes
+test("VOICE-7 modes: push to talk is the default, and nothing stored is still push to talk", async () => {
+  const { voice } = await loadVoice();
+  assert.deepEqual(voice._TALK_MODES, ["push", "always"]);
+  assert.equal(voice._TALK_MODE_DEFAULT, "push");
+  // The fake window has no localStorage at all, which is also a private window and a browser set to
+  // refuse site data. The default is the answer in every one of those.
+  assert.equal(voice.getTalkMode(), "push");
+  const stored = await loadVoice({ window: { localStorage: { getItem: () => "whatever-mode", setItem: () => {} } } });
+  assert.equal(stored.voice.getTalkMode(), "push", "a stored value nobody recognises is not obeyed");
+});
+
+test("VOICE-7 modes: the setting round-trips through the module's own door", async () => {
+  const box = new Map();
+  const storage = { getItem: (k) => box.get(k) ?? null, setItem: (k, v) => box.set(k, v) };
+  const { voice } = await loadVoice({ window: { localStorage: storage } });
+  assert.equal(voice.getTalkMode(), "push");
+  assert.equal(voice.setTalkMode("always"), "always");
+  assert.equal(voice.getTalkMode(), "always");
+  assert.equal(box.get(voice._TALK_MODE_KEY), "always", "and it survives the next load of this page");
+  const again = await loadVoice({ window: { localStorage: storage } });
+  assert.equal(again.voice.getTalkMode(), "always");
+  assert.equal(voice.setTalkMode("nonsense"), "push", "an unknown mode falls back rather than switching the button off");
+});
+
+test("VOICE-7 modes: always listening is a toggle, and one press ends the call once", async () => {
+  const { voice, sent } = await loadTalking();
+  voice.setTalkMode("always");
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(voice._state.on, true, "a press opens the line");
+  assert.equal(voice._state.talking, true, "and the microphone is open, which is what the name says");
+  // A release does nothing at all in this mode: the line is up until the next press.
+  voice.talkUp();
+  assert.equal(voice._state.on, true);
+  await voice.talkDown();
+  assert.equal(voice._state.on, false, "and a second press ends it");
+  assert.equal(sent.json.filter((one) => one.t === "stop").length, 1, "the relay was told once, not twice");
+});
+
+test("VOICE-7 modes: push to talk holds while the button is down and shuts the microphone on the release", async () => {
+  const { voice, sent } = await loadTalking();
+  assert.equal(voice.getTalkMode(), "push");
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(voice._state.on, true, "the first hold opens the line");
+  assert.equal(voice._state.held, true);
+  assert.equal(voice._state.talking, true);
+
+  voice.talkUp();
+  assert.equal(voice._state.held, false);
+  assert.equal(voice._state.talking, false, "the microphone shuts on the release");
+  // THE LINE STAYS UP, so the second hold is instant rather than paying the dial again -- 1.6 to 2.0
+  // seconds of it, measured through console.titanium.bot.
+  assert.equal(voice._state.on, true);
+  assert.equal(sent.json.filter((one) => one.t === "stop").length, 0, "a release is not a hang-up");
+
+  // A second release with nothing held ends nothing twice.
+  voice.talkUp();
+  assert.equal(voice._state.talking, false);
+  await voice.talkDown();
+  assert.equal(voice._state.talking, true, "and the next hold opens it again with no second dial");
+  assert.equal(voice._state.on, true);
+  voice.stop();
+  assert.equal(voice._state.held, false, "hanging up releases the hold as well");
+});
+
+test("VOICE-7 modes: push to talk captures BEFORE the line is up, and always listening does not", async () => {
+  // The dial is 1.6 to 2.0 s through console.titanium.bot, and in push to talk the person is already
+  // talking into a button they are holding down, so a capture that waited for the socket would lose
+  // the first words of every first hold. Always listening keeps socket-first, because there a
+  // refused line should never have touched the microphone at all.
+  const source = await read("ui/machine-room/voice.js");
+  const body = source.slice(source.indexOf("async function start("), source.indexOf("let heldTimer"));
+  assert.match(body, /captureFirst/);
+  assert.match(body, /PENDING_FRAME_CAP/, "the frames captured before the socket opened are bounded");
+  assert.match(body, /if \(captureFirst\) \{\s*try \{ state\.capture = await beginCapture\(\)/,
+    "push to talk opens the microphone first");
+  assert.match(body, /await openSocket\(\);[\s\S]*if \(!captureFirst\)/, "and always listening opens the line first");
+  const { voice } = await loadVoice();
+  // Two seconds at a hundred milliseconds a frame, because the relay drops audio more than three
+  // seconds ahead of its own wall clock and counts what it dropped as a held frame.
+  assert.equal(voice._PENDING_FRAME_CAP, 20);
+});
+
+test("VOICE-7 modes: push to talk counts its silence apart from the echo gate's own drops", async () => {
+  // The echo gate's number is the proof that the agent never hears himself, and the browser leg reads
+  // it. Folding push-to-talk's between-holds silence into it would make that number unreadable the
+  // moment anybody used the default.
+  const { voice } = await loadTalking();
+  const chunks = [];
+  let talking = false;
+  const capture = await voice.captureAudio({
+    source: { getTracks: () => [] },
+    frameBytes: 480,
+    held: () => false,
+    muted: () => talking !== true,
+    onChunk: (buffer) => chunks.push(buffer),
+    audio: {
+      AudioContext: class {
+        constructor() { this.audioWorklet = { addModule: async () => {} }; }
+        createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+        close() {}
+      },
+      AudioWorkletNode: class { constructor() { this.port = {}; capturePort = this.port; } disconnect() {} },
+      workletUrl: "blob:x",
+    },
+  });
+  // Not talking: the frame is dropped and counted as muted, and it is not an echo hold.
+  capturePort.onmessage({ data: new Float32Array(240) });
+  assert.equal(capture.stats.mutedFrames, 1);
+  assert.equal(capture.stats.heldFrames, 0, "silence between two holds is not the agent talking over somebody");
+  assert.equal(chunks.length, 0);
+  // Holding: it goes.
+  talking = true;
+  capturePort.onmessage({ data: new Float32Array(240) });
+  assert.equal(chunks.length, 1);
+  assert.equal(capture.stats.sent, 1);
+  assert.equal(capture.stats.mutedFrames, 1, "and the muted count did not grow while somebody was talking");
+  capture.stop();
+});
+
+test("VOICE-7 modes: the space bar bails on every other thing that wants it", async () => {
+  // FIVE other keydown paths live on this document -- the transcript's own space handler, Escape
+  // closing a drawer, the desktop chord, the composer's Enter and the command palette -- and the
+  // box's screen is an iframe that takes keystrokes outright for the machine on the other side.
+  const cases = [
+    { what: "a text box", active: { tagName: "TEXTAREA" }, may: false },
+    { what: "a field", active: { tagName: "INPUT" }, may: false },
+    { what: "a dropdown", active: { tagName: "SELECT" }, may: false },
+    { what: "the box's own screen", active: { tagName: "IFRAME" }, may: false },
+    { what: "something being edited in place", active: { tagName: "DIV", isContentEditable: true }, may: false },
+    { what: "another button", active: { tagName: "BUTTON", closest: () => null }, may: false },
+    { what: "the talk button itself", active: { tagName: "BUTTON", closest: () => ({}) }, may: true },
+    { what: "nothing at all", active: { tagName: "BODY" }, may: true },
+  ];
+  for (const one of cases) {
+    const { voice } = await loadVoice({
+      window: { MutationObserver: class { observe() {} }, document: fakeDocument({ activeElement: one.active }) },
+    });
+    assert.equal(voice._spaceMayTalk(), one.may, `the space bar with ${one.what} focused`);
+  }
+  const withDialog = await loadVoice({
+    window: { MutationObserver: class { observe() {} }, document: fakeDocument({ querySelector: (s) => (s === "dialog[open]" ? {} : null) }) },
+  });
+  assert.equal(withDialog.voice._spaceMayTalk(), false, "an open dialog takes its own keys");
+  const withDrawer = await loadVoice({
+    window: { MutationObserver: class { observe() {} }, document: fakeDocument({ body: { dataset: { drawer: "people" } } }) },
+  });
+  assert.equal(withDrawer.voice._spaceMayTalk(), false, "and so does an open drawer");
+  // And a half-typed message: a microphone opening on the same key as a sentence somebody is writing
+  // is two things happening at once, and only one of them was asked for.
+  const halfTyped = await loadVoice({
+    window: { MutationObserver: class { observe() {} }, document: fakeDocument({ getElementById: (id) => (id === "message-input" ? { value: "half a thought" } : null) }) },
+  });
+  assert.equal(halfTyped.voice._spaceMayTalk(), false);
+});
+
+test("VOICE-7 modes: Escape ends the call, and never takes an Escape that belongs to somebody else", async () => {
+  const { voice } = await loadTalking();
+  voice.setTalkMode("always");
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(voice._state.on, true);
+  assert.equal(voice._escapeStops(), true);
+  assert.equal(voice._state.on, false, "Escape is the way out that needs no pointer");
+  assert.equal(voice._escapeStops(), false, "and with nothing running there is nothing to stop");
+
+  // app.js closes an open drawer on Escape and a dialog closes itself. Neither is ours to take.
+  const drawer = await loadTalking({ document: fakeDocument({ body: { dataset: { drawer: "people" } } }) });
+  drawer.voice._state.on = true;
+  assert.equal(drawer.voice._escapeStops(), false, "an Escape meant for an open drawer ended a call instead");
+  assert.equal(drawer.voice._state.on, true);
+});
+
+test("VOICE-7 modes: changing the mode ends the call rather than changing what the button means underneath it", async () => {
+  const { voice } = await loadTalking();
+  voice.setTalkMode("always");
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(voice._state.on, true);
+  voice.setTalkMode("push");
+  assert.equal(voice._state.on, false, "a live microphone whose control has changed meaning is a state nobody on screen can account for");
+  assert.equal(voice.getTalkMode(), "push");
+});
+
+test("VOICE-7 modes: a forgotten hold does not spend a workspace's day", async () => {
+  // The caps count WALL CLOCK, not audio. Push to talk keeps the line up between holds so the second
+  // one is instant, so a press somebody walked away from would otherwise burn thirty minutes of a
+  // hundred and twenty minute allowance with nobody in the room.
+  const { voice } = await loadTalking();
+  assert.equal(voice._PUSH_IDLE_CLOSE_MS, 60_000);
+  const source = await read("ui/machine-room/voice.js");
+  const idle = source.slice(source.indexOf("function armIdleClose"), source.indexOf("function socketUrl"));
+  assert.match(idle, /if \(talkMode\(\) !== "push"\) return;/,
+    "always listening has no such timer: there the line being up IS what the person asked for");
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  voice.talkUp();
+  assert.equal(voice._state.on, true, "the line is warm for the next hold");
+  voice.stop();
+
+  const always = await loadTalking();
+  always.voice.setTalkMode("always");
+  await always.voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  always.voice.talkUp();
+  assert.equal(always.voice._state.talking, true, "always listening does not shut the microphone on a release");
+  always.voice.stop();
+});
+
+test("VOICE-7 modes: one pair of entry points, so the desktop app's hotkey inherits the setting", async () => {
+  // docs/APPS.md section 6: the shell's global hotkey is a later wave and it presses THIS control. A
+  // hotkey with its own copy of the behaviour would be a third thing to keep in step with a setting a
+  // person can change.
+  const { voice } = await loadVoice();
+  for (const door of ["talkDown", "talkUp", "setTalkMode", "getTalkMode"]) {
+    assert.equal(typeof voice[door], "function", `${door} is the door the hotkey needs`);
+  }
+  const source = await read("ui/machine-room/voice.js");
+  const wired = source.slice(source.indexOf("function wire()"), source.indexOf("// The console repaints wholesale"));
+  for (const listener of ["pointerdown", "pointerup", "pointercancel", "touchstart", "touchend", "touchcancel", "contextmenu", "keydown", "keyup"]) {
+    assert.ok(wired.includes(`"${listener}"`), `push to talk needs ${listener} and it is not wired`);
+  }
+  // The keydown path is a NAMED handler rather than an inline listener, because Escape and the space
+  // bar are two questions about the same key and the console's own Escape already lived there.
+  const keys = source.slice(source.indexOf("function onKeyDown"), source.indexOf("function onKeyUp"));
+  assert.match(keys, /event\.repeat/, "a held key repeats, and without a latch the handler fires tens of times a second");
+  assert.match(keys, /spaceMayTalk\(\)/, "the space bar must ask whether it is allowed to be the hold");
+  assert.match(wired, /"blur", release/,
+    "a window that loses focus never delivers the keyup for a space bar that is still down");
+  assert.match(wired, /if \(talkMode\(\) !== "push"\) toggle\(\)/,
+    "a click in push to talk must not toggle on top of the hold that pointerdown already handled");
+});
+
+test("VOICE-7 modes: a key another handler already acted on is not also a microphone", async () => {
+  // This listener is on the document, so it runs after every handler between it and the thing that was
+  // focused. app.js's transcript handler opens an evidence row or an agent-to-agent blurb on the space
+  // bar and calls preventDefault; the palette and the composer do the same with their own keys. Found
+  // while reading app.js's five existing keydown paths, not after a bug report.
+  const source = await read("ui/machine-room/voice.js");
+  const wired = source.slice(source.indexOf("function wire()"), source.indexOf("// The console repaints wholesale"));
+  assert.match(wired, /addEventListener\("keydown", onKeyDown\)/, "the keydown handler is not wired at all");
+  const keydown = source.slice(source.indexOf("function onKeyDown"), source.indexOf("function onKeyUp"));
+  assert.match(keydown, /if \(event\?\.defaultPrevented === true\) return;/,
+    "the space bar would be taken from a control that had already acted on it");
+
+  // And the transcript's own focusable rows, which are controls by their ROLE rather than their tag:
+  // an agent-to-agent blurb is a div carrying role="button" and tabindex="0".
+  const blurb = await loadVoice({
+    window: {
+      MutationObserver: class { observe() {} },
+      document: fakeDocument({ activeElement: { tagName: "DIV", getAttribute: (name) => (name === "role" ? "button" : null), closest: () => null } }),
+    },
+  });
+  assert.equal(blurb.voice._spaceMayTalk(), false, "a focusable transcript row had its space bar taken");
+  const evidence = await loadVoice({
+    window: {
+      MutationObserver: class { observe() {} },
+      document: fakeDocument({ activeElement: { tagName: "DIV", getAttribute: () => null, closest: (sel) => (sel.includes("data-evidence") ? {} : null) } }),
+    },
+  });
+  assert.equal(evidence.voice._spaceMayTalk(), false);
+  // The talk button still gets its own space bar even when it is a control by role.
+  const talk = await loadVoice({
+    window: {
+      MutationObserver: class { observe() {} },
+      document: fakeDocument({ activeElement: { tagName: "DIV", getAttribute: (name) => (name === "role" ? "button" : null), closest: (sel) => (sel.includes("data-voice-talk") ? {} : null) } }),
+    },
+  });
+  assert.equal(talk.voice._spaceMayTalk(), true);
+});
+
+test("VOICE-7 panel: a long utterance keeps its newest words in view", async () => {
+  // The panel has a ceiling so it can never cover the whole conversation, and nothing in it can be
+  // scrolled by hand: pointer events are off on purpose so the chat underneath stays clickable while
+  // somebody is talking. So the words being said right now are kept in view from the paint instead.
+  const styles = await read("ui/machine-room/styles.css");
+  assert.match(styles, /\.voice-overlay \{[\s\S]*?pointer-events: none;/, "the panel must not take clicks from the conversation");
+  assert.match(styles, /\.voice-overlay-panel \{[\s\S]*?overflow-y: auto;/);
+  const source = await read("ui/machine-room/voice.js");
+  const paint = source.slice(source.indexOf("function paintOverlay"), source.indexOf("async function start("));
+  assert.match(paint, /panel\.scrollTop = panel\.scrollHeight/,
+    "a long utterance would scroll its newest words out of sight with no way to reach them");
+});
+
+test("VOICE-7 row: the choice is a row under General > System, in plain words", async () => {
+  // WHERE THE ITEM ASKED FOR IT: "In Settings under General > System, a row 'Talk mode' with two
+  // choices in plain words." The settings surface that landed beside this wave owns that section, so
+  // the row is declared there, the way Theme and Microphone are, rather than on a card of voice's own.
+  const source = await read("ui/machine-room/settings.js");
+  const rows = new Function("window", source)({ document: undefined }) ?? null;
+  const mr = rows ?? (() => { const stub = { document: undefined }; new Function("window", source)(stub); return stub.__mrSettings; })();
+  const general = mr.rowsFor("general", { talkMode: "push" });
+  const row = general.find((one) => one.id === "talk-mode");
+  assert.ok(row != null, "there is no Talk mode row, so nobody can change how the button behaves");
+  assert.equal(row.group, "system", "it belongs beside Microphone and the talking switch");
+  assert.equal(row.label, "Talk mode");
+
+  // ONE ROW, ONE CONTROL, which is the whole rule of this surface (docs/SETTINGS.md 1).
+  assert.equal(row.control.kind, "select");
+  assert.equal(row.control.action, "talk-mode");
+  assert.deepEqual(row.control.options.map((one) => one.value), ["push", "always"]);
+  assert.deepEqual(row.control.options.map((one) => one.label), [
+    "Push to talk: hold the button while you speak",
+    "Always listening: press once to start, press again to stop",
+  ], "the two ways to talk, written out the way a person would say them");
+  assert.equal(row.control.value, "push", "the row opens on the mode the page is really in");
+  assert.equal(mr.rowsFor("general", { talkMode: "always" }).find((one) => one.id === "talk-mode").control.value, "always");
+
+  // AND NOTHING, drawn on a console with no voice module at all: the PROXY-1 rule this surface keeps
+  // everywhere else. A control that cannot do anything is worse than an absent one.
+  assert.equal(mr.rowsFor("general", {}).find((one) => one.id === "talk-mode"), undefined);
+
+  // Nothing in the row names a service, a model or a protocol -- the VOICE-1 rule, re-checked because
+  // this row adds copy a customer reads.
+  const words = `${row.label} ${row.line} ${row.control.options.map((one) => one.label).join(" ")}`;
+  for (const leak of ["xAI", "OpenAI", "Grok", "sendPrompt", "websocket", "VAD", "turn_detection"]) {
+    assert.ok(!words.includes(leak), `${leak} reached a row a customer reads`);
+  }
+});
+
+test("VOICE-7 row: the choice is the person's and never the workspace's", async () => {
+  // NOT THE WORKSPACE'S. /voice/settings is one file per workspace, and two people sharing one would
+  // fight over how their own button behaves. So this value never goes near that route: it is
+  // remembered in this browser, beside Theme, and the row reaches it through the module's own door.
+  const box = new Map();
+  const storage = { getItem: (k) => box.get(k) ?? null, setItem: (k, v) => box.set(k, v) };
+  const { voice } = await loadVoice({ window: { localStorage: storage } });
+  assert.equal(voice.getTalkMode(), "push", "nothing stored is push to talk, the mode that cannot leave a microphone open");
+  assert.equal(voice.setTalkMode("always"), "always");
+  assert.equal(box.get(voice._TALK_MODE_KEY), "always", "the choice was not remembered at all");
+  // A second page in the same browser opens on the choice the first one made.
+  const again = await loadVoice({ window: { localStorage: storage } });
+  assert.equal(again.voice.getTalkMode(), "always");
+  // And a value nobody offered is refused rather than stored.
+  assert.equal(voice.setTalkMode("whenever"), "push");
+
+  // The route this must never reach. The settings surface writes talking's own fields through
+  // voice.saveSettings; the talk mode is not one of them and has no field on that door.
+  const source = await read("ui/machine-room/voice.js");
+  const writer = source.slice(source.indexOf("async function writeSettings"), source.indexOf("async function getSettings"));
+  assert.ok(!writer.includes("talkMode"), "the talk mode reached the workspace's own settings file");
+  // And no request body anywhere in this module carries it. The only places the name may appear are
+  // the state field, the reader, the setter, and the stats the gate reads.
+  for (const [, body] of source.matchAll(/JSON\.stringify\(([^)]*)\)/g)) {
+    assert.ok(!body.includes("talkMode"), `a request body carries the talk mode: ${body}`);
+  }
+  assert.ok(source.includes("localStorage?.setItem(TALK_MODE_KEY"), "it is remembered in this browser and nowhere else");
+});

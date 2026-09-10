@@ -424,11 +424,28 @@ export const canonicalEvent = (type) => INBOUND_ALIASES.get(String(type ?? "")) 
  * with corrections -- each event carries the whole utterance so far -- and OpenAI's `.delta` is
  * incremental. Appending the delta on xAI writes the sentence N times, which is what the console
  * would then draw.
+ *
+ * IT ALSO KEEPS THE ITEM ID, and a new one RESETS the accumulator. MEASURED on this Mac (node
+ * v22.23.1, 2026-09-10) before that existed: on the incremental path an utterance whose `.completed`
+ * never arrives -- a `.failed`, a dropped event, two utterances close together -- bleeds into the
+ * next one, so "open the box" then "what time is it" reads "open the boxwhat time is it". A one-line
+ * strip hid that; VOICE-7 puts these words in a panel over the conversation where it is unmissable.
+ * OpenAI's own transcription guide says to reconcile finals on `item_id` for exactly this reason,
+ * and it does not guarantee ordering between two turns' `.completed` events.
  */
 export function makeCaption(mode = "cumulative") {
   let text = "";
+  let itemId = "";
+  /** A transcription event for a DIFFERENT item is a different utterance, so start it empty. */
+  const seat = (event) => {
+    const id = String(event?.item_id ?? "");
+    if (id.length === 0) return;
+    if (id !== itemId) text = "";
+    itemId = id;
+  };
   return {
     apply(event) {
+      seat(event);
       const whole = typeof event?.transcript === "string" ? event.transcript : null;
       const delta = typeof event?.delta === "string" ? event.delta : "";
       if (mode === "cumulative") text = whole != null && whole.length > 0 ? whole : (delta.length > 0 ? delta : text);
@@ -437,12 +454,14 @@ export function makeCaption(mode = "cumulative") {
       return text;
     },
     complete(event) {
+      seat(event);
       const whole = typeof event?.transcript === "string" ? event.transcript : null;
       if (whole != null && whole.length > 0) text = whole;
       return text;
     },
     get value() { return text; },
-    reset() { text = ""; },
+    get itemId() { return itemId; },
+    reset() { text = ""; itemId = ""; },
   };
 }
 
@@ -1083,19 +1102,27 @@ export function makeTurnRunner({
     newUserTurn() { rounds = 0; nudges = 0; },
 
     /**
-     * @returns {Promise<{ok:boolean, text:string, pieces:string[], attemptId:string, afterId:string,
-     *          afterMs:number, card:object|null, hops:object}>}
+     * `onSent` fires once, the instant sendPrompt is accepted, carrying the nonce that the durable
+     * user entry will be stamped with. `accepted` says whether anything reached Titan at all, which
+     * is what tells "he has not answered yet" from "this never went in".
+     *
+     * @returns {Promise<{ok:boolean, accepted:boolean, text:string, pieces:string[], attemptId:string,
+     *          afterId:string, afterMs:number, card:object|null, hops:object, nonce?:string}>}
      */
-    async run({ agentId, message, onNudge = () => {} }) {
+    async run({ agentId, message, nonce: given = "", onNudge = () => {}, onSent = () => {} }) {
       const hops = { t1: now(), t2: 0, t3: 0, t4: 0 };
       if (rounds >= maxRounds) {
-        return { ok: false, refused: true, text: "I have already asked him twice about that. Say it again and I will take it to him fresh.", pieces: [], attemptId: "", afterId: "", afterMs: 0, card: null, hops };
+        return { ok: false, refused: true, accepted: false, text: "I have already asked him twice about that. Say it again and I will take it to him fresh.", pieces: [], attemptId: "", afterId: "", afterMs: 0, card: null, hops };
       }
       rounds += 1;
       const before = await tailOf(agentId);
       const beforeId = before == null ? "" : String(before.at(-1)?.id ?? "");
       const beforeMs = before == null ? 0 : Number(before.at(-1)?.timestampMs ?? before.at(-1)?.createdAt) || 0;
-      const nonce = `voice:${now()}`;
+      // THE ID OF THE ROW THIS IS ABOUT TO BECOME. The caller supplies it when it needs to tell the
+      // page that id BEFORE the five-to-twenty-five second wait for Titan; this own-mint is the
+      // fallback for every caller that does not care. A bare millisecond clock is not unique across
+      // two sessions in the same millisecond, so a supplied one is scoped to its session.
+      const nonce = String(given ?? "").length > 0 ? String(given) : `voice:${now()}`;
       // MEASURED 6-14 ms and fire-and-forget: sendPrompt answers {accepted:true} unconditionally
       // (awaitTurn is gated on SAND_DISABLE_SEND_ACCEPT_RETURN, which is set nowhere), so the
       // answer is a receipt that the host took it and not that Titan replied.
@@ -1103,9 +1130,14 @@ export function makeTurnRunner({
         .then(() => true)
         .catch((error) => { log(`voice sendPrompt failed: ${error?.message ?? error}`); return false; });
       hops.t2 = now();
+      // THE CONFIRMATION, SAID THE MOMENT IT IS TRUE and not when Titan finishes. sendPrompt answers
+      // in 6-14 ms; run() does not return for 5.5 to 25 s. VOICE-7's panel over the conversation has
+      // to dissolve when the PERSON stops talking, so what the page needs -- the bytes that went into
+      // Titan's conversation and the nonce his durable row will carry -- is handed out here.
       if (!accepted) {
-        return { ok: false, text: "I could not get that to him just now. His box did not take it.", pieces: [], attemptId: "", afterId: beforeId, afterMs: beforeMs, card: null, hops, nonce };
+        return { ok: false, accepted: false, text: "I could not get that to him just now. His box did not take it.", pieces: [], attemptId: "", afterId: beforeId, afterMs: beforeMs, card: null, hops, nonce };
       }
+      try { onSent({ nonce, message, agentId }); } catch (error) { log(`voice onSent failed: ${error?.message ?? error}`); }
       const deadline = now() + waitCapS * 1000;
       let nudged = 0;
       while (now() < deadline) {
@@ -1125,7 +1157,7 @@ export function makeTurnRunner({
               afterId: String(landed.id ?? beforeId),
               afterMs: Number(landed.timestampMs ?? landed.createdAt) || now(),
               card: pickOneCard(pendingCardsOf(fresh)),
-              hops, nonce,
+              hops, nonce, accepted: true,
             };
           }
           // A card with no reply beside it is still an answer: he is waiting on the person.
@@ -1133,7 +1165,7 @@ export function makeTurnRunner({
           if (card != null) {
             hops.t3 = now();
             hops.t4 = now();
-            return { ok: true, text: "", pieces: [], attemptId: "", afterId: String(fresh.at(-1)?.id ?? beforeId), afterMs: Number(fresh.at(-1)?.timestampMs ?? now()), card, hops, nonce, cards: pendingCardsOf(fresh) };
+            return { ok: true, accepted: true, text: "", pieces: [], attemptId: "", afterId: String(fresh.at(-1)?.id ?? beforeId), afterMs: Number(fresh.at(-1)?.timestampMs ?? now()), card, hops, nonce, cards: pendingCardsOf(fresh) };
           }
         }
         // A nudge is driven off the roster's own working flag, never a bare timer, and each one is
@@ -1151,7 +1183,7 @@ export function makeTurnRunner({
         text: now() < deadline
           ? "He stopped working without answering that one. Ask again and I will take it back to him."
           : `He has not come back in ${waitCapS} seconds. It is still in his conversation on screen.`,
-        pieces: [], attemptId: "", afterId: beforeId, afterMs: beforeMs, card: null, hops, nonce,
+        pieces: [], attemptId: "", afterId: beforeId, afterMs: beforeMs, card: null, hops, nonce, accepted: true,
       };
     },
 
@@ -1456,6 +1488,24 @@ export function makeVoiceSession({
   let dialWatch = null;
   /** The caps this session was authorised under, kept so the audio ceiling and the tick can read them. */
   let capSeconds = SESSION_CAP_SECONDS;
+  /**
+   * The orb's own value, kept here as well as sent, because two things read it: nothing may paint
+   * the person's words while the machine is the one making noise (docs/VOICE.md 8 records a measured
+   * feedback loop where the model's own speech came back through the microphone and transcribed as a
+   * user turn), and the VOICE-7 panel must never show the machine's words as the person's.
+   */
+  let orbState = "off";
+  /**
+   * The user turn whose words are on screen right now, or 0 when none is. Every open turn is closed
+   * EXACTLY ONCE by a `hear-end`, whatever happens to it, because a panel that waits for a chat row
+   * hangs on the three turns that never produce one: a spoken yes answering a held card, an empty
+   * utterance, and a send the box refused.
+   */
+  let hearTurn = 0;
+  // Counts the sends in this session, so a row id is unique without depending on the clock.
+  let sendSeq = 0;
+  /** The last turn a `hear-end` closed, so a transcript arriving after it cannot re-open the panel. */
+  let hearClosedTurn = 0;
 
   const secondsNow = () => Math.max(0, Math.round((now() - startedMs) / 1000));
   const bytesToSeconds = (bytes) => Math.round(bytes / (AUDIO_RATE * 2));
@@ -1474,6 +1524,68 @@ export function makeVoiceSession({
     heldFrames: gate.heldFrames + meter.browserHeld,
     closeReason,
   });
+
+  /** The orb, said once and remembered, so the two readers above never have to guess. */
+  const setState = (value) => { orbState = String(value ?? ""); browser?.state(orbState); };
+
+  /**
+   * VOICE-7's vocabulary, beside the `heard` frame and not instead of it.
+   *
+   * `heard` is shipped and drawn by ui/machine-room/voice.js, and a relay restart mid-call leaves an
+   * old page against a new relay, so it keeps going out exactly as it did. What it could never do is
+   * say WHICH of three different things it was carrying -- a partial transcript, the finished
+   * transcript, or the string the model actually handed to Titan -- which is what a panel that has to
+   * dissolve at the right moment needs. So:
+   *
+   *   hear-begin       {turn, itemId}                  the person started talking
+   *   hear             {turn, itemId, text, final}     the words so far, replace-whole
+   *   heard-confirmed  {turn, text, nonce, landed}     the bytes that went into Titan's conversation
+   *   hear-end         {turn, reason}                  this turn is over, and why
+   *
+   * `heard-confirmed` is the ONLY frame whose text is the same bytes as the chat row: the words the
+   * person watched being built are the transcription model's, and the string that becomes the row is
+   * the realtime model's own tool argument. Two models, two strings, and they will differ. The nonce
+   * is the one the durable entry carries, so the page can tie the panel to the row it becomes
+   * (ui/machine-room/gateway-adapter.js stamps `spoken` off that same `voice:` prefix).
+   */
+  /**
+   * Whether the machine is the one making noise. The orb alone is not enough: a speech_started event
+   * sets the orb back to listening before anything else runs, so the truth is the echo gate, which is
+   * booked from the BYTES of audio that went out and stays held for the tail after them. MEASURED: a
+   * guard on the orb alone admitted two partials of the model's own sentence.
+   */
+  const machineTalking = () => orbState === "speaking" || gate.holding();
+
+  const hearBegin = (itemId = "") => {
+    if (machineTalking()) return undefined;
+    hearTurn = Math.max(session.userTurn, 1);
+    browser?.sendJson({ t: "hear-begin", turn: hearTurn, itemId: String(itemId ?? "") });
+    return undefined;
+  };
+  const hear = (text, { final = false, itemId = "" } = {}) => {
+    // Never while the machine is the one talking. If the echo gate ever slips, the panel would
+    // otherwise render Titan's own sentence as though the person had said it.
+    if (machineTalking()) return undefined;
+    if (hearTurn === 0) {
+      // A vendor that sends a transcript without a speech_started still gets a panel. A transcript
+      // arriving AFTER this turn was closed does not: the `.completed` and the tool call race, and
+      // resurrecting the panel a moment after it dissolved is a flicker over the conversation.
+      const turn = Math.max(session.userTurn, 1);
+      if (turn <= hearClosedTurn) return undefined;
+      hearTurn = turn;
+    }
+    browser?.sendJson({ t: "hear", turn: hearTurn, itemId: String(itemId ?? ""), text: String(text ?? ""), final: final === true });
+    return undefined;
+  };
+  /** Closes an open turn once. A second call for the same turn is dropped, so no panel flickers back. */
+  const hearEnd = (reason) => {
+    if (hearTurn === 0) return undefined;
+    const turn = hearTurn;
+    hearClosedTurn = turn;
+    hearTurn = 0;
+    browser?.sendJson({ t: "hear-end", turn, reason: String(reason ?? "") });
+    return undefined;
+  };
 
   const sendProvider = (object) => {
     if (provider == null || provider.readyState !== 1) return false;
@@ -1507,9 +1619,16 @@ export function makeVoiceSession({
   const dispatch = async (toolCall) => {
     if (toolCall.name !== "titan") return answerTool(toolCall.callId, { error: "there is no such tool here" });
     meter.toolCalls += 1;
+    // The turn this call belongs to, taken here rather than read later: in always-listening the next
+    // utterance can start while this one is still with Titan, and the panel's frames have to stay
+    // with the words the person watched being built.
+    const turn = hearTurn || session.userTurn;
     let message = "";
     try { message = String(JSON.parse(toolCall.argumentsJson || "{}").message ?? "").trim(); } catch { message = ""; }
-    if (message.length === 0) return answerTool(toolCall.callId, { reply: "I did not catch that. Say it again." });
+    if (message.length === 0) {
+      hearEnd("empty");
+      return answerTool(toolCall.callId, { reply: "I did not catch that. Say it again." });
+    }
     browser?.sendJson({ t: "heard", text: message });
     // A whole-utterance yes or no while a card is on the table is an ANSWER to that card, and it
     // goes through the approval path the console already uses rather than into the conversation as
@@ -1519,6 +1638,9 @@ export function makeVoiceSession({
     if (decision != null && session.heldCard != null) {
       const card = session.heldCard;
       if (card.offeredTurn === session.userTurn) {
+        // The model talked itself into a confirmation inside one user turn. Nothing goes to Titan and
+        // no row appears, so the panel is closed rather than left over the conversation.
+        hearEnd("not-accepted");
         return answerTool(toolCall.callId, { reply: "Say that again and I will take it as your answer." });
       }
       session.heldCard = null;
@@ -1526,11 +1648,35 @@ export function makeVoiceSession({
         ? { ok: false, said: `There are ${card.count} things waiting on you. Say which one and I will take it back to him, or answer them on screen.` }
         : await resolveHeldCard({ call, agentId: agent.agentId, card, decision: decision.decision });
       const said = outcome.ok && String(outcome.requestId ?? "").length > 0 ? `${outcome.said} That was ${outcome.requestId}.` : outcome.said;
+      // A yes that closes a card never becomes a row in the conversation, so the panel is told the
+      // turn is over on its own terms rather than waiting for a row that is not coming.
+      hearEnd("answered-card");
       browser?.sendJson({ t: "said", text: said });
       return answerTool(toolCall.callId, { reply: said });
     }
-    browser?.state("thinking");
-    const result = await runner.run({ agentId: agent.agentId, message, onNudge: (text) => void say(text) });
+    setState("thinking");
+    // THE ID OF THE ROW THESE BYTES ARE ABOUT TO BECOME, minted here rather than inside the runner so
+    // that it is known before the send rather than after it. A bare millisecond clock is not unique
+    // across two sessions that open in the same millisecond, so it is scoped to this session and
+    // counted within it. `voice:` is the whole of what gateway-adapter.js reads to stamp a row spoken,
+    // so the prefix is load-bearing and the rest of the shape is ours.
+    sendSeq += 1;
+    const nonce = `voice:${sessionId}:${sendSeq}`;
+    const result = await runner.run({
+      agentId: agent.agentId,
+      message,
+      nonce,
+      onNudge: (text) => void say(text),
+      // The instant the box takes it, and not when Titan answers: these are the bytes that became
+      // the row, and the nonce that row carries.
+      onSent: () => {
+        browser?.sendJson({ t: "heard-confirmed", turn, text: message, nonce, landed: true });
+        hearEnd("sent");
+      },
+    });
+    // Nothing reached his box: a refused send, or a third round inside one user turn. Either way no
+    // durable row will ever appear, so the panel is closed here instead of hanging over the chat.
+    if (result.accepted !== true) hearEnd("not-accepted");
     const pieces = result.pieces.length > 0 ? result.pieces : (result.text.length > 0 ? [result.text] : []);
     let reply = pieces.join(" ");
     if (result.card != null) {
@@ -1571,18 +1717,43 @@ export function makeVoiceSession({
       if (meter.toolCalls === 0 && meter.audioOutBytes === 0) return void close("the voice service refused this session", SENTENCE.providerRefused, "no-key");
       return undefined;
     }
-    if (type === "session.updated") { browser?.state("listening"); return undefined; }
-    if (type === "input_audio_buffer.speech_started") { session.userTurn += 1; runner.newUserTurn(); browser?.state("listening"); return undefined; }
-    if (type === "input_audio_buffer.speech_stopped") { session.hops.t0 = now(); browser?.state("thinking"); return undefined; }
+    if (type === "session.updated") { setState("listening"); return undefined; }
+    if (type === "input_audio_buffer.speech_started") {
+      session.userTurn += 1;
+      runner.newUserTurn();
+      // THE RESET THAT WAS MISSING. Until 2026-09-10 the accumulator was cleared only by a
+      // `.completed`, so an utterance whose completion never arrived bled into the next one. A new
+      // utterance starts empty here whatever happened to the last one.
+      caption.reset();
+      setState("listening");
+      hearBegin(event?.item_id);
+      return undefined;
+    }
+    if (type === "input_audio_buffer.speech_stopped") { session.hops.t0 = now(); setState("thinking"); return undefined; }
     if (type === "conversation.item.input_audio_transcription.updated" || type === "conversation.item.input_audio_transcription.delta") {
       // REPLACE-WHOLE on both vendors. Append-the-delta writes the sentence N times on xAI.
-      browser?.sendJson({ t: "heard", text: caption.apply(event) });
+      const text = caption.apply(event);
+      browser?.sendJson({ t: "heard", text });
+      hear(text, { final: false, itemId: event?.item_id ?? caption.itemId });
       return undefined;
     }
     if (type === "conversation.item.input_audio_transcription.completed") {
       const text = caption.complete(event);
+      const itemId = event?.item_id ?? caption.itemId;
       caption.reset();
       browser?.sendJson({ t: "heard", text });
+      // The transcription model's own last word. It is a `hear` and NOT the end of the turn: this
+      // and the tool call race, and dissolving here would flicker the panel back when the confirmed
+      // text arrives a moment later.
+      hear(text, { final: true, itemId });
+      return undefined;
+    }
+    if (type === "conversation.item.input_audio_transcription.failed") {
+      // Handled nowhere in this file until 2026-09-10, which is how one utterance came to bleed into
+      // the next. The words are gone; the turn is not left open waiting for them.
+      log(`voice transcription failed: ${String(event?.error?.message ?? event?.error?.code ?? "").slice(0, 160)}`);
+      caption.reset();
+      hearEnd("no-words");
       return undefined;
     }
     if (type === "response.created") { responseInFlight = true; return undefined; }
@@ -1590,7 +1761,7 @@ export function makeVoiceSession({
       const audio = Buffer.from(String(event.delta ?? ""), "base64");
       if (audio.byteLength === 0) return undefined;
       meter.audioOutBytes += audio.byteLength;
-      if (!gate.holding()) { speakId += 1; browser?.sendJson({ t: "speak-begin", id: speakId }); browser?.state("speaking"); }
+      if (!gate.holding()) { speakId += 1; browser?.sendJson({ t: "speak-begin", id: speakId }); setState("speaking"); }
       // Booked from BYTES: the model sends audio far faster than it is spoken, so the room is loud
       // long after the queue is empty, and that window is exactly when the mic must stay shut.
       gate.book(audio.byteLength);
@@ -1619,12 +1790,17 @@ export function makeVoiceSession({
           void say("The voice service is rate limiting us. Give it a moment and say that again.");
         }
       }
-      if (!gate.holding()) browser?.state("listening");
+      if (!gate.holding()) setState("listening");
     }
-    for (const toolCall of toolCallsOf(event)) {
+    const calls = toolCallsOf(event);
+    for (const toolCall of calls) {
       // ONE call_id, dispatched once, on whichever of the three surfaces carried it first.
       if (dedupe.claim(toolCall.callId)) void dispatch(toolCall).catch((error) => log(`voice dispatch failed: ${error?.message ?? error}`));
     }
+    // A finished response that asked Titan nothing means the model answered out of its own head,
+    // which the instructions forbid but cannot prevent. No tool call, no row, so the turn is closed
+    // here rather than leaving the person's words sitting over the conversation forever.
+    if (type === "response.done" && !calls.some((toolCall) => toolCall.name === "titan")) hearEnd("no-answer");
     return undefined;
   };
 
@@ -1634,7 +1810,9 @@ export function makeVoiceSession({
     if (tick != null) clearInterval(tick);
     if (dialWatch != null) clearTimeout(dialWatch);
     if (sentence.length > 0) browser?.note(sentence, condition);
-    browser?.state("off");
+    // The line is going down with words on screen, so the panel is dissolved before the socket is.
+    hearEnd("line-closed");
+    setState("off");
     browser?.bye(reason, 1000, condition);
     try { provider?.close(1000, "done"); } catch { /* already gone */ }
     await ledger.settle(rowNow("closed", reason)).catch((error) => log(`voice could not settle the ledger: ${error?.message ?? error}`));
@@ -1714,7 +1892,7 @@ export function makeVoiceSession({
         sessionCapSeconds, dayRemainingSeconds,
         frameBytes: FRAME_BYTES, rate: AUDIO_RATE, echoTailMs: ECHO_TAIL_MS,
       });
-      browser.state("listening");
+      setState("listening");
 
       // ARMED BEFORE THE DIAL, cleared on the provider's own `open`. A failed upgrade does not close
       // and a black hole says nothing at all, so this is the only thing between a wrong key and half

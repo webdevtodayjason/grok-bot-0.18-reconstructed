@@ -236,6 +236,9 @@ import "./voice-wire.test.mjs";
 import "./voice-turn.test.mjs";
 import "./voice-caps-ledger.test.mjs";
 import "./voice-socket.test.mjs";
+// VOICE-7: the labelled words on the wire -- partial, settled, confirmed, and the turns that close
+// without ever becoming a line in the conversation.
+import "./voice-transcription.test.mjs";
 // The console half: the microphone capture MEETING-1 shares, and the talk button, orb, notes and
 // Voice card as they are sliced out of the live console files.
 import "./voice-capture.test.mjs";
