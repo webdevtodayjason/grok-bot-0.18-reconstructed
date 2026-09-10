@@ -272,6 +272,7 @@ import "./asset-cache.test.mjs";
 // off the console's own page when it has no bearer yet.
 import "./apps-wire-shapes.test.mjs";
 import "./console-app-hooks.test.mjs";
+import "./console-approval-card.test.mjs";
 import "./console-needs-you-attributes.test.mjs";
 // SETTINGS-2: the settings surface, its rows, its words, and who is shown what.
 import "./machine-room-settings.test.mjs";

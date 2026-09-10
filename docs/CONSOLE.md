@@ -595,6 +595,7 @@ node scripts/verify-console-polish.mjs --boot     the plate is on <html> before 
                                        --tile-live the tile follows the agent's screen, and what that costs
                                        --files    a file row opens a viewer and downloads
                                        --chips    a backticked span is a chip a mouse can press, and pressing it copies (§8)
+                                       --approval the auto-review card in every state, and one real forced approval
                                        --all      every leg in sequence, one browser
 ```
 
@@ -617,7 +618,8 @@ Five rules the script is written under, each paid for by an earlier gate that li
   emptied — see §1.)
 - **The rail tile's click is a write**, so that leg is local-box only. `--tile-live` drives the
   box's own browser with `box-chrome` and holds a reader on a real seat, so it is local-box only for
-  the same reason and is refused outright in read-only mode.
+  the same reason and is refused outright in read-only mode. So is `--approval`, which arms the
+  box's own review mode, forces a real approval and presses its buttons.
 - **A cadence measured through `app.js`'s own render loop is not a cadence.** `renderBoxHandoffSurfaces`
   calls `sync` on every heartbeat with the record's *real* status, which retimes the reader underneath
   any probe holding it at another one — measured while building `--tile-live`. So that leg pins the
@@ -634,6 +636,12 @@ Five rules the script is written under, each paid for by an earlier gate that li
   and therefore counts HTTP only. `--tile-live` counts `Network.webSocketFrameReceived` and prints
   the tile against the same figures `docs/APPS.md` sets, with what those figures are and are not
   spelled out in §3.
+- **A leg that arms the box puts it back in a `finally`.** `--approval` sets
+  `SAND_AUTO_REVIEW_MODE=enforce` in the box's settings file and adds one block instruction through
+  `setHostSettings`. A run that died between those two writes and its restore would leave every
+  other wave's gate on that box looking at a host that refuses every command, so the restore covers
+  the settings file, the operator's instructions, any card still pending and the scratch agent, and
+  each of those is checked rather than assumed.
 - **`getForeverBoxStatus` takes `{ id }`**, and the tile leg asserts the difference between the two
   argument shapes rather than assuming it.
 - **A leg opens a conversation that HAS the thing it measures.** The badge, files and scroll legs
@@ -660,6 +668,7 @@ Screenshots land in `$GROK_BOT_SHOT_DIR` and every one is named in the output.
 | `node --test tests/machine-room-gap-badge.test.mjs` | the gap predicate (**including that an adapter notice ends a gap and is never folded away**), the headline, its kinds line in plain words and its span ceiling, the preference store, the receipt that survives a rebuild, and that the module is loaded ahead of app.js |
 | `node --test tests/machine-room-screen-tile.test.mjs` | the blank-frame refusal, the reader's life, the seat argument shape, the stylesheet's `[hidden]` belt, and `SCREEN-TILE-1`'s three cadences — the idle remount, that a render never pushes the wake back, the hidden tab, the cheap reader URL, `capturedAt` and the age wording |
 | `node --test tests/machine-room-files.test.mjs` | the viewer's five branches, the masking, and the `/files` route's fences against a real relay and a real gateway |
+| `node --test tests/console-approval-card.test.mjs` | the approval card: four pill states, the 400-character elision and its count, the stripped location clause, the conditional rule paragraph and Always-allow button, the settled branches keeping the command, and the order of the two calls behind Always allow (§9) |
 | `scripts/verify-dashboard.mjs` | unchanged by this wave, and NOT green on `grok-bot-local-vm`. It leaves its own probe agents behind and they then fail its avatar and bot-cap legs (GATE-14), so the honest way to read it on this box is to diff its failure list against a run of the previous commit rather than to read its tally |
 
 The CONSOLE-4 ship was **relay-only by construction**: everything in that wave was `ui/`, tests,
@@ -672,6 +681,8 @@ and with it the two-box swap (the demo box and Jason's box, never Richard's) and
 The assertion above becomes: `git diff <pre-wave>..HEAD -- source/ deploy/` touches
 `standing-persona.ts` **and nothing else**. If it touches anything more, stop and re-scope — the
 budget for this wave was exactly that one sentence.
+
+Nothing in §8 or §9 is part of that host change. The chip and the approval card are `ui/` alone.
 
 ---
 
@@ -1256,3 +1267,154 @@ repo importing nothing from `scripts/gate-agent.mjs`.
 | `node --test tests/machine-room-files.test.mjs` | that the viewer still renders through the same renderer |
 | `node --test tests/standing-persona.test.mjs` | that every agent, not only the lead, is told to use backticks, and that the sentence names no surface |
 | `node scripts/verify-console-polish.mjs --chips` | the chip in a real browser: its paint against the measured before, a real mouse press, the clipboard read back, the tick, the live region, Enter on a focused chip, and a real agent's reply |
+
+## 9. The approval card (COMMAND-CARD-1)
+
+Jason kept a screenshot of the original product's card for a shell command and said "which I thought
+was cool." Ours carried the request and two buttons and nothing else. Measured on
+`grok-bot-local-vm` in real Chrome at 1440x1000 on 2026-09-10 at 16:05 UTC, against an approval
+really forced out of the host rather than a mock, the old card was **498x132** and read:
+
+> Echo hello-from-rac in shell on Grok Bot's computer | Violates the instruction to ask the user
+> before running any shell command. — echo hello-from-rac | Approve | Deny
+
+No pill, no line saying whose computer it runs on, no disclosure, no elision, no always-allow, and
+the dead upstream's name on a customer's screen. Once answered it collapsed to the title plus "You
+approved this", so a person had no way to see afterwards what it was they had allowed.
+
+### The shape, and where each line comes from
+
+```
+  Titan wants to run a command                        [ Needs your yes ]
+  Runs on Titan's computer
+  Post Chief Sentry decision alert to Jason
+  Violates the instruction to ask the user before running any shell command.
+  Always allow adds this rule to your Auto-review settings: "…"
+  > Show the command
+  [ ✓ Allow ]  [ ↗ Always allow ]  [ ✕ Refuse ]
+```
+
+| Element | Source |
+|---|---|
+| The title | `approval.surface`, turned into a plain sentence and never shown as a token. `host_shell` and `box_shell` are "wants to run a command"; `mcp` a connector; `computer` the computer; `browser` the browser; `automation_write` a routine; `cloud_agent` a cloud agent; `subagent` a task. A surface this console has never heard of reads "wants your review" |
+| The pill | `approval.status`, and for the two green ones the host's saved allow list as well |
+| "Runs on X's computer" | `approval.surface` again: `host_shell` is the person's own machine ("Runs on your computer"), everything else is the agent's box |
+| The request sentence | `approval.summary`, with its trailing location clause stripped — see below |
+| The grey "why" line | `approval.reason`, and **only while the card is pending**. On a card the person has answered, the reason it was asked reads as a complaint about their answer |
+| The rule paragraph | `approval.proposedRule`, and only when there is one. Most approvals have none |
+| The disclosure | `approval.command`, capped at 400 characters shown |
+| The buttons | `DECISION_ACTIONS["auto-review"]`, with Always allow filtered out when there is no rule to save |
+
+`cardOf` in `ui/machine-room/gateway-adapter.js` used to join the reason and the command into one
+`detail` string, which is why the card could draw neither as its own thing. It now carries
+`command`, `reason` and `surface` as their own fields; `detail` stays for anything still reading it.
+
+### The four pill states
+
+| Pill | When | Colour |
+|---|---|---|
+| Needs your yes | pending | `.status-pill attention`, the amber the needs-you pill already uses |
+| Always allowed | approved, **and** this approval's own proposed rule is on the host's `allowInstructions` | `.status-pill success` |
+| Allowed once | approved, with no such rule on the list | `.status-pill success` |
+| Refused | denied or expired | `.status-pill muted` |
+
+Nothing on this card is painted in the error colour. An approval that is merely waiting is not a
+failure, and a coloured line under a reply gets read as one.
+
+"Always allowed" is derived from the host's live settings rather than remembered from the button
+press, so it survives a reload and stays true. The edge that buys: if a person granted the same rule
+on an *earlier* approval and then answers a second one by hand, the second card reads "Always
+allowed" too. The sentence it prints is still true — a rule always allowing this really is in their
+Auto-review settings — and the alternative, a flag that dies with the page, would be false after
+every reload.
+
+### The location clause, and the old product's name
+
+The host writes the location into its own summary, and it writes it with the **old** product's name:
+`source/host/runner/sand-auto-review-summaries.ts` says "on Grok Bot's computer" in five places. That
+summary is the card's title and is also what a push notification puts on a lock screen. The console
+strips a trailing `on <someone>'s computer` (or `on your local computer`) off the summary to get the
+request sentence, and draws the clause itself as the grey line with **this agent's** name in it. That
+is both the original's own shape and the console half of taking a dead vendor's name off a customer's
+screen. It is anchored at the end of the sentence on purpose: mid-sentence — "Run a task on Titan's
+computer: '…'" — the clause is part of what the agent asked for and stays.
+
+The five host strings are **NAME-1's**, not this card's, and they are still there.
+
+### The disclosure and the elision
+
+`<details class="tool-receipt approval-command">`, the same disclosure the tool receipts use, so it
+inherits the hidden marker, the wrapping `<pre>` and its 220px clip. Its two words swap on `[open]`
+in the stylesheet with no script behind them: the transcript wipes its own `innerHTML` on every
+render, so a handler bound to that element would not survive one poll.
+
+400 characters are shown and the rest is counted in the original's own words, head and tail around
+the label rather than a truncation, because the end of a long command is where the interesting
+argument is:
+
+```
+<first 200 characters>
+...[N chars omitted]...
+<last 200 characters>
+```
+
+`N` is the real remainder, so what is shown plus what is counted adds back up to the command. A
+766-character command elides to `...[366 chars omitted]...`, measured in the browser.
+
+The disclosure is drawn in **every** state, not only while pending. The branch this replaced threw
+the command, the rule and the request away the moment a person answered.
+
+### Always allow is two calls, and the order matters
+
+The host's resolution vocabulary is `"approved" | "denied"` and nothing else
+(`source/host/runner/sand-auto-review.ts`), so always-allow is not a resolution. It is:
+
+1. `getHostSettings` — read the instructions **live**, in the same breath. `setHostSettings` replaces
+   the whole `autoReviewInstructions` object, and the settings panel may have a block list in
+   flight; writing from this page's copy would silently undo it.
+2. `setHostSettings` — the same object with the proposed rule appended to `allowInstructions`.
+3. `resolveAutoReviewApproval` with `"approved"`.
+
+If the settings write fails nothing is resolved: the card goes back to pending and says the rule was
+not saved. Approving anyway would grant the action while quietly dropping the standing permission
+the person actually asked for. And with no proposed rule there is no Always-allow button at all,
+because there would be nothing to write.
+
+### What was measured, and where
+
+On **`grok-bot-local-vm`** (this Mac, real Chrome through `playwright-core`, 1440x1000,
+2026-09-10), `node scripts/verify-console-polish.mjs --approval`: **51 passed, 0 failed, 0 skipped**.
+
+- The five states, drawn by `app.js`'s own `decisionMarkup` sliced out of the shipped file and run
+  on the shipped stylesheet — not a mock of it. Card heights at 1440x1000: pending with a rule
+  512x257, pending without 512x218, always-allowed 512x180, allowed-once 512x141, refused 512x141.
+  Pill colours `rgb(231,162,60)` amber, `rgb(166,233,185)` green, `rgba(233,239,239,0.46)` grey.
+  Every button hit-tested where it lands: Allow 73x34, Always allow 112x34, Refuse 79x34, and the
+  disclosure's summary 460x15. Picture: `approval-states.png`.
+- **One real approval**, forced end to end. The box was armed the way `scripts/verify-review.mjs`
+  proved — `SAND_AUTO_REVIEW_MODE=enforce` in its settings file, which REVIEW-1 made resolve per
+  call so nothing restarts, plus one block instruction through `setHostSettings`. A scratch agent
+  asked to run `echo hello-from-command-card` raised a pending approval in **27.1 s**, surface
+  `box_shell`, **no proposed rule** (which is the ordinary case). The console drew the new card at
+  **460x226**, reading "probe-command-card-2kmme wants to run a command", "Runs on
+  probe-command-card-2kmme's computer", the request, the reason, the disclosure with the command in
+  it, and Allow / Refuse. Allow was hit-tested and then really pressed; the card came back
+  **approved / "Allowed once"** with the command and the request still on it and no buttons.
+  Pictures: `approval-live-pending.png`, `approval-live-settled.png`.
+- **The two calls behind Always allow**, made against the live host in the adapter's own order: the
+  rule landed in `allowInstructions` and the block list the settings panel owns survived the write.
+  This is the settings half, not a button press — the host proposes no rule for a plain `echo`, so
+  there was no live Always-allow card to press, and the leg says so in its own output.
+- The box was put back and checked: no gate instruction left in the allow or block lists, the review
+  mode back at its original value, the scratch agent gone from the roster.
+
+**The gate needs the files under test to be the files being served.** The relay on `127.0.0.1:7777`
+serves the shared checkout, so a first run measured the injected renderer against the *old*
+stylesheet and reported the disclosure toggle broken and the live card missing. The leg was re-run
+against a second relay started from the worktree
+(`SAND_UI_PORT=7788`, `SAND_UI_STATE_DIR` pointed outside the tree) with
+`SAND_GATEWAY_URL=http://127.0.0.1:7788`. Both relays talk to the same box. That is the honest way
+to read any browser leg on this branch while several waves share one checkout.
+
+Still to measure: one turn on the R750 demo tenant through `console.titanium.bot` as a throwaway
+customer. That is the ship's leg, not the builder's.

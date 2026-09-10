@@ -237,6 +237,14 @@
       status: m.approval.status ?? "pending",
       title: m.approval.summary || "This action needs your review",
       detail: [m.approval.reason, m.approval.command].filter(Boolean).join(" — "),
+      // COMMAND-CARD-1: the reason and the command carried separately as well as joined. `detail`
+      // stays for anything still reading it; the card draws the reason as its own grey line and the
+      // command inside a disclosure, and one joined string can be neither. `surface` is the host's
+      // own token (host_shell, box_shell, mcp, computer, browser, automation_write, cloud_agent,
+      // subagent) and decides both the card's title and whose computer the grey line names.
+      command: m.approval.command ?? null,
+      reason: m.approval.reason ?? null,
+      surface: m.approval.surface ?? null,
       rule: m.approval.proposedRule ?? null,
       options: [],
     };
@@ -4860,6 +4868,38 @@
             .catch((error) => { card.status = "pending"; failed(`That answer did not reach the host: ${error.message}`); });
           return emit("message:created", { context: target });
         };
+        // COMMAND-CARD-1. "Always allow" is not a host resolution -- resolveAutoReviewApproval takes
+        // only approved|denied (runner/sand-auto-review.ts:9) -- so it is TWO calls in order: the
+        // proposed rule goes into the person's Auto-review settings, and only then is the approval
+        // approved. If the settings write fails nothing is resolved: the card stays pending and says
+        // the rule was not saved, because approving anyway would grant the action while quietly
+        // dropping the standing permission the person actually asked for.
+        //
+        // The current instructions are re-read from the host in the same breath rather than taken
+        // from this page's copy. setHostSettings REPLACES the whole autoReviewInstructions object,
+        // and the settings panel may have a block list in flight; writing from a stale snapshot
+        // would silently undo it.
+        if (card.kind === "auto-review" && decision === "always") {
+          const rule = typeof card.rule === "string" ? card.rule.trim() : "";
+          if (rule.length === 0) return notWired("Always-allowing this — the host proposed no rule to add, so there is nothing to save");
+          card.status = "sending";
+          (async () => {
+            const live = await call("getHostSettings").catch((error) => { throw new Error(`Your review settings could not be read, so nothing was allowed: ${error.message}`); });
+            const current = live?.autoReviewInstructions ?? {};
+            const allow = Array.isArray(current.allowInstructions) ? [...current.allowInstructions] : [];
+            if (!allow.some((entry) => String(entry).trim() === rule)) allow.push(rule);
+            const block = Array.isArray(current.blockInstructions) ? current.blockInstructions : [];
+            const isEnabled = current.isEnabled ?? true;
+            await call("setHostSettings", { autoReviewInstructions: { isEnabled, allowInstructions: allow, blockInstructions: block } })
+              .catch((error) => { throw new Error(`The standing rule was not saved, so nothing was allowed: ${error.message}`); });
+            state.settings.autoReview = { enabled: isEnabled, allow, block };
+            await call("resolveAutoReviewApproval", { agentId, entryId: messageId, requestId: card.requestId, resolution: "approved" })
+              .catch((error) => { throw new Error(`The rule was saved, but this one action was not approved: ${error.message}`); });
+          })()
+            .then(() => reloadActive())
+            .catch((error) => { card.status = "pending"; failed(error.message); });
+          return emit("message:created", { context: target });
+        }
         if (card.kind === "auto-review") return sent(call("resolveAutoReviewApproval", {
           agentId, entryId: messageId, requestId: card.requestId,
           resolution: decision === "denied" ? "denied" : "approved",

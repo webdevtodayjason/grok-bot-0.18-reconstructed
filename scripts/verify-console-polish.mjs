@@ -68,13 +68,16 @@
 // Screenshots land in the scratchpad and every one is named in the output, because a claim about
 // what a person sees that has no picture behind it is a claim, not a measurement.
 import { createRequire } from "node:module";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { acquireBoxLock } from "./lib/box-lock.mjs";
+// SIGNIN-1. Every gate says its own name at somebody's front door. This file sent nothing at
+// all -- node's default user agent -- while seven other gates already carried this, so its
+// requests were indistinguishable from a stranger's in the relay's sign-in ledger.
 import { gateUserAgent } from "./gate-agent.mjs";
 
-const LEGS = ["boot", "scroll", "picker", "badge", "tile", "tile-live", "files", "chips"];
+const LEGS = ["boot", "scroll", "picker", "badge", "tile", "tile-live", "files", "chips", "approval"];
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(`--${name}`);
 const value = (name) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : null; };
@@ -83,7 +86,7 @@ const URL_TARGET = value("url");
 const READ_ONLY = URL_TARGET != null || flag("read-only");
 const chosen = flag("all") ? [...LEGS] : LEGS.filter((leg) => flag(leg));
 if (chosen.length === 0) {
-  console.log("usage: node scripts/verify-console-polish.mjs (--boot | --scroll | --picker | --badge | --tile | --tile-live | --files | --chips | --all)");
+  console.log("usage: node scripts/verify-console-polish.mjs (--boot | --scroll | --picker | --badge | --tile | --tile-live | --files | --chips | --approval | --all)");
   console.log("       [--url https://console.titanium.bot]   read-only pass, CONSOLE_BEARER in the environment");
   console.log("");
   console.log("  --boot    the chosen background is on the page before first paint, and the cover lifts");
@@ -94,6 +97,7 @@ if (chosen.length === 0) {
   console.log("  --tile-live  the tile follows the agent's screen on its own, and what that costs");
   console.log("  --files   a file row opens a viewer and downloads");
   console.log("  --chips   a backticked span is a chip a mouse can press, and pressing it copies");
+  console.log("  --approval  the auto-review card in every state, plus one real forced approval on the local box");
   process.exit(2);
 }
 
@@ -107,7 +111,8 @@ const SHOTS = process.env.GROK_BOT_SHOT_DIR ?? "/tmp/console-polish-shots";
 // gate spending the throttle on purpose (cp/admin.mjs matches on the prefix, at the start).
 const GATE_AGENT = gateUserAgent(import.meta.url);
 // The box whose screen this gate drives. Only --tile-live uses it, and only off the local box.
-const BOX = process.env.GROK_BOT_BOX ?? "grok-bot-local-vm";
+// Two legs of this wave name the same container through different variables; both are honoured.
+const BOX = process.env.GROK_BOT_BOX ?? process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 // Well inside the 300 s these gates run under, so the summary is printed here rather than replaced
 // by a `timeout` kill with no tallies in it.
@@ -138,8 +143,27 @@ const until = async (fn, ms, step = 400) => {
 
 mkdirSync(SHOTS, { recursive: true });
 const shots = [];
-const shoot = async (page, name) => {
+const shoot = async (page, name, selector = null) => {
   const file = path.join(SHOTS, `${name}.png`);
+  // A fixture taller than the viewport is clipped by a page screenshot, and the clipped half is
+  // exactly the state nobody looked at. Naming a selector shoots that element whole instead.
+  //
+  // AND IT SAYS WHEN IT COULD NOT. An element screenshot waits for the element to hold still and
+  // throws when it does not; swallowing that left a file from an EARLIER RUN sitting under the new
+  // run's name, which is a picture that lies about what was measured. So the element attempt has a
+  // short timeout, a failure falls back to the page, and the file is deleted first so a stale one
+  // can never be mistaken for this run's.
+  rmSync(file, { force: true });
+  if (selector) {
+    // A LOCATOR, not an element handle. The transcript re-renders by wiping its own innerHTML, so a
+    // handle taken a moment earlier is detached by the time the shot is taken -- measured on
+    // grok-bot-local-vm as "Element is not attached to the DOM" on the live approval card. A locator
+    // re-resolves the selector at the moment of the shot, which is the whole difference.
+    const why = await page.locator(selector).first().screenshot({ path: file, timeout: 8000 })
+      .then(() => null).catch((error) => String(error.message).split("\n")[0]);
+    if (why == null) { shots.push(file); return file; }
+    info(`${name}: could not shoot ${selector} on its own (${why.slice(0, 90)}); the whole page instead`);
+  }
   await page.screenshot({ path: file }).catch(() => {});
   shots.push(file);
   return file;
@@ -1365,9 +1389,375 @@ async function legChips(page) {
   await shoot(page, `chips-live-${Date.now()}`);
 }
 
+// ---- --approval -----------------------------------------------------------------------------
+//
+// COMMAND-CARD-1. The auto-review card in the shape Jason kept a screenshot of, in three parts, and
+// each part says out loud which kind of claim it is, because they are not equally strong.
+//
+//   1. THE FIVE STATES. The shipped markup, on the shipped stylesheet, in real Chrome, every control
+//      hit-tested and the lot screenshot. This is app.js's own decisionMarkup sliced out of the file
+//      that ships and run in the page -- not a mock of it -- so the words, the pill, the elision and
+//      the buttons are the ones a person gets. What it does NOT prove is that the host ever produces
+//      each of those states, which is part 2's job.
+//
+//   2. ONE REAL APPROVAL, forced on the local box. The box is armed the way scripts/verify-review.mjs
+//      proved: SAND_AUTO_REVIEW_MODE=enforce in the box's own settings file (read live per call since
+//      REVIEW-1, so nothing restarts) plus one block instruction through setHostSettings. A scratch
+//      agent is asked to run one harmless command, the card it raises is read in the browser, Allow is
+//      pressed for real and the settled card is read back off the page.
+//
+//   3. THE TWO CALLS BEHIND ALWAYS ALLOW, made against the live host in the adapter's own order:
+//      read the instructions, append the rule, write them back, and only then approve. The host never
+//      proposes a rule for a plain echo, so this part exercises the settings half against the real
+//      host and then draws the settled card with that rule on the list -- it is not a button press,
+//      and it says so.
+//
+// THE BOX IS PUT BACK IN A FINALLY, always. A leg that dies between arming and restoring leaves every
+// other wave's gate on this box looking at a host that blocks every command, so the restore covers the
+// settings file, the instructions, any card still pending and the scratch agent.
+const BOX_SETTINGS = "/home/box/sand-data/sand-host-settings.json";
+const APPROVAL_BLOCK = "ask me before running any shell command";
+const APPROVAL_PROBE = "echo hello-from-command-card";
+// A rule nobody would write by hand, so a leftover is recognisable if the restore ever fails.
+const APPROVAL_RULE = "Allow the console polish gate's echo probe in the box shell";
+
+const dockerExec = (args) => new Promise((resolve, reject) => execFile(
+  "docker", ["exec", BOX, ...args], { maxBuffer: 8 << 20 },
+  (error, out) => (error ? reject(new Error(`docker exec ${args[0]}: ${error.message}`)) : resolve(out)),
+));
+// readSettingsFile (source/host/sand-box-setting.ts) accepts a flat object or { settings: {...} } and
+// PREFERS the nested one, so both helpers resolve the container the reader actually consults -- the
+// pair scripts/verify-review.mjs proved, and the reason the arming needs no restart. Nothing is read
+// into this process but the one key being moved: the file is the operator's.
+const settingsContainer = "const c=(d&&typeof d.settings==='object'&&d.settings!=null&&!Array.isArray(d.settings))?d.settings:d;";
+const boxSettingsPreamble = `const fs=require('fs');const p=${JSON.stringify(BOX_SETTINGS)};let d={};`
+  + `try{const parsed=JSON.parse(fs.readFileSync(p,'utf8'));if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed))d=parsed;}catch{}`;
+const readBoxSetting = async (name) => {
+  const out = await dockerExec(["node", "-e", `${boxSettingsPreamble}${settingsContainer}`
+    + `process.stdout.write(JSON.stringify(c[${JSON.stringify(name)}] ?? null));`]);
+  try { return JSON.parse(out); } catch { return null; }
+};
+const writeBoxSetting = async (name, value) => {
+  const mutate = value == null ? `delete c[${JSON.stringify(name)}];` : `c[${JSON.stringify(name)}]=${JSON.stringify(value)};`;
+  await dockerExec(["node", "-e", `${boxSettingsPreamble}${settingsContainer}${mutate}`
+    + `fs.writeFileSync(p,JSON.stringify(d),{mode:0o600});`]);
+};
+
+// The shipped renderer, sliced out of the file that ships. The run of helpers between
+// DECISION_ACTIONS and decisionMarkup carries the pill, the elision and the sentence-stripping; the
+// drawer itself follows. This is the same slice tests/console-approval-card.test.mjs evaluates, so a
+// green unit test and a green browser leg are reading the same bytes.
+const approvalRendererSource = () => {
+  const app = readModule("app.js");
+  if (app == null) return null;
+  const from = app.indexOf("  const DECISION_ACTIONS = {");
+  const at = app.indexOf("  function decisionMarkup(");
+  if (from < 0 || at < 0) return null;
+  return `${app.slice(from, at)}\n${app.slice(at, app.indexOf("\n  }\n", at) + 4)}`;
+};
+
+const APPROVAL_CASES = [
+  {
+    label: "pending-rule",
+    allow: [],
+    card: { status: "pending", rule: "Allow echo commands in the box shell" },
+  },
+  { label: "pending-no-rule", allow: [], card: { status: "pending", rule: null } },
+  {
+    label: "always-allowed",
+    allow: ["Allow echo commands in the box shell"],
+    card: { status: "approved", rule: "Allow echo commands in the box shell" },
+  },
+  { label: "allowed-once", allow: [], card: { status: "approved", rule: null } },
+  { label: "refused", allow: [], card: { status: "denied", rule: null } },
+];
+
+async function legApproval(page) {
+  console.log("\n== --approval: the auto-review card in the original's shape, and one real forced approval");
+  if (READ_ONLY) {
+    skip("--approval", "it arms the box's review mode, forces a real approval and presses its buttons; refused against a URL");
+    return;
+  }
+  const source = approvalRendererSource();
+  if (source == null) { check(false, "app.js still carries DECISION_ACTIONS and decisionMarkup to slice", "one of the two anchors moved"); return; }
+  if (!await bootConsole(page, 60_000)) { check(false, "the console booted", `no adapter at ${ORIGIN} inside the budget`); return; }
+
+  // ---- part 1: the five states, shipped markup on the shipped stylesheet ----------------------
+  const drawn = await page.evaluate(({ src, cases, longCommand }) => {
+    const escapeHtml = (value) => String(value ?? "")
+      .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+    const build = new Function("escapeHtml", "adapter", "activeContext", "contextName", `${src}\nreturn decisionMarkup;`);
+    const draw = build(escapeHtml, { dismissCard() {}, submitSecretRequest() {} }, () => ({ kind: "worker", id: "w-3" }), () => "Titan");
+    const host = document.createElement("div");
+    host.id = "gate-approval-states";
+    host.setAttribute("style", "position:fixed;left:18px;top:18px;width:540px;z-index:999999;display:grid;gap:12px;padding:14px;border-radius:16px;background:rgba(8,14,18,0.92)");
+    host.innerHTML = cases.map((one) => {
+      const message = {
+        id: `e-${one.label}`, type: "decision", authorId: "w-3", authorName: "Titan",
+        card: {
+          kind: "auto-review", requestId: `r-${one.label}`, surface: "box_shell",
+          title: "Echo hello-from-command-card in shell on Grok Bot's computer",
+          detail: "", command: one.label === "pending-rule" ? longCommand : "echo hello-from-command-card",
+          reason: "Violates the instruction to ask the user before running any shell command.",
+          options: [], ...one.card,
+        },
+      };
+      return `<div data-state-case="${one.label}">${draw(message, one.allow)}</div>`;
+    }).join("");
+    document.body.appendChild(host);
+    const read = (label) => {
+      const root = host.querySelector(`[data-state-case="${label}"]`);
+      const card = root?.querySelector("[data-approval-card]") ?? null;
+      if (card == null) return null;
+      return {
+        text: card.textContent.replace(/\s+/g, " ").trim(),
+        commandShown: card.querySelector(".approval-command pre")?.textContent ?? "",
+        pill: card.querySelector("[data-approval-pill]")?.textContent ?? "",
+        pillColour: card.querySelector("[data-approval-pill]") ? getComputedStyle(card.querySelector("[data-approval-pill]")).color : "",
+        where: card.querySelector(".approval-where")?.textContent ?? "",
+        request: card.querySelector(".approval-request")?.textContent ?? "",
+        rule: card.querySelector(".approval-rule")?.textContent ?? "",
+        buttons: [...card.querySelectorAll("[data-decide]")].map((b) => b.getAttribute("data-decide")),
+        disclosure: card.querySelector(".approval-command") != null,
+        box: `${Math.round(card.getBoundingClientRect().width)}x${Math.round(card.getBoundingClientRect().height)}`,
+      };
+    };
+    return Object.fromEntries(cases.map((one) => [one.label, read(one.label)]));
+  }, { src: source, cases: APPROVAL_CASES, longCommand: `echo ${"a".repeat(761)}` });
+
+  const pills = { "pending-rule": "Needs your yes", "pending-no-rule": "Needs your yes", "always-allowed": "Always allowed", "allowed-once": "Allowed once", refused: "Refused" };
+  for (const [label, want] of Object.entries(pills)) {
+    const got = drawn[label];
+    check(got != null && got.pill === want, `the ${label} card's pill reads ${JSON.stringify(want)}`, got == null ? "no card drawn" : `pill ${JSON.stringify(got.pill)}, ${got.box}`);
+  }
+  check(drawn["pending-rule"]?.buttons?.join(",") === "approved,always,denied",
+    "a pending card with a proposed rule offers Allow, Always allow and Refuse",
+    `buttons ${JSON.stringify(drawn["pending-rule"]?.buttons ?? null)}`);
+  check(drawn["pending-no-rule"]?.buttons?.join(",") === "approved,denied",
+    "a pending card with no rule offers no Always allow, because there would be nothing to save",
+    `buttons ${JSON.stringify(drawn["pending-no-rule"]?.buttons ?? null)}`);
+  check(drawn["always-allowed"]?.rule?.includes("was added to your Auto-review settings") === true,
+    "an always-allowed card names the standing rule back to the person",
+    JSON.stringify((drawn["always-allowed"]?.rule ?? "").slice(0, 90)));
+  check(drawn["allowed-once"]?.rule === "" && drawn["refused"]?.rule === "",
+    "a card with no saved rule claims no standing rule");
+  for (const label of Object.keys(pills)) {
+    check(drawn[label]?.where === "Runs on Titan's computer", `the ${label} card says whose computer it runs on`, JSON.stringify(drawn[label]?.where ?? null));
+    check(drawn[label]?.request === "Echo hello-from-command-card in shell",
+      `the ${label} card's request sentence has the host's location clause stripped`, JSON.stringify(drawn[label]?.request ?? null));
+    check(drawn[label]?.disclosure === true, `the ${label} card keeps the command behind a disclosure`);
+  }
+  const noOldName = Object.values(drawn).every((one) => one != null && !one.text.includes("Grok Bot"));
+  check(noOldName, "the dead upstream's name is on none of the five cards");
+  check(drawn["pending-rule"]?.commandShown?.includes("[366 chars omitted]") === true,
+    "a 766-character command is elided at 400 and the remainder counted",
+    JSON.stringify((drawn["pending-rule"]?.commandShown ?? "").match(/\[[^\]]*omitted[^\]]*\]/)?.[0] ?? null));
+
+  // Every control a person presses, hit-tested where it lands rather than clicked blind.
+  for (const [label, decide] of [["pending-rule", "approved"], ["pending-rule", "always"], ["pending-rule", "denied"]]) {
+    const hit = await hitTest(page, `#gate-approval-states [data-state-case="${label}"] [data-decide="${decide}"]`);
+    check(hit.found && hit.visible && hit.hit, `the ${decide} button is where a mouse can reach it`, `${hit.w}x${hit.h}, under its centre ${hit.on}`);
+  }
+  const summaryHit = await hitTest(page, `#gate-approval-states [data-state-case="pending-rule"] .approval-command > summary`);
+  check(summaryHit.found && summaryHit.visible && summaryHit.hit, "Show the command is a control a person can press", `${summaryHit.w}x${summaryHit.h}, under its centre ${summaryHit.on}`);
+  const toggled = await page.evaluate(() => {
+    const details = document.querySelector('#gate-approval-states [data-state-case="pending-rule"] .approval-command');
+    const shown = () => [...details.querySelectorAll("summary span")].filter((s) => getComputedStyle(s).display !== "none").map((s) => s.textContent);
+    const closed = shown();
+    details.open = true;
+    const open = shown();
+    const pre = getComputedStyle(details.querySelector("pre"));
+    details.open = false;
+    return { closed, open, preWrap: pre.whiteSpace, preMax: pre.maxHeight };
+  });
+  check(toggled.closed.join("") === "Show the command" && toggled.open.join("") === "Hide the command",
+    "the disclosure swaps its own two words with no script behind it", `closed ${JSON.stringify(toggled.closed)}, open ${JSON.stringify(toggled.open)}`);
+  info(`the command block wraps (${toggled.preWrap}) and clips at ${toggled.preMax}`);
+  info(`the five cards at 1440x1000: ${Object.entries(drawn).map(([k, v]) => `${k} ${v?.box ?? "-"}`).join(", ")}`);
+  info(`pending pill colour ${drawn["pending-rule"]?.pillColour}, always-allowed ${drawn["always-allowed"]?.pillColour}, refused ${drawn["refused"]?.pillColour}`);
+  await page.evaluate(() => {
+    const first = document.querySelector('#gate-approval-states [data-state-case="pending-rule"] .approval-command');
+    if (first != null) first.open = true;
+  });
+  await shoot(page, "approval-states", "#gate-approval-states");
+  await page.evaluate(() => document.getElementById("gate-approval-states")?.remove());
+
+  // ---- part 2: one real approval, forced on the local box -------------------------------------
+  if (budgetLeft() < 120_000) { skip("a real forced approval on the local box", `${seconds(budgetLeft())} left of ${seconds(RUN_BUDGET_MS)}, and one turn needs about 90s`); return; }
+
+  const beforeMode = await readBoxSetting("SAND_AUTO_REVIEW_MODE");
+  const beforeEnforce = await readBoxSetting("SAND_AUTO_REVIEW");
+  const beforeTrace = await readBoxSetting("SAND_TOOL_TRACE");
+  const liveSettings = await api("getHostSettings").then((r) => r.value).catch(() => null);
+  const beforeInstructions = liveSettings?.autoReviewInstructions ?? null;
+  let probeId = null;
+  let pending = null;
+  try {
+    if (beforeInstructions == null) { check(false, "the host answered getHostSettings", "no autoReviewInstructions to arm"); return; }
+    await writeBoxSetting("SAND_AUTO_REVIEW_MODE", "enforce");
+    await writeBoxSetting("SAND_TOOL_TRACE", "1");
+    await api("setHostSettings", {
+      autoReviewInstructions: {
+        isEnabled: true,
+        allowInstructions: [...(beforeInstructions.allowInstructions ?? [])],
+        blockInstructions: [...new Set([...(beforeInstructions.blockInstructions ?? []), APPROVAL_BLOCK])],
+      },
+    });
+    const armed = await api("getHostSettings").then((r) => r.value?.autoReviewInstructions ?? {});
+    check((armed.blockInstructions ?? []).includes(APPROVAL_BLOCK), "the box is armed: the block instruction is stored",
+      `isEnabled ${armed.isEnabled}, ${(armed.blockInstructions ?? []).length} block instruction(s)`);
+
+    const created = await api("createAgent", { name: `probe-command-card-${Math.random().toString(36).slice(2, 7)}`, description: "", origin: "user", isKickstartRequested: false });
+    probeId = created.value?.agent?.id ?? created.value?.id ?? null;
+    if (probeId == null) { check(false, "createAgent returned an agent to prompt", JSON.stringify(created.value).slice(0, 140)); return; }
+    info(`scratch agent ${probeId}`);
+    await api("sendPrompt", {
+      agentId: probeId,
+      prompt: `Run exactly this one command in your box shell and then tell me what happened: ${APPROVAL_PROBE}\n`
+        + "If Auto-review blocks it, immediately retry the exact same command once with "
+        + "request_smart_mode_approval set to true so the approval card reaches me, then stop and wait for my "
+        + "answer. Do not run any other command and do not work around the block.",
+    });
+    const askedAt = Date.now();
+    pending = await until(async () => {
+      const entries = await api("getAgentTranscript", { id: probeId }).then((r) => r.value).catch(() => []);
+      const cards = (Array.isArray(entries) ? entries : [])
+        .filter((e) => e.kind === "send-message" && e.message?.type === "auto-review-approval")
+        .map((e) => ({ entryId: e.id, ...e.message.approval }));
+      return cards.find((c) => c.status === "pending") ?? null;
+    }, within(Math.max(0, budgetLeft() - 70_000)), 3000);
+    if (pending == null) {
+      skip("a real forced approval on the local box", `no pending approval inside ${seconds(Date.now() - askedAt)}; the box's model endpoint may not have taken the turn`);
+    } else {
+      check(true, "the host raised a real pending approval", `${seconds(Date.now() - askedAt)}, surface ${pending.surface}, command ${JSON.stringify(String(pending.command ?? "").slice(0, 60))}, proposedRule ${pending.proposedRule == null ? "none" : "present"}`);
+      // The roster on the page predates this agent, so the page is reloaded rather than waited on.
+      await page.reload({ waitUntil: "load", timeout: within(40_000) });
+      await until(() => page.evaluate(() => (window.__machineRoomAdapter ? true : null)), within(40_000), 500);
+      const opened = await openConversation(page, probeId);
+      check(opened, "the console opens the conversation the approval is waiting in");
+      const live = await until(() => page.evaluate(() => {
+        const card = document.querySelector("#transcript [data-approval-card]");
+        if (card == null) return null;
+        return {
+          state: card.getAttribute("data-approval-state"),
+          title: card.querySelector("strong")?.textContent ?? "",
+          pill: card.querySelector("[data-approval-pill]")?.textContent ?? "",
+          where: card.querySelector(".approval-where")?.textContent ?? "",
+          request: card.querySelector(".approval-request")?.textContent ?? "",
+          why: card.querySelector(".approval-why")?.textContent ?? "",
+          command: card.querySelector(".approval-command pre")?.textContent ?? "",
+          buttons: [...card.querySelectorAll("[data-decide]")].map((b) => b.getAttribute("data-decide")),
+          needsYou: card.getAttribute("data-needs-you-card"),
+          pushTitle: card.getAttribute("data-title"),
+          box: `${Math.round(card.getBoundingClientRect().width)}x${Math.round(card.getBoundingClientRect().height)}`,
+        };
+      }), within(45_000), 900);
+      if (live == null) {
+        check(false, "the real approval draws the new card in the browser", "no [data-approval-card] in the transcript inside 45s");
+      } else {
+        check(live.pill === "Needs your yes" && live.state === "pending", "the live card carries the pending pill", `${live.pill}, state ${live.state}, ${live.box}`);
+        check(/ wants to run a command$/.test(live.title), "the live card's title names what the agent wants in plain words", JSON.stringify(live.title));
+        check(live.where.endsWith("'s computer") || live.where === "Runs on your computer", "the live card says whose computer it runs on", JSON.stringify(live.where));
+        check(!live.title.includes("Grok Bot") && !live.request.includes("Grok Bot") && !String(live.pushTitle ?? "").includes("Grok Bot"),
+          "the dead upstream's name is on neither the card nor the title a lock screen would get", JSON.stringify(live.pushTitle));
+        check(live.command.includes("echo hello-from-command-card"), "the command is readable inside the disclosure", JSON.stringify(live.command.slice(0, 60)));
+        check(live.why.length > 0, "the live card says why it is being asked", JSON.stringify(live.why.slice(0, 80)));
+        check(live.needsYou != null, "the pending card still carries the needs-you hook the shells read", live.needsYou ?? "absent");
+        const hit = await hitTest(page, '#transcript [data-approval-card] [data-decide="approved"]');
+        check(hit.found && hit.visible && hit.hit, "Allow is where a mouse can reach it on the live card", `${hit.w}x${hit.h}, under its centre ${hit.on}`);
+        // After the hit-test, and after the boot cover has actually gone: the reload above puts the
+        // cover back up, it fades over its own few seconds, and a picture taken under it shows the
+        // card through a scrim. #boot-cover is removed from the DOM when the console is ready.
+        await until(() => page.evaluate(() => (document.getElementById("boot-cover") == null ? true : null)), within(15_000), 300);
+        await shoot(page, "approval-live-pending", "#transcript [data-approval-card]");
+        info(`the live card today: ${live.box} at 1440x1000, buttons ${JSON.stringify(live.buttons)}`);
+        await page.click('#transcript [data-approval-card] [data-decide="approved"]', { timeout: 8000 }).catch(() => {});
+        const settled = await until(() => page.evaluate(() => {
+          const card = document.querySelector("#transcript [data-approval-card]");
+          if (card == null || card.getAttribute("data-approval-state") === "pending") return null;
+          return {
+            state: card.getAttribute("data-approval-state"),
+            pill: card.querySelector("[data-approval-pill]")?.textContent ?? "",
+            command: card.querySelector(".approval-command pre")?.textContent ?? "",
+            request: card.querySelector(".approval-request")?.textContent ?? "",
+            buttons: card.querySelectorAll("[data-decide]").length,
+            needsYou: card.getAttribute("data-needs-you-card"),
+          };
+        }), within(Math.min(45_000, Math.max(0, budgetLeft() - 25_000))), 900);
+        if (settled == null) {
+          check(false, "pressing Allow settles the card", "the card was still pending when the budget ran out");
+        } else {
+          await shoot(page, "approval-live-settled", "#transcript [data-approval-card]");
+          pending = null;
+          check(settled.state === "approved" && settled.pill === "Allowed once",
+            "pressing Allow leaves an Allowed once card, because no standing rule decided it", `state ${settled.state}, pill ${JSON.stringify(settled.pill)}`);
+          check(settled.command.includes("echo hello-from-command-card") && settled.request.length > 0,
+            "the settled card still shows what was allowed, which the old card threw away");
+          check(settled.buttons === 0 && settled.needsYou == null, "a settled card offers no buttons and counts on no tray");
+        }
+      }
+    }
+
+    // ---- part 3: the two calls behind Always allow, against the live host --------------------
+    if (budgetLeft() < 20_000) { skip("the two calls behind Always allow", `${seconds(budgetLeft())} left`); }
+    else {
+      const live = await api("getHostSettings").then((r) => r.value?.autoReviewInstructions ?? {});
+      const allow = [...new Set([...(live.allowInstructions ?? []), APPROVAL_RULE])];
+      await api("setHostSettings", { autoReviewInstructions: { isEnabled: live.isEnabled ?? true, allowInstructions: allow, blockInstructions: live.blockInstructions ?? [] } });
+      const after = await api("getHostSettings").then((r) => r.value?.autoReviewInstructions ?? {});
+      check((after.allowInstructions ?? []).includes(APPROVAL_RULE),
+        "the rule Always allow would write really lands in the host's allowInstructions",
+        `${(after.allowInstructions ?? []).length} allow instruction(s) after the write`);
+      check((after.blockInstructions ?? []).includes(APPROVAL_BLOCK),
+        "and the block list the settings panel owns survived the write, because the instructions were re-read first");
+      const named = await page.evaluate(({ src, rule }) => {
+        const escapeHtml = (value) => String(value ?? "")
+          .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+        const build = new Function("escapeHtml", "adapter", "activeContext", "contextName", `${src}\nreturn decisionMarkup;`);
+        const draw = build(escapeHtml, {}, () => ({ kind: "worker", id: "w-3" }), () => "Titan");
+        const html = draw({
+          id: "e-1", type: "decision", authorId: "w-3", authorName: "Titan",
+          card: { kind: "auto-review", requestId: "r-1", surface: "box_shell", status: "approved", title: "Echo hello-from-command-card in shell on Grok Bot's computer", detail: "", command: "echo hello-from-command-card", reason: "", rule, options: [] },
+        }, [rule]);
+        const host = document.createElement("div");
+        host.innerHTML = html;
+        return { pill: host.querySelector("[data-approval-pill]")?.textContent ?? "", rule: host.querySelector(".approval-rule")?.textContent ?? "" };
+      }, { src: source, rule: APPROVAL_RULE });
+      check(named.pill === "Always allowed" && named.rule.includes(APPROVAL_RULE),
+        "with that rule on the host's list the card reads Always allowed and quotes the rule", `${JSON.stringify(named.pill)} / ${JSON.stringify(named.rule.slice(0, 90))}`);
+      info("part 3 exercised the settings write against the live host, not the button: the host proposes no rule for a plain echo, so there was no live Always-allow card to press");
+    }
+  } finally {
+    // Back the way it was found, in this order: answer anything still pending, put the operator's
+    // instructions back, put the two switches back, delete the scratch agent.
+    if (pending != null && probeId != null) {
+      await api("resolveAutoReviewApproval", { agentId: probeId, entryId: pending.entryId, requestId: pending.requestId, resolution: "denied" }).catch(() => {});
+    }
+    if (beforeInstructions != null) {
+      await api("setHostSettings", { autoReviewInstructions: beforeInstructions }).catch((error) => info(`the instructions were NOT restored: ${error.message}`));
+      const back = await api("getHostSettings").then((r) => r.value?.autoReviewInstructions ?? {}).catch(() => ({}));
+      check(!(back.blockInstructions ?? []).includes(APPROVAL_BLOCK) && !(back.allowInstructions ?? []).includes(APPROVAL_RULE),
+        "the box is back the way it was found: neither the gate's block instruction nor its rule is left behind",
+        `${(back.allowInstructions ?? []).length} allow, ${(back.blockInstructions ?? []).length} block`);
+    }
+    await writeBoxSetting("SAND_AUTO_REVIEW_MODE", beforeMode).catch((error) => info(`SAND_AUTO_REVIEW_MODE was NOT restored: ${error.message}`));
+    await writeBoxSetting("SAND_AUTO_REVIEW", beforeEnforce).catch(() => {});
+    await writeBoxSetting("SAND_TOOL_TRACE", beforeTrace).catch(() => {});
+    const mode = await readBoxSetting("SAND_AUTO_REVIEW_MODE").catch(() => "?");
+    check(JSON.stringify(mode) === JSON.stringify(beforeMode), "the box's review mode is back where it started", `now ${JSON.stringify(mode)}, was ${JSON.stringify(beforeMode)}`);
+    if (probeId != null) {
+      await api("deleteAgents", { ids: [probeId] }).catch(() => api("deleteAgent", { id: probeId }).catch(() => {}));
+      const gone = (await api("listAgents").then((r) => r.value).catch(() => [])).every((a) => a.id !== probeId);
+      check(gone, "the scratch agent is gone from the roster");
+    }
+  }
+}
+
 // ---- the run --------------------------------------------------------------------------------------
 
-const RUNNER = { boot: legBoot, scroll: legScroll, picker: legPicker, badge: legBadge, tile: legTile, "tile-live": legTileLive, files: legFiles, chips: legChips };
+const RUNNER = { boot: legBoot, scroll: legScroll, picker: legPicker, badge: legBadge, tile: legTile, "tile-live": legTileLive, files: legFiles, chips: legChips, approval: legApproval };
 
 try {
   console.log(`console-polish: ${chosen.join(", ")} against ${ORIGIN}${READ_ONLY ? " (read-only)" : ""}`);
