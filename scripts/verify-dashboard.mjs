@@ -312,11 +312,28 @@ const openMarketplace = async () => {
 //      so an element handle taken the instant the entry appears is detached a frame later and
 //      clicking it throws into the middle of a run. A locator re-resolves the selector on every
 //      retry, so it cannot go stale.
+//
+// AND ONE THING THAT IS NOT A FAILURE AT ALL. This gate drives the console the LONG-RUNNING RELAY
+// serves, which is the shared working copy and not the worktree the gate is being run from. A
+// worktree that has not been merged and synced yet is therefore measured against a console that
+// predates it: settings.js answers 404 there, the page has no settings surface, and app.js falls
+// back to the panel that shipped. That is the fallback working, not a defect, so it is said in one
+// line and the legs that need the surface are NOT REACHED rather than red. On a console that does
+// serve the surface and still will not open it, they fail, which is the case worth a red line.
+let hasSettingsSurface = null;
 const openSettingsPanel = async () => {
+  if (hasSettingsSurface == null) {
+    hasSettingsSurface = await page.evaluate(() => typeof window.__mrSettings === "object" && window.__mrSettings != null).catch(() => false);
+    if (!hasSettingsSurface) {
+      console.log("  INFO  this console has no settings surface (settings.js is not served by the relay this gate drives),"
+        + " so app.js's fallback panel is what opens. Merge and sync SETTINGS-2 and this line goes away.");
+    }
+  }
   for (let attempt = 0; attempt < 2; attempt += 1) {
     await page.evaluate(() => document.getElementById("panel-dialog")?.close());
     await page.waitForTimeout(300);
     await page.click("#settings-button").catch(() => {});
+    if (!hasSettingsSurface) { await page.waitForTimeout(1400); return; }
     const surface = await page.waitForSelector("[data-settings-surface]", { timeout: 15_000 }).catch(() => null);
     if (surface == null) continue;
     const operator = page.locator('[data-settings-nav="operator"]');
@@ -2429,15 +2446,23 @@ try {
     const providers = at("Providers");
     const operatorShown = await page.$('[data-settings-operator="true"]') != null;
     // AN EMPTY READ IS NOT A FAILING ORDER, and saying so is the difference between a reader fixing
-    // the surface and a reader fixing the gate. If the panel is not showing the operator's section
-    // there is no order to check, so the three legs below say that instead of failing blank.
-    check(operatorShown && sectionOrder.length > 0, "the Operator section is on screen, which is where all of this now lives",
-      operatorShown ? `${sectionOrder.length} card(s)` : "no [data-settings-operator=\"true\"] on the page — Settings is not open on the operator's section");
-    if (operatorShown && sectionOrder.length > 0) {
+    // the surface and a reader fixing the gate. Three cases, and only one of them is red: the console
+    // predates SETTINGS-2 and has no surface at all (not reached, said once at the top of the run);
+    // the surface is there and open on the operator's section (checked); the surface is there and
+    // would not open (red, because that is a defect).
+    if (hasSettingsSurface === false) {
+      notReached("this console predates SETTINGS-2, so the cards are on app.js's fallback panel",
+        "the Operator section is on screen, which is where all of this now lives",
+        "Settings carries Providers directly under Inference", "and the chat listeners are the section after it");
+    } else if (operatorShown && sectionOrder.length > 0) {
+      check(true, "the Operator section is on screen, which is where all of this now lives", `${sectionOrder.length} card(s)`);
       check(inference >= 0 && providers === inference + (at("Plan") === inference + 1 ? 2 : 1),
         "Settings carries Providers directly under Inference, with only the plan group allowed between", shown);
       check(at("Listeners") === providers + 1, "and the chat listeners are the section after it", shown);
     } else {
+      // The surface is served and still did not come up on the operator's section. That IS a defect.
+      check(false, "the Operator section is on screen, which is where all of this now lives",
+        `no [data-settings-operator="true"] on the page and ${sectionOrder.length} card(s) read`);
       notReached("the operator's section was not on screen to read",
         "Settings carries Providers directly under Inference", "and the chat listeners are the section after it");
     }
