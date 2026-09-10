@@ -372,6 +372,63 @@ Five rules, each one load-bearing:
   alone is a weak test — a genuinely dark screen compresses small too — so the guard reads the
   **colour spread off the thumbnail's own pixels** before it encodes, and needs both: at least 2,048
   characters and a luminance spread of at least 10 out of 255.
+- **A picture nobody can click never holds the keyboard** (SEAT-FOCUS-1). See below.
+
+### The seat's keyboard (SEAT-FOCUS-1)
+
+**A picture nobody can click never holds the keyboard. The pane a person opened does.**
+
+There are two off-screen readers — `screen-tile.js`'s (`[data-screen-tile-source]`) and `app.js`'s
+hand-off thumb (`[data-box-handoff-thumb-source]`). Both are 1280x800 noVNC clients parked at
+`left: -10000px` with `pointer-events: none`, `opacity: 0`, `aria-hidden` and `view_only=1`. About two
+seconds after every mount the client focuses its own canvas and `document.activeElement` becomes the
+**iframe**: from that moment every document-level key goes into the frame and never reaches the page.
+MEASURED on grok-bot-local-vm in real Chrome at 1440x900, 2026-09-10: with a reader focused, a real
+Escape and a real space bar produced **zero** keydown events on a capture-phase listener on `document`,
+so `voice.js`'s handlers never ran — **Escape did not leave talk mode, the space bar did not talk** —
+and an **open desktop dialog did not close on Escape** either. Nothing was logged and nothing on screen
+said why. An idle reader mounts, grabs and releases in about 2–3 s every 30 s and a working agent's
+client is held for the whole turn, which is the one-in-three flakiness `verify-voice --leg nokey` had.
+
+So `screen-tile.js` arms a **hand-back** for each reader frame it creates, and `boxHandoffEnsureThumb`
+borrows the same function rather than keeping a second copy: if `document.activeElement` is that frame,
+`frame.blur()`. Two things drive it, because one of them is not always available:
+
+- a `focusin` listener installed on the **frame's own document**, which is readable because both
+  readers build their `src` on `window.location.origin` — the reader is **same origin by
+  construction**. In a harness this handed the keyboard back before a poll saw anything at all.
+- a **250 ms poll** for the frame's lifetime, which catches the steal within a quarter second. It stays
+  even though the listener works: if a future image ever served the client from the box's own address
+  the listener would silently stop installing, and this is what is left.
+
+Three things the filed row had wrong, each measured rather than argued: the thief is the off-screen
+**reader**, not the desktop dialog's seat; the frame is **same origin**, not cross-origin; and the
+mechanism it proposed — a `focus` listener on the iframe element — **does not fire at all** for a focus
+that lands inside the frame (0 in the product, 0 in an isolated harness; `inert` on the frame does not
+stop the steal either). `blur()` is enough and it sticks — `activeElement` stayed `BODY` for 14 s and
+the client never took it back, which is narrower than the blanket claim beside `app.js`'s teach frame:
+that one holds for a frame a **person** clicks, whose pointer events re-focus it.
+
+**Scoped to those two attributes and nothing else.** The seat inside the desktop dialog
+(`iframe[data-box-vnc]`) is the pane a person opened, is meant to hold the keys, says so in its own copy
+("⌘/Ctrl + V pastes into the box while this pane has the keyboard"), and the paste bridge depends on it.
+Because the readers are unreachable by any pointer the rule needs no "unless the person put it there"
+exception — which is just as well, since a **pointerdown inside an iframe is invisible to the parent
+document**, so that exception could not have been implemented for an interactive frame anyway.
+
+**MEASURED on grok-bot-local-vm, real Chrome 1440x900, 2026-09-10, `verify-console-polish --keys`
+7 of 7 with a reader held on Chief of staff's seat (:6):** the reader took the keyboard and was handed
+it back inside the first read (**2 hand-backs** over the run, poll every 250 ms), **20 of 20** real
+`keyboard.press("Escape")` reached a capture-phase listener on `document`, `document.activeElement` was
+**never an iframe across 24 samples**, a real space bar reached the module and opened the line, and
+Escape then left talk mode. `--tile-live` in the same pass: the tile still followed a real page change
+in **1.01 s** (1.81 s counting the gate's own `docker exec`) for **120.5 KiB over 86 websocket frames**,
+so the hand-back costs the picture nothing.
+
+`window.__screenTile.handBacks()` counts them, and `state().handBacks` carries the same number, so a
+gate can prove it **reproduced** the steal rather than measuring an empty page. That matters: one run
+in the reader pass had no reader on the page during the Escape loop and reported 20 of 20 with the
+defect present and unfixed.
 
 ### The tile keeps up (SCREEN-TILE-1)
 
@@ -620,6 +677,7 @@ node scripts/verify-console-polish.mjs --boot     the plate is on <html> before 
                                        --badge    a gap is one row, and it opens and shuts again
                                        --tile     a picture or a plate, and never a broken image
                                        --tile-live the tile follows the agent's screen, and what that costs
+                                       --keys     the reader never holds the keyboard: Escape leaves talk mode, the space bar talks
                                        --files    a file row opens a viewer and downloads
                                        --chips    a backticked span is a chip a mouse can press, and pressing it copies (§8)
                                        --approval the auto-review card in every state, and one real forced approval

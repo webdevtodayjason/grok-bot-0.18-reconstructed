@@ -72,11 +72,17 @@ Notifications and zero elsewhere, and the operator body `class="settings-list se
 - **Appearance** — Theme (Follow system / Light / Dark, and the choice is remembered, which the old
   two-state flip never did). Language, which is one disabled row reading "English for now. More are
   coming." — the reference product has the row, and a row that says plainly what it is beats an empty
-  promise. Background, a mount slot that `backgrounds.js` fills with its tiles **inline in the row**.
-  The design put them behind a Choose sub-view and the sub-view was not built: measured on
-  grok-bot-local-vm at 390x844, the eighteen tiles are 159x99 each inside the row's one control slot,
-  and General is 1,547 px of scroll in a 645 px window because of them. Filed as **BG-PICKER-1**,
-  which is where the sub-view is owned.
+  promise. Background, a mount slot `backgrounds.js` fills with **one Choose control whose face names
+  the plate that is chosen**, so a person reading General sees what the background is without opening
+  anything. Pressing it opens the gallery as a **sub-view of General** — a back control that says it
+  goes back to General, the title Background, and the same eighteen tiles with the upload and the
+  storage note, uncapped, because in a sub-view the gallery is the whole body. Choosing a plate applies
+  it at once; back is not a Save. **BG-PICKER-1 closed.** What it replaced was the grid inline in the
+  row: measured on grok-bot-local-vm in real Chrome on 2026-09-10, the row was 816x441.63 at 1440x900
+  and 360x361.63 at 390x844 with nineteen pressable faces in its one slot, and General was 1,250 px of
+  scroll in a 676 px window (1.85x) and 1,537 px in 645 px (2.38x). After, same machine: **one face**,
+  the row **63.63 px** and **70 px**, and General **872 px (1.29x)** and **1,256 px (1.95x)** — 378 px
+  and 281 px back, with `verify-settings` 95 of 95 green at both widths.
 - **System** — Microphone, drawn only when this browser can actually name one. Let me talk to Titan,
   a switch that writes whether talking is on for this workspace, disabled with the line "Your
   operator has not switched talking on yet" when no key exists for it anywhere.
@@ -310,7 +316,32 @@ So that three builders and five gates agree on one set of names:
              = <div><strong>label</strong><small>line</small></div> + exactly one control
   action   [data-settings-action="<name>"]          every control that does something
   mount    [data-settings-mount="<name>"]           a slot another module fills
+
+  sub-view [data-settings-subview="<id>"]           one module's whole body for one section
+             also carries data-settings-section="<id>", so everything that asks which section
+             is on screen keeps answering
+  back     [data-settings-back]                     the way out, carrying NO action name
+  body     [data-settings-subview-body]             where that module's markup goes
 ```
+
+### A sub-view (BG-PICKER-1)
+
+```
+window.__mrSettings.openSubview({ id, section, title, markup, fill, onBack })
+window.__mrSettings.closeSubview()
+```
+
+One at a time, and it belongs to one section. `markup()` draws it once; `fill(body)` runs on **every**
+paint of that section, so a live value still lands and the owner's wiring has to be idempotent. While
+it is open `paint()` does not rebuild the body — the same rule the two `mounts` shells get, and for the
+same reason: `account-menu.js` calls `refresh()` 2.5 s after boot, `refresh()` calls `paint()`, and a
+sub-view with no guard is wiped under the person's hand. A nav press (**including one naming its own
+section**), a search that lands somewhere else, a paint of any other section, and `open()` all end it.
+`register()` is untouched: a module that wants a sub-view draws its own control in its own mount slot
+and wires its own press, which keeps this out of `act()` — `act()` has no default branch, so a control
+routed through it would be swallowed in silence. The back control carries no action name for that
+reason. The sub-view's body is **not** sent the `titanbot:settings-section` event: that event is the
+section body's, and the section body is not on screen.
 
 The Notifications body carries `[data-push-mount]`, which is `push-settings.js`'s whole mount
 contract and what its legs match on; `.settings-list` is the operator stack's class and appears on no

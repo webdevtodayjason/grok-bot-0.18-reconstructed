@@ -790,14 +790,13 @@ async function noKeyInABrowser(relay) {
     // when the relay answers; waiting on `hidden === false` pressed Escape in that gap, which made this
     // leg read as a product that ignores Escape about one run in two. Both waits below are the words.
     await sentenceUp(desktop.page);
-    // WHERE THE KEYBOARD IS WHEN ESCAPE IS PRESSED, and it is not always the console. MEASURED on
-    // grok-bot-local-vm: once the agent's screen connects, noVNC focuses its own canvas, and the seat is
-    // a CROSS-ORIGIN iframe, so from that moment every document-level key lands inside it and never
-    // reaches this page -- `document.activeElement` is the IFRAME and its src is the seat's vnc.html.
-    // That made this leg fail about one run in three with identical state on both sides of the press.
-    // It is a real condition, filed as SEAT-FOCUS-1 (it swallows the space bar too), and it is NOT what
-    // this leg is about: a person who has just pressed Talk has the focus this line restores.
-    await desktop.page.focus("[data-voice-talk]").catch(() => {});
+    // WHERE THE KEYBOARD IS WHEN ESCAPE IS PRESSED, and this leg no longer arranges it. It used to call
+    // focus("[data-voice-talk]") first, because the agent's screen swallowed the key about one run in
+    // three: the off-screen reader takes focus a couple of seconds after it connects and from then on
+    // every document-level key landed inside it. That was SEAT-FOCUS-1, and it is fixed -- a reader
+    // hands the keyboard straight back (screen-tile.js, and scripts/verify-console-polish.mjs --keys
+    // measures it). So the press now happens with whatever has the focus, which is the real question:
+    // a person who pressed Talk and then reached for Escape did not focus anything first either.
     // And what else is on the page, because voice.js refuses Escape while a native <dialog> or a drawer
     // is open -- stealing the key from a modal would read as a broken one -- so a leg that fails here
     // has to say which of the four it was.

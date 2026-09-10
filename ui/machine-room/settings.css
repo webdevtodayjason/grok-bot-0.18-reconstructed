@@ -308,12 +308,55 @@
    Measured on grok-bot-local-vm, 18 plates: General was 1939 px of scroll at 1440x900 and 2196 px at
    390x844 -- 3.40x the window on the phone, over this wave's own ceiling -- and nine rows of tiles
    were all of it. A picture gallery is the one control a fixed box suits: the rows below it are
-   settings, and they should not be nine tiles away. */
+   settings, and they should not be nine tiles away.
+
+   BG-PICKER-1 moved the gallery behind a Choose control, so these two rules now only apply to the
+   INLINE fallback backgrounds.js draws on a console whose settings module has no sub-view seam. In the
+   sub-view the gallery is the whole body and the .settings-body scroller is its box. */
 [data-settings-mount="background"] .bg-grid {
   max-height: 300px;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
+
+/* BG-PICKER-1: the Background row is a label, a line and ONE button now, so it reads like its
+   neighbours rather than wrapping the control onto a line of its own. The two rules above exist
+   because the GALLERY needed the full width of the card -- `flex: 1 1 100%` on the slot and
+   flex-wrap on the row -- and with the gallery gone that full-width slot was all that kept the row
+   tall. MEASURED on grok-bot-local-vm in real Chrome: 441.63 px with the gallery inline at 1440x900,
+   113.63 px with the Choose control still on a line of its own, and 63.63 px once the slot sits
+   beside the label like every other row's. Scoped to the slot when it holds the Choose control, so
+   the inline fallback keeps the full width its tiles need. */
+.settings-card .setting-row:has([data-settings-mount="background"]:has([data-bg-open])) {
+  flex-wrap: nowrap;
+  align-items: center;
+}
+
+.settings-card .setting-row > [data-settings-mount="background"]:has([data-bg-open]) {
+  flex: 0 0 auto;
+  width: auto;
+  max-width: 55%;
+  justify-content: flex-end;
+}
+
+/* ---- BG-PICKER-1: a sub-view ------------------------------------------------------------------
+   One module's whole body for one section: a back control that says what it goes back to, a title,
+   and the thing the person came to choose. Nothing here caps the gallery -- that is the point of
+   opening it -- and the back control sits above the title so it reads as the way out rather than as
+   one more control on the page. */
+.settings-subview-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.settings-back { align-self: flex-start; }
+
+/* The gallery is the body here, so it keeps no card of its own. Same three properties the inline
+   mount neutralises, for the same reason. */
+[data-settings-subview] #bg-section { padding: 0; border: 0; background: transparent; }
+[data-settings-subview] .bg-grid { margin-top: 0; }
 
 /* ---- the account menu at the foot of the roster --------------------------------------------- */
 
@@ -533,6 +576,13 @@
   .settings-subrow button,
   .settings-identity button { min-width: 44px; }
 
+  /* BG-PICKER-1: the inline fallback only, as above. The sub-view's gallery is uncapped at every
+     width, which is why General gets 281 px back at this one.
+
+     The rule above about a control going UNDER its label at this width is about a control that needs
+     the room -- a select, a text field, a gallery. The Choose control is a short button naming a plate
+     and it fits beside the label, so it is deliberately left there at both widths: measured 70 px on
+     the phone against 361.63 px with the gallery inline. */
   [data-settings-mount="background"] .bg-grid { max-height: 220px; }
 
   /* A SWITCH IS A TARGET TOO, and every switch on this surface measured 38x22 -- including the six

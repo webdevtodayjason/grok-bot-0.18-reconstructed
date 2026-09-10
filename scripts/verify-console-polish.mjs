@@ -12,6 +12,10 @@
 //   "there's a broken image there"                                                       --tile
 //   "when there is a file and I click Files ... I can't do anything with it"             --files
 //
+// And SEAT-FOCUS-1, which nobody reported because it says nothing when it happens: the off-screen
+// reader takes the keyboard about two seconds after every mount, and from then on Escape does not
+// leave talk mode and the space bar does not talk.                                      --keys
+//
 // And one from 2026-09-10, which is SCREEN-TILE-1:
 //
 //   "the AI's desktop in the right-hand corner has a screenshot that does not stay up to
@@ -77,7 +81,7 @@ import { acquireBoxLock } from "./lib/box-lock.mjs";
 // requests were indistinguishable from a stranger's in the relay's sign-in ledger.
 import { gateUserAgent } from "./gate-agent.mjs";
 
-const LEGS = ["boot", "scroll", "picker", "badge", "tile", "tile-live", "files", "chips", "approval"];
+const LEGS = ["boot", "scroll", "picker", "badge", "tile", "tile-live", "keys", "files", "chips", "approval"];
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(`--${name}`);
 const value = (name) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : null; };
@@ -86,7 +90,7 @@ const URL_TARGET = value("url");
 const READ_ONLY = URL_TARGET != null || flag("read-only");
 const chosen = flag("all") ? [...LEGS] : LEGS.filter((leg) => flag(leg));
 if (chosen.length === 0) {
-  console.log("usage: node scripts/verify-console-polish.mjs (--boot | --scroll | --picker | --badge | --tile | --tile-live | --files | --chips | --approval | --all)");
+  console.log("usage: node scripts/verify-console-polish.mjs (--boot | --scroll | --picker | --badge | --tile | --tile-live | --keys | --files | --chips | --approval | --all)");
   console.log("       [--url https://console.titanium.bot]   read-only pass, CONSOLE_BEARER in the environment");
   console.log("");
   console.log("  --boot    the chosen background is on the page before first paint, and the cover lifts");
@@ -95,6 +99,7 @@ if (chosen.length === 0) {
   console.log("  --badge   everything between two chat messages folds into one badge that opens again");
   console.log("  --tile    the rail's screen tile shows a picture or a plate, and never a broken image");
   console.log("  --tile-live  the tile follows the agent's screen on its own, and what that costs");
+  console.log("  --keys    the agent's screen never holds the keyboard: Escape leaves talk mode, the space bar talks");
   console.log("  --files   a file row opens a viewer and downloads");
   console.log("  --chips   a backticked span is a chip a mouse can press, and pressing it copies");
   console.log("  --approval  the auto-review card in every state, plus one real forced approval on the local box");
@@ -658,6 +663,189 @@ const ageSeconds = (words) => {
   return null;
 };
 
+// ---- --keys (SEAT-FOCUS-1) -----------------------------------------------------------------------
+//
+// A picture nobody can click never holds the keyboard. The off-screen reader is a 1280x800 noVNC client
+// parked at left:-10000px with pointer-events:none, opacity 0, aria-hidden and view_only=1, and about
+// two seconds after every mount the client focuses its own canvas: document.activeElement becomes the
+// IFRAME and every document-level key goes into it. MEASURED on grok-bot-local-vm before the fix: with
+// a reader focused, a real Escape and a real space bar produced ZERO keydowns on a capture-phase
+// listener on document, so voice.js's handlers never ran.
+//
+// THIS LEG HAS TO PROVE IT REPRODUCED THE CONDITION OR IT IS MEASURING AN EMPTY PAGE. Measured in the
+// reader pass: one whole run had no reader on the page during the Escape loop and reported 20 of 20
+// with the defect present and unfixed. So a reader frame must be mounted AND the module's own hand-back
+// count must have moved -- which is the only way to see, with the fix on, that the frame really did
+// take the keyboard and really was handed it back.
+async function legKeys(page) {
+  console.log("\n== --keys: the agent's screen never holds the keyboard (SEAT-FOCUS-1)");
+  if (READ_ONLY) {
+    skip("the reader hands the keyboard back", "read-only pass: this leg drives a real box's reader and presses real keys");
+    return;
+  }
+
+  const { workers, seats, shared } = await seatsOnThisBox(150_000);
+  const candidates = [...seats, ...(shared ? [shared] : [])];
+  if (candidates.length === 0) {
+    skip("the reader hands the keyboard back", `no agent on this box has a screen to read (${workers.length} workers)`);
+    return;
+  }
+
+  const booted = await bootConsole(page);
+  check(booted === true, "the console boots and the gateway adapter is on the page", booted === true ? "window.__machineRoomAdapter present" : "no adapter");
+  if (booted !== true) return;
+  const hasModule = await page.evaluate(() => typeof window.__screenTile?.keepKeyboardOff === "function");
+  if (!hasModule) { skip("the reader hands the keyboard back", "window.__screenTile.keepKeyboardOff is not on this page; SEAT-FOCUS-1 has not shipped here"); return; }
+
+  // A capture-phase listener on the document, which is where voice.js's own handlers live. Counting
+  // what ARRIVES rather than what the product did with it: the question is whether the key reached the
+  // page at all, and the product's answer is asserted separately below.
+  await page.evaluate(() => {
+    window.__gateKeys = { escapes: 0, spaces: 0, actives: [] };
+    if (window.__gateKeyWatch) return;
+    window.__gateKeyWatch = (event) => {
+      if (event.key === "Escape") window.__gateKeys.escapes += 1;
+      if (event.key === " " || event.code === "Space") window.__gateKeys.spaces += 1;
+    };
+    document.addEventListener("keydown", window.__gateKeyWatch, true);
+  });
+
+  // A reader is held for the whole window by pinning the state the module is driven with, exactly the
+  // way --tile-live does, because app.js's own renders would retime it underneath this probe.
+  let held = null;
+  const tried = [];
+  for (const candidate of candidates) {
+    if (budgetLeft() < 90_000) break;
+    let opened = await openConversation(page, candidate.id);
+    if (!opened) {
+      opened = await page.evaluate((id) => {
+        const card = document.querySelector(`.worker-card[data-context-id="${id}"]`);
+        if (!card) return false;
+        card.click();
+        return true;
+      }, candidate.id);
+      await sleep(2500);
+    }
+    const showing = await until(() => page.evaluate((id) => (document.querySelector(".rail-screen-button")?.dataset.agentId === id ? true : null), candidate.id), within(12_000), 500);
+    if (showing !== true) { tried.push(`${candidate.name} (its conversation would not open)`); continue; }
+    await holdTile(page, { agentId: candidate.id, seat: candidate.seat, status: "working" });
+    await beatTile(page, 1000);
+    const mounted = await until(() => page.$("iframe[data-screen-tile-source]"), within(20_000), 300);
+    if (!mounted) { tried.push(`${candidate.name} (no reader frame in 20 s)`); await releaseTile(page); continue; }
+    held = candidate;
+    break;
+  }
+  if (!held) {
+    check(false, "a reader is mounted on this box, so there is something to measure",
+      `no reader mounted, so nothing was measured — ${candidates.length} candidate(s): ${tried.join("; ") || "none reached"}`);
+    return;
+  }
+
+  try {
+    // THE REPRODUCTION. The client focuses its own canvas a couple of seconds after it connects, and
+    // the count moving is the only visible trace of that once the fix is on. Polled rather than slept
+    // on, and how long it took is printed.
+    const armedAt = Date.now();
+    const took = await until(() => page.evaluate(() => {
+      const n = window.__screenTile.handBacks();
+      return n > 0 ? n : null;
+    }), within(40_000), 250);
+    check(took != null, "the reader took the keyboard and was handed it straight back, so the condition reproduced",
+      took != null
+        ? `${took} hand-back(s) in ${((Date.now() - armedAt) / 1000).toFixed(1)}s on ${held.name}'s screen (:${held.seat ?? 1})`
+        : `no reader took the keyboard inside 40 s on ${held.name}'s screen, so the swallow was NOT reproduced and nothing below would mean anything`);
+    if (took == null) return;
+
+    // AND THE KEYBOARD IS NEVER LEFT IN IT. Sampled across the press loop rather than read once: the
+    // steal is a moment, and a single read between two of them proves nothing.
+    await page.evaluate(() => {
+      window.__gateActive = { samples: 0, inFrame: 0, worst: "" };
+      if (window.__gateActiveWatch) clearInterval(window.__gateActiveWatch);
+      window.__gateActiveWatch = setInterval(() => {
+        const el = document.activeElement;
+        window.__gateActive.samples += 1;
+        if (el && el.tagName === "IFRAME") {
+          window.__gateActive.inFrame += 1;
+          window.__gateActive.worst = el.getAttribute("data-screen-tile-source") ? "the tile's reader"
+            : el.getAttribute("data-box-handoff-thumb-source") ? "the hand-off reader"
+              : el.getAttribute("data-box-vnc") ? "the seat a person opened" : "some other frame";
+        }
+      }, 100);
+    });
+
+    // TWENTY REAL PRESSES. Not a dispatched event: the question is what a keyboard reaches.
+    await page.evaluate(() => { window.__gateKeys.escapes = 0; });
+    for (let i = 0; i < 20; i += 1) {
+      await page.keyboard.press("Escape");
+      await sleep(120);
+    }
+    const keys = await page.evaluate(() => window.__gateKeys);
+    const active = await page.evaluate(() => {
+      clearInterval(window.__gateActiveWatch);
+      delete window.__gateActiveWatch;
+      return window.__gateActive;
+    });
+    check(keys.escapes === 20, "20 of 20 real Escapes reach a capture-phase listener on the document",
+      `${keys.escapes} of 20 arrived, with a reader mounted the whole time`);
+    check(active.inFrame === 0, "and document.activeElement is never an iframe while that reader is mounted",
+      active.inFrame === 0 ? `${active.samples} samples, none in a frame` : `${active.inFrame} of ${active.samples} samples were inside ${active.worst}`);
+    const count = await page.evaluate(() => window.__screenTile.handBacks());
+    info(`${count} hand-back(s) in total on grok-bot-local-vm, reader on ${held.name}'s screen (:${held.seat ?? 1}), poll every ${await page.evaluate(() => window.__screenTile.limits.HANDBACK_POLL_MS)} ms`);
+
+    // THE PRODUCT'S OWN ANSWER. Escape has to LEAVE talk mode, and the space bar has to open the line
+    // with the message box empty -- the two things that silently stopped working. Talk mode is pinned
+    // to push so the space bar is the hold, and the composer is cleared so voice.js's own guard allows
+    // the key. This box's voice.json may be empty, in which case the line that opens is a refusal --
+    // which is still the space bar reaching the module, which is what this measures.
+    const state = await page.evaluate(async () => {
+      if (typeof window.__voice?.setTalkMode !== "function") return null;
+      window.__voice.setTalkMode("push");
+      const box = document.getElementById("message-input");
+      if (box) box.value = "";
+      document.querySelectorAll("dialog[open]").forEach((node) => node.close?.());
+      const before = { on: window.__voice._state.on, talking: window.__voice._state.talking, notes: window.__voice._state.notes.length };
+      return { before, mode: window.__voice.talkMode() };
+    });
+    if (state == null) { skip("a real space bar opens the line and Escape leaves again", "voice.js is not on this page"); }
+    else {
+      await page.keyboard.down("Space");
+      await sleep(900);
+      const down = await page.evaluate(() => ({
+        spaces: window.__gateKeys.spaces,
+        held: window.__voice._state.held,
+        talking: window.__voice._state.talking,
+        on: window.__voice._state.on,
+        notes: window.__voice._state.notes.map((one) => one.condition),
+        lineUp: document.getElementById("voice-line")?.hidden === false,
+      }));
+      await page.keyboard.up("Space");
+      await sleep(400);
+      check(down.spaces > 0, "a real space bar reaches the document with a reader mounted", `${down.spaces} space keydown(s)`);
+      const opened = down.held === true || down.talking === true || down.on === true || down.notes.length > 0 || down.lineUp === true;
+      check(opened, "and it opens the line rather than doing nothing at all",
+        `held ${down.held}, talking ${down.talking}, on ${down.on}, notes ${JSON.stringify(down.notes)}, line ${down.lineUp ? "up" : "down"}`);
+      await page.keyboard.press("Escape");
+      await sleep(500);
+      const left = await page.evaluate(() => ({
+        on: window.__voice._state.on,
+        talking: window.__voice._state.talking,
+        notes: window.__voice._state.notes.length,
+        lineUp: document.getElementById("voice-line")?.hidden === false,
+      }));
+      check(left.on === false && left.talking === false && left.lineUp === false,
+        "and Escape then leaves talk mode, which is the half the reader used to swallow",
+        `on ${left.on}, talking ${left.talking}, line ${left.lineUp ? "still up" : "down"}, ${left.notes} note(s)`);
+    }
+    await shoot(page, `keys-${Date.now()}`);
+  } finally {
+    await releaseTile(page).catch(() => {});
+    await page.evaluate(() => {
+      if (window.__gateActiveWatch) { clearInterval(window.__gateActiveWatch); delete window.__gateActiveWatch; }
+      if (window.__gateKeyWatch) { document.removeEventListener("keydown", window.__gateKeyWatch, true); delete window.__gateKeyWatch; }
+    }).catch(() => {});
+  }
+}
+
 async function legTileLive(page) {
   console.log("\n== --tile-live: the tile keeps up with the agent on its own, and what that costs");
   if (READ_ONLY) {
@@ -1062,13 +1250,21 @@ async function legPicker(page) {
   // on the surface's own section event, and General is the section Settings opens on, so this press
   // is unchanged -- what changed is that it no longer depends on the panel being titled anything.
   await page.evaluate(() => (document.getElementById("settings-button") ?? document.getElementById("shelf-settings"))?.click());
-  const injected = await until(() => page.$('[data-settings-mount="background"] .bg-grid, .bg-grid'), within(15_000), 400);
-  if (!injected) { skip("the background picker has no blank tiles", "Settings would not open, or it carries no .bg-grid"); return; }
+  // BG-PICKER-1: ONE PRESS, and this leg's coverage depends on it. The gallery is no longer inline in
+  // the Background row -- the row is a Choose control and the tiles are a sub-view of General -- so a
+  // leg that waited for .bg-grid on General would find nothing and skip(), which reads as "the picker
+  // has not shipped" about a picker that is one press away. Flagged for the integrator as the one edit
+  // this wave makes to an existing leg.
+  const chooser = await until(() => page.$("[data-bg-open]"), within(15_000), 400);
+  if (chooser) await page.evaluate(() => document.querySelector("[data-bg-open]")?.click());
+  const injected = await until(() => page.$('[data-settings-subview="background"] .bg-grid, [data-settings-mount="background"] .bg-grid, .bg-grid'), within(15_000), 400);
+  if (!injected) { skip("the background picker has no blank tiles", `Settings would not open, or Choose reached no .bg-grid (chooser ${chooser ? "pressed" : "absent"})`); return; }
+  info(`the gallery was reached by ${chooser ? "pressing the row's Choose control" : "reading it inline, with no Choose control on the row"}`);
 
   // The blank spots: a series heading drawn as a grid item reads as a tile-shaped hole. A heading
   // row spans the whole grid; a tile does not.
   const grid = await page.evaluate(() => {
-    const el = document.querySelector(".bg-grid");
+    const el = document.querySelector('[data-settings-subview="background"] .bg-grid') ?? document.querySelector(".bg-grid");
     if (!el) return null;
     const width = Math.round(el.getBoundingClientRect().width);
     return [...el.children].map((child) => {
@@ -1893,7 +2089,7 @@ async function legApproval(page) {
 
 // ---- the run --------------------------------------------------------------------------------------
 
-const RUNNER = { boot: legBoot, scroll: legScroll, picker: legPicker, badge: legBadge, tile: legTile, "tile-live": legTileLive, files: legFiles, chips: legChips, approval: legApproval };
+const RUNNER = { boot: legBoot, scroll: legScroll, picker: legPicker, badge: legBadge, tile: legTile, "tile-live": legTileLive, keys: legKeys, files: legFiles, chips: legChips, approval: legApproval };
 
 try {
   console.log(`console-polish: ${chosen.join(", ")} against ${ORIGIN}${READ_ONLY ? " (read-only)" : ""}`);

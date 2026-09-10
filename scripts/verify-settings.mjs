@@ -70,6 +70,13 @@ const BASELINE = {
   sections: 10,
   controls: 90,
   passwordFields: 4,
+  // BG-PICKER-1, measured on grok-bot-local-vm in real Chrome on 2026-09-10 with the 18-tile grid
+  // INLINE in the Background row's control slot, which is what this ship takes out of it. The row
+  // itself was 441.63 px at 1440x900 and 361.63 px at 390x844, and hiding the gallery gave General
+  // back 362 px and 282 px.
+  generalDesktop: 1250, generalDesktopWindow: 676,
+  generalPhone: 1537, generalPhoneWindow: 645,
+  backgroundRowDesktop: 441.63, backgroundRowPhone: 361.63,
 };
 
 const EXPECTED_NAV = ["general", "computer", "usage", "updates", "notifications"];
@@ -299,6 +306,126 @@ try {
     await page.waitForTimeout(700);
   };
 
+  /**
+   * BG-PICKER-1. The Background row, the Choose control, the gallery behind it, and the way back --
+   * run at both widths, because the row was measured at both and the sub-view is the whole body at
+   * both. SETTINGS-2's own claim rides along: the gallery is still found by structure and still lands
+   * in General, which is the regression the old title guard would have caused silently.
+   */
+  async function settingsBackgroundLeg(page, view) {
+    step(`the Background row is one Choose control at ${view.w}x${view.h}, and the gallery is behind it`);
+    await gotoSection(page, "general");
+    const row = await page.evaluate(() => {
+      const node = document.querySelector('[data-setting-row="background"]');
+      const slot = node?.querySelector(":scope > .setting-control");
+      return node == null || slot == null ? null : {
+        h: Math.round(node.getBoundingClientRect().height * 100) / 100,
+        faces: slot.querySelectorAll("button, a, select, input, textarea, label").length,
+        face: (slot.querySelector("[data-bg-open]")?.textContent ?? "").trim(),
+        named: slot.querySelector("[data-bg-open]")?.getAttribute("aria-label") ?? "",
+        tiles: slot.querySelectorAll("[data-bg-id]").length,
+        grids: slot.querySelectorAll(".bg-grid").length,
+      };
+    });
+    check(row != null && row.faces === 1 && row.grids === 0 && row.tiles === 0,
+      "the row's one slot holds one control face and no tile grid",
+      row == null ? "no background row on this box" : `${row.faces} face(s), ${row.tiles} tile(s), ${row.grids} grid(s)`);
+    if (row != null) {
+      check(row.face.length > 0, "and its face names the plate that is chosen", `"${row.face}" — ${row.named}`);
+      const was = view.w === PHONE.w ? BASELINE.backgroundRowPhone : BASELINE.backgroundRowDesktop;
+      check(row.h < was / 2, `and the row is ${row.h} px, against ${was} px with the gallery inline on grok-bot-local-vm`,
+        `${was} -> ${row.h} px`);
+    }
+
+    // THE PRESS. Without it this gate stops measuring the picker at all, which is the failure shape
+    // this wave keeps finding: a leg that reads a selector somewhere it no longer is.
+    const pressed = await page.$("[data-bg-open]");
+    if (pressed == null) { skip("pressing Choose opens the gallery as a sub-view of General", "the row drew no Choose control"); return; }
+    await page.click("[data-bg-open]");
+    await page.waitForTimeout(800);
+    const picker = await page.evaluate(() => {
+      const view_ = document.querySelector('[data-settings-subview="background"]');
+      const grid = view_?.querySelector(".bg-grid") ?? null;
+      if (grid == null) return null;
+      const width = Math.round(grid.getBoundingClientRect().width);
+      const cells = [...grid.children].map((child) => {
+        const rect = child.getBoundingClientRect();
+        return {
+          w: Math.round(rect.width), h: Math.round(rect.height),
+          full: Math.round(rect.width) >= width - 4,
+          hasImage: child.querySelector("img") != null,
+        };
+      });
+      return {
+        tiles: grid.querySelectorAll("[data-bg-id]").length,
+        blanks: cells.filter((cell) => !cell.hasImage && !cell.full && cell.w > 40 && cell.h > 40).length,
+        section: view_.dataset.settingsSection ?? "",
+        back: (view_.querySelector("[data-settings-back]")?.textContent ?? "").replace(/\s+/g, " ").trim(),
+        title: (view_.querySelector("[data-settings-title]")?.textContent ?? "").trim(),
+        capped: grid.scrollHeight > grid.clientHeight + 1,
+        rows: document.querySelectorAll('[data-settings-body] [data-setting-row="background"]').length,
+      };
+    });
+    check(picker != null && picker.tiles > 0, "pressing Choose opens the gallery as a sub-view of General",
+      picker == null ? "no .bg-grid inside [data-settings-subview=background]: the press reached nothing" : `${picker.tiles} tiles`);
+    if (picker == null) return;
+    check(picker.blanks === 0, "and no series heading is drawn in a tile's box", `${picker.tiles} tiles, every heading spans the grid`);
+    check(picker.section === "general" && picker.rows === 0,
+      "the sub-view IS General's body, so the nav still says General and the rows are not under it",
+      `section ${picker.section}, ${picker.rows} background row(s) still painted`);
+    check(/Back to General/.test(picker.back) && picker.title === "Background",
+      "its back control says what it goes back to", `"${picker.back}" / "${picker.title}"`);
+    check(picker.capped === false, "and the gallery is not a 300 px window onto itself any more, which is what the row gives back");
+
+    // ACCOUNT-MENU.JS'S OWN REFRESH IS 2.5 s AFTER BOOT and it repaints the open section. A sub-view
+    // with no paint guard is wiped by it -- the same mechanism that was measured putting a stored
+    // notification switch back under a person's hand. Four seconds is past it.
+    await page.evaluate(() => window.__mrSettings.refresh());
+    await page.waitForTimeout(4000);
+    const survived = await page.evaluate(() => {
+      const view_ = document.querySelector('[data-settings-subview="background"]');
+      return view_ == null ? null : { tiles: view_.querySelectorAll("[data-bg-id]").length, wired: view_.querySelector("#bg-section")?.dataset.bgWired ?? "" };
+    });
+    check(survived != null && survived.tiles > 0, "and it is still there four seconds and a refresh later",
+      survived == null ? "the repaint wiped it, which is the seam not holding" : `${survived.tiles} tiles, wired ${survived.wired}`);
+
+    // Choosing a plate applies immediately, the way it always did. Read off <html>, which bg-boot.js
+    // owns, rather than off storage.
+    const chose = await page.evaluate(async () => {
+      const tiles = [...document.querySelectorAll('[data-settings-subview="background"] [data-bg-id]')];
+      const before = document.documentElement.dataset.bg ?? "";
+      const next = tiles.find((tile) => tile.dataset.bgId !== before);
+      if (next == null) return null;
+      next.click();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return { before, want: next.dataset.bgId, now: document.documentElement.dataset.bg ?? "" };
+    });
+    if (chose == null) skip("choosing a plate applies it at once", "only one plate on this box");
+    else check(chose.now === chose.want, "choosing a plate applies it at once, with no Save", `${chose.before} -> ${chose.now}`);
+
+    await shoot(page, `background-subview-${view.w}x${view.h}`);
+    await page.click("[data-settings-back]");
+    await page.waitForTimeout(800);
+    const backOn = await page.evaluate(() => ({
+      subviews: document.querySelectorAll("[data-settings-subview]").length,
+      grids: document.querySelectorAll('[data-settings-body] .bg-grid').length,
+      face: (document.querySelector("[data-bg-open]")?.textContent ?? "").trim(),
+      section: document.querySelector("[data-settings-body] [data-settings-section]")?.dataset.settingsSection ?? "",
+    }));
+    check(backOn.subviews === 0 && backOn.grids === 0 && backOn.section === "general",
+      "back returns to General with no gallery on it",
+      `${backOn.subviews} sub-view(s), ${backOn.grids} grid(s), section ${backOn.section}`);
+    // The face is read against the plate <html> actually carries, so "it says something" is not
+    // mistaken for "it says the right thing".
+    const named = await page.evaluate(() => {
+      const id = document.documentElement.dataset.bg ?? "";
+      const list = window.__machineRoomBackgrounds?.BUILT_IN ?? [];
+      return (list.find((one) => one.id === id)?.name) ?? "";
+    });
+    check(backOn.face.length > 0 && (named.length === 0 || backOn.face === named),
+      "and the row reads the plate that was chosen", `the row reads "${backOn.face}", the page is on "${named || "a plate this browser uploaded"}"`);
+  }
+
   // =================================================================================================
   step(`the surface at ${DESKTOP.w}x${DESKTOP.h}, as a customer`);
   // =================================================================================================
@@ -363,6 +490,13 @@ try {
       `${body.scrollHeight} px in a ${body.clientHeight} px window (${ratio.toFixed(2)}x)`);
   }
   info(`total across five sections ${bodies.reduce((n, body) => n + body.scrollHeight, 0)} px, against ${BASELINE.desktopScroll} px in one dialog before this ship`);
+  // BG-PICKER-1: General is the one section this ship changes the height of, so its own number is
+  // printed against the one measured with the gallery inline rather than left inside a total.
+  const generalDesk = bodies.find((body) => body.id === "general");
+  info(`General at ${DESKTOP.w}x${DESKTOP.h} is ${generalDesk.scrollHeight} px in a ${generalDesk.clientHeight} px window `
+    + `(${(generalDesk.scrollHeight / generalDesk.clientHeight).toFixed(2)}x), against `
+    + `${BASELINE.generalDesktop} px in ${BASELINE.generalDesktopWindow} px `
+    + `(${(BASELINE.generalDesktop / BASELINE.generalDesktopWindow).toFixed(2)}x) with the gallery inline on grok-bot-local-vm`);
 
   step("every row is a label, at most one line, and exactly one control slot");
   for (const id of EXPECTED_NAV) {
@@ -423,20 +557,10 @@ try {
   await page.fill("[data-settings-search]", "");
   await page.waitForTimeout(400);
 
-  step("the Background picker, which the old title guard would have deleted");
-  await gotoSection(page, "general");
-  const picker = await page.evaluate(() => {
-    const grid = document.querySelector('[data-settings-mount="background"] .bg-grid') ?? document.querySelector(".bg-grid");
-    return grid == null ? null : {
-      inAppearance: grid.closest('[data-settings-group="appearance"]') != null,
-      inGeneral: grid.closest('[data-settings-section="general"]') != null,
-      tiles: grid.querySelectorAll("[data-bg-id]").length,
-    };
-  });
-  check(picker != null && picker.tiles > 0, "the Background picker is on screen with its tiles",
-    picker == null ? "no .bg-grid anywhere: the rename deleted the picker" : `${picker.tiles} tiles`);
-  if (picker != null) check(picker.inGeneral && picker.inAppearance, "and it mounted into General -> Appearance and nowhere else",
-    `general ${picker.inGeneral}, appearance ${picker.inAppearance}`);
+  // BG-PICKER-1. Two claims, and the second one is where the coverage used to be: the row is one
+  // control at rest, and PRESSING it still reaches the same gallery. A leg that only read .bg-grid off
+  // General would now find nothing and report it as a deleted picker, which is why the press is here.
+  await settingsBackgroundLeg(page, DESKTOP);
 
   step("the notification switches round-trip through the push settings route");
   await gotoSection(page, "notifications");
@@ -707,7 +831,14 @@ try {
       `${seen.scrollHeight} px in a ${seen.clientHeight} px window (${ratio.toFixed(2)}x)`);
     await shoot(page, `settings-${id}-390x844`);
   }
+  await settingsBackgroundLeg(page, PHONE);
+  await gotoSection(page, "general");
   info(`total across five sections ${phoneBodies.reduce((n, body) => n + body.scrollHeight, 0)} px, against ${BASELINE.phoneScroll} px in one dialog before this ship`);
+  const generalPhone = phoneBodies.find((body) => body.id === "general");
+  info(`General at ${PHONE.w}x${PHONE.h} is ${generalPhone.scrollHeight} px in a ${generalPhone.clientHeight} px window `
+    + `(${(generalPhone.scrollHeight / generalPhone.clientHeight).toFixed(2)}x), against `
+    + `${BASELINE.generalPhone} px in ${BASELINE.generalPhoneWindow} px `
+    + `(${(BASELINE.generalPhone / BASELINE.generalPhoneWindow).toFixed(2)}x) with the gallery inline on grok-bot-local-vm`);
 
   step(`nothing past the right edge (${BASELINE.phoneOverflow} rects before this ship, worst right edge 692 px)`);
   let worstOverflow = { count: 0, worst: [] };
