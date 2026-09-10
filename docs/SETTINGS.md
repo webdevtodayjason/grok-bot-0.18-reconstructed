@@ -131,10 +131,25 @@ carry on."* The label above it stays as it was so the phone app's own copy still
 ### Operator
 
 Everything technical the old panel held, in one place a customer never reaches: which endpoint is
-answering and its health, the chat listeners, what is included with the plan, the technical half of
-talking (service, model, voice), the email plane **minus every key field**, the job bus with every
-attribute intact, this box's version and its update and reset buttons, and one line saying keys the
-product uses live in the admin console.
+answering and its health, the chat listeners, what is included with the plan, the email plane
+**minus its sending-key field**, the job bus with every attribute intact, this box's version and its
+update and reset buttons, and one line saying keys the product uses live in the admin console.
+
+One thing the email plane keeps, and keeps deliberately: the **webhook signing secret**. It is not a
+vendor credential the product fetches, it is the routing discriminator that decides which workspace
+a message claiming a shared mail domain belongs to, so one global value in front of every edge would
+let the first claimant read another customer's mail. It stays on each workspace's own file and it is
+the only password field left on the whole surface.
+
+And one thing that is NOT here yet, written down rather than implied: the technical half of talking
+— **Service, Model, Voice and Who you are talking to**. The old Voice card carried those four beside
+its key field; the key field is gone, correctly, and the four went with it. The relay still accepts
+every one of those writes, so the capability is live on the server and has no control on screen.
+Measured on a local relay from the shipped build behind the instance-password door, 2026-09-10:
+`[data-voice-vendor]`, `[data-voice-model]`, `[data-voice-voice]` and `[data-voice-agent]` are absent
+from the whole page. It is filed as **VOICE-8** with an owner and a next action — four rows
+registered into an Operator *Talking* group through `__mrSettings.register`, reading and writing the
+route that already takes them.
 
 ---
 

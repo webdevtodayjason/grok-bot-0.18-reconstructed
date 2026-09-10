@@ -431,6 +431,22 @@ select:focus-visible {
   padding-right: 12px;
 }
 
+/* SETTINGS-2: the account tile the wave put at the foot of the roster is 61 px the roster never
+   carried, and the cap above was written when the roster held the stack and nothing else. MEASURED on
+   grok-bot-local-vm in real Chrome: with the foot mounted the roster came to 663.50 px inside a stage
+   row whose content box is 648 px, so it STRETCHED the row and took every column with it --
+   .transcript grew 567.75 -> 583.25 at 1440x900 and 487.75 -> 503.25 at 1100x820, which is
+   verify-mobile's desktop baseline going red over an element nothing in this wave touched. The stack
+   gives the foot its 61 px back, so the roster is the height it has always been and the row does not
+   move. `:has` rather than an unconditional number, because a console whose account-menu.js did not
+   load has no foot and should keep the whole cap. Lifted inside the drawer, where the roster is fixed
+   top to bottom and the shelf is not under it (:4547). */
+@media (min-width: 691px) {
+  .worker-roster:has(.account-foot) .worker-stack {
+    max-height: calc(100vh - 391px);
+  }
+}
+
 .worker-card {
   overflow: hidden;
   position: relative;
