@@ -1444,3 +1444,105 @@ to read any browser leg on this branch while several waves share one checkout.
 
 Still to measure: one turn on the R750 demo tenant through `console.titanium.bot` as a throwaway
 customer. That is the ship's leg, not the builder's.
+
+---
+
+## 10. What the console polish 3 ship measured
+
+Shipped 2026-09-10 as merge commit `be6d4b0`. Unlike CONSOLE-4 this one moves the host bundle, for
+one sentence: the standing persona's backticks line. So the ship was a relay sync, then
+`updateHostNow` inside **exactly two boxes** — the demo box `titanbot-box-atonqjq7zx593jsacaccpfau`
+and Jason's box `titanbot-box-p927bfqm83ioloibamlvyd7g` — and the relay restarted **last**.
+Richard's box was not touched and answered `f82ee6bf780a` afterwards, the version it was already on.
+Both swapped boxes wrote their own line: `post-swap watch disarmed: host up 60075ms on
+be6d4b071c58 (healthy)` and `... 60079ms on be6d4b071c58 (healthy)`, and both then reported
+`hostVersion be6d4b071c58` with `hostUpdateAvailable false`. Neither box was recreated, redeployed or
+restarted through Coolify, and no box had an agent mid-turn when it took the swap.
+
+### On this Mac, `grok-bot-local-vm`, real Chrome through playwright-core at 1440x1000
+
+| Gate | Result |
+|---|---|
+| `npm test` | **3,087 passed, 0 failed, 0 skipped** on the merged tree |
+| `npm run source:typecheck` | clean |
+| `git diff <shared tip>..<merge> -- source/ deploy/` | one file, `standing-persona.ts`, 9 lines |
+| `verify-console-polish --chips` | **17 passed, 0 failed** |
+| `verify-console-polish --approval` | **51 passed, 0 failed**, including one real forced approval end to end |
+| `verify-console-polish --tile-live` | **12 passed, 0 failed**; the tile followed a page change in **1.01 s**, a working minute cost **18.8 KiB**, an idle grab **18.6 KiB** and a hidden tab **0 B** |
+| `verify-console-polish --tile --files` | **24 + 4 passed, 0 failed** after the integration fix below |
+| `verify-console-polish --boot --scroll --picker --badge` | **10 passed, 0 failed** |
+| `verify-persona` | **13 of 13**, 63 s. An earlier run in the same hour reported one failure — the last question's turn timed out at 93 s while three gates were sharing this box — and that is the box's endpoint, not the prompt |
+| `verify-dashboard` | **158 passed, 16 failed**, and the SAME sixteen in the same order on a clean tree at the shared tip. Not one of them belongs to this wave; DASH-7 carries the list |
+
+### On the R750, through `https://console.titanium.bot` at 1440x1000
+
+Signed in as a **throwaway customer account** minted inside the cp container on the demo workspace
+and removed afterwards. The console answered on bundle `be6d4b071c58` throughout.
+
+**The chips, and the habit behind them.** Titan was asked for its address and the hostname of its
+computer. Nothing in the ask mentioned formatting, and the reply came back *"My email address is
+`agent247758@myagents.email`. The hostname of the computer I'm on is `0e6e57702ef1`."* — the persona
+sentence doing its work on a live instance. The console drew two chips in that reply at
+`rgb(255, 107, 107)` on `rgba(10, 16, 20, 0.62)`, `1px` border `rgba(255, 107, 107, 0.3)`, 13.8px
+ui-monospace, `overflow-wrap: anywhere`, `cursor: pointer`, 226x18. A real mouse press at the chip's
+own centre put exactly `agent247758@myagents.email` on the clipboard, and the chip showed its own
+tick rather than a banner.
+
+**The tile.** A picture landed in the tile with nobody clicking it, captioned "as of 1 s ago". A real
+turn then moved the screen — the customer asked for `example.com`, then for the Wikipedia article —
+and the tile followed with no click; both frames were written to disk and looked at, and they are
+Example Domain and then the Titanium article, which is Jason's complaint in reverse.
+
+Two numbers, and they measure different things:
+
+- **0.51 s**, the tile's own latency, measured the only way it can be measured honestly: by driving
+  the demo box's browser directly so the moment of the change is known, with the screen settled first
+  (two reads four seconds apart, 4,983 characters both times). 1.08 s counting the probe's own ssh
+  and `docker exec`, which an agent on the box does not pay.
+- **12.9 s** from the ask, through a real turn. That is the model deciding and the page loading, and
+  it is *not* the tile. Through a turn there is no observable instant at which the screen changed —
+  the transcript row does not name the page — so a turn cannot produce the five-second number, and
+  the honest thing is two numbers rather than one flattering one.
+
+Between turns a reader was up for **20% of the samples over 30 s**, where a held stream would be
+100%: the idle tile really is a photograph every half minute rather than a standing stream of
+somebody's desktop.
+
+**The approval card, and the half of it the R750 could not show.** The five states were drawn by the
+`app.js` the R750 itself serves (536,383 characters, fetched from `https://console.titanium.bot/app.js`)
+on the live stylesheet inside the live console: pending-with-rule **512x257**, pending-without
+**512x218**, always-allowed **512x180**, allowed-once **512x141**, refused **512x141**; pill colours
+amber `rgb(231,162,60)`, green `rgb(166,233,185)`, grey `rgba(233,239,239,0.46)`; "Runs on Titan's
+computer"; a 766-character command elided to `...[366 chars omitted]...`; and the dead upstream's
+name on none of the five.
+
+A live card from a real turn **could not be measured**, and the reason is a defect worth more than
+the measurement was. Armed the way the local gate arms — enforce in the box's own settings file, one
+block instruction through `setHostSettings` — a scratch agent asked to run `echo hello-from-the-ship`
+was told *"Auto-review blocked ... An error occured while classifying this action. Please review
+manually"*, twice, and an explicit escalation with `request_smart_mode_approval: true` came back
+rejected the same way. The box's own log says why, and it is not the network:
+
+```
+[sand][auto-review] {"action":"shell","layer":"model","decision":"error","ms":1,
+                     "why":"Cannot read properties of undefined (reading 'map')"}
+```
+
+One to two milliseconds, seven times: it throws before any inference call. The same forced approval
+on `grok-bot-local-vm` raises a card in 24 to 27 s, and the demo box's log holds no successful
+`layer:"model"` line in its entire history — nobody had ever exercised that path on a tenant box.
+The customer-visible shape of it is worse than a missing gate leg: a person who turns Auto-review on
+and writes one rule gets every command refused with a sentence telling them to review manually, and
+nothing to review. Filed as **AUTOREV-CLASSIFIER-1**, owned, with the next action on the row.
+
+Everything the probe armed was put back and checked afterwards: no allow or block instruction left on
+the host, `SAND_AUTO_REVIEW_MODE` removed from the demo box's settings file (back to its original 71
+bytes), every scratch agent deleted, and the throwaway account removed from the workspace.
+
+### What the integration itself changed
+
+Merging the three items onto one tree turned the old `--tile` leg red, and two real holes were under
+it rather than a stale expectation — `forget()` and the plate that never came back. Both are in §3.
+The gate also learned to open a conversation with a second click, because Playwright's element click
+on a roster card silently does not take on this box and three runs read a plate off another agent's
+tile before that was named.
