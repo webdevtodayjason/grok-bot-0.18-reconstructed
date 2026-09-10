@@ -398,5 +398,16 @@ test("sync.sh ships the sandbox image directory, because the Dockerfile's contex
   assert.match(entry, /: > "\$CRED"/, "the credential file is truncated as soon as it is sourced");
   assert.match(entry, /jq -r '\.instructions/, "the prompt comes out of a file and never off a command line");
   assert.ok(!/claude -p "/.test(entry), "the instructions are never an argument to the agent");
-  assert.match(entry, /< \/dev\/null/, "stdin is closed, so nothing it runs can block on a terminal");
+
+  // THE PROMPT REALLY REACHES THE AGENT. This assertion used to read `assert.match(entry,
+  // /< \/dev\/null/)` -- it pinned the bug instead of the rule. The redirect sat AFTER the pipe on
+  // the same command, so it won, the agent read an empty stdin, and every task on the R750 died on
+  // "Error: Input must be provided either through stdin or as a prompt argument when using --print"
+  // (measured 2026-09-10) while this test stayed green. A pipe and a redirect cannot both feed one
+  // stdin, so what has to be true is that the prompt is piped in and nothing takes stdin back.
+  const invocation = entry.slice(entry.indexOf("printf '%s' \"$PREAMBLE\""), entry.indexOf("CODE=$?"));
+  assert.ok(invocation.length > 0, "the agent is still invoked with the preamble on a pipe");
+  assert.match(invocation, /\|\s*claude -p/, "the prompt goes in on a pipe");
+  assert.ok(!/<\s*\/dev\/null/.test(invocation),
+    "and nothing redirects the agent's stdin away from that pipe, which is what made every task fail");
 });

@@ -74,17 +74,24 @@ $PROMPT"
 #   * a --max-turns exit, which means it stopped because it was told how many turns it may take.
 # The relay drops the first from the log it shows and reports the second as a finished task whose
 # summary says what is unfinished.
+# THE PROMPT GOES IN ON STDIN AND THERE IS NO `< /dev/null` ON THIS COMMAND. There was, and it came
+# after the pipe, so it won: the agent read an empty stdin and the whole task died on
+# "Error: Input must be provided either through stdin or as a prompt argument when using --print".
+# Measured on the R750 2026-09-10. A pipe and a redirect cannot both feed one stdin.
+#
+# The redirect was there so nothing the agent RUNS blocks waiting for a terminal, and it is not
+# needed for that: once the agent has read the prompt its stdin is at EOF, and a child process that
+# reads EOF gets an answer immediately rather than hanging. The prompt stays on stdin rather than
+# becoming an argument because it is the customer's own words and any process can read another's
+# argument list (MARKET-17).
 set +e
 printf '%s' "$PREAMBLE" | claude -p \
   --output-format json \
   --dangerously-skip-permissions \
   --max-turns "$MAX_TURNS" \
-  > "$TRANSCRIPT" 2> "$LOG" < /dev/null
+  > "$TRANSCRIPT" 2> "$LOG"
 CODE=$?
 set -e
-
-# stdin from /dev/null on the agent, so nothing it runs can block waiting for a terminal that is not
-# there. The prompt goes in on a pipe instead, which is why it is not an argument either.
 
 # The summary is the agent's job, but a task that died before writing one still has to answer the
 # person with a sentence rather than with silence.
