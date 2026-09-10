@@ -146,7 +146,7 @@ export function clipReason(text) {
 // a raw workspace slug in it would be a tenant name on somebody else's wire.
 export function cardKey({ tenant, agentId, entryId }) {
   return createHash("sha256")
-    .update(`${str(tenant)} ${str(agentId)} ${str(entryId)}`, "utf8")
+    .update(`${str(tenant)}\0${str(agentId)}\0${str(entryId)}`, "utf8")
     .digest("hex")
     .slice(0, 32);
 }
@@ -1266,3 +1266,69 @@ export function createCredentialReader({ cpUrl, relayToken, fetchImpl = fetch, r
     },
   };
 }
+
+// ---- create(deps): the shape ui/relay-hooks.mjs actually loads ----------------------------------
+//
+// FOUND AT MERGE TIME, AND IT IS THE FAILURE THIS SEAM EXISTS TO PREVENT. The seam loads this module
+// by name, calls `create(deps)` if it finds one, and then looks for `handle` and `sweepStart` on what
+// comes back. This module exported `pushRoutes` and `pushSweepStart` instead. Nothing threw: the seam
+// found no `handle`, answered `null` for the routes, and /push 404'd on a relay that had every line of
+// push in it. Absent, not red -- the same shape as the bare-array roster this module's own gate caught.
+// So the adapter lives here, where the exports are, rather than in the seam, where a reader would have
+// to know this module to understand it.
+//
+// TWO SIGNATURES ARE BRIDGED AND NOTHING ELSE CHANGES. The seam hands `handle` one object
+// ({t, req, res, url, sub}); `handle` inside this module takes four positionals and reads `sub`
+// through `subOf(req)`. The object's `sub` wins when it carries one, because the relay has already
+// resolved the session by the time it dispatches and re-deriving it here would be a second answer to
+// a settled question.
+//
+// WHAT THE RELAY OWES THIS MODULE, and it is only what this module cannot reach: `readBody` and `fail`
+// (so /push refuses the way every other route on the relay refuses), `subOf`, the console's public
+// host for the https half of a deep link, and the control plane's URL and relay token -- two strings,
+// not a credential reader, because importing this module's reader into server.mjs would undo the whole
+// point of the module being optional.
+export function create(deps = {}) {
+  const reader = createCredentialReader({
+    cpUrl: str(deps.cpUrl),
+    relayToken: str(deps.relayToken),
+    log: deps.log ?? (() => {}),
+  });
+  const stopReader = reader.start();
+  const publicHost = str(deps.publicHost) || "console.titanium.bot";
+  const given = typeof deps.subOf === "function" ? deps.subOf : () => "";
+  const edge = createPushEdge({
+    ...deps,
+    credentials: () => reader.current(),
+    hostOf: deps.hostOf ?? (() => publicHost),
+    // The sub the relay stamped on this request first, then whatever the relay's own resolver says.
+    // Both, because the sweep reads rows with no request in hand at all and still has to know whose
+    // they are.
+    subOf: (req) => subFromRequest(req) || str(given(req)),
+  });
+  return {
+    edge,
+    handle(one = {}) {
+      // Both call shapes, because tests/relay-push-routes.test.mjs drives the four positionals and the
+      // relay drives the object. A bridge that only understood one of them would pass its own suite.
+      if (one != null && typeof one === "object" && !Array.isArray(one) && one.req !== undefined) {
+        const { t, req, res, url, sub } = one;
+        return edge.handle(sub === undefined ? req : withSub(req, sub), res, url, t);
+      }
+      return edge.handle(...arguments);
+    },
+    sweepStart: () => edge.sweepStart(),
+    close() { stopReader?.(); edge.close?.(); },
+  };
+}
+
+// The session's own `sub`, carried on the request the way every other per-person read on this relay
+// carries it, so `subOf` inside the edge answers what the relay already decided rather than parsing a
+// cookie a second time. A property and not a wrapper object: the edge passes `req` to `readBody`,
+// which needs the real stream.
+const SUB_ON_REQUEST = Symbol.for("titanbot.push.sub");
+function withSub(req, sub) {
+  try { req[SUB_ON_REQUEST] = str(sub); } catch { /* a frozen request keeps whatever subOf says */ }
+  return req;
+}
+export const subFromRequest = (req) => str(req?.[SUB_ON_REQUEST]);

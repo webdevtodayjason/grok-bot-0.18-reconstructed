@@ -17,12 +17,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:http";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { RELAY_PASSWORD, startRelay } from "./relay-tenant-support.mjs";
 
 const json = { "content-type": "application/json" };
+
+// The three files ui/relay-hooks.mjs loads by name. Named once, because two legs delete them and one
+// leg's stubs replace them.
+const MODULES = ["api-diet.mjs", "asset-cache.mjs", "push-edge.mjs"];
 
 // serverCopy() copies ui/*.mjs and nothing else, so the copy has no machine-room directory and every
 // static path is a 404. Two small files is all the static branch needs to be exercised, and writing
@@ -46,6 +50,12 @@ async function relayWith(stubs, env = {}) {
   const first = await startRelay(env, { prefix: "hooks-" });
   first.stop();
   seedFrontend(first.dir);
+  // THE REAL MODULES ARE REMOVED FIRST, and this line is why the whole file still means something.
+  // serverCopy() copies ui/*.mjs, and since the apps wave merged that glob includes the three real
+  // optional modules. Without this, "absent" legs booted with the real api-diet, asset-cache and
+  // push-edge loaded and quietly measured the shipped modules while claiming to measure their
+  // absence. A leg that passes for the wrong reason is worse than one that fails.
+  for (const name of MODULES) rmSync(path.join(first.dir, name), { force: true });
   for (const [name, source] of Object.entries(stubs)) writeFileSync(path.join(first.dir, name), source);
   const { spawn } = await import("node:child_process");
   const port = 41000 + Math.floor(Math.random() * 6000);
@@ -83,8 +93,9 @@ const bearerFor = async (relay) => {
 // ---- absent: the relay is exactly what it was -------------------------------------------------
 
 test("with none of the three modules the relay boots, says so, and behaves as it did", async () => {
-  const relay = await startRelay({}, { prefix: "hooks-none-" });
-  seedFrontend(relay.dir);
+  // relayWith with no stubs at all, which is a relay whose ui/ copy has had the three real modules
+  // deleted: the production case where the apps wave's other two pieces have not landed yet.
+  const relay = await relayWith({});
   try {
     assert.match(relay.boot, /hook none: bodies unchanged, assets no-store, no push/,
       "the relay says which hooks it has, so a deploy that lost one is visible in the log");
@@ -183,8 +194,12 @@ test("an api-diet module is handed the answer and its bytes are the ones on the 
 
 test("an asset-cache module decides the cache headers, the 304 and the stamping", async () => {
   const relay = await relayWith({
-    "asset-cache.mjs": `export function assetPolicy(file, url, req) {
-      if (String(req?.headers?.["if-none-match"] ?? "") === '"stub"') return { status: 304, headers: { etag: '"stub"' } };
+    // The third argument is the request's HEADERS, not the request. The seam normalises it, because
+    // the real module takes a header bag and server.mjs holds an IncomingMessage; a stub written to the
+    // other shape reads if-none-match as undefined and never answers 304, which is the merge defect
+    // this assertion now pins.
+    "asset-cache.mjs": `export function assetPolicy(file, url, headers) {
+      if (String(headers?.["if-none-match"] ?? "") === '"stub"') return { status: 304, headers: { etag: '"stub"' } };
       return { headers: { "cache-control": "private, max-age=31536000, immutable", etag: '"stub"' } };
     }
     export function stampHtml(html) { return html.replace("<head>", "<head><!-- stamped -->"); }\n`,
@@ -301,7 +316,8 @@ test("a module's create() is handed what it cannot reach for itself", async () =
     assert.equal(res.status, 200);
     const body = await res.json();
     // The contract, named here so a module author reads it from a test rather than from a comment.
-    assert.equal(body.names, "contextOf,file,gatewayCall,operatorSlug,ownLikeParent,tenants");
+    assert.equal(body.names,
+      "contextOf,cpUrl,fail,file,gatewayCall,operatorSlug,ownLikeParent,publicHost,readBody,relayToken,subOf,tenants");
     assert.deepEqual(body.tenants, ["titanium"], "tenants() answers live contexts, not registry rows");
   } finally { relay.stop(); }
 });

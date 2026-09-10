@@ -4508,6 +4508,20 @@ const HOOKS = await loadRelayHooks({
     gatewayCall: (t, method, args) => jobBusCall(t, method, args),
     ownLikeParent,
     operatorSlug: OPERATOR_SLUG,
+    // What a module with its own ROUTES needs and the three above do not give it: the body reader and
+    // the refusal this file already uses everywhere, so /push answers in the same words and the same
+    // shapes as /auth and /mail rather than inventing a second vocabulary for the same 400.
+    readBody,
+    fail,
+    subOf,
+    // The control plane's address and credential, as two STRINGS rather than a reader. push-edge.mjs
+    // builds its own reader out of them, because importing that reader into this file would make the
+    // module mandatory and undo the one property the seam exists for.
+    cpUrl: RELAY?.cpUrl ?? "",
+    relayToken: RELAY?.relayToken ?? "",
+    // The https half of a deep link a person taps on a lock screen. One env var because the relay has
+    // never needed to know its own public name before: every other answer it gives is relative.
+    publicHost: String(process.env.SAND_UI_PUBLIC_HOST ?? "").trim() || "console.titanium.bot",
   },
 });
 if (!await dockerAvailable()) {

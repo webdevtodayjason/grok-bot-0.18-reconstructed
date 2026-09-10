@@ -116,7 +116,12 @@ export async function loadRelayHooks({ log = (line) => console.log(line), deps =
     assetPolicy(file, url, req) {
       if (A == null || typeof A.assetPolicy !== "function") return { headers: { ...NO_STORE }, status: 200 };
       try {
-        const out = A.assetPolicy(file, url, req);
+        // THE REQUEST'S HEADERS, not the request. Measured during the merge: passing the whole
+        // IncomingMessage here reads `if-none-match` as undefined, so every cache decision came out
+        // right and every 304 silently became a 200 -- a second boot re-downloading the whole bundle
+        // while the headers claimed it was cached. Normalised in the seam because the seam is the one
+        // place that knows both shapes, and a module author should not have to guess which arrived.
+        const out = A.assetPolicy(file, url, req?.headers ?? req ?? {});
         if (out == null || typeof out.headers !== "object") return { headers: { ...NO_STORE }, status: 200 };
         return { headers: out.headers, status: Number.isFinite(out.status) ? out.status : 200 };
       } catch (error) {
