@@ -396,9 +396,10 @@ check(bundleOnServer.length === 64 && bundleInBox === bundleOnServer,
 // GET /v1/relay/tenants, and it holds those in memory and never in its environment.
 //
 // The compose dropped the two references, but Coolify keeps a service's environment rows after the
-// compose stops mentioning them, so the values sat in the running relay for weeks under a doc that
-// said they were gone. Measured on jason-PowerEdge-R750 2026-09-10: both were present, and the
-// CP_SESSION_SECRET there fingerprinted to the titanium DERIVED key rather than the master, so
+// compose stops mentioning them, and a `docker restart` reuses the container, so the values sat in
+// the running relay for weeks under a doc that said they were gone and survived every restart.
+// Measured on jason-PowerEdge-R750 2026-09-10: both were present, and the CP_SESSION_SECRET there
+// fingerprinted to the titanium DERIVED key rather than the master, so
 // nothing was exposed -- but a field with the master's name in a relay is the shape of the thing
 // the next reader copies. Only the NAMES cross the tailnet here; no value is read or printed.
 const FORBIDDEN_RELAY_ENV = ["TENANT_ID", "CP_SESSION_SECRET"];
@@ -410,8 +411,9 @@ check(relayEnvNames.length > 0 && forbidden.length === 0,
   "neither TENANT_ID nor CP_SESSION_SECRET is in the relay's environment",
   relayEnvNames.length === 0 ? "the relay's environment could not be read"
     : forbidden.length === 0 ? `${relayEnvNames.length} names, and neither of those two`
-      : `${forbidden.join(" and ")} still set on ${RELAY_NAME} -- remove the row from the Coolify `
-        + `service; the relay picks it up at its next restart`);
+      : `${forbidden.join(" and ")} still set on ${RELAY_NAME} -- delete the row from the relay's `
+        + `Coolify service, then let a deploy RECREATE the container: a restart reuses it and keeps `
+        + `the value`);
 
 // The token file is the single source of truth for the gateway bearer. Read it here, hold it in
 // memory, and never let it reach this Mac's disk or this script's output.
