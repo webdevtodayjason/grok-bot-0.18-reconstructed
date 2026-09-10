@@ -188,14 +188,20 @@ test("the directory's owner and the container's --user are the same one number",
   // 2026-09-10 they disagreed -- directory 0:0, container 1000:1000 -- and the first thing the agent
   // inside did was fail with "cannot create /task/SUMMARY.md: Permission denied", which reaches a
   // person as a coding job that did nothing and said nothing. One value now owns both halves.
-  for (const boxUid of ["0", "1000", "1001"]) {
+  // A root box maps to the image's own user, and that is not a fudge: the constraint is one-way.
+  // The artifacts must be readable by the BOX, and a root box reads a file owned by anyone; the
+  // container must not be root at all, because the coding agent refuses
+  // `--dangerously-skip-permissions cannot be used with root/sudo privileges` and writes a summary
+  // saying it stopped. Both halves were measured on the R750 2026-09-10, one after the other.
+  for (const [boxUid, runAs] of [["0", "1000"], ["1000", "1000"], ["1001", "1001"], ["nonsense", "1000"], ["", "1000"]]) {
     const { res, seen } = await start(GOOD, {}, { dockerAnswers: { exec: (args) => (args.includes("id") ? { stdout: `${boxUid}\n` } : { stdout: "" }) } });
     assert.equal(res.status, 200);
     const create = seen.docker.find((args) => args[0] === "create");
     const at = create.indexOf("--user");
     assert.ok(at > 0, "the container is always given a user");
-    assert.equal(create[at + 1], `${boxUid}:${boxUid}`,
-      `a box whose own id -u is ${boxUid} gets a task that runs as ${boxUid}; zero is an answer, not an absence`);
+    assert.equal(create[at + 1], `${runAs}:${runAs}`,
+      `a box whose own id -u is ${JSON.stringify(boxUid)} gets a task that runs as ${runAs}`);
+    assert.notEqual(create[at + 1], "0:0", "a coding task is never root");
   }
 });
 

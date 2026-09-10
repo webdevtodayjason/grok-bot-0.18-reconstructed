@@ -73,6 +73,11 @@ export const PROXY_PORT = 4000;
 /** The one network a task may never land on, checked by resolved id and not by name. */
 export const SHARED_NETWORK = "titanbot-net";
 
+/** The unprivileged user the sandbox image itself runs as (`USER 1000:1000` in its Dockerfile). A
+ *  task is never root: the coding agent refuses `--dangerously-skip-permissions` under root, and a
+ *  root box can read a file this user owns anyway. See runUidOf. */
+export const CODE_IMAGE_UID = 1000;
+
 export const CODE_DEFAULTS = {
   provider: "local",
   /** Wall clock. Enforced off the container's own deadline LABEL by the sweep, never by a timer in
@@ -806,22 +811,31 @@ export function createCodeEdge({
 
   // ---- the pieces of the create path, each reversible ------------------------------------------
 
-  /** The run uid, read once per task from the box itself. The tenant root is uid 1001 while
-   *  volumes/workspace is uid 1000, so guessing either one produces an artifact the box cannot open
-   *  half the time. 1000 is the default because that is what the box image's own user is.
+  /** The run uid, read once per task from the box itself, and it is the ONE number that owns both
+   *  the task directory and `--user`. The tenant root is uid 1001 while volumes/workspace is uid
+   *  1000, so guessing either one produces an artifact the box cannot open half the time.
    *
-   *  ZERO IS AN ANSWER, NOT AN ABSENCE. The R750's own boxes run as root, so `id -u` says 0, and an
-   *  earlier `uid > 0` here threw that away and fell back to 1000. Measured on the R750 2026-09-10:
-   *  the demo box answered 0, the task directory was made root-owned, the container was given
-   *  --user 1000:1000, and the first thing the agent inside did was fail with "cannot create
-   *  /task/SUMMARY.md: Permission denied". A box that runs as root is the normal case here, not the
-   *  odd one. Only a value that is not a number at all falls back. */
+   *  ROOT MAPS TO THE IMAGE'S OWN USER, and that is the whole subtlety. Both halves of this were
+   *  measured on the R750 on 2026-09-10, one after the other:
+   *
+   *  - An earlier `uid > 0` guard read a root box's `id -u` of 0 as "no answer" and fell back to
+   *    1000 while the directory stayed root-owned, and the agent failed on its first write:
+   *    `cannot create /task/SUMMARY.md: Permission denied`.
+   *  - Taking 0 at face value fixed the directory and broke the agent instead:
+   *    `--dangerously-skip-permissions cannot be used with root/sudo privileges for security
+   *    reasons`, so the task wrote a summary saying it had stopped and nothing else.
+   *
+   *  The constraint is one-way. The artifacts have to be READABLE BY THE BOX, and a box running as
+   *  root can read a file owned by anyone; the container, on the other hand, must not be root at
+   *  all. So a non-root box keeps its own uid, and a root box gets the image's own unprivileged
+   *  user -- which is what `USER 1000:1000` in the Dockerfile already is. */
   async function runUidOf(slug) {
     const box = asString(boxOf(slug));
-    if (box.length === 0) return 1000;
+    if (box.length === 0) return CODE_IMAGE_UID;
     const got = await docker(["exec", box, "id", "-u"], { timeoutMs: 10_000 });
     const uid = Number(String(got.stdout ?? "").trim());
-    return Number.isInteger(uid) && uid >= 0 ? uid : 1000;
+    if (!Number.isInteger(uid) || uid < 0) return CODE_IMAGE_UID;
+    return uid === 0 ? CODE_IMAGE_UID : uid;
   }
 
   /** Every subnet docker already holds, in one call. */
