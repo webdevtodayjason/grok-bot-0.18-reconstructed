@@ -1073,8 +1073,8 @@ try {
       await page.setViewportSize({ width: 1440, height: 900 });
       await page.click("#shelf-settings");
       // SETTINGS-2: Settings opens on General and paints ONE body at a time, and this card is the
-      // Notifications body. Pressing that entry is what a person does; the card mounts on the
-      // .settings-list that body carries, which is the same structural contract as before.
+      // Notifications body. Pressing that entry is what a person does; the card mounts into that
+      // body's own [data-push-mount] slot, which is still structure and still not a string of copy.
       await page.waitForSelector("[data-settings-surface]", { timeout: within(20_000) }).catch(() => {});
       await page.click('[data-settings-nav="notifications"]').catch(() => {});
       const card = await page.waitForSelector("[data-push-settings]", { timeout: within(20_000) }).catch(() => null);
@@ -1193,11 +1193,11 @@ try {
       // nothing to do with the module being absent.
       await bare.setViewportSize({ width: 1440, height: 900 });
       await bare.click("#shelf-settings");
-      // SETTINGS-2 retarget, and a better leg than the one it replaces. `.settings-list` is now the
-      // Notifications body's own class, and that body is exactly what is blocked here -- so waiting
-      // for it would be waiting for the thing under test. What is asserted instead is what a person
-      // would see: the nav still lists Notifications, opening it says it could not load, no card is
-      // mounted, and nothing threw.
+      // SETTINGS-2 retarget, and a better leg than the one it replaces. `.settings-list` belongs to
+      // the operator's card stack now, which a customer never sees, so waiting for it here would be
+      // waiting for something this leg is not about. What is asserted instead is what a person would
+      // see: the nav still lists Notifications, that body is still drawn, no card is mounted into it
+      // because the module that mounts one was blocked, and nothing threw.
       const surface = await bare.waitForSelector("[data-settings-surface]", { timeout: within(20_000) }).catch(() => null);
       const listed = await bare.$('[data-settings-nav="notifications"]');
       if (listed != null) { await listed.click(); await bare.waitForTimeout(1200); }

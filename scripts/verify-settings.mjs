@@ -586,22 +586,28 @@ try {
   if (before == null) {
     skip("a write of \"ask\" round-trips through the host", "this box reports no local tool permission at all, so the row is not drawn");
   } else {
-    const target = before === "ask" ? "never" : "ask";
-    await page.selectOption('[data-setting-row="execution"] select', target);
-    await page.waitForTimeout(2500);
-    await openSettings(page, false);
-    await gotoSection(page, "computer");
-    const after = await page.evaluate(() => document.querySelector('[data-setting-row="execution"] select')?.value ?? null);
-    check(after === target, `a write of "${target}" round-trips through the host`,
-      `${before} -> asked for ${target}, host answered ${after}`);
-    if (after !== target) {
-      info(`TRIPWIRE: the host would not take "${target}". That option has to ship disabled with an honest line, and the row is item C's to file.`);
+    // BOTH WRITES, and "ask" LAST, because "ask" is the one the tripwire is about: it is the middle
+    // choice, the one the settings extension's own setter is not typed for, and the one a box is
+    // most likely to be sitting on already -- so a leg that only wrote "whatever it is not" would
+    // have proved "never" on this box and called the tripwire cleared without ever writing "ask".
+    const write = async (value) => {
+      await page.selectOption('[data-setting-row="execution"] select', value);
+      await page.waitForTimeout(2500);
+      await openSettings(page, false);
+      await gotoSection(page, "computer");
+      return page.evaluate(() => document.querySelector('[data-setting-row="execution"] select')?.value ?? null);
+    };
+    for (const target of ["never", "always", "ask"]) {
+      const after = await write(target);
+      check(after === target, `a write of "${target}" round-trips through the host`,
+        `asked for ${target}, host answered ${after}`);
+      if (after !== target) {
+        info(`TRIPWIRE: the host would not take "${target}". That option has to ship disabled with an honest line, and the row is item C's to file.`);
+      }
     }
-    // Put the box back the way it was found.
-    await page.selectOption('[data-setting-row="execution"] select', before);
-    await page.waitForTimeout(2000);
-    const restored = await page.evaluate(() => document.querySelector('[data-setting-row="execution"] select')?.value ?? null);
-    info(`this box's local tool permission restored to ${restored} (it was ${before} before this run)`);
+    // Put the box back the way it was found. It is shared with every other gate.
+    const restored = await write(before);
+    check(restored === before, "and the box is left on the value it was found on", `${before} -> ${restored}`);
   }
   await page.context().close();
 

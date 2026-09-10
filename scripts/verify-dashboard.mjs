@@ -297,18 +297,39 @@ const openMarketplace = async () => {
   // draws nothing still fails the checks below on its own numbers.
   await until(() => page.evaluate(() => (document.querySelector("[data-marketplace-loading]") == null ? true : null)), 30_000, 500);
 };
-// SETTINGS-2: opening Settings lands on General. Everything this gate reads is the operator's, so
-// it presses the Operator entry and waits for the body to be that one before reading anything.
+// SETTINGS-2: opening Settings lands on General. Everything this gate reads is the operator's, so it
+// presses the Operator entry and waits for THAT body before reading anything.
+//
+// Written defensively, because the first version of this helper failed quietly and handed three
+// empty-looking failures to a reader who would have blamed the surface. Two things go wrong here and
+// each has its own guard:
+//
+//   1. ESCAPE DOES NOT ALWAYS LEAVE THE PANEL CLOSED. This runs after the Marketplace, and a
+//      #settings-button click that lands on a modal backdrop instead of the button leaves no surface
+//      at all -- at which point every read below is of a page that is not showing Settings. The
+//      dialog is closed through its own close() and the open is retried once.
+//   2. A HANDLE TO THE NAV ENTRY GOES STALE. The nav is rebuilt the moment the session answer lands,
+//      so an element handle taken the instant the entry appears is detached a frame later and
+//      clicking it throws into the middle of a run. A locator re-resolves the selector on every
+//      retry, so it cannot go stale.
 const openSettingsPanel = async () => {
-  await page.keyboard.press("Escape"); await page.waitForTimeout(300);
-  await page.click("#settings-button");
-  await page.waitForSelector("[data-settings-surface]", { timeout: 20_000 }).catch(() => {});
-  const operator = await page.waitForSelector('[data-settings-nav="operator"]', { timeout: 20_000 }).catch(() => null);
-  if (operator != null) {
-    await operator.click();
-    await page.waitForSelector('[data-settings-section="operator"]', { timeout: 20_000 }).catch(() => {});
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await page.evaluate(() => document.getElementById("panel-dialog")?.close());
+    await page.waitForTimeout(300);
+    await page.click("#settings-button").catch(() => {});
+    const surface = await page.waitForSelector("[data-settings-surface]", { timeout: 15_000 }).catch(() => null);
+    if (surface == null) continue;
+    const operator = page.locator('[data-settings-nav="operator"]');
+    await operator.waitFor({ state: "visible", timeout: 20_000 }).catch(() => {});
+    if (await operator.count() > 0) {
+      await operator.click({ timeout: 20_000 }).catch(() => {});
+      await page.waitForSelector('[data-settings-section="operator"]', { timeout: 20_000 }).catch(() => {});
+    }
+    await page.waitForTimeout(1400);
+    return;
   }
-  await page.waitForTimeout(1400);
+  // Said out loud rather than left as an empty failure detail three legs down.
+  console.log("  INFO  Settings would not open after two tries, so the operator legs below read a page that is not showing it");
 };
 // A nav click by id, not by text: the sidebar scrolls, and a click at a stale coordinate lands on
 // the dialog backdrop, which closes the panel instead of selecting the card. Retried once through
@@ -2402,10 +2423,20 @@ try {
     const shown = sectionOrder.map((section) => section.group ?? section.heading).join(" | ");
     const inference = sectionOrder.findIndex((section) => section.heading === "Inference");
     const providers = at("Providers");
-    check(inference >= 0 && providers === inference + (at("Plan") === inference + 1 ? 2 : 1),
-      "Settings carries Providers directly under Inference, with only the plan group allowed between", shown);
-    check(at("Listeners") === providers + 1, "and the chat listeners are the section after it", shown);
-    check(await page.$('[data-settings-nav="operator"]') != null, "and every one of them is inside the Operator section, which only the operator is given");
+    const operatorShown = await page.$('[data-settings-operator="true"]') != null;
+    // AN EMPTY READ IS NOT A FAILING ORDER, and saying so is the difference between a reader fixing
+    // the surface and a reader fixing the gate. If the panel is not showing the operator's section
+    // there is no order to check, so the three legs below say that instead of failing blank.
+    check(operatorShown && sectionOrder.length > 0, "the Operator section is on screen, which is where all of this now lives",
+      operatorShown ? `${sectionOrder.length} card(s)` : "no [data-settings-operator=\"true\"] on the page — Settings is not open on the operator's section");
+    if (operatorShown && sectionOrder.length > 0) {
+      check(inference >= 0 && providers === inference + (at("Plan") === inference + 1 ? 2 : 1),
+        "Settings carries Providers directly under Inference, with only the plan group allowed between", shown);
+      check(at("Listeners") === providers + 1, "and the chat listeners are the section after it", shown);
+    } else {
+      notReached("the operator's section was not on screen to read",
+        "Settings carries Providers directly under Inference", "and the chat listeners are the section after it");
+    }
     const relaySubs = await relay("/subscriptions").then((r) => (Array.isArray(r) ? r : r?.subscriptions ?? [])).catch(() => []);
     const providerIds = await page.$$eval('[data-plugin-group="Providers"] [data-plugin-id]', (els) => els.map((e) => e.dataset.pluginId));
     check(relaySubs.length > 0 && providerIds.length === relaySubs.length && providerIds.every((id) => id.startsWith("sub:")),
