@@ -36,8 +36,15 @@ iPhone UA, real Chrome through playwright-core.
 | `verify-machine-room.mjs` | **clean** | regression |
 | `verify-dashboard.mjs` | **163 pass, 7 fail** | regression. **All seven reproduce byte for byte on a clean worktree at the shared tip with none of this wave in it**, and they are the local box's model endpoint not answering (no reply, so no rendered attachment) plus its noVNC canvases. Not this wave's, and proved so rather than assumed |
 
-The one skip in the cost gate is the working ceiling and the one in the push gate is the mint door;
-both are named where they belong, in sections 5 and 7.
+**About the skips.** The cost gate's one skip is the working ceiling (section 5). The push gate's
+skips are all the same shape and none of them survives the merge: `--host` and `--console` both target
+a live relay on this machine that serves the shared working copy rather than the merged tree, so they
+skip the mint door and the console's `?agent=`/`?entry=` boot parse by name rather than claim them.
+Both are proved elsewhere on the merged tree: the mint door by `verify-door` and by the
+bearer-to-push composition above, and the boot parse by `verify-cost --paint`, which reports **first
+paint landed on the conversation the link named** — the deep link decided the first paint rather than
+a second navigation after it. The remaining `--console` skip is a real gap in the product and not in
+the gate: at 390x844 there is no route into Settings at all (section 8).
 
 ---
 
