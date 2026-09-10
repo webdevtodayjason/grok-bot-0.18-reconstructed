@@ -604,6 +604,26 @@ The card stays honest either way: any amber is still a stop, `done` needs all fi
 amber with a green welcome draws an amber card with Retry on it. Something needs a look, and the
 customer was not left in the dark while it waits.
 
+**THE STEP CLOCK OF THE FIRST ALL-GREEN ONBOARDING, measured on the R750 2026-09-10 21:40 UTC**, run
+from this Mac (Darwin 25.6.0, node v22.23.1, headless Chromium through playwright-core 1.62.1) against
+`api.titanium.bot` by `scripts/verify-onboard-r750.mjs`, which built, signed into, read and removed one
+real customer: **38 passed, 0 failed.** The press answered in **302 ms** with the password on the card.
+Off the ledger's own rows, press to welcome **16.96 s** end to end:
+
+| Step | Landed | From the press |
+|---|---|---|
+| Creating the workspace | 21:40:29.233Z | 0.00 s |
+| Building the computer | 21:40:42.001Z | 12.77 s |
+| Waking Titan | 21:40:45.540Z | 16.31 s |
+| Giving the agents their addresses | 21:40:45.872Z | 16.64 s |
+| Sending the welcome | 21:40:46.197Z | 16.96 s |
+
+**Waking Titan took 3.54 s**, which is the measurement the fix above exists for: on the run before it
+that step spent 58 s watching an empty model and went amber. The sweep answered on its first pass with
+`agent080514@myagents.email`, the welcome left at **21:40:45.880Z** and the provider took it. The
+removal then freed **5,044,086 bytes** through the relay's purge, proved the container absent through
+docker, and retired the one address it had minted.
+
 **Measured on the R750's control-plane ledger 2026-09-07**, the only real provisioning before this
 wave: `richard-avery` ran directories through start in 0.41 s and reported `ready how gateway waitedMs
 12181`, whole box 12.6 s, with the image already on the server. **Measured on this Mac in
