@@ -1233,6 +1233,15 @@ connection: keep-alive
 x-accel-buffering: no
 ```
 
+**Two of those four do not reach a shell, and a shell author checking for them will think the route is
+broken.** They are hints addressed to whatever proxy sits in front of the relay, not to a client, and
+**Cloudflare strips them**: measured on the R750 2026-09-10, `GET /push/events` through
+`console.titanium.bot` answers HTTP/2 200 with `content-type: text/event-stream` and
+`cache-control: no-cache` and **no `x-accel-buffering` and no `connection`** — while the same handler
+on this Mac answers all four (`verify-push --host`). What has to survive the edge is the content type,
+the no-cache, and that the bytes actually flow; the other two are there so they are never the reason
+the bytes do not.
+
 **PUSH-4.** `POST /push/devices` accepted `platform: desktop` from the first day and then routed it to
 the **APNs** sender, on the reasoning that a desktop app is signed by the same Apple account. That is
 not a transport. Windows has no APNs at all, and macOS needs an `aps-environment` entitlement and an
@@ -1321,8 +1330,35 @@ that box, one gate at a time behind the shared box lock, gate user agent
 | the tray and the card | the pending frame **2 ms** after the connection opened, on channel `push-card`, carrying the same row the route answers; the **closed** frame on the same key **4 s** after the hand-back |
 | what was written down | 4 tray frames swept beside every recorded send and log line for a device token, a private key, a bearer and a gateway token: **clean**. Longest notification body 45 characters |
 
-`npm test` over the whole suite: **2,778 pass, 0 fail** on the same machine, including the 13 wire-shape
-round-trips through a real relay and the 12 that pin the three page attributes out of the shipped files.
+`npm test` over the whole suite: **2,803 pass, 0 fail** in 33.4 s on the same machine at the merged
+commit, including the wire-shape round-trips through a real relay and the 35 that pin the three page
+attributes out of the shipped files. The other gates on the same box, one at a time: `verify-push
+--console` real Chrome at 390x844 scale 3 touch **21 pass, 0 fail, 3 skip**; `verify-mobile --width
+--desktop` **27 pass, 0 fail, 1 skip**; `verify-door --door --cors --app` **93 pass, 0 fail, 1 skip**.
+
+### And on the R750, through console.titanium.bot, which is what makes it done
+
+Shipped with `deploy/r750/sync.sh --no-install` from a detached clean worktree at the merged commit
+(host bundle `77cf3f55e148`), relay restarted **last**, **no box swapped** and **no control plane
+rebuilt** — this wave changes no `source/` and no `cp/` file. Measured between **12:21Z and 12:31Z on
+2026-09-10** as a **throwaway customer account on the demo workspace**, removed afterwards with every
+device row and bearer it made. Never Jason's account and never Richard's.
+
+| Leg | Before, on the same live host | After |
+| --- | --- | --- |
+| the prose body the phone app sent | **200 `"Saved."`** — and the account's stored settings became the DEFAULTS: `widget` back **on**, quiet hours **off at 22 to 7**, offset **0**, all of it read back off the live route | **400** naming `enabled`, and the stored settings byte for byte unchanged (`widget` still off, quiet hours still on 23 to 6, offset still -300) |
+| six other wrong shapes (`kinds.widget: "false"`, `quietHours.on: "true"`, `from: 99`, `fromHour: 1`, `utcOffsetMinutes: "-300"`, a JSON list) | **200** on every one | **400** on every one, each naming its own field |
+| `POST /push/settings` | **200, and it saved** | **405 `{"error": "GET or PUT"}`** |
+| a partial body `{kinds: {report: false}}` | 200, and it reset everything else to the defaults | 200, `report` off and **nothing else moved** |
+| the documented body | 200 | 200, round-tripping byte for byte, `scope` `person` |
+| `GET /push/pending` | **404** | **200** with exactly the six documented keys; on a real pending hand-off **badge 1** over 9 agents in a **670-byte** answer, the row carrying the push's own collapse key `fcfe865fea4964bc07e7d506cecc55f4`, `Take the keyboard for <agent>` and `Open it to read what it needs done.` The agent's own 38-character instruction appears **nowhere** on the row (rule 5) |
+| the memo, back to back through Cloudflare | — | first read **97 ms** and `ageMs 0` (a collection), the next three **32 to 34 ms** with `ageMs` 95, 130, 163 against `memoMs 5000` |
+| `GET /push/events` | **404** | **200 `text/event-stream`, `no-cache`**; a real pending card arrived as a `push-card` frame on the same key the route answers, `state pending`, `badge 1` |
+| the three page attributes, real Chrome at 390x844 and 1440x900 | — | **10 pass, 0 fail**: `data-needs-you-count="0"` on the roster pill, and the desktop shell's own reader run verbatim against the live page answers **0** where the same page answers **1** with the value removed. `data-talk-button` on one element, id `voice-talk`. No page error at either size |
+
+**One thing the live host corrected about this document**, and it is the kind of thing that only the
+edge can tell you: `x-accel-buffering` and `connection` do not survive Cloudflare. The header block
+above now says so.
 
 ### One thing this section does not document
 
@@ -1330,5 +1366,6 @@ round-trips through a real relay and the 12 that pin the three page attributes o
 off the stub sender, which records exactly what would have gone out. The day a credential lands,
 nothing in this section changes except which sender the edge picks.
 
-**And nothing here is measured on the R750.** Everything on this page is grok-bot-local-vm. Nothing is
-done until it is measured on the R750 through `console.titanium.bot`.
+**A pending card of every kind on the R750.** The live leg made a real `box-handoff` and read it
+through both new routes. The other five kinds were measured on grok-bot-local-vm only, because each one
+needs a model to reach for a particular tool and the card decision is the same code for all six.
