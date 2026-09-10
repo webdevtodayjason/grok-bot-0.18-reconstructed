@@ -16,6 +16,29 @@ machine it was measured on and, where it is a layout number, the viewport. **Mea
 **planned** are kept visibly apart, because mixing them is what makes an update unreadable. The
 app halves of STORE-1 and PUSH-1 belong to the phone and desktop panes and are not claimed here.
 
+
+### Every gate, in one table
+
+All of these ran on **grok-bot-local-vm (this Mac)** on **2026-09-10**, against a relay spawned from the
+merged tree, one at a time behind the shared box lock, each inside the 300 s ceiling, each sending the
+user agent `titanbot-gate/<script>`. Phone legs at **390x844** and **430x932**, device scale 3, touch,
+iPhone UA, real Chrome through playwright-core.
+
+| Gate | Result | What it is |
+| --- | --- | --- |
+| `npm test` | **2,689 pass, 0 fail** | the whole suite, not only the new files |
+| `verify-door.mjs --all` | **96 pass, 0 fail, 0 skip** | the door at both phone widths, CORS, and a real page on a second origin minting, reading, holding `/events` 30 s and revoking |
+| `verify-cost.mjs` (3 runs) | **15 pass, 0 fail, 1 skip** | first paint, idle, hidden, resume, the asset cache, noVNC printed by name, the desktop A/B |
+| `verify-push.mjs --host` | **32 pass, 0 fail, 1 skip** | a real pending hand-off to exactly one recorded send, collapse, quiet hours, the badge, revoke |
+| `verify-push.mjs --console` | **16 pass, 0 fail, 4 skip** | the Notifications card at 390x844 and the absent-module case |
+| the bearer-to-push composition | **11 pass, 0 fail** | the one thing no single item could measure: a bearer from `/auth/token` is what opens `/push/devices`, and revoking it closes both |
+| `verify-mobile.mjs --width --fonts --desktop` | **36 pass, 0 fail** | regression, including the desktop baseline this wave repaired |
+| `verify-machine-room.mjs` | **clean** | regression |
+| `verify-dashboard.mjs` | **163 pass, 7 fail** | regression. **All seven reproduce byte for byte on a clean worktree at the shared tip with none of this wave in it**, and they are the local box's model endpoint not answering (no reply, so no rendered attachment) plus its noVNC canvases. Not this wave's, and proved so rather than assumed |
+
+The one skip in the cost gate is the working ceiling and the one in the push gate is the mint door;
+both are named where they belong, in sections 5 and 7.
+
 ---
 
 ## 1. The one fact that shaped all of it
@@ -65,6 +88,14 @@ the app keeps in its keychain so a re-mint refreshes the same row instead of mak
 device; anything that is not `[A-Za-z0-9_.:-]{4,64}` is replaced with a fresh id rather than refused,
 because a mint that fails over bookkeeping is a customer who cannot sign in.
 
+**One spelling to know about, because getting it wrong used to fail silently.** This door writes the
+id as `device: {"id": …}` and `POST /push/devices` writes it as a top-level `deviceId`, and a shell is
+told to use the **same** id at both. Sending the push spelling here once minted a bearer for a
+*freshly generated* id instead of refusing, so the bearer and the push row keyed on different devices
+and revoking the bearer left the push row behind, notifying a phone somebody had signed out of.
+**Both spellings are accepted here now** (`device.id` wins when both are sent), and the answer always
+names the id it actually used — read it back rather than assuming.
+
 The answer:
 
 ```json
@@ -88,10 +119,13 @@ platform credential store. Never in a URL, never in a log line, never in a query
    carry a header. Same for images: fetch with the bearer and make a blob URL, never a bare `<img
    src>` — Chrome's Opaque Response Blocking turns our JSON 401 into `net::ERR_BLOCKED_BY_ORB`, which
    your page cannot see.
-4. **Rotating the instance password kills every device token at once.** They are signed with the
+4. **A token never rides in a URL.** No events ticket, no query-string credential, no token in a log
+   line. That is why `/events` is read with `fetch` and images are turned into blob URLs rather than
+   given a signed URL each.
+5. **Rotating the instance password kills every device token at once.** They are signed with the
    cookie secret, which `set-password.mjs` rewrites. That is deliberate: it is the operator's one
    revoke-everything lever, the same one the cookie already had.
-5. **A device bearer is strictly less than the cookie.** It does not open `/v1` (the job bus keeps its
+6. **A device bearer is strictly less than the cookie.** It does not open `/v1` (the job bus keeps its
    own token), it never mints a cookie, and it cannot open the websocket upgrade at all, because a
    browser WebSocket carries no headers. **So a phone gets no live screen of the box.** That is by
    construction as well as by design.
@@ -140,18 +174,6 @@ So the shells' rule is:
 
 A bad bearer **use** is rate limited but does not charge the password lockout. A failed **mint**
 does, and it is the same lockout `/login` and `/v1` share.
-
-### Three things that follow from the refusal rule
-
-- `/events` is read with `fetch` plus a stream reader, **never `EventSource`**, which carries no
-  header.
-- Images are fetched with the bearer and turned into blob URLs, because `<img>` carries no header
-  either.
-- **Never a bare `<script>` or `<img>`** for an authenticated asset: an unauthenticated subresource
-  surfaces as `ERR_BLOCKED_BY_ORB` rather than as a readable 401, so the app cannot tell what went
-  wrong.
-- **A token never rides in a URL.** No events ticket, no query-string credential, no token in a log
-  line.
 
 ### One thing to know about the instance-password door
 
@@ -251,22 +273,26 @@ A third ceiling, **600 KiB a minute while an agent is working**, is gated but ha
 (see below).
 
 **Measured on grok-bot-local-vm (this Mac) at 390x844, device scale 3, touch, iPhone UA, real Chrome
-via playwright-core with CDP network capture, 2026-09-10. All figures decoded bytes.**
+via playwright-core with CDP network capture, 2026-09-10, on the MERGED tree with `ui/relay-hooks.mjs`
+wired — so these are the bytes the relay actually sends, not a shaping proxy standing in for it. All
+figures decoded bytes.**
 
 | | before (32f4007) | after | ceiling |
 | --- | --- | --- | --- |
-| first paint, API | **548.7 KiB over 47 calls**, plus **1,683.7 KiB** more on selecting a named agent | **166.2 KiB over 32 calls** (three runs: 159.8, 162.6, 166.2) | 250 KiB |
+| first paint, API | **548.7 KiB over 47 calls**, plus **1,683.7 KiB** more on selecting a named agent | **163.8 KiB over 33 calls** | 250 KiB |
 | `getConversationOutline`, one read | **1,210.4 KiB** | **39.8 KiB** | — |
-| duplicate `/api` keys on first paint | **12** | **0** of this adapter's | — |
-| 60 s idle | **646.7 KiB over 4 ticks** | **56.1 KiB over 4 ticks** | 100 KiB |
+| duplicate `/api` keys in the paint window | **12** | **4** (`getHostStatus`, `listMcpServerTools`, `listConnectorSecretFields`, `readAttachmentText` — none of them this adapter's) | — |
+| 60 s idle | **646.7 KiB over 4 ticks**, 161.7 KiB a tick | **56.1 KiB over 4 ticks**, 14.0 KiB a tick, at the busier of two quiet windows | 100 KiB |
 | 60 s with the page hidden | **44 requests, 654.8 KiB** | **0 requests** from this adapter (8 from timers it does not own) | — |
 | coming back from hidden | — | **1** catch-up read inside 600 ms, 2 reloads in 4 s, 27.8 KiB | — |
-| second boot, asset wire | **1,393.1 KiB** | **1.3 KiB**, a 99.9% fall | — |
-| asset answers | `no-store` on every one | 25 `immutable`, 7 revalidating, **0** `no-store`, **0** `public` | — |
+| second boot, asset wire | **1,479.4 KiB** | **1.2 KiB**, a 99.9% fall, one 304 | — |
+| asset answers | `no-store` on every one | 28 `immutable`, 7 revalidating, **0** `no-store`, **0** `public` | — |
+| desktop shell at 1440x900 | — | **0 px** of movement over 211 rects, 190 messages drawn either way | unchanged |
+| noVNC at phone width, printed and excluded by name | — | 165 requests, 1,575.4 KiB, 41% of the boot (**COST-2**) | not in the ceiling |
 
-`node scripts/verify-cost.mjs` ran in four invocations to stay inside the 300 s gate ceiling:
-`--idle` 4 pass / 0 fail, `--paint` 3 pass / 0 fail, `--working --cache --novnc --desktop` 8 pass /
-0 fail / 1 skip.
+`node scripts/verify-cost.mjs` ran in three invocations to stay inside the 300 s gate ceiling:
+`--paint` 3 pass / 0 fail, `--idle` 4 pass / 0 fail, `--working --cache --novnc --desktop` 8 pass /
+0 fail / 1 skip. **15 pass, 0 fail, 1 skip**, and the skip is the working ceiling, below.
 
 ### What a shell needs to know about it
 
@@ -307,11 +333,11 @@ via playwright-core with CDP network capture, 2026-09-10. All figures decoded by
   not measured**: one projected outline read on that agent is 39.8 KiB, the host's own
   `OUTLINE_WORKING_MAX_AGE_MS` allows about twelve a minute, so about 477 KiB plus about 56 KiB of
   tick traffic, against 14.5 MiB unprojected.
-- **The desktop layout is unchanged to 2 px, not to 0.** The A/B compares the **shell** at 1440x900,
-  worst difference 2 px over 199 rects, live with both modules absent and with both active. The
-  transcript is not compared in the browser because two boots 40 s apart on a shared box draw
-  different numbers of messages; what the projection does to a transcript is pinned exactly by a unit
-  test that weaves the real 1,578-item payload both ways.
+- **The desktop layout is unchanged to 0 px.** The A/B compares the **shell** at 1440x900: worst
+  difference **0 px over 211 rects**, and 190 messages drawn, live with both modules absent and with
+  both active. The transcript's contents are not compared in the browser because two boots 40 s apart
+  on a shared box draw different numbers of messages; what the projection does to a transcript is
+  pinned exactly by a unit test that weaves the real 1,578-item payload both ways.
 
 ---
 
@@ -502,13 +528,14 @@ Everything in this section ran on **grok-bot-local-vm on this Mac** on **2026-09
 relay talking to that box, with the gate user agent `titanbot-gate/verify-push.mjs`. Phone legs ran
 at **390x844, device scale 3, touch, iPhone UA, real Chrome via playwright-core**.
 
-`node scripts/verify-push.mjs --host` — **32 pass, 0 fail, 1 skip**
+`node scripts/verify-push.mjs --host` — **32 pass, 0 fail, 1 skip** (re-run on the merged tree,
+2026-09-10)
 
 - A device registers, a second registration of the same `deviceId` updates rather than duplicating,
   and neither the registration answer nor the device list carries a token.
 - A **real pending hand-off** on the box (20.1 s from prompt to pending) produced **exactly one**
   recorded send for that card: title `Take the keyboard for <agent>`, a 62-character reason, collapse
-  id `a9dd5e42d53774f5fea3ce9f163c2418`, `apns-push-type: alert` at priority 10, 677 bytes of 4096,
+  id `d6a325d5713e8b038b0d582fb726f1e2`, `apns-push-type: alert` at priority 10, 687 bytes of 4096,
   both deep links present as peers of `aps`.
 - Badge **3**, against the gate's own independent count of 3 pending cards across 12 agents read
   straight from the box. The console's needs-you count said 1 (see PUSH-3 above).
@@ -520,10 +547,15 @@ at **390x844, device scale 3, touch, iPhone UA, real Chrome via playwright-core*
 - Revoking removed the row from the workspace's own file; a revoked device got no send; a workspace
   with no device reached its box **zero** times.
 - Every recorded payload and every log line swept clean of a device token, a private key, a bearer
-  and a gateway token. Longest notification body 62 characters.
-- **Skipped:** minting through `POST /auth/token`, because that route is item A's and was not on the
-  relay when this ran. Registration went through the console's own door, which is the other half of
-  the same contract.
+  and a gateway token. Longest notification body 72 characters.
+- **Skipped inside the gate:** minting through `POST /auth/token`, because this gate targets a live
+  relay on this machine that serves the shared working copy rather than the merged tree. **That skip
+  is closed separately, and it is the one composition neither builder could measure alone:** against a
+  relay spawned from the merged tree, a device bearer minted at `POST /auth/token` is what opens
+  `POST /push/devices` (HTTP 200, the push token never handed back), reads `GET /push/devices` and
+  `GET /push/settings`, and — once that bearer is revoked at `DELETE /auth/devices/<id>` — no longer
+  opens push at all (HTTP 401, `x-relay-auth: required`). Eleven assertions, all green, on
+  grok-bot-local-vm 2026-09-10.
 
 `node scripts/verify-push.mjs --console` — **16 pass, 0 fail, 4 skip**
 
@@ -543,7 +575,7 @@ at **390x844, device scale 3, touch, iPhone UA, real Chrome via playwright-core*
   conversation and revealing the entry (item B's boot parse); and the card being openable by a thumb
   at 390x844 — see the next section, which is the one thing this wave measured and did not fix.
 
-`node --test` over the whole suite — **2307 pass, 0 fail**, including 29 tests of the decider, the
+`node --test` over the whole suite — **2,689 pass, 0 fail** on the merged tree, including 29 tests of the decider, the
 collapse rules, quiet hours, the expiry, the ledger's survival across a restart, the pruning table
 and the zero-gateway-call case, plus 11 of the four routes and the absent-module fallback, plus 7 of
 the two control-plane credential doors.
@@ -569,8 +601,13 @@ the two control-plane credential doors.
   arrived on a device; what is claimed is that one send was recorded with the right collapse key,
   title, badge and link.
 - **A real APNs or FCM send.** No credential exists yet.
-- **The R750.** Nothing in this document is done until it is measured again through
-  `console.titanium.bot`.
+- **A browser page on a second origin, on the R750.** That needs an allowed origin a browser can
+  actually be served from, and adding one to a running deployment is an env change this wave is not
+  permitted to make. The browser path end to end — mint, read a conversation, hold `/events` 30 s,
+  fetch an avatar with the bearer, revoke, then read the 401 — is measured on grok-bot-local-vm from a
+  real page on a genuinely different origin with Chrome's web security ON, and on the R750 the same
+  door is proved from a native client sending `Origin: capacitor://localhost`, which is the shape an
+  iOS shell actually sends.
 
 ---
 

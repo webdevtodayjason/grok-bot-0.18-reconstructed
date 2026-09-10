@@ -376,7 +376,14 @@ export function mintRequest(raw) {
     email: String(parsed.email ?? "").trim(),
     password: String(parsed.password ?? ""),
     device: {
-      id: cleanId(device.id),
+      // `device.id` OR a top-level `deviceId`, because the two doors of this same contract spell it
+      // differently: the mint takes `device: {id}` and POST /push/devices takes `deviceId`, and a
+      // shell is told to use the same stable id at both. Sending the push spelling here used to mint a
+      // bearer for a FRESH id instead of refusing, so the bearer and the push row keyed on different
+      // devices and revoking the bearer left the push row behind, notifying a phone somebody had
+      // signed out of. Silent, and only visible as a notification nobody could stop. Accepting both
+      // spellings is a tolerance, not a second API: the answer still names the id it used.
+      id: cleanId(device.id ?? parsed.deviceId),
       name: cleanDeviceName(device.name),
       platform: cleanPlatform(device.platform),
     },

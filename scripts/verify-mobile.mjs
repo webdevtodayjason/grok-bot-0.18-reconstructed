@@ -815,6 +815,40 @@ async function desktopPage(origin, size = { w: 1440, h: 900 }) {
 }
 
 // THE REAL A/B. One browser, two relays, two trees, the same box behind both.
+
+// ONE NAMED ALLOWANCE IN THE BASELINE COMPARISON, AND THE REASON IT IS EXACTLY THIS NARROW.
+//
+// The baseline is a COMMIT, and features land after it. `c57dac3` put a Talk button inside the
+// composer row, beside the message box, which is a deliberate shipped feature: the button takes width
+// from `#message-input` and moves nothing at all. Measured on grok-bot-local-vm 2026-09-10, at three
+// desktop widths, the input's x, y and height are byte-identical to the baseline and only its width
+// differs -- 447.83 to 370.05 at 1440x900, 356.08 to 278.30 at 1100x820, 421.02 to 343.23 at 900x800,
+// the same 77.78 px every time, which is one button.
+//
+// So this leg would otherwise fail for every wave from now on, on a condition none of them caused,
+// which is the state it was in when the apps wave found it: the clean shared tip fails these three
+// legs with byte-identical numbers to a tree carrying the whole apps wave, which is how it was proved
+// not to be the apps wave's.
+//
+// THE ALLOWANCE IS THE WIDTH OF ONE ELEMENT AND NOTHING ELSE. Its position, its height and its
+// positioning scheme are still compared, and every other rect is still compared whole, so a talk
+// button that PUSHED the input instead of sharing its row would still fail here, and so would any
+// change to the shelf, the stage, the transcript, the composer or the send button.
+const WIDTH_MAY_DIFFER = new Map([
+  ["#message-input", "a Talk button landed beside it in c57dac3 and takes width from it; its position is still compared"],
+]);
+
+function rectAgrees(name, before, after) {
+  if (before === after) return true;
+  const why = WIDTH_MAY_DIFFER.get(name);
+  if (why == null) return false;
+  const a = String(before).split(",");
+  const b = String(after).split(",");
+  if (a.length !== 5 || b.length !== 5) return false;
+  // x, y, height and position must match; only the width may move.
+  return a[0] === b[0] && a[1] === b[1] && a[3] === b[3] && a[4] === b[4];
+}
+
 async function legBaseline() {
   if (READ_ONLY) { skip("every structural rect matches the tree before the phone pass", "this run reads a deployed console, so there is no baseline worktree to spawn"); return; }
   const { execFileSync } = await import("node:child_process");
@@ -851,7 +885,7 @@ async function legBaseline() {
       const shippedFile = path.join(SHOTS, `desktop-${name}-shipped.png`);
       await shipped.page.screenshot({ path: shippedFile, fullPage: true }).catch(() => {});
       shots.push(shippedFile);
-      const moved = DESKTOP_RECTS.filter((one) => before[one] !== after[one]);
+      const moved = DESKTOP_RECTS.filter((one) => !rectAgrees(one, before[one], after[one]));
       const present = DESKTOP_RECTS.filter((one) => before[one] !== "absent" || after[one] !== "absent");
       info(`${name}: ${present.length} of ${DESKTOP_RECTS.length} named rects exist on both sides`);
       check(moved.length === 0, `${name}: every structural rect matches ${sha.slice(0, 7)}, the tree before the phone pass`,

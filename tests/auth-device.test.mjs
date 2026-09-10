@@ -268,3 +268,38 @@ test("an allowed origin gets the headers, a near miss gets none, and nothing eve
   assert.equal(corsHeaders("", allowed), null, "no Origin is not a CORS request at all");
   assert.equal(corsHeaders(undefined, allowed), null);
 });
+
+// ---- the mint's body, and the one spelling that used to fail silently --------------------------
+
+test("the mint takes the device id under either of the two spellings this contract uses", () => {
+  // THE DEFECT THIS PINS, found when the apps wave's three items were first in one tree. The mint
+  // takes `device: {id}` and POST /push/devices takes a top-level `deviceId`, and docs/APPS.md tells a
+  // shell to use the SAME stable id at both. A shell sending the push spelling at the mint was not
+  // refused: it was given a bearer for a freshly minted id, so the bearer and the push row keyed on
+  // different devices, and revoking the bearer left the push row behind, notifying a phone somebody
+  // had signed out of. Nothing errored anywhere along that path.
+  const nested = mintRequest(JSON.stringify({ password: "x", device: { id: "phone-in-a-pocket" } }));
+  assert.equal(nested.device.id, "phone-in-a-pocket");
+
+  const flat = mintRequest(JSON.stringify({ password: "x", deviceId: "phone-in-a-pocket" }));
+  assert.equal(flat.device.id, "phone-in-a-pocket", "the push door's spelling names the same device here");
+
+  // The nested one wins when both are sent, because it is the shape this door documents.
+  const both = mintRequest(JSON.stringify({ password: "x", deviceId: "the-flat-one", device: { id: "the-nested-one" } }));
+  assert.equal(both.device.id, "the-nested-one");
+
+  // No id, and an id of the wrong shape, both come out EMPTY here rather than as a refusal: the
+  // store mints a fresh one (`cleanId(id) || newDeviceId()`), because an id is bookkeeping and a
+  // mint that fails over bookkeeping is a customer who cannot sign in.
+  assert.equal(mintRequest(JSON.stringify({ password: "x" })).device.id, "");
+  assert.equal(mintRequest(JSON.stringify({ password: "x", deviceId: "no" })).device.id, "",
+    "three characters is not the shape, so the store will mint one");
+
+  // A non-string in either place is empty, not a crash and not an object on the row.
+  assert.equal(mintRequest(JSON.stringify({ password: "x", deviceId: { nope: true } })).device.id, "");
+  assert.equal(mintRequest(JSON.stringify({ password: "x", device: { id: { nope: true } } })).device.id, "");
+  // A one-element array stringifies to its element and so survives if the element is a valid id.
+  // Recorded rather than guarded: what comes out is a well-formed id either way, and the store only
+  // ever compares it as a string.
+  assert.equal(mintRequest(JSON.stringify({ password: "x", device: { id: ["a-real-looking-id"] } })).device.id, "a-real-looking-id");
+});
