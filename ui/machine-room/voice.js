@@ -800,9 +800,19 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       return { enabled: false, available: false };
     }
     const value = state.settings ?? {};
+    const capSeconds = Number(value.dayCapSeconds) || 0;
     return {
       enabled: value.enabled === true,
       available: value.available === true || (value.available == null && value.apiKeySet === true),
+      // THE MINUTES TRAVEL WITH THE ANSWER, because the row that draws them is one read away in
+      // Settings and a second round trip for two numbers the relay already sent is a second chance
+      // to disagree with itself. They are OMITTED, not zeroed, when this workspace has no day cap:
+      // the Usage row tests both for a finite number and draws no bar at all without them, and a bar
+      // reading 0 of 0 is a measurement nobody took.
+      ...(capSeconds > 0 ? {
+        minutesUsedToday: Math.round(((Number(value.dayUsedSeconds) || 0) / 60) * 10) / 10,
+        minutesCapToday: Math.round((capSeconds / 60) * 10) / 10,
+      } : {}),
     };
   }
 
@@ -817,6 +827,12 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   // a list worth showing; a browser without it gets no row rather than a control that decides nothing.
   const supportsMicChoice = () => typeof global.navigator?.mediaDevices?.enumerateDevices === "function";
   const getMicDeviceId = () => state.micDeviceId;
+  // Published BOTH ways on purpose, and the reason is worth the two lines. The rows in Settings test
+  // `supportsMicChoice === true` and call `micDeviceId()`, because that is the shape every other fact
+  // that surface reads already has; this file's own callers and its tests use the function and the
+  // get/set pair. A silent mismatch here does not throw -- it draws no Microphone row at all and
+  // reports the chosen device as "System default" forever -- which is exactly the class of seam that
+  // gets found in front of a customer rather than in a suite.
   const setMicDeviceId = (id) => { state.micDeviceId = String(id ?? "").trim(); return state.micDeviceId; };
 
   function minutes(seconds) {
@@ -949,7 +965,8 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // caller in the console.
     getSettings,
     setEnabled,
-    supportsMicChoice,
+    get supportsMicChoice() { return supportsMicChoice(); },
+    micDeviceId: getMicDeviceId,
     getMicDeviceId,
     setMicDeviceId,
     usage,

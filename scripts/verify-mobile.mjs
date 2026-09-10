@@ -66,7 +66,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireBoxLock } from "./lib/box-lock.mjs";
 
-const LEGS = ["width", "reach", "scroll", "send", "drawers", "panels", "attach", "card", "fonts", "land", "demo", "desktop"];
+const LEGS = ["width", "reach", "scroll", "send", "drawers", "panels", "settings", "attach", "card", "fonts", "land", "demo", "desktop"];
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(`--${name}`);
 const value = (name) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : null; };
@@ -75,7 +75,7 @@ const URL_TARGET = value("url");
 const READ_ONLY = URL_TARGET != null;
 const chosen = flag("all") ? [...LEGS] : LEGS.filter((leg) => flag(leg));
 if (chosen.length === 0) {
-  console.log("usage: node scripts/verify-mobile.mjs (--all | --width | --reach | --scroll | --send | --drawers | --panels | --attach | --card | --fonts | --land | --demo | --desktop)");
+  console.log("usage: node scripts/verify-mobile.mjs (--all | --width | --reach | --scroll | --send | --drawers | --panels | --settings | --attach | --card | --fonts | --land | --demo | --desktop)");
   console.log("       [--url https://console.titanium.bot]  read-only, CONSOLE_BEARER in the environment");
   console.log("");
   console.log("  --width    the shell's column is the viewport and nothing hangs off the right edge");
@@ -84,6 +84,7 @@ if (chosen.length === 0) {
   console.log("  --send     a tapped Send puts a message in the transcript");
   console.log("  --drawers  the roster and the agent panel open, work, and close");
   console.log("  --panels   the marketplace, a bot page and settings fit");
+  console.log("  --settings the settings sheet: one tap from the bar, two from the roster, full height, 44 px");
   console.log("  --attach   a picture staged from the composer shows an unclipped chip");
   console.log("  --card     a report card opened by hand fits, and its Send is a real target");
   console.log("  --fonts    every text input is at least 16px and the viewport meta covers the notch");
@@ -565,6 +566,232 @@ async function legPanels(page, phone) {
   await shoot(page, `mobile-settings-${phone.name}`);
   await page.keyboard.press("Escape");
   await page.waitForTimeout(500);
+}
+
+// ================================================================================================
+// MOBILE-2c / SETTINGS-2. THE SETTINGS SHEET ON A PHONE.
+//
+// Jason, 2026-09-10 05:53, on the settings modal: "It's so busy, with so much stuff... a user is
+// never going to put a resend key in... it's getting to the point where you've got to be a developer
+// to understand what's going on." The surface it becomes is a full-height sheet at phone widths with
+// a left nav of sections, and this leg is what holds it to that on a real phone.
+//
+// WHAT MOBILE-2c USED TO SAY, AND WHY IT WAS WRONG. The row read "there is no route into Settings on
+// a phone at all" and cited one binding. MEASURED on grok-bot-local-vm 2026-09-10 in real Chrome at
+// 390x844 with touch, device scale 3: there are TWO, and the window bar's own gear is fine --
+// #settings-button is 44x44 at (336,42), nothing is drawn on top of it, and a real touchscreen tap
+// opens the panel. What is dead is the SHELF's gear, #shelf-settings, which computes display:none
+// inside .shelf-utilities at this width; voice.js used to synthesise a click on it to answer "open
+// voice settings", which is why that action led nowhere in the hand. So the finding is the length of
+// the sheet and the dead opener, not the absence of a route, and this leg measures both.
+//
+// THE STRICT HALF IS GATED ON THE SURFACE BEING THERE, deliberately and visibly. Until SETTINGS-2's
+// [data-settings-surface] lands this leg cannot assert a nav, a section, a full-height sheet or a
+// 44 px floor inside the panel without going red on a defect it is not this file's job to fix. So
+// when the surface is absent it MEASURES the old panel and prints those numbers as the before, and
+// each strict check is a named SKIP rather than a silent pass. The moment the surface is in the tree
+// every one of them is an assertion, with no edit to this file.
+//
+// EVERY SELECTOR BELOW IS READ OFF settings.js's AND account-menu.js's OWN MARKUP, not off a plan:
+// the surface is `[data-settings-surface]`, the nav entries carry `aria-selected` rather than
+// `aria-current`, and the account menu hangs off `[data-account-tile]` inside `[data-account-foot]`
+// at the roster's foot. A gate written against the planned names would SKIP for ever on a tree that
+// has the surface, which is the silent pass this leg is shaped to make impossible.
+//
+// AND ONE SECTION IS IN THE DOM AT A TIME. settings.js repaints the body on every nav press rather
+// than rendering all six and hiding five, so this leg asserts what the NAV offers and then proves the
+// press really swaps the body -- never that six section wrappers exist at once.
+async function legSettings(page, phone) {
+  await page.keyboard.press("Escape").catch(() => {});
+  await page.evaluate(() => { delete document.body.dataset.drawer; });
+  await sleep(400);
+
+  // ---- route one: the window bar's gear, one tap ------------------------------------------------
+  const gear = await page.evaluate(REACH, "#settings-button");
+  check(gear.found === true, `${phone.name}: the settings gear is on the page`, "#settings-button");
+  if (gear.found) {
+    check(gear.on === true && gear.big === true, `${phone.name}: and it is a real target in the hand`, `${gear.w}x${gear.h} at (${gear.x},${gear.right - gear.w})`);
+    check(gear.hit === true, `${phone.name}: with nothing drawn on top of it`, `under it: ${gear.under}`);
+  }
+  const shelfGear = await page.evaluate(() => {
+    const el = document.getElementById("shelf-settings");
+    if (!el) return { found: false };
+    const cs = getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    return { found: true, display: cs.display, w: Math.round(r.width), h: Math.round(r.height) };
+  });
+  // Not a failure: the shelf's utilities are deliberately not drawn on a phone. It is recorded
+  // because it is the binding voice.js used to synthesise a click on, and a synthesised click on a
+  // display:none control is a button that reports success and does nothing.
+  if (shelfGear.found) info(`${phone.name}: the shelf's own gear #shelf-settings computes display:${shelfGear.display} at ${shelfGear.w}x${shelfGear.h} — nothing may route through it at this width`);
+  else info(`${phone.name}: this console draws no #shelf-settings at all`);
+
+  await tap(page, "#settings-button");
+  await page.waitForTimeout(2200);
+  const opened = await page.evaluate(() => {
+    const el = document.getElementById("panel-dialog");
+    if (!el) return { open: false };
+    const r = el.getBoundingClientRect();
+    const cs = getComputedStyle(el);
+    const surface = el.querySelector("[data-settings-surface]");
+    // THE THING A THUMB ACTUALLY DRAGS THROUGH, found rather than named. The panel's own scroller is
+    // #panel-content today and may be a section wrapper after SETTINGS-2, so this takes the tallest
+    // descendant that really scrolls. Naming one class measured the DIALOG instead and reported a
+    // 744 px sheet holding 744 px of content, which is the panel's window, not its length.
+    const scrollers = [el, ...el.querySelectorAll("*")].filter((n) => {
+      const c = getComputedStyle(n);
+      return (c.overflowY === "auto" || c.overflowY === "scroll") && n.scrollHeight > n.clientHeight + 1;
+    });
+    const body = scrollers.sort((a, b) => b.scrollHeight - a.scrollHeight)[0] ?? el.querySelector("#panel-content") ?? el;
+    return {
+      open: cs.display !== "none" && r.width > 0 && r.height > 0,
+      x: Math.round(r.x * 100) / 100, y: Math.round(r.y * 100) / 100,
+      w: Math.round(r.width * 100) / 100, h: Math.round(r.height * 100) / 100,
+      radius: cs.borderRadius,
+      // The length of the thing a thumb has to drag through, which is the whole complaint.
+      scrollHeight: Math.round(body.scrollHeight),
+      clientHeight: Math.round(body.clientHeight),
+      viewport: { w: Math.round(window.visualViewport?.width ?? window.innerWidth), h: Math.round(window.visualViewport?.height ?? window.innerHeight) },
+      docScrollWidth: document.scrollingElement.scrollWidth,
+      surface: surface != null,
+      nav: [...el.querySelectorAll("[data-settings-nav]")].map((n) => n.getAttribute("data-settings-nav")),
+      sections: [...el.querySelectorAll("[data-settings-section]")].map((n) => n.getAttribute("data-settings-section")),
+      current: el.querySelector('[data-settings-nav][aria-selected="true"]')?.getAttribute("data-settings-nav") ?? null,
+      heading: (el.querySelector("[data-settings-title]")?.textContent ?? "").trim().slice(0, 40),
+      title: (el.querySelector("#panel-title")?.textContent ?? "").trim().slice(0, 40),
+    };
+  });
+  check(opened.open === true, `${phone.name}: one tap on the bar's gear opens settings`, opened.open ? `${opened.w}x${opened.h} at (${opened.x},${opened.y})` : "the panel did not open");
+  if (!opened.open) return;
+  info(`${phone.name}: the sheet is ${opened.w}x${opened.h} in a ${opened.viewport.w}x${opened.viewport.h} viewport, ${opened.scrollHeight} px of content in a ${opened.clientHeight} px window, radius ${opened.radius}, panel title "${opened.title}"${opened.heading ? `, section "${opened.heading}"` : ""}`);
+
+  // The one assertion that holds whatever surface is open: a panel a person cannot pan away from.
+  check(opened.docScrollWidth <= opened.viewport.w + 1, `${phone.name}: the page does not scroll sideways with settings open`, `document scrollWidth ${opened.docScrollWidth} vs visual viewport ${opened.viewport.w}`);
+
+  const why = "SETTINGS-2's [data-settings-surface] is not in this tree yet; the numbers above are the before";
+  if (opened.surface) {
+    // A FULL-HEIGHT SHEET, not a modal parked in the middle. 98% rather than 100% because a phone's
+    // safe-area inset is a legitimate few pixels and pinning to the pixel would fail on a notch.
+    check(opened.h >= opened.viewport.h * 0.98 && opened.y <= 2, `${phone.name}: and it is a full-height sheet, not a modal in the middle`, `${opened.h} px tall at y ${opened.y} in ${opened.viewport.h}`);
+    check(opened.w >= opened.viewport.w - 1, `${phone.name}: the full width of the phone`, `${opened.w} in ${opened.viewport.w}`);
+    check(opened.nav.length >= 5, `${phone.name}: the nav offers every section this person is entitled to`, opened.nav.join(", ") || "no [data-settings-nav] at all");
+    check(opened.current != null, `${phone.name}: and one entry says which section is open`, `aria-selected=true on ${opened.current}`);
+    // ONE section body, because the surface repaints rather than hiding five. The claim is that the
+    // body on screen is the one the nav says is open, which is the thing a person can be wrong about.
+    check(opened.sections.length === 1 && opened.sections[0] === opened.current,
+      `${phone.name}: and the body on screen is that section and no other`, `showing ${opened.sections.join(", ") || "nothing"}, nav says ${opened.current}`);
+    check(opened.heading.length > 0, `${phone.name}: the section has a title on it`, JSON.stringify(opened.heading));
+  } else {
+    check(opened.h > 0, `${phone.name}: the old panel's length is recorded as the before number`, `${opened.scrollHeight} px of content in a ${opened.clientHeight} px window at ${opened.viewport.w}x${opened.viewport.h}`);
+    skip(`${phone.name}: settings is a full-height sheet`, why);
+    skip(`${phone.name}: the settings nav is on the sheet`, why);
+    skip(`${phone.name}: one nav entry says which section is open`, why);
+  }
+
+  // ---- every control in the open section is a real target ----------------------------------------
+  const inPanel = await page.evaluate(() => {
+    const root = document.getElementById("panel-dialog");
+    if (!root) return [];
+    const sel = "button, a[href], input:not([type=hidden]), select, textarea, [role=button], [role=switch], [tabindex]:not([tabindex='-1'])";
+    const out = [];
+    for (const el of root.querySelectorAll(sel)) {
+      const cs = getComputedStyle(el);
+      if (cs.visibility === "hidden" || cs.display === "none" || cs.pointerEvents === "none") continue;
+      if (el.disabled === true) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      // A row inside a section the nav is not showing is not on the phone's screen. The surface
+      // repaints rather than hiding, so there is normally nothing to exclude here -- this stays for
+      // the section wrapper that is hidden rather than removed, which costs nothing and would
+      // otherwise red-card a control no thumb can reach.
+      if (el.closest("[data-settings-section][hidden]") != null) continue;
+      const cls = String(el.className || "").split(" ").filter(Boolean)[0] ?? "";
+      out.push({
+        key: `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ""}${cls ? `.${cls}` : ""}`,
+        label: (el.getAttribute("aria-label") || el.textContent || "").trim().slice(0, 32),
+        w: Math.round(r.width * 100) / 100, h: Math.round(r.height * 100) / 100,
+      });
+    }
+    return out;
+  });
+  const small = inPanel.filter((one) => one.w < 44 || one.h < 44);
+  info(`${phone.name}: ${inPanel.length} controls in the open settings section, ${small.length} under 44x44`);
+  if (opened.surface) {
+    check(small.length === 0, `${phone.name}: every control in the open section is at least 44x44`,
+      small.slice(0, 8).map((one) => `${one.key} "${one.label}" ${one.w}x${one.h}`).join(" | ") || `${inPanel.length} controls`);
+  } else {
+    skip(`${phone.name}: every control in the open settings section is at least 44x44`, `${why} — ${small.length} of ${inPanel.length} are under it today`);
+  }
+  await shoot(page, `mobile-settings-sheet-${phone.name}`);
+
+  // ---- the nav really switches the section --------------------------------------------------------
+  if (opened.surface && opened.nav.length > 1) {
+    const target = opened.nav.find((id) => id !== opened.current) ?? opened.nav[1];
+    const hit = await page.evaluate(REACH, `[data-settings-nav="${target}"]`);
+    check(hit.big === true && hit.hit === true, `${phone.name}: a nav entry is a real target`, `${target} ${hit.w}x${hit.h}, under it: ${hit.under}`);
+    await tap(page, `[data-settings-nav="${target}"]`);
+    await page.waitForTimeout(600);
+    const after = await page.evaluate(() => {
+      const el = document.getElementById("panel-dialog");
+      const shown = [...el.querySelectorAll("[data-settings-section]")].filter((s) => !s.hidden).map((s) => s.getAttribute("data-settings-section"));
+      return { shown, current: el.querySelector('[data-settings-nav][aria-selected="true"]')?.getAttribute("data-settings-nav") ?? null };
+    });
+    check(after.current === target && after.shown.length === 1 && after.shown[0] === target,
+      `${phone.name}: and tapping it shows that section and only that one`, `showing ${after.shown.join(", ") || "nothing"}, aria-current on ${after.current}`);
+  } else if (!opened.surface) {
+    skip(`${phone.name}: a nav entry switches the section`, why);
+  }
+
+  // ---- route two: the roster drawer's account menu, two taps -------------------------------------
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(600);
+  await tap(page, "#roster-drawer");
+  const strip = await page.evaluate(() => {
+    const el = document.querySelector("[data-account-tile]");
+    if (!el) return { found: false };
+    const r = el.getBoundingClientRect();
+    const roster = document.getElementById("worker-roster")?.getBoundingClientRect();
+    return {
+      found: true, w: Math.round(r.width), h: Math.round(r.height), y: Math.round(r.y),
+      // The foot of the roster is the foot of the drawer on a phone: the same node serves both.
+      atTheFoot: roster != null && r.bottom <= roster.bottom + 1 && r.top >= roster.top,
+    };
+  });
+  if (!strip.found) {
+    skip(`${phone.name}: settings is two taps away through the roster's account menu`, `${why} — no [data-account-tile] at the foot of the roster`);
+    await page.evaluate(() => { delete document.body.dataset.drawer; });
+    await sleep(300);
+    return;
+  }
+  check(strip.h >= 44, `${phone.name}: the account strip at the foot of the roster is a real target`, `${strip.w}x${strip.h}`);
+  check(strip.atTheFoot === true, `${phone.name}: and it is at the foot of the roster, which is the foot of the drawer here`, `y ${strip.y}`);
+  await tap(page, "[data-account-tile]");
+  await page.waitForTimeout(500);
+  const menu = await page.evaluate(() => {
+    const el = document.querySelector("[data-account-menu]");
+    if (!el) return { found: false };
+    const r = el.getBoundingClientRect();
+    return {
+      found: true, open: getComputedStyle(el).display !== "none" && r.height > 0,
+      rows: [...el.querySelectorAll("[data-account-row]")].map((n) => n.getAttribute("data-account-row")),
+      onScreen: r.left >= -1 && r.right <= window.innerWidth + 1 && r.bottom <= window.innerHeight + 1,
+    };
+  });
+  check(menu.found === true && menu.open === true, `${phone.name}: one tap on it opens the account menu`, menu.found ? `rows: ${menu.rows.join(", ")}` : "no [data-account-menu]");
+  if (menu.found && menu.open) {
+    check(menu.onScreen === true, `${phone.name}: and the whole menu is on screen`);
+    await tap(page, '[data-account-row="settings"]');
+    await page.waitForTimeout(1500);
+    const reached = await page.evaluate(() => {
+      const el = document.getElementById("panel-dialog");
+      return el != null && getComputedStyle(el).display !== "none" && el.querySelector("[data-settings-surface]") != null;
+    });
+    check(reached === true, `${phone.name}: and the second tap is the settings sheet — two taps from the drawer`, reached ? "open" : "the sheet did not come up");
+    await shoot(page, `mobile-settings-account-${phone.name}`);
+  }
+  await page.keyboard.press("Escape").catch(() => {});
+  await page.evaluate(() => { delete document.body.dataset.drawer; });
+  await sleep(300);
 }
 
 async function legAttach(page, phone) {
@@ -1148,6 +1375,7 @@ try {
       if (chosen.includes("scroll")) await legScroll(page, phone);
       if (chosen.includes("drawers")) await legDrawers(page, phone);
       if (chosen.includes("panels")) await legPanels(page, phone);
+      if (chosen.includes("settings")) await legSettings(page, phone);
       if (chosen.includes("attach")) await legAttach(page, phone);
       if (chosen.includes("card")) await legCard(page, phone);
       if (chosen.includes("fonts")) await legFonts(page, phone);

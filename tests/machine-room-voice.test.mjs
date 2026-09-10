@@ -543,9 +543,18 @@ test("VOICE-2 seam: what item A's rows read is two booleans, so no vendor can re
     fetch: async () => ({ ok: true, status: 200, json: async () => answer, text: async () => JSON.stringify(answer) }),
   });
   const settings = await voice.getSettings();
-  assert.deepEqual(Object.keys(settings).sort(), ["available", "enabled"], "two facts and no third");
+  // Two booleans and, when this workspace has a day cap, the two numbers the Usage row draws a bar
+  // from. NOT A STRING AMONG THEM, which is the claim this test exists to make: there is nothing on
+  // this seam a vendor name, a model id or a voice name could ride in on, so no customer row can
+  // render one by accident.
+  assert.deepEqual(Object.keys(settings).sort(), ["available", "enabled", "minutesCapToday", "minutesUsedToday"]);
+  for (const [name, value] of Object.entries(settings)) {
+    assert.ok(typeof value === "boolean" || typeof value === "number", `${name} is ${typeof value}, and a string is how a vendor name travels`);
+  }
   assert.equal(settings.enabled, true);
   assert.equal(settings.available, true);
+  assert.equal(settings.minutesUsedToday, 2.1, "126 seconds, in the minutes the row shows");
+  assert.equal(settings.minutesCapToday, 120);
   const asText = JSON.stringify(settings);
   for (const leak of ["xai", "grok", "ember", "agent-1", "apiKey", "key"]) {
     assert.doesNotMatch(asText, new RegExp(leak, "i"), `"${leak}" reached the seam item A draws rows from`);
@@ -573,16 +582,28 @@ test("VOICE-2 seam: `available` is a key existing anywhere, and an older relay's
   // A relay that does not answer at all is not a workspace that is switched on.
   const { voice: down } = await loadVoice({ fetch: async () => { throw new Error("no relay"); } });
   assert.deepEqual(await down.getSettings(), { enabled: false, available: false });
+
+  // NO DAY CAP MEANS NO NUMBERS, rather than a bar reading 0 of 0. The Usage row tests both fields
+  // for a finite number and draws nothing without them, so omitting is what makes it draw nothing.
+  const { voice: uncapped } = await loadVoice({
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({ enabled: true, available: true, dayUsedSeconds: 0, dayCapSeconds: 0 }) }),
+  });
+  assert.deepEqual(Object.keys(await uncapped.getSettings()).sort(), ["available", "enabled"]);
 });
 
 test("VOICE-2 seam: the microphone choice is offered only when the browser can name one, and it reaches getUserMedia", async () => {
   const { voice } = await loadVoice();
-  assert.equal(voice.supportsMicChoice(), false, "a window with no mediaDevices gets no row rather than a dead control");
+  // READ AS A PROPERTY, which is the shape the Settings rows test (`v.supportsMicChoice === true`).
+  // It was a function here and a function is not `=== true`, so the Microphone row silently did not
+  // draw at all; the seam is published both ways now and this is the half that pins the property.
+  assert.equal(voice.supportsMicChoice, false, "a window with no mediaDevices gets no row rather than a dead control");
   const { voice: real } = await loadVoice({
     window: { navigator: { mediaDevices: { enumerateDevices: async () => [] } } },
   });
-  assert.equal(real.supportsMicChoice(), true);
+  assert.equal(real.supportsMicChoice, true);
   assert.equal(real.getMicDeviceId(), "", "and nothing is chosen until somebody chooses it");
+  assert.equal(typeof real.micDeviceId, "function", "and the name the Settings row calls is a function");
+  assert.equal(real.micDeviceId(), "", "answering the same thing the get/set pair does");
   real.setMicDeviceId("  mic-7  ");
   assert.equal(real.getMicDeviceId(), "mic-7");
 
