@@ -12,7 +12,10 @@
 //                   types. Needs nothing but node.
 //   --leg relay     a relay with a stub vendor: the accepted socket, the ready frame, and the ledger
 //                   row written BEFORE the dial.
-//   --leg nokey     an empty voice.json: the upgrade is ACCEPTED, one plain sentence arrives, then bye.
+//   --leg nokey     an empty voice.json: the upgrade is ACCEPTED, one plain sentence arrives, then bye
+//                   -- and then VOICE-2, in real Chrome at 1440x900 and 390x844: one press of Talk
+//                   moves nothing in the footer but the message box, a second press and Escape both
+//                   leave talk mode, and the line takes itself away if it is left alone.
 //   --leg caps      a one-minute policy: a refusal in words over an accepted socket.
 //   --leg origin    a cross-origin upgrade: refused in words, not with a destroyed socket.
 //   --leg refused   a vendor that answers 401 to the upgrade, and an address with nothing behind it:
@@ -76,7 +79,8 @@ if (process.argv.includes("--help") || process.argv.includes("-h") || leg.length
     "",
     "  cp       the control plane half. Needs only node; runs anywhere.",
     "  relay    a relay against a stub vendor: the accepted socket, the ready frame, the claim first.",
-    "  nokey    an empty voice.json answers one plain sentence over an ACCEPTED socket.",
+    "  nokey    an empty voice.json answers one plain sentence over an ACCEPTED socket, and real",
+    "           Chrome proves the footer does not move and that talk mode can be left.",
     "  caps     a one minute policy refuses in words.",
     "  origin   a cross-origin upgrade is refused in words, never by a destroyed socket.",
     "  refused  a vendor that answers 401, and an address with nothing behind it: one sentence each.",
@@ -568,7 +572,9 @@ async function legRelay() {
 
 async function legNoKey() {
   console.log(`verify-voice --leg nokey on ${MACHINE}`);
-  requireTheOtherItems(false);
+  // `true`: since VOICE-2 this leg also presses the button in a real browser, so it needs the console's
+  // side on disk as well as the relay's.
+  requireTheOtherItems(true);
   const { startStubRealtime } = await import(STUB_REALTIME);
   const stub = await startStubRealtime({});
   cleanups.push(() => { try { stub.close(); } catch { /* gone */ } });
@@ -588,14 +594,251 @@ async function legNoKey() {
   check(socket.accepted, "the upgrade is accepted rather than destroyed", `${socket.statusLine || "no status line at all"} in ${Date.now() - t0} ms on ${MACHINE}`);
   check(socket.notes.length >= 1, "and one note arrives", JSON.stringify(socket.notes));
   const sentence = socket.notes[0] ?? "";
-  check(/key/i.test(sentence) || /not set/i.test(sentence) || /switched on/i.test(sentence),
-    "saying in plain words that this workspace has no realtime key yet", JSON.stringify(sentence));
+  // VOICE-2 DELETED THE WORDING ASSERTION THAT USED TO SIT HERE, rather than inverting it. It required
+  // the customer-visible sentence to contain "key", "not set" or "switched on" -- and "key" is a word
+  // the copy rule forbids on any row a customer reads. A gate that requires a banned word is a gate
+  // that has to be edited every time the copy is right. What a sentence must NOT say is still swept
+  // below, because that is a rule about leaks and not about phrasing; what it SHOULD say is proved
+  // once, by verify-settings' plain-words sweep over every customer-visible row and this line with
+  // them. One owner for the words, and it is not this file.
+  info(`the sentence this workspace reads: ${JSON.stringify(sentence)}`);
+  check(sentence.trim().length > 20, "one sentence, long enough to be one", `${sentence.trim().length} characters`);
   for (const word of ["xai", "openai", "grok", "websocket", "socket", "titan(", "undefined", "null", "error"]) {
     check(!sentence.toLowerCase().includes(word), `the sentence does not say ${word}`, JSON.stringify(sentence));
   }
   check(socket.closedWith != null, "then bye and a close the page can read", String(socket.closedWith));
   check(stub.events.requests.length === 0, "and the vendor was never dialled", `the stub was asked for ${stub.events.requests.length} upgrade(s)`);
+
+  await noKeyInABrowser(relay);
   return;
+}
+
+/**
+ * VOICE-2, IN A REAL BROWSER, against the real relay this leg already started.
+ *
+ * THE THING BEING MEASURED IS THE FOOTER, not the sentence. Jason's screenshot of 2026-09-10 is one
+ * press of Talk on a workspace with no voice: the footer split in two, the message box went to a
+ * third of its width, and there was no way out of talk mode. MEASURED here before the fix at
+ * 1440x900 on grok-bot-local-vm, six rects before and after that one press:
+ *
+ *   .control-shelf     1392x106 @24,776    ->  1392x196.02 @24,685.98
+ *   #composer          600x54   @459       ->  407.98x54   @991
+ *   #message-input     370.05              ->  178.03
+ *   .shelf-utilities   row 1               ->  wrapped to row 2 at x41
+ *   .composer-aside    @747.06             ->  90 px up, onto the right rail's Skills row
+ *   .transcript        567.75 tall         ->  45.5 px shorter
+ *
+ * Five of those six must now be unchanged TO THE PIXEL. The sixth is the message box, which gives up
+ * the line's width and gets it straight back, and its number is printed rather than asserted tight.
+ */
+async function noKeyInABrowser(relay) {
+  const playwright = await loadPlaywright();
+  const { chromium } = playwright;
+  const browser = await chromium.launch({ args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"] });
+  cleanups.push(() => { try { browser.close(); } catch { /* gone */ } });
+
+  const readRects = (page) => page.evaluate(() => {
+    const of = (selector) => {
+      const node = document.querySelector(selector);
+      if (node == null) return null;
+      const r = node.getBoundingClientRect();
+      const round = (value) => Math.round(value * 100) / 100;
+      return [round(r.width), round(r.height), round(r.left), round(r.top)];
+    };
+    const line = document.getElementById("voice-line");
+    const shown = line == null ? null : [...line.children].find((one) => !one.hidden);
+    return {
+      shelf: of(".control-shelf"), composer: of("#composer"), box: of("#message-input"),
+      utilities: of(".shelf-utilities"), aside: of(".composer-aside"), transcript: of(".transcript"),
+      talk: of("[data-voice-talk]"),
+      lineUp: line != null && line.hidden === false,
+      lineIn: line?.parentElement?.id || line?.parentElement?.className || "",
+      lineText: shown == null ? "" : shown.textContent.replace(/\s+/g, " ").trim(),
+      lineCut: shown == null ? null : (shown.scrollWidth - shown.clientWidth > 1 || shown.scrollHeight - shown.clientHeight > 1),
+      lineHeight: shown == null ? null : Math.round(shown.getBoundingClientRect().height * 100) / 100,
+      lineChars: shown == null ? 0 : shown.textContent.trim().length,
+      leadsSomewhere: line?.querySelector("[data-voice-line-do]:not([hidden])") != null,
+      sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    };
+  });
+
+  // THE BUTTON EXISTING IS NOT THE BUTTON BEING PRESSABLE. The console draws an opaque boot cover
+  // over everything until app.js has painted or its 8 s ceiling expires, and voice.js mounts the line
+  // long before that. A gate that pressed on `#voice-line exists` pressed the cover: MEASURED here,
+  // every press landed on nothing and the leg read as a page that says nothing when you press Talk.
+  // So the button is polled through elementFromPoint, the way the unit test's browser leg does.
+  const pressable = async (page) => {
+    for (let i = 0; i < 60; i += 1) {
+      const reachable = await page.evaluate(() => {
+        const node = document.querySelector("[data-voice-talk]");
+        if (node == null || node.disabled) return false;
+        const r = node.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return false;
+        const hit = document.elementFromPoint(Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2));
+        return node.contains(hit) || hit === node;
+      });
+      if (reachable) return true;
+      await sleep(500);
+    }
+    return false;
+  };
+
+  // AND A PAGE THAT IS STILL PAINTING IS NOT A BASELINE. The transcript's height moved 2.25 px on its
+  // own between two reads taken a second apart, which is enough to fail a to-the-pixel comparison for
+  // a reason that has nothing to do with the line. So the baseline is read twice and only trusted
+  // when the two agree.
+  const settled = async (page) => {
+    let last = JSON.stringify(await readRects(page));
+    for (let i = 0; i < 20; i += 1) {
+      await page.waitForTimeout(250);
+      const now = await readRects(page);
+      if (JSON.stringify(now) === last) return now;
+      last = JSON.stringify(now);
+    }
+    return readRects(page);
+  };
+
+  const open = async (size) => {
+    const context = await browser.newContext({
+      userAgent: GATE_AGENT, viewport: { width: size.width, height: size.height },
+      hasTouch: size.touch === true, isMobile: size.touch === true, permissions: ["microphone"],
+    });
+    const page = await context.newPage();
+    await page.goto(`${relay.base}/login`, { waitUntil: "domcontentloaded" });
+    await page.fill('input[type="password"]', relay.password).catch(() => {});
+    await page.press('input[type="password"]', "Enter").catch(() => {});
+    // Never networkidle: the console holds an EventSource open for the whole session.
+    await page.waitForLoadState("domcontentloaded");
+    await page.waitForFunction(() => document.getElementById("voice-line") != null, null, { timeout: 40_000 });
+    const reachable = await pressable(page);
+    check(reachable, `the console is painted and the talk button can be pressed at ${size.width}x${size.height}`);
+    return { context, page };
+  };
+
+  const press = async (page, touch) => {
+    const at = await page.evaluate(() => {
+      const r = document.querySelector("[data-voice-talk]").getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    });
+    if (touch) await page.touchscreen.tap(at.x, at.y);
+    else await page.mouse.click(at.x, at.y);
+  };
+
+  const NAMED = ["shelf", "composer", "utilities", "aside", "transcript"];
+
+  // ---- 1440x900 -------------------------------------------------------------------------------
+  step("one press of Talk moves nothing in the footer but the message box (1440x900)");
+  const desktop = await open({ width: 1440, height: 900 });
+  try {
+    const atRest = await settled(desktop.page);
+    check(atRest.lineUp === false, "the line is mounted and quiet before anything happens");
+    check(atRest.lineIn === "composer", "and at this width it lives inside the composer's own row", atRest.lineIn);
+    const t0 = Date.now();
+    await press(desktop.page, false);
+    await desktop.page.waitForFunction(() => document.getElementById("voice-line")?.hidden === false, null, { timeout: 30_000 })
+      .catch(() => {});
+    const said = Date.now() - t0;
+    const up = await readRects(desktop.page);
+    check(up.lineUp, "the person is left with a sentence to read", `after ${said} ms on ${MACHINE}`);
+    check(up.leadsSomewhere, "and it leads somewhere, because this is the one condition they can fix");
+    // HOW MUCH OF THE SENTENCE FITS IS THE RELAY'S BUSINESS, NOT THIS LEG'S. The line holds three lines
+    // of words; what a person reads in them is whoever wrote the sentence. This leg asserts NO wording
+    // at all -- the words are proved once, by verify-settings' plain-words sweep over every
+    // customer-visible row and this line with them -- so it prints what fitted and asserts only that
+    // the line cannot push the form it sits in, whatever it is handed.
+    info(`${up.lineChars} characters of sentence in a ${up.lineHeight} px line, ${up.lineCut ? "ellipsised" : "whole"}`);
+    check(up.lineHeight <= 42, "and the line cannot grow past the form it sits in, whatever it is handed",
+      `${up.lineHeight} px inside a 42 px content box`);
+    for (const named of NAMED) {
+      check(JSON.stringify(up[named]) === JSON.stringify(atRest[named]),
+        `${named} is unchanged to the pixel`, `${JSON.stringify(atRest[named])} -> ${JSON.stringify(up[named])}`);
+    }
+    check(up.sideways === false, "and the page does not scroll sideways");
+    info(`the message box gives up ${Math.round((atRest.box[0] - up.box[0]) * 100) / 100} px while the line is up `
+      + `(${atRest.box[0]} -> ${up.box[0]}) at 1440x900 on ${MACHINE}`);
+    info(`the sentence arrived ${said} ms after the press on ${MACHINE}`);
+
+    step("a second press leaves, Escape leaves, and left alone the line leaves by itself (1440x900)");
+    await press(desktop.page, false);
+    await desktop.page.waitForTimeout(300);
+    const afterSecond = await readRects(desktop.page);
+    check(afterSecond.lineUp === false, "a second press leaves talk mode instead of redialling into the same refusal");
+    check(NAMED.every((named) => JSON.stringify(afterSecond[named]) === JSON.stringify(atRest[named])),
+      "and the footer is exactly what it was before the first press");
+    check(afterSecond.box[0] === atRest.box[0], "the message box included", `${atRest.box[0]} -> ${afterSecond.box[0]}`);
+
+    await press(desktop.page, false);
+    await desktop.page.waitForFunction(() => document.getElementById("voice-line")?.hidden === false, null, { timeout: 30_000 })
+      .catch(() => {});
+    await desktop.page.keyboard.press("Escape");
+    await desktop.page.waitForTimeout(300);
+    check((await readRects(desktop.page)).lineUp === false, "Escape leaves talk mode");
+
+    await press(desktop.page, false);
+    await desktop.page.waitForFunction(() => document.getElementById("voice-line")?.hidden === false, null, { timeout: 30_000 })
+      .catch(() => {});
+    const armed = Date.now();
+    await desktop.page.waitForFunction(() => document.getElementById("voice-line")?.hidden === true, null, { timeout: 20_000 })
+      .catch(() => {});
+    const waited = Date.now() - armed;
+    check((await readRects(desktop.page)).lineUp === false, "and left alone it takes itself away", `${waited} ms on ${MACHINE}`);
+    check(waited >= 4000, "after long enough to read it", `${waited} ms`);
+
+    step("a live caption is the same line, and moves the footer just as little (1440x900)");
+    // Fixing only the note would have left the identical break for everyone who can actually talk:
+    // MEASURED before the fix, a caption alone with no note took the shelf 1392x106 -> 1392x168 and
+    // the composer 600 -> 407.98 with the utilities wrapped.
+    await desktop.page.evaluate(() => window.__voice._onMessage({
+      data: JSON.stringify({ t: "heard", text: "what is the team working on this afternoon" }),
+    }));
+    await desktop.page.waitForTimeout(120);
+    const captioned = await readRects(desktop.page);
+    check(captioned.lineUp, "a caption puts words on the same line", JSON.stringify(captioned.lineText));
+    check(captioned.leadsSomewhere === false, "and it is a status, not a control");
+    for (const named of NAMED) {
+      check(JSON.stringify(captioned[named]) === JSON.stringify(atRest[named]),
+        `${named} is unchanged to the pixel with a caption up`, `${JSON.stringify(atRest[named])} -> ${JSON.stringify(captioned[named])}`);
+    }
+  } finally {
+    await desktop.context.close().catch(() => {});
+  }
+
+  // ---- 390x844, with touch ---------------------------------------------------------------------
+  step("on a phone the line takes a row of the shelf and the composer is untouched (390x844)");
+  const phone = await open({ width: 390, height: 844, touch: true });
+  try {
+    const atRest = await settled(phone.page);
+    check(atRest.lineIn.includes("control-shelf"), "the line belongs to the shelf at this width", atRest.lineIn);
+    check(atRest.talk[0] >= 44 && atRest.talk[1] >= 44,
+      "and the talk button clears the 44 px floor this file enforces for every control beside it",
+      `${atRest.talk[0]}x${atRest.talk[1]} (38x38 before VOICE-2)`);
+    await press(phone.page, true);
+    await phone.page.waitForFunction(() => document.getElementById("voice-line")?.hidden === false, null, { timeout: 30_000 })
+      .catch(() => {});
+    const up = await readRects(phone.page);
+    check(up.lineUp, "a tap leaves a sentence to read", JSON.stringify(up.lineText));
+    check(up.composer[0] === atRest.composer[0] && up.composer[2] === atRest.composer[2],
+      "the composer does not move or narrow", `${JSON.stringify(atRest.composer)} -> ${JSON.stringify(up.composer)}`);
+    check(up.box[0] === atRest.box[0], "and neither does the message box", `${atRest.box[0]} -> ${up.box[0]}`);
+    check(up.sideways === false, "and the page does not scroll sideways");
+    const grew = Math.round((up.shelf[1] - atRest.shelf[1]) * 100) / 100;
+    // THE BUDGET IS A ROW, AND WHICH ROW DEPENDS ON WHAT IS ON IT. A sentence that leads somewhere is
+    // a control, and the 44 px floor beside it is what sets its height; a caption is text and costs a
+    // quarter of that. Both are printed, and the number to beat is the 94.02 px the strip cost here.
+    check(grew <= 60, "the shelf grows by a row, not by a layout", `${grew} px (94.02 px before VOICE-2), ${atRest.shelf[1]} -> ${up.shelf[1]}`);
+    check(up.leadsSomewhere, "and the sentence is a full-width tap target on a phone");
+    await phone.page.evaluate(() => window.__voice.toggle());
+    await phone.page.evaluate(() => window.__voice._onMessage({
+      data: JSON.stringify({ t: "heard", text: "what is the team working on this afternoon" }),
+    }));
+    await phone.page.waitForTimeout(120);
+    const captioned = await readRects(phone.page);
+    const captionGrew = Math.round((captioned.shelf[1] - atRest.shelf[1]) * 100) / 100;
+    check(captionGrew <= 40, "and a live caption costs a quarter of that", `${captionGrew} px`);
+    check(captioned.composer[0] === atRest.composer[0], "with the composer still untouched", `${captioned.composer[0]} px`);
+  } finally {
+    await phone.context.close().catch(() => {});
+  }
 }
 
 async function legCaps() {

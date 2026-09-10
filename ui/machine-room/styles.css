@@ -4838,56 +4838,94 @@ body[data-composer-drop="1"] .composer {
   .voice-orb[data-state="speaking"] { animation: none; }
 }
 
-/* The live half, above the composer. The durable record of a spoken turn is the transcript row
-   itself -- this is what is being heard and said right now, plus any note. The transcript is rebuilt
-   wholesale on every render, so nothing drawn here can live inside it. */
-/* :not([hidden]) because [hidden] LOSES to an author display rule, and this file already carries
-   three rules that exist only because that bit a shipped control (styles.css:3830, :4162, :4216).
-   A strip that cannot hide is a caption line sitting above every composer on every page. */
-.voice-strip:not([hidden]) {
-  display: grid;
-  gap: 0.4rem;
-  margin: 0 0 0.5rem;
-}
-.voice-caption {
-  margin: 0;
-  min-height: 1.1em;
-  color: var(--text-secondary);
-  font-size: 0.86rem;
-  font-style: italic;
-}
-.voice-caption:empty { display: none; }
-.voice-notes { display: grid; gap: 0.35rem; }
-.voice-note .message-bubble {
-  display: flex;
+/* VOICE-2 -- THE LIVE LINE, which replaced a strip that broke the footer.
+   ----------------------------------------------------------------------
+   The durable record of a spoken turn is the transcript row itself. This is the live half: what is
+   being heard or said right now, or one note, in ONE capped line.
+
+   WHY IT IS NOT A BAND ABOVE THE COMPOSER ANY MORE. The strip was an auto-placed child of
+   .control-shelf's three-column grid with no grid-column of its own, which is the third time that
+   bug has been found in this file (.composer-status at :3178 and .attachment-tray at :3832 each
+   carry a comment about it). MEASURED on grok-bot-local-vm in real Chrome at 1440x900, one press of
+   Talk with no voice switched on: the shelf 1392x106@24,776 -> 1392x196.02@24,685.98, the composer
+   600x54@459 -> 407.98x54@991, the message box 370.05 -> 178.03, .shelf-utilities wrapped to row two
+   at x41, .composer-aside rose 90 px onto the right rail and the transcript lost 45.5 px.
+   `grid-column: 1 / -1` where the strip sat measured WORSE (1392x208.55, three rows, the composer in
+   column one), because the strip is mounted after #workspace-list.
+
+   So the line has two homes and voice.js picks one by width: a slot in the composer's own row at
+   desktop, where nothing else moves at all, and the shelf's FIRST row under 900 px, where it spans
+   every column beside the two children already placed that way.
+
+   :not([hidden]) because [hidden] LOSES to an author display rule, and this file carries three rules
+   that exist only because that bit a shipped control (:3830, :4162, :4216). A line that cannot hide
+   is a sentence sitting in every composer on every page. */
+.voice-line:not([hidden]) {
+  display: inline-flex;
   align-items: center;
-  gap: 0.6rem;
-  flex-wrap: wrap;
-}
-.voice-note-action { font-size: 0.8rem; }
-
-.voice-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
-  gap: 0.6rem;
-}
-
-/* Each cell is a label wrapped round its own control, so the word has to sit ABOVE the control the
-   way every other field on this card does. MEASURED on the R750 2026-09-10: without this the three
-   labels ran into their own boxes on one line -- "Service" hard against the dropdown -- which is the
-   one row on the card that did not look like the rest of the console. */
-.voice-grid label {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  font-size: 0.78rem;
-  color: var(--ink-soft, #9aa4ad);
-}
-
-.voice-grid select,
-.voice-grid input {
-  width: 100%;
+  gap: 4px;
   min-width: 0;
+  /* A CEILING, not the sizing. The line and the message box SHARE what the composer has spare, and
+     the fifth track above is where that share is written: 1fr to the box and 0.7fr to the line, so
+     the box always keeps the larger half and both shrink together on a narrower screen. This cap is
+     only the point past which a very wide composer stops handing the line more room it does not need.
+
+     TWO SIZINGS WERE MEASURED AND REJECTED, and both are the same trap in different clothes:
+       `max-width: min(13rem, 40%)` on an `auto` track -- 1440x900, a 101.36 px line inside a
+       253.42 px track and a 112.63 px message box. A percentage max-width on a grid item resolves
+       against the grid AREA, which for an `auto` track depends on the item, so it is indefinite while
+       the track is being sized: the track took the sentence's whole max-content and only then did the
+       40% resolve, against the track it had just grown.
+       `minmax(0, 13rem)` as a fixed track -- fine at 1440 (a 158.05 px box) and broken at 1280, where
+       the composer has less to spare and the box measured 60.52 px. A track that does not yield is a
+       track that takes the message box with it. */
+  max-width: 13rem;
+  color: var(--text-tertiary);
+  font-size: 0.7rem;
+  line-height: 16px;
+}
+
+/* One node per shape, exactly one shown. The span is a status and may not look pressable; the button
+   carries the same sentence when that sentence leads somewhere, so the SENTENCE is the control's own
+   accessible name and NOTE_ACTIONS' words are the title beside it, rather than a second labelled
+   control the composer's row has no room for.
+
+   THREE LINES, NOT ONE, and that is what makes the whole sentence readable in a narrow line.
+   MEASURED: the sentence a workspace with no voice reads is 253 px of one line at this size, so on
+   one line it would lose its last eight characters to an ellipsis -- a truncated sentence in the one
+   place a person has to read one. The composer's content box is 42 px tall and three lines of this
+   size are 39, so the words fit inside a form whose height does not change. Past three it still
+   ellipsises, which only the microphone sentence reaches and only on a narrow window. */
+.voice-line-say:not([hidden]),
+.voice-line-do:not([hidden]) {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 13px;
+}
+
+.voice-line-do {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px dotted color-mix(in srgb, var(--teal-500) 70%, transparent);
+  background: none;
+  color: var(--teal-300);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.voice-line-do:hover { border-bottom-color: var(--teal-300); }
+
+/* The phone's home: the shelf's first row, full width, centred, with the whole sentence readable
+   because there is no composer beside it to protect. */
+.voice-line.is-shelf:not([hidden]) {
+  grid-column: 1 / -1;
+  justify-self: center;
+  max-width: min(72ch, 100%);
 }
 
 /* The spoken chip. A quiet mark on the person's own row saying that row was said out loud, not
@@ -4920,21 +4958,57 @@ body[data-composer-drop="1"] .composer {
   grid-template-columns: 38px minmax(0, 1fr) auto auto;
 }
 
+/* VOICE-2: THE FIFTH TRACK, AND WHY IT IS GATED ON AN ATTRIBUTE. The live line is a fifth child, and
+   the same bug bites again twice over. MEASURED at 1440x900: a fifth child with no new track took the
+   composer 600x54 -> 600x96 and put Send at row two column one, the exact failure the note above
+   records; and an UNCONDITIONAL fifth track, with the line hidden, took 4 px off the message box
+   through this grid's own 4 px gap. So the track exists only while voice.js has the line in the form
+   with something to say, and at rest the composer is the form it has always been, to the pixel.
+
+   The attribute's value is never read. It is a state flag, and the selector is listed beside
+   `.composer` in tests/machine-room-voice.test.mjs's allow-list for the same reason that one is:
+   deliberately, in this commit, rather than discovered in CI. */
+.composer[data-voice-line] {
+  grid-template-columns: 38px minmax(0, 1fr) minmax(0, 0.7fr) auto auto;
+}
+
 @media (max-width: 690px) {
   /* On a phone the textarea is the scarce thing, so the word goes and the orb stays -- the button
-     keeps its aria-label, so it still says what it is to anyone not reading the screen. It is then
-     the same 38px circle as the attach button beside it. */
+     keeps its aria-label, so it still says what it is to anyone not reading the screen. */
   .composer {
     grid-template-columns: 38px minmax(0, 1fr) auto auto;
   }
+
+  /* VOICE-2, A BROKEN WINDOW CLOSED IN THE SAME PASS. This shipped at 38x38 to match the attach
+     button beside it, and MEASURED at 390x844 that is under the 44 px floor :4641-4652 enforces for
+     .send-button, .composer-plus, #report-problem, #run-self-test and seven others -- the attach
+     button it was matched to is itself on that list, so matching it was matching the wrong number.
+     It costs the message box 6 px, which is recorded in the gate's output and in docs/GAP-ANALYSIS.md
+     rather than guessed at here. */
   .voice-talk {
-    width: 38px;
-    height: 38px;
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
     padding: 0;
     border-radius: 50%;
     justify-content: center;
   }
   .voice-talk-label {
     display: none;
+  }
+
+  /* The line is a row of the shelf at this width, so the sentence that leads somewhere is a full-width
+     tap target rather than a 17 px one -- the same 44 px floor :4641-4652 puts under every other
+     control on this row. A status that leads nowhere stays a line of text and costs the shelf nothing
+     but its own height, which is why the two are sized separately. Centred flow rather than a
+     44 px line-height: MEASURED, the line-height version took the shelf 133 -> 190 px, five more than
+     the target needs, because the box grew as well as the text inside it. */
+  .voice-line.is-shelf .voice-line-do:not([hidden]) {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    text-align: center;
   }
 }

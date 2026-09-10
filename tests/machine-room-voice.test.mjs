@@ -142,21 +142,42 @@ test("VOICE-1 orb: a state frame moves it and an unknown one leaves it exactly w
 });
 
 // ------------------------------------------------------------------ the notes
-test("VOICE-1 notes: a note paints a detail-less quiet row and does not colour the orb", async () => {
+test("VOICE-2 notes: a note is ONE capped line, never a row beside the composer", async () => {
   const { voice } = await loadVoice();
   frame(voice, { t: "state", value: "listening" });
   frame(voice, { t: "note", text: "Your agent is still reading. One moment." });
   assert.equal(voice._state.notes.length, 1);
   assert.equal(voice._state.orb, "listening", "a note is not a state; it may never move the orb");
-  const markup = voice._noteMarkup("relay", "Your agent is still reading. One moment.");
-  assert.match(markup, /class="message-row is-system voice-note"/, "the console's own muted bubble");
-  assert.doesNotMatch(markup, /is-turn-failed/, "none of these is a failed turn");
+  const line = voice._lineFor(voice._state.notes, "");
+  assert.equal(line.text, "Your agent is still reading. One moment.");
+  assert.equal(line.action, null, "this one leads nowhere, so it is a status and not a control");
+  const markup = voice._lineMarkup();
+  // Jason's screenshot of 2026-09-10 is a picture of the thing this assertion forbids: a wide grey
+  // message bubble beside the message box, taking a column of the footer's grid.
+  assert.doesNotMatch(markup, /message-row|message-bubble|is-turn-failed/,
+    "the live half is a line in the composer's own row, not a bubble in the footer");
   // Detail-less on purpose: an expander here would put a machine's innards beside a conversation.
   assert.doesNotMatch(markup, /<details|<pre|<summary/);
+  // Two children, exactly one shown, and both start hidden so an empty line cannot flash on load.
+  assert.match(markup, /data-voice-line-say[^>]*hidden/);
+  assert.match(markup, /data-voice-line-do[^>]*hidden/);
+  assert.match(markup, /<span class="voice-line" id="voice-line" data-voice-line hidden>/);
   // A frame with nothing to say paints nothing rather than an empty row.
   voice._state.notes = [];
   frame(voice, { t: "note", text: "   " });
   assert.equal(voice._state.notes.length, 0);
+});
+
+test("VOICE-2 line: a caption and a note share the one line, and the note wins", async () => {
+  const { voice } = await loadVoice();
+  assert.deepEqual(voice._lineFor([], "what you just said"), { text: "what you just said", action: null });
+  assert.deepEqual(voice._lineFor([], ""), { text: "", action: null }, "nothing to say draws nothing");
+  // Fixing only the note would have left the identical break for everyone who actually talks:
+  // MEASURED at 1440x900, a live caption alone with no note took the shelf 1392x106 -> 1392x168 and
+  // the composer 600 -> 407.98. The caption and the note are the same node for that reason.
+  const both = voice._lineFor([{ condition: "no-key" }], "a caption that was still on screen");
+  assert.equal(both.text, voice._NOTES["no-key"], "the note is the newer fact and the only one shown");
+  assert.equal(both.action, "Open settings");
 });
 
 test("VOICE-1 notes: each of the six conditions produces its own plain sentence", async () => {
@@ -171,9 +192,7 @@ test("VOICE-1 notes: each of the six conditions produces its own plain sentence"
     const sentence = voice._sentenceFor(condition);
     assert.ok(sentence.length > 20, `${condition}: "${sentence}" is not a sentence`);
     assert.match(sentence, /[.!]$/, `${condition}: a sentence ends`);
-    const markup = voice._noteMarkup(condition);
-    assert.ok(markup.includes("is-system") && markup.includes("voice-note"), `${condition}: the quiet row's class`);
-    assert.doesNotMatch(markup, /is-turn-failed/, `${condition}: never dressed as a failed turn`);
+    assert.equal(voice._lineFor([{ condition }], "").text, sentence, `${condition}: the line says it`);
     // No vendor, no tool name, no machine's noun. These are the words a business owner reads.
     for (const leak of ["xai", "x\\.ai", "openai", "grok", "realtime", "websocket", "socket", "titan\\(", "sendPrompt",
       "function_call", "session\\.update", "pcm", "api", "token", "4001", "upgrade"]) {
@@ -183,8 +202,20 @@ test("VOICE-1 notes: each of the six conditions produces its own plain sentence"
   // And exactly one of them leads somewhere, because "nothing is set up yet" is the one condition a
   // person can fix from this page.
   assert.deepEqual(Object.keys(voice._NOTE_ACTIONS), ["no-key"]);
-  assert.match(voice._noteMarkup("no-key"), /data-voice-open-settings/);
-  assert.doesNotMatch(voice._noteMarkup("line-dropped"), /data-voice-open-settings/);
+  assert.equal(voice._lineFor([{ condition: "no-key" }], "").action, "Open settings");
+  assert.equal(voice._lineFor([{ condition: "line-dropped" }], "").action, null);
+  assert.match(voice._lineMarkup(), /data-voice-open-settings/, "and the control that leads there exists");
+
+  // VOICE-2, AND THIS IS THE SENTENCE JASON READ. The shipped one ended "Add one on the Voice card in
+  // Settings and press the button again", which instructed the loop he got stuck in: the press that
+  // produces this line cannot succeed, so a second press only produces it again. The relay says the
+  // same string (ui/voice-edge.mjs), so retitleNote cannot put two wordings on one row.
+  assert.equal(voice._NOTES["no-key"], "Voice is not switched on for this workspace yet.");
+  for (const condition of conditions) {
+    if (voice._NOTE_ACTIONS[condition] == null) continue;
+    assert.doesNotMatch(voice._NOTES[condition], /press .*again/i,
+      `${condition}: a sentence a person cannot act on must not tell them to press the button again`);
+  }
 });
 
 test("VOICE-1 notes: the relay's own sentence wins, and the close only names the condition", async () => {
@@ -195,8 +226,8 @@ test("VOICE-1 notes: the relay's own sentence wins, and the close only names the
   voice._onClose({ code: 1000, reason: "" });
   assert.equal(voice._state.notes.length, 1, "one row, not the relay's sentence and then ours");
   assert.equal(voice._state.notes[0].text, "Talking is not set up for this workspace yet.");
-  assert.equal(voice._state.notes[0].condition, "no-key", "so the row still offers the card that fixes it");
-  assert.match(voice._noteMarkup("no-key", voice._state.notes[0].text), /data-voice-open-settings/);
+  assert.equal(voice._state.notes[0].condition, "no-key", "so the line still leads where it fixes it");
+  assert.equal(voice._lineFor(voice._state.notes, "").action, "Open settings");
 });
 
 test("VOICE-1 notes: the relay's reason outranks the page's, so the way forward is not taken away", async () => {
@@ -214,8 +245,8 @@ test("VOICE-1 notes: the relay's reason outranks the page's, so the way forward 
   assert.equal(voice._state.notes.length, 1, "still one row");
   assert.equal(voice._state.notes[0].condition, "no-key", "and it still names what the relay said");
   assert.equal(voice._state.notes[0].text, "This workspace has no realtime voice key yet.");
-  assert.match(voice._noteMarkup(voice._state.notes[0].condition, voice._state.notes[0].text), /data-voice-open-settings/,
-    "so the control that opens the card is still there");
+  assert.equal(voice._lineFor(voice._state.notes, "").action, "Open settings",
+    "so the way into the row that fixes it is still there");
 
   // The other way round is NOT blocked: with nothing from the relay, the page's own microphone
   // condition is the only thing anybody knows, and it must still be said.
@@ -258,9 +289,8 @@ test("VOICE-1 notes: a 4003 close paints its own reason, not a generic failure",
   voice._onClose({ code: 4003, reason: "That call reached thirty minutes. Press Talk to start another." });
   assert.equal(voice._state.notes[0].condition, "session-cap");
   assert.equal(voice._state.notes[0].text, "That call reached thirty minutes. Press Talk to start another.");
-  const markup = voice._noteMarkup("session-cap", voice._state.notes[0].text);
-  assert.match(markup, /thirty minutes/, "the relay's words are what the person reads");
-  assert.doesNotMatch(markup, /is-turn-failed/);
+  assert.match(voice._lineFor(voice._state.notes, "").text, /thirty minutes/,
+    "the relay's words are what the person reads");
   // The private range is a table, so a code this page does not know still says something true.
   assert.deepEqual(voice._CLOSE_CONDITIONS, { 4001: "no-key", 4002: "day-cap", 4003: "session-cap", 4004: "box-not-running" });
 
@@ -339,101 +369,237 @@ test("VOICE-1: a socket that errors with no close code still says something a pe
   // only onerror at 16 ms with no close code -- indistinguishable from the relay being down, which is
   // the void answer this console has already been burned by (handoff-screen-and-void-rpc.md).
   assert.equal(voice._state.notes[0].condition, "no-key");
-  assert.match(voice._sentenceFor("no-key"), /not available/i);
-  assert.match(voice._noteMarkup("no-key"), /data-voice-open-settings/, "and it leads somewhere");
+  assert.match(voice._sentenceFor("no-key"), /not switched on/i);
+  assert.equal(voice._lineFor(voice._state.notes, "").action, "Open settings", "and it leads somewhere");
 });
 
-// ------------------------------------------------------------------ the Voice card
-test("VOICE-1 card: the key is paste-or-clear and no answer can show a value back", async () => {
+// ------------------------------------------------------------------ VOICE-2: the way out
+//
+// Talk mode used to be a room with no door. These three legs are the door, and each names the
+// measurement that found the room.
+test("VOICE-2 leaving: a second press leaves the mode instead of redialling into the same refusal", async () => {
   const { voice } = await loadVoice();
-  const markup = voice._voiceCardMarkup();
-  assert.match(markup, /type="password"/, "the field is never a text box a value could be read out of");
-  assert.match(markup, /data-voice-key-set/);
-  assert.match(markup, /data-voice-key-clear/);
-  // Nothing in the card's markup asks for a value back, because the route only answers apiKeySet.
-  assert.doesNotMatch(markup, /value="\$\{[^}]*apiKey/);
-  // The one control that decides whether the first press reaches the head of the team.
-  assert.match(markup, /data-voice-agent/);
-  assert.match(markup, /Who you are talking to/);
-  // No barge-in, said in words rather than left to be discovered.
-  assert.match(markup, /microphone is shut while he talks/);
-  // And no vendor or tool name anywhere on it.
-  for (const leak of ["xAI", "x.ai", "OpenAI", "Grok", "websocket", "sendPrompt", "realtime"]) {
-    assert.ok(!markup.includes(leak), `${leak} reached the card`);
-  }
+  // The state a person is really in when they press again: the relay refused, so `on` is ALREADY
+  // false and a note is on screen. toggle() read only `on`, so the second press called start() and
+  // produced the identical sentence -- and the sentence itself told them to press the button again.
+  // MEASURED at 1440x900: the geometry after the second press was byte-identical to the first break.
+  voice._state.on = true;
+  voice.stop("no-key");
+  assert.equal(voice._state.on, false);
+  assert.equal(voice._state.notes.length, 1, "the sentence is up, which IS the mode");
+
+  voice.toggle();
+  assert.equal(voice._state.notes.length, 0, "the second press cleared the line");
+  // start() would have set both of these on its first statement, so this is the dial that did not
+  // happen rather than a stub that was not called.
+  assert.equal(voice._state.on, false, "and did not dial again");
+  assert.equal(voice._state.orb, "off");
+  assert.equal(voice._dismissTimer(), null, "and took the pending dismiss with it");
+
+  // AND A PRESS THAT STOPS A LIVE CALL LEAVES JUST AS CLEANLY. The relay sends advisory notes mid
+  // call ("Your agent is still reading. One moment."); without this, one of those outlived the call
+  // it was about and sat in the footer, which is the same room with no door in a quieter form.
+  voice._state.on = true;
+  frame(voice, { t: "note", text: "Your agent is still reading. One moment." });
+  assert.equal(voice._state.notes.length, 1);
+  voice.toggle();
+  assert.equal(voice._state.on, false);
+  assert.equal(voice._state.notes.length, 0, "an ordinary stop leaves nothing standing either");
+
+  // But a stop that DOES carry a reason keeps it, because that sentence is the whole point of the
+  // press: a refused line has to say so.
+  voice._state.on = true;
+  voice.stop("box-not-running");
+  assert.equal(voice._state.notes[0].condition, "box-not-running");
+  assert.ok(voice._dismissTimer() != null, "and it goes on its own clock rather than never");
 });
 
-test("VOICE-1 card: a key that is set reads as set and never as a value", async () => {
-  const { voice } = await loadVoice();
-  const fields = new Map();
-  const root = {
-    querySelector: (selector) => fields.get(selector) ?? null,
-  };
-  for (const selector of ["[data-voice-key-note]", "[data-voice-enabled-note]", "[data-voice-usage]"]) {
-    fields.set(selector, { textContent: "" });
-  }
-  for (const selector of ["[data-voice-model]", "[data-voice-voice]"]) fields.set(selector, { value: "" });
-  for (const selector of ["[data-voice-vendor]", "[data-voice-agent]"]) fields.set(selector, { innerHTML: "" });
-  fields.set("[data-voice-enabled]", { attributes: {}, setAttribute(k, v) { this.attributes[k] = v; } });
+test("VOICE-2 leaving: Escape leaves, and never steals the key from a dialog", async () => {
+  const { voice, listeners } = await loadVoice();
+  const escape = listeners.get("keydown");
+  assert.equal(typeof escape, "function", "nothing listened for Escape at all before this");
 
-  voice._paintCard(root, {
-    enabled: true, vendor: "a", model: "m", voice: "v", agentId: "agent-1",
-    apiKeySet: true, sessionCapSeconds: 1800, dayCapSeconds: 7200, dayUsedSeconds: 126,
-    vendors: [{ id: "a", label: "The cheaper one" }], agents: [{ id: "agent-1", name: "Titan" }],
+  voice._state.on = true;
+  voice.stop("no-key");
+  assert.equal(voice._state.notes.length, 1);
+  escape({ key: "Escape" });
+  assert.equal(voice._state.notes.length, 0, "Escape cleared the line");
+
+  // Any other key is not a way out, or typing an e would end a call.
+  voice._state.notes = [{ condition: "no-key", text: "", fromRelay: false }];
+  escape({ key: "e" });
+  assert.equal(voice._state.notes.length, 1);
+
+  // And with nothing up it does nothing at all, so it cannot swallow an Escape somebody else wanted.
+  voice._state.notes = [];
+  voice._state.on = false;
+  escape({ key: "Escape" });
+
+  // app.js:6802 already owns a document-level Escape for the drawer, and this console has native
+  // <dialog>s -- the settings panel, onboarding, the report card. Stealing Escape from one of those
+  // would read as a modal that will not close.
+  const { voice: withDialog } = await loadVoice({
+    window: {
+      document: {
+        readyState: "complete", body: null, getElementById: () => null,
+        querySelector: (selector) => (selector === "dialog[open]" ? { open: true } : null),
+        addEventListener: () => {},
+      },
+    },
   });
-  const note = fields.get("[data-voice-key-note]").textContent;
-  assert.match(note, /A key is set/);
-  assert.doesNotMatch(note, /sk-|xai-|\*\*\*\*/, "not even a masked value: the answer carries none");
-  assert.equal(fields.get("[data-voice-enabled]").attributes["aria-pressed"], "true");
-  // Minutes, in words a person predicts: wall time, which is what the caps count.
-  assert.match(fields.get("[data-voice-usage]").textContent, /2\.1 min of 120 min today/);
-  assert.match(fields.get("[data-voice-usage]").textContent, /30 min in one call/);
-  assert.match(fields.get("[data-voice-agent]").innerHTML, /value="agent-1" selected>Titan</);
+  withDialog._state.notes = [{ condition: "no-key", text: "", fromRelay: false }];
+  withDialog._onKeyDown({ key: "Escape" });
+  assert.equal(withDialog._state.notes.length, 1, "a dialog was open, so Escape belonged to it");
 });
 
-test("VOICE-1 card: what a real settings answer puts IN the card's fields names no vendor either", async () => {
-  // The sentence sweep was never the whole card. MEASURED on this Mac 2026-09-10: the relay's own
-  // settings answer prefilled Model with `grok-voice-latest` and the Service dropdown read "the
-  // cheaper realtime service", so the two strings the day-cap test sweeps its refusals for -- a
-  // vendor's name and its model id -- were sitting in a text input on the customer's own card, put
-  // there by the product rather than typed by them. This leg reads the REAL answer shape and sweeps
-  // what paintCard writes, not only the sentences.
-  const { voiceSettingsShape } = await import("../ui/voice-edge.mjs");
-  const { voice } = await loadVoice();
-  const fields = new Map();
-  const root = { querySelector: (selector) => fields.get(selector) ?? null };
-  for (const selector of ["[data-voice-key-note]", "[data-voice-enabled-note]", "[data-voice-usage]"]) fields.set(selector, { textContent: "" });
-  for (const selector of ["[data-voice-model]", "[data-voice-voice]"]) fields.set(selector, { value: "" });
-  for (const selector of ["[data-voice-vendor]", "[data-voice-agent]"]) fields.set(selector, { innerHTML: "" });
-  fields.set("[data-voice-enabled]", { attributes: {}, setAttribute(k, v) { this.attributes[k] = v; } });
+test("VOICE-2 leaving: the note takes itself away, and every way back in clears it first", async () => {
+  // A fake clock, so this asserts the note really goes rather than waiting six seconds to find out.
+  const armed = [];
+  let cleared = 0;
+  const { voice } = await loadVoice({
+    window: {
+      setTimeout: (fn, ms) => { armed.push({ fn, ms }); return { id: armed.length, unref() {} }; },
+      clearTimeout: () => { cleared += 1; },
+    },
+  });
+  assert.equal(voice._NOTE_DISMISS_MS, 6000, "about six seconds, which is long enough to read a line");
+  assert.equal(voice._dismissTimer(), null);
 
-  // A workspace that has never touched Model or Voice, which is every workspace on its first day.
-  const shape = voiceSettingsShape({}, { sessionCapSeconds: 1800, dayCapSeconds: 7200, dayUsedSeconds: 0, agents: [] });
-  assert.equal(shape.model, "", "the answer prefills no model");
-  assert.equal(shape.voice, "", "and no voice");
-  voice._paintCard(root, shape);
-  // The WORDS on screen, which for the dropdown is the option text and never the form value: the id
-  // is what the page posts back and a person never reads it.
-  const optionText = [...String(fields.get("[data-voice-vendor]").innerHTML).matchAll(/>([^<]*)</g)].map((m) => m[1]).join(" ");
-  const onTheCard = [
-    fields.get("[data-voice-model]").value,
-    fields.get("[data-voice-voice]").value,
-    optionText,
-    fields.get("[data-voice-key-note]").textContent,
-    fields.get("[data-voice-enabled-note]").textContent,
-    fields.get("[data-voice-usage]").textContent,
-  ].join(" ");
-  for (const leak of ["xai", "x\\.ai", "openai", "grok", "gpt-", "realtime", "websocket", "socket", "pcm",
-    "session\\.update", "function_call", "titan\\(", "sendPrompt", "token", "api", "upgrade", "undefined"]) {
-    assert.doesNotMatch(onTheCard, new RegExp(leak, "i"), `"${leak}" reached the Voice card's own fields`);
+  voice._state.on = true;
+  voice.stop("line-dropped");
+  assert.equal(armed.length, 1, "nothing ever cleared a note before this: it sat in the footer until a reload");
+  assert.equal(armed[0].ms, 6000);
+  assert.equal(voice._state.notes.length, 1, "and not one moment before its time");
+  armed[0].fn();
+  assert.equal(voice._state.notes.length, 0, "the line took itself away");
+  assert.equal(voice._dismissTimer(), null);
+
+  // Every way back into the mode cancels a pending one, or a note armed six seconds ago wipes a
+  // fresh line. `ready` is the same clearNotes() start() calls on its way in.
+  voice._state.on = true;
+  voice.stop("no-key");
+  assert.ok(voice._dismissTimer() != null);
+  frame(voice, { t: "ready", session: "one" });
+  assert.equal(voice._state.notes.length, 0);
+  assert.equal(voice._dismissTimer(), null, "a line that really came up cleared the pending dismiss");
+  assert.ok(cleared > 0, "and cleared it through the window's own clearTimeout");
+
+  voice.stop();
+  assert.equal(voice._dismissTimer(), null, "an ordinary stop with nothing to say arms nothing");
+});
+
+test("VOICE-2 leaving: the dismiss timer does not hold a process open", async () => {
+  // tests/machine-room-voice.test.mjs calls stop() six times in a row a few legs above this one, and
+  // stop() also fires from visibilitychange, pagehide and beforeunload. A referenced timer there
+  // keeps a node test run alive for six seconds per call and keeps a page alive past its own unload.
+  const { voice } = await loadVoice();
+  voice._state.on = true;
+  voice.stop("line-dropped");
+  const timer = voice._dismissTimer();
+  assert.ok(timer != null);
+  assert.equal(typeof timer.unref, "function");
+  assert.equal(timer.hasRef?.(), false, "the timer is unref'd");
+  voice._state.on = true;
+  voice.stop();
+  assert.equal(voice._dismissTimer(), null);
+});
+
+// ------------------------------------------------------------------ VOICE-2: the card is gone
+//
+// A customer never sees a key field. The realtime key belongs to the operator and is pasted once at
+// the admin console; the relay fetches it and never hands it back. So this file holds no paste
+// control, no Save key, no Clear, and no vendor's product name -- and the four things item A's
+// Settings rows read are what took its place.
+test("VOICE-2 keys: the console's own side of talking has no key field left in it", async () => {
+  const source = await read("ui/machine-room/voice.js");
+  for (const gone of ["data-voice-key", 'type="password"', "Save key", "Paste your key"]) {
+    assert.ok(!source.includes(gone),
+      `${gone} is still in voice.js; a key a customer can paste is a key the product asked a customer for`);
   }
-  assert.equal(fields.get("[data-voice-model]").value, "", "Model is empty, and the placeholder says the service's own");
-  assert.match(voice._voiceCardMarkup(), /placeholder="The service's own"/);
-  // And the Service dropdown offers a billing shape rather than a comparison this product says it
-  // cannot make (docs/VOICE.md 7: tokens are not converted into minutes and presented as a price).
-  assert.match(optionText, /minute you talk/);
-  assert.match(optionText, /not by the minute/);
-  assert.doesNotMatch(optionText, /cheap/i);
+  // apiKeySet is a boolean about whether one exists somewhere, which is the only thing about a key
+  // this file is allowed to know. apiKey, the value, may not appear at all.
+  assert.doesNotMatch(source, /\bapiKey\b(?!Set)/,
+    "voice.js names the key itself somewhere, which means it can still write one");
+  // And the card's own container went with it, so nothing can mount one back by accident.
+  for (const gone of ["voiceCardMarkup", "mountCard", "openCard", "settings-section"]) {
+    assert.ok(!source.includes(gone), `${gone} is still in voice.js`);
+  }
+  const { voice } = await loadVoice();
+  assert.equal(voice._voiceCardMarkup, undefined, "the card is not exported either");
+  assert.equal(voice._stripMarkup, undefined, "and neither is the strip that broke the footer");
+});
+
+test("VOICE-2 seam: what item A's rows read is two booleans, so no vendor can reach a customer's row", async () => {
+  // MEASURED on this Mac 2026-09-10 against the shipped card: the relay's settings answer prefilled
+  // Model with a vendor's product id and the Service dropdown named a vendor, both on a customer's
+  // own card. The seam is two booleans for exactly that reason -- there is no string on it a vendor
+  // name could ride in on.
+  const answer = {
+    enabled: true, vendor: "xai", model: "grok-voice-latest", voice: "ember", agentId: "agent-1",
+    apiKeySet: true, sessionCapSeconds: 1800, dayCapSeconds: 7200, dayUsedSeconds: 126,
+    vendors: [{ id: "xai", label: "Billed by the minute you talk" }], agents: [{ id: "agent-1", name: "Titan" }],
+  };
+  const { voice } = await loadVoice({
+    fetch: async () => ({ ok: true, status: 200, json: async () => answer, text: async () => JSON.stringify(answer) }),
+  });
+  const settings = await voice.getSettings();
+  assert.deepEqual(Object.keys(settings).sort(), ["available", "enabled"], "two facts and no third");
+  assert.equal(settings.enabled, true);
+  assert.equal(settings.available, true);
+  const asText = JSON.stringify(settings);
+  for (const leak of ["xai", "grok", "ember", "agent-1", "apiKey", "key"]) {
+    assert.doesNotMatch(asText, new RegExp(leak, "i"), `"${leak}" reached the seam item A draws rows from`);
+  }
+});
+
+test("VOICE-2 seam: `available` is a key existing anywhere, and an older relay's answer still reads true", async () => {
+  // The control plane holds the key now, so the relay answers `available`. A relay that has not been
+  // updated answers only apiKeySet, which means the same thing there, and a workspace on one must not
+  // read as switched off.
+  const shapes = [
+    { body: { enabled: true, available: true, apiKeySet: false }, want: true, why: "the control plane has one" },
+    { body: { enabled: true, available: false, apiKeySet: true }, want: false, why: "the control plane is the authority when it answers" },
+    { body: { enabled: false, apiKeySet: true }, want: true, why: "an older relay answers only apiKeySet" },
+    { body: { enabled: true, apiKeySet: false }, want: false, why: "and says so when there is none" },
+  ];
+  for (const shape of shapes) {
+    const { voice } = await loadVoice({
+      fetch: async () => ({ ok: true, status: 200, json: async () => shape.body }),
+    });
+    const settings = await voice.getSettings();
+    assert.equal(settings.available, shape.want, shape.why);
+    assert.equal(settings.enabled, shape.body.enabled === true);
+  }
+  // A relay that does not answer at all is not a workspace that is switched on.
+  const { voice: down } = await loadVoice({ fetch: async () => { throw new Error("no relay"); } });
+  assert.deepEqual(await down.getSettings(), { enabled: false, available: false });
+});
+
+test("VOICE-2 seam: the microphone choice is offered only when the browser can name one, and it reaches getUserMedia", async () => {
+  const { voice } = await loadVoice();
+  assert.equal(voice.supportsMicChoice(), false, "a window with no mediaDevices gets no row rather than a dead control");
+  const { voice: real } = await loadVoice({
+    window: { navigator: { mediaDevices: { enumerateDevices: async () => [] } } },
+  });
+  assert.equal(real.supportsMicChoice(), true);
+  assert.equal(real.getMicDeviceId(), "", "and nothing is chosen until somebody chooses it");
+  real.setMicDeviceId("  mic-7  ");
+  assert.equal(real.getMicDeviceId(), "mic-7");
+
+  // The choice is worth nothing unless the capture asks for it. `exact` only ever appears when a
+  // device was picked: asking exactly for "" refuses every microphone on the machine.
+  let asked = null;
+  const audio = {
+    AudioContext: class { constructor(o) { this.options = o; this.audioWorklet = { addModule: async () => {} }; }
+      createMediaStreamSource() { return { connect() {} }; } close() {} },
+    AudioWorkletNode: class { constructor() { this.port = {}; } disconnect() {} },
+    workletUrl: "fake://worklet",
+    getUserMedia: async (constraints) => { asked = constraints; return { getTracks: () => [] }; },
+  };
+  await real.captureAudio({ source: "microphone", deviceId: "mic-7", audio });
+  assert.deepEqual(asked.audio.deviceId, { exact: "mic-7" });
+  await real.captureAudio({ source: "microphone", deviceId: "", audio });
+  assert.equal(asked.audio.deviceId, undefined, "an empty choice asks for nothing, or it refuses every microphone");
 });
 
 // ------------------------------------------------------------------ the source legs
@@ -485,24 +651,41 @@ test("VOICE-1 source: styles.css gained only new selectors, under one banner", a
   // And every selector below the banner is this wave's own.
   const selectors = [...after.matchAll(/^\s*([.#][^{\n]*?)\s*\{/gm)].map((m) => m[1].trim());
   assert.ok(selectors.length > 0, "the banner is not followed by any rules at all");
-  // Every selector below the banner is this wave's own, with ONE allowed exception, declared here so
-  // it cannot grow quietly: .composer's grid template. A fourth child of a three-track grid opens an
-  // implicit second row and pushes Send off the line -- MEASURED at 390, 768 and 1440 CSS px. The
-  // rule is re-declared by appending, never edited in place, so a rebase is still a clean append.
-  const allowed = new Set([".composer"]);
+  // Every selector below the banner is this wave's own, with TWO allowed exceptions, declared here so
+  // they cannot grow quietly: .composer's grid template, and the same rule gated on the state
+  // attribute VOICE-2 hangs the live line's fifth track on. A fourth child of a three-track grid
+  // opens an implicit second row and pushes Send off the line -- MEASURED at 390, 768 and 1440 CSS
+  // px -- and a fifth child does it again. The rules are re-declared by appending, never edited in
+  // place, so a rebase is still a clean append.
+  //
+  // THE LIST IS WIDENED IN THE COMMIT THAT NEEDS IT, deliberately, rather than discovered in CI by
+  // whoever runs the suite next.
+  const allowed = new Set([".composer", ".composer[data-voice-line]"]);
   for (const selector of selectors) {
     for (const part of selector.split(",").map((one) => one.trim()).filter(Boolean)) {
       if (allowed.has(part)) continue;
       assert.match(part, /^\.voice-/, `${part} is not a selector this wave owns`);
     }
   }
-  // And the exception may only move the grid track. Anything else in it would be this wave editing
+  // And each exception may only move the grid track. Anything else in one would be this wave editing
   // another wave's composer.
-  for (const match of after.matchAll(/^\s*\.composer\s*\{([^}]*)\}/gm)) {
-    const properties = match[1].split(";").map((one) => one.split(":")[0].trim()).filter(Boolean);
+  const composerRules = [...after.matchAll(/^\s*\.composer(\[data-voice-line\])?\s*\{([^}]*)\}/gm)];
+  assert.ok(composerRules.length >= 2, "the fifth track's rule is missing, so the live line has no slot to sit in");
+  for (const match of composerRules) {
+    const properties = match[2].split(";").map((one) => one.split(":")[0].trim()).filter(Boolean);
     assert.deepEqual(properties, ["grid-template-columns"],
       `the .composer override carries more than the track it exists for: ${properties.join(", ")}`);
   }
+  // The gated rule adds exactly one track to the ungated one, which is the whole of its job. An
+  // unconditional fifth track was MEASURED to take 4 px off the message box through .composer's own
+  // 4 px gap, so the base rule must stay four tracks and the gated one five.
+  const tracks = (selector) => {
+    const rule = composerRules.find((one) => `.composer${one[1] ?? ""}` === selector);
+    assert.ok(rule != null, `${selector} is not under the banner`);
+    return rule[2].split(":")[1].trim().replace(/;$/, "").split(/\s+(?![^(]*\))/).length;
+  };
+  assert.equal(tracks(".composer"), 4, "at rest the composer is the four-track form it has always been");
+  assert.equal(tracks(".composer[data-voice-line]"), 5, "and it grows a track only while the line is up");
   for (const keyframes of [...after.matchAll(/@keyframes\s+([\w-]+)/g)].map((m) => m[1])) {
     assert.match(keyframes, /^voice-/, `${keyframes} could collide with another wave's animation`);
   }
@@ -516,10 +699,16 @@ test("VOICE-1 source: styles.css gained only new selectors, under one banner", a
   }
   assert.ok(after.includes("prefers-reduced-motion"), "the pulse drops for anyone who asked the OS for less of it");
   // [hidden] LOSES to an author display rule, and this file already carries three rules that exist
-  // only because that bit a shipped control (:3830, :4162, :4216). A strip that cannot hide is a
-  // caption line above every composer on every page.
-  assert.match(rules, /\.voice-strip:not\(\[hidden\]\)\s*\{/,
-    "the strip's display rule has to lose to the hidden attribute, or it can never be hidden");
+  // only because that bit a shipped control (:3830, :4162, :4216). A line that cannot hide is a
+  // sentence sitting in every composer on every page, and at rest it would also be a fifth grid item
+  // in a four-track form. The discipline moves with the node; the node it used to guard is gone.
+  assert.match(rules, /\.voice-line:not\(\[hidden\]\)\s*\{/,
+    "the line's display rule has to lose to the hidden attribute, or it can never be hidden");
+  assert.ok(!rules.includes(".voice-strip"), "the strip that broke the footer left no rules behind");
+  // The phone home spans every column. Anything else there opens a row the shelf did not have, which
+  // is the bug this whole item exists to close.
+  assert.match(rules, /\.voice-line\.is-shelf:not\(\[hidden\]\)\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/,
+    "the shelf's copy of the line has to span the shelf, or it takes a column of it");
 });
 
 test("VOICE-1 source: the adapter gained one line and nothing else of this wave", async () => {
@@ -637,7 +826,8 @@ test("VOICE-1 in a real browser: the button is on screen, a mouse can press it, 
     ],
   });
   try {
-    const context = await browser.newContext({ userAgent: GATE_AGENT, permissions: ["microphone"] });
+    const context = await browser.newContext({ userAgent: GATE_AGENT, permissions: ["microphone"],
+      viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
     const failures = [];
     page.on("pageerror", (error) => failures.push(String(error)));
@@ -672,52 +862,229 @@ test("VOICE-1 in a real browser: the button is on screen, a mouse can press it, 
     assert.equal(reachable, true, `a mouse cannot reach the talk button; elementFromPoint landed elsewhere (${JSON.stringify(box)})`);
     assert.match(box.label, /Talk/, "the control says what it does in a word");
 
+    // SIX RECTS BEFORE THE PRESS, read in one evaluate so they are one frame's truth. The whole of
+    // VOICE-2 is that five of the six do not move, and the sixth -- the message box -- moves by the
+    // width of the line and nothing more.
+    const rects = () => page.evaluate(() => {
+      const of = (selector) => {
+        const node = document.querySelector(selector);
+        if (node == null) return null;
+        const r = node.getBoundingClientRect();
+        return [Math.round(r.width * 100) / 100, Math.round(r.height * 100) / 100,
+          Math.round(r.left * 100) / 100, Math.round(r.top * 100) / 100];
+      };
+      const line = document.getElementById("voice-line");
+      return {
+        shelf: of(".control-shelf"), composer: of("#composer"), box: of("#message-input"),
+        utilities: of(".shelf-utilities"), aside: of(".composer-aside"), transcript: of(".transcript"),
+        tracks: getComputedStyle(document.getElementById("composer")).gridTemplateColumns.split(" ").length,
+        lineIn: line?.parentElement?.id || line?.parentElement?.className || "",
+        lineHidden: line == null ? null : line.hidden,
+      };
+    });
+
+    const atRest = await rects();
+    assert.equal(atRest.lineHidden, true, "the line is mounted and hidden before anything happens");
+    assert.equal(atRest.tracks, 4, `the composer has its four tracks at rest: ${JSON.stringify(atRest)}`);
+    assert.equal(atRest.lineIn, "composer", `at this width the line lives in the composer: ${atRest.lineIn}`);
+
     // A real press at the real coordinates.
     await page.mouse.click(box.x, box.y);
 
     // Two things follow, and the second is the one a person sees. The page asked the relay for a
     // line; the relay here has no voice door, so it answers nothing -- and the page says so.
+    const readLine = () => page.evaluate(() => {
+      const line = document.getElementById("voice-line");
+      const say = line?.querySelector("[data-voice-line-say]");
+      const does = line?.querySelector("[data-voice-line-do]");
+      const shown = [say, does].filter((one) => one != null && !one.hidden);
+      return {
+        notes: window.__voice.stats().notes,
+        text: shown.map((one) => one.textContent.replace(/\s+/g, " ").trim()).join(" "),
+        shown: shown.length,
+        visible: line != null && !line.hidden && line.getBoundingClientRect().height > 0,
+        classes: line?.className ?? "",
+        hasAction: does != null && !does.hidden,
+        actionName: does?.getAttribute("title") ?? "",
+        actionReads: does == null ? "" : does.textContent.replace(/\s+/g, " ").trim(),
+        orb: document.querySelector("[data-voice-orb]")?.getAttribute("data-state") ?? "",
+      };
+    });
     let saw = null;
-    for (let n = 0; n < 40; n += 1) {
-      saw = await page.evaluate(() => {
-        const strip = document.getElementById("voice-strip");
-        const note = strip?.querySelector("[data-voice-note]");
-        return {
-          notes: window.__voice.stats().notes,
-          text: note == null ? "" : note.textContent.replace(/\s+/g, " ").trim(),
-          visible: note != null && note.getBoundingClientRect().height > 0,
-          classes: note?.className ?? "",
-          hasAction: note?.querySelector("[data-voice-open-settings]") != null,
-          orb: document.querySelector("[data-voice-orb]")?.getAttribute("data-state") ?? "",
-        };
-      });
+    for (let n = 0; n < 16; n += 1) {
+      saw = await readLine();
       if (saw.visible) break;
-      await page.waitForTimeout(250);
+      await page.waitForTimeout(125);
     }
     assert.ok(upgrades.some((one) => one === "/voice/socket"), `the press opened no socket; saw ${JSON.stringify(upgrades)}`);
     assert.equal(saw.visible, true, `the person was left with nothing to read (${JSON.stringify(saw)})`);
     assert.ok(saw.text.length > 20, saw.text);
-    assert.match(saw.classes, /is-system/);
-    assert.doesNotMatch(saw.classes, /is-turn-failed/);
+    assert.equal(saw.shown, 1, `one node shows at a time, not two: ${JSON.stringify(saw)}`);
+    // The live half is a LINE, never the console's own message bubble. Jason's screenshot of
+    // 2026-09-10 is a picture of that bubble taking a column of the footer.
+    assert.doesNotMatch(saw.classes, /message-row|is-turn-failed/);
     // The sentence a refused line must produce, and the control that makes it lead somewhere. The
     // first version of this file said "the line dropped" here instead, with no control: Chrome fires
     // error AND close, and the close overwrote the useful sentence. No fake socket caught that.
     assert.deepEqual(saw.notes, ["no-key"], `the press led nowhere: ${JSON.stringify(saw)}`);
-    assert.equal(saw.hasAction, true, "the one condition a person can fix from this page has to offer the card");
+    assert.equal(saw.hasAction, true, "the one condition a person can fix from this page has to lead there");
+    assert.equal(saw.actionName, "Open settings", "and the control says where it goes");
+    // The control's own accessible name is the SENTENCE, not the action: an aria-label would replace
+    // the button's text for a screen reader and swallow the one thing a person needs to hear.
+    assert.equal(saw.actionReads, saw.text, "the control reads out as the sentence it carries");
     assert.equal(saw.orb, "off", "the orb went back to off rather than spinning at a line that is not there");
     // getUserMedia on the fake device is the other half: a refused microphone is a different
     // sentence, so reading the no-key one proves the device resolved.
     assert.ok(!saw.notes.includes("no-microphone"), `the fake audio device was not accepted: ${JSON.stringify(saw.notes)}`);
 
-    // THE COMPOSER STILL FITS ON ONE ROW, at three widths, because this wave added a child to
-    // somebody else's grid. Without the restored track, MEASURED here: Send was pushed onto a row of
-    // its own and the form grew from 54 to 104 px at every width. The console phone wave is live on
-    // this branch, so breaking that row would be breaking their work, and a source test cannot see it.
+    // THE FOOTER DID NOT MOVE, which is the whole of VOICE-2 and the thing no test could see before.
+    // MEASURED on this Mac before the fix, one press at 1440x900: .control-shelf 1392x106@24,776 ->
+    // 1392x196.02@24,685.98, #composer 600x54@459 -> 407.98x54@991, #message-input 370.05 -> 178.03,
+    // .shelf-utilities wrapped to row two at x41, .composer-aside rose 90 px onto the right rail and
+    // .transcript lost 45.5 px. Five of those six are now unchanged TO THE PIXEL; the message box is
+    // the one that gives up room, because the line has to come from somewhere.
+    const withLine = await rects();
+    for (const named of ["shelf", "composer", "utilities", "aside", "transcript"]) {
+      assert.deepEqual(withLine[named], atRest[named],
+        `${named} moved when the line came up: ${JSON.stringify(atRest[named])} -> ${JSON.stringify(withLine[named])}`);
+    }
+    assert.equal(withLine.tracks, 5, "the fifth track is there while the line is up");
+    assert.ok(withLine.box[0] < atRest.box[0], "the message box is where the line's width came from");
+    assert.ok(withLine.box[0] >= 150,
+      `the message box is too narrow to type in with the line up: ${withLine.box[0]} px (was ${atRest.box[0]})`);
+    // AND THE SENTENCE IS WHOLE. A capped line that ellipsises the one sentence a person has to read
+    // is a truncated apology; two lines of 13 px inside a form that is 54 px tall is what buys the
+    // words back without moving anything.
+    const readable = await page.evaluate(() => {
+      const node = document.querySelector("#voice-line [data-voice-line-do]:not([hidden])")
+        ?? document.querySelector("#voice-line [data-voice-line-say]:not([hidden])");
+      return { over: node.scrollWidth - node.clientWidth, tall: node.scrollHeight - node.clientHeight, text: node.textContent };
+    });
+    assert.ok(readable.over <= 1 && readable.tall <= 1,
+      `the sentence is cut off in the composer: ${JSON.stringify(readable)}`);
+    console.log(`    VOICE-2 at 1440x900: the line costs the message box ${Math.round((atRest.box[0] - withLine.box[0]) * 100) / 100} px `
+      + `(${atRest.box[0]} -> ${withLine.box[0]}), nothing else in the footer moves, and the sentence is whole`);
+
+    // A LIVE CAPTION IS THE SAME NODE, which is the other half of the same bug: fixing only the note
+    // would have left the identical break for everyone who actually talks. MEASURED before the fix, a
+    // caption alone with no note took the shelf 1392x106 -> 1392x168 and the composer 600 -> 407.98.
+    await page.evaluate(() => window.__voice._onMessage({
+      data: JSON.stringify({ t: "heard", text: "what is the team working on this afternoon" }),
+    }));
+    await page.waitForTimeout(60);
+    const captioned = await rects();
+    for (const named of ["shelf", "composer", "utilities", "aside", "transcript"]) {
+      assert.deepEqual(captioned[named], atRest[named],
+        `${named} moved when a live caption came up: ${JSON.stringify(atRest[named])} -> ${JSON.stringify(captioned[named])}`);
+    }
+    await page.evaluate(() => window.__voice._onMessage({ data: JSON.stringify({ t: "heard", text: "" }) }));
+
+    // A SECOND PRESS LEAVES. It used to call start() again, because toggle() read a flag the relay had
+    // already cleared, and the geometry afterwards was byte-identical to the break.
+    const before = upgrades.length;
+    await page.mouse.click(box.x, box.y);
+    await page.waitForTimeout(250);
+    const left = await readLine();
+    assert.equal(left.visible, false, `the second press did not leave the mode: ${JSON.stringify(left)}`);
+    assert.deepEqual(left.notes, [], "and the line really went, rather than being painted empty");
+    assert.equal(upgrades.length, before, "and it did not redial into the same refusal");
+    const afterLeaving = await rects();
+    assert.deepEqual(afterLeaving, atRest, "and the footer is exactly what it was before the first press");
+
+    // ESCAPE LEAVES TOO. Measured before the fix: Escape changed nothing at all.
+    await page.mouse.click(box.x, box.y);
+    await page.waitForFunction(() => document.getElementById("voice-line")?.hidden === false, null, { timeout: 10_000 });
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(200);
+    assert.equal((await readLine()).visible, false, "Escape did not leave talk mode");
+
+    // AND LEFT ALONE IT CLEARS ITSELF. Nothing ever cleared a note: clearNotes ran from start() and
+    // the ready frame and nowhere else, so the sentence sat in the footer for the life of the tab.
+    await page.mouse.click(box.x, box.y);
+    await page.waitForFunction(() => document.getElementById("voice-line")?.hidden === false, null, { timeout: 10_000 });
+    const armed = Date.now();
+    await page.waitForFunction(() => document.getElementById("voice-line")?.hidden === true, null, { timeout: 12_000 });
+    const waited = Date.now() - armed;
+    assert.ok(waited >= 4000, `the line vanished in ${waited} ms, which is too fast to read`);
+    console.log(`    VOICE-2: the line took itself away after ${waited} ms on this Mac`);
+
+    // THE PHONE'S HOME, which is a different parent and not only a different width: in the composer
+    // there is no room for a sentence beside a 178 px message box, so the line takes the shelf's first
+    // row, full width, the way .composer-status and .attachment-tray already do.
+    const phone = await browser.newContext({ userAgent: GATE_AGENT, viewport: { width: 390, height: 844 },
+      hasTouch: true, isMobile: true, permissions: ["microphone"] });
+    try {
+      const small = await phone.newPage();
+      await small.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+      await small.waitForFunction(() => document.getElementById("voice-line") != null, null, { timeout: 15_000 });
+      const shelfBefore = await small.evaluate(() => Math.round(document.querySelector(".control-shelf").getBoundingClientRect().height * 100) / 100);
+      const talkBox = await small.evaluate(() => {
+        const r = document.querySelector("[data-voice-talk]").getBoundingClientRect();
+        return { width: Math.round(r.width), height: Math.round(r.height), x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      });
+      // styles.css:4641-4652 puts a 44 px floor under ten controls on this row. The talk button shipped
+      // at 38x38 to match the attach button beside it, which is itself on that list.
+      assert.ok(talkBox.width >= 44 && talkBox.height >= 44,
+        `the talk button is ${talkBox.width}x${talkBox.height} on a phone, under the 44 px floor this file enforces`);
+      await small.touchscreen.tap(talkBox.x, talkBox.y);
+      await small.waitForFunction(() => document.getElementById("voice-line")?.hidden === false, null, { timeout: 10_000 });
+      const onPhone = await small.evaluate(() => {
+        const line = document.getElementById("voice-line");
+        const shelf = document.querySelector(".control-shelf");
+        const composer = document.getElementById("composer");
+        const l = line.getBoundingClientRect();
+        const s = shelf.getBoundingClientRect();
+        const does = line.querySelector("[data-voice-line-do]");
+        const d = does?.getBoundingClientRect();
+        return {
+          parent: line.parentElement.className, classes: line.className,
+          full: Math.round((l.width / (s.width - 18)) * 100),
+          shelfHeight: Math.round(s.height * 100) / 100,
+          composerWidth: Math.round(composer.getBoundingClientRect().width),
+          action: d == null ? null : { width: Math.round(d.width), height: Math.round(d.height) },
+          sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+        };
+      });
+      assert.match(onPhone.parent, /control-shelf/, `on a phone the line belongs to the shelf, not the composer: ${onPhone.parent}`);
+      assert.match(onPhone.classes, /is-shelf/, "and it carries the class that spans the shelf's columns");
+      assert.equal(onPhone.sideways, false, "and the page does not scroll sideways with it up");
+      assert.ok(onPhone.action != null && onPhone.action.height >= 44,
+        `the sentence that leads somewhere is a ${JSON.stringify(onPhone.action)} tap target`);
+      const grew = Math.round((onPhone.shelfHeight - shelfBefore) * 100) / 100;
+      console.log(`    VOICE-2 at 390x844: the line takes ${onPhone.full}% of the shelf's width, the shelf grows `
+        + `${grew} px (${shelfBefore} -> ${onPhone.shelfHeight}), the composer stays ${onPhone.composerWidth} px, `
+        + `the talk button is ${talkBox.width}x${talkBox.height}, the action is ${JSON.stringify(onPhone.action)}`);
+      // A ROW, NOT A LAYOUT. The budget is the tap target plus the shelf's own 8 px row gap: this row
+      // carries a control and the 44 px floor this file enforces for every other control beside it is
+      // what sets the number. A caption, which leads nowhere and is text, costs a third of that.
+      assert.ok(grew <= 60, `the shelf grew ${grew} px on a phone, which is a footer that moved rather than a line that appeared`);
+      assert.equal(onPhone.composerWidth, 358, "and the composer is untouched, which is what the strip could never manage");
+
+      // The caption's own cost, measured separately, because it is the common case for anyone who can
+      // actually talk and it carries no control.
+      // toggle(), not stop(): an ordinary stop leaves a note standing on purpose (the relay's diagnosis
+      // outranks anything that happens after it), and a note outranks a caption on the one line.
+      await small.evaluate(() => window.__voice.toggle());
+      await small.evaluate(() => window.__voice._onMessage({
+        data: JSON.stringify({ t: "heard", text: "what is the team working on this afternoon" }),
+      }));
+      await small.waitForTimeout(60);
+      const captionCost = await small.evaluate(() => Math.round(document.querySelector(".control-shelf").getBoundingClientRect().height * 100) / 100);
+      console.log(`    VOICE-2 at 390x844: a live caption costs the shelf ${Math.round((captionCost - shelfBefore) * 100) / 100} px`);
+      assert.ok(captionCost - shelfBefore <= 40,
+        `a caption grew the shelf ${captionCost - shelfBefore} px, which is a row and a half of words`);
+    } finally {
+      await phone.close();
+    }
+
+
+    // THE COMPOSER STILL FITS ON ONE ROW AT REST, at three widths, because this wave has now added two
+    // children to somebody else's grid. Without the tracks, MEASURED: Send was pushed onto a row of
+    // its own and the form grew from 54 to 104 px at every width.
     //
     // EACH WIDTH IS A FRESH LOAD, not a resize of this page. Resizing proved misleading: app.js sizes
     // the shelf once at load, so a page opened at 1280 and resized to 768 kept a 306 px composer and
-    // the message box measured 76 px -- a number no person would ever see. A person opens the console
-    // at their own size, so that is what is measured.
+    // the message box measured 76 px -- a number no person would ever see.
     for (const size of [{ width: 390, height: 844 }, { width: 768, height: 1024 }, { width: 1440, height: 900 }]) {
       const sized = await browser.newContext({ userAgent: GATE_AGENT, viewport: size });
       try {
@@ -729,17 +1096,22 @@ test("VOICE-1 in a real browser: the button is on screen, a mouse can press it, 
           const talk = document.querySelector("[data-voice-talk]");
           const send = document.querySelector(".send-button");
           const box = document.getElementById("message-input");
+          const line = document.getElementById("voice-line");
           const f = form.getBoundingClientRect();
           const t = talk.getBoundingClientRect();
           const s = send.getBoundingClientRect();
           const hit = document.elementFromPoint(Math.round(t.left + t.width / 2), Math.round(t.top + t.height / 2));
           return {
             formHeight: Math.round(f.height), formWidth: Math.round(f.width),
-            talkWidth: Math.round(t.width), boxWidth: Math.round(box.getBoundingClientRect().width),
+            talkWidth: Math.round(t.width), talkHeight: Math.round(t.height),
+            boxWidth: Math.round(box.getBoundingClientRect().width),
             insideForm: t.left >= f.left - 1 && t.right <= f.right + 1,
             sameRowAsSend: Math.abs(t.top - s.top) < 12,
             reachable: talk.contains(hit) || hit === talk,
             sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+            lineIn: line?.parentElement?.id || line?.parentElement?.className || "",
+            lineHidden: line?.hidden,
+            tracks: getComputedStyle(form).gridTemplateColumns.split(" ").length,
           };
         });
         const where = `${size.width}px: ${JSON.stringify(row)}`;
@@ -748,46 +1120,24 @@ test("VOICE-1 in a real browser: the button is on screen, a mouse can press it, 
         assert.equal(row.insideForm, true, `the talk button overflows the composer. ${where}`);
         assert.equal(row.reachable, true, `a mouse cannot reach the talk button. ${where}`);
         assert.equal(row.sideways, false, `the page scrolls sideways. ${where}`);
-        // The message box has to stay usable. On a phone the word goes and the orb stays, which is
-        // what buys that back: the button is the same 38 px circle as the attach button beside it.
+        assert.equal(row.lineHidden, true, `the line is showing with nothing to say. ${where}`);
+        assert.equal(row.tracks, 4, `the composer grew a track with the line down. ${where}`);
+        // At rest the message box is exactly what it always was: the line costs nothing until it has
+        // something to say, which is why the fifth track hangs off a state attribute.
         assert.ok(row.boxWidth >= 150, `the message box is too narrow to type in. ${where}`);
-        if (size.width <= 690) assert.equal(row.talkWidth, 38, `the phone button kept its label. ${where}`);
-        else assert.ok(row.talkWidth > 60, `the desktop button lost its label. ${where}`);
+        // The line lives in the composer above 900 px and in the shelf at or below it, because a
+        // 358 px composer has no room for a sentence beside a 176.98 px message box.
+        if (size.width <= 900) assert.match(row.lineIn, /control-shelf/, `the line is not in the shelf. ${where}`);
+        else assert.equal(row.lineIn, "composer", `the line is not in the composer. ${where}`);
+        if (size.width <= 690) {
+          assert.ok(row.talkWidth >= 44 && row.talkHeight >= 44, `the phone button is under the 44 px floor. ${where}`);
+          assert.equal(row.talkWidth, row.talkHeight, `the phone button is not a circle. ${where}`);
+        } else {
+          assert.ok(row.talkWidth > 60, `the desktop button lost its label. ${where}`);
+        }
       } finally {
         await sized.close();
       }
-    }
-
-    // THE CARD, in a real page, because it is the only way a key is ever set. A key pasted over ssh
-    // would be the hand operation no-hand-operations-on-the-product forbids, so this control existing
-    // on screen is the mechanism, not a convenience -- and it mounts itself into a panel app.js paints.
-    await page.click("#shelf-settings");
-    let card = null;
-    for (let n = 0; n < 40; n += 1) {
-      card = await page.evaluate(() => {
-        const node = document.querySelector("[data-voice]");
-        if (node == null) return null;
-        const rect = node.getBoundingClientRect();
-        const key = node.querySelector("[data-voice-key]");
-        return {
-          visible: rect.height > 0,
-          agents: node.querySelector("[data-voice-agent]") != null,
-          keyType: key?.getAttribute("type") ?? "",
-          keyValue: key?.value ?? "",
-          keyNote: node.querySelector("[data-voice-key-note]")?.textContent.trim() ?? "",
-          text: node.textContent.replace(/\s+/g, " ").trim(),
-        };
-      });
-      if (card?.visible) break;
-      await page.waitForTimeout(250);
-    }
-    assert.ok(card?.visible, "the Voice card never appeared in the settings panel, so no key could ever be set from the product");
-    assert.equal(card.agents, true, "the agent choice is what points the first press at the head of the team");
-    assert.equal(card.keyType, "password");
-    assert.equal(card.keyValue, "", "the card starts empty, because the answer carries no value to fill it with");
-    assert.match(card.keyNote, /No key yet/, `the card read: ${card.keyNote}`);
-    for (const leak of ["xAI", "OpenAI", "Grok", "sendPrompt", "websocket"]) {
-      assert.ok(!card.text.includes(leak), `${leak} reached the card in a real page`);
     }
 
     const ours = failures.filter((one) => /voice/i.test(one));

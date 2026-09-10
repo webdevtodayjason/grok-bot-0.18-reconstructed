@@ -1,8 +1,17 @@
 /*
- * VOICE-1 — the console's side of talking to your agent.
- * ------------------------------------------------------
- * One button beside the composer, one orb, a microphone, a speaker, and a live caption. Press to
- * start, press to stop. There is no wake word and nothing listens when the button is off.
+ * VOICE-1 / VOICE-2 — the console's side of talking to your agent.
+ * ----------------------------------------------------------------
+ * One button beside the composer, one orb, a microphone, a speaker, and ONE capped line of live
+ * words. Press to start; press again, or Escape, to leave. There is no wake word and nothing listens
+ * when the button is off.
+ *
+ * VOICE-2, AND WHAT IT CHANGED. Talk mode used to be a room you could not leave. The live strip was
+ * an unplaced child of the footer's grid, so one press moved six rects and took 45.5 px off the
+ * conversation; a second press redialled instead of leaving, because it read a flag the relay had
+ * already cleared; Escape did nothing; and no code path anywhere cleared a note, so the sentence sat
+ * in the footer until the tab was reloaded. The Voice card went with it: a key belongs to the
+ * operator and lives in the admin console, so this file publishes the four facts item A's Settings
+ * rows read and holds no paste field of its own. The numbers are in the comments beside each fix.
  *
  * WHAT THIS FILE IS NOT. It is not a voice assistant. The realtime model on the other end of the
  * relay is a mouth and a pair of ears; it holds exactly one tool, which puts what you said into
@@ -32,8 +41,8 @@
  * says exactly this in its own comment).
  *
  * NO BARGE-IN. Speaking while your agent speaks interrupts nothing, because the microphone is shut.
- * On speakers that was never a feature: the thing being interrupted was the person. The Voice card
- * says so in one sentence.
+ * On speakers that was never a feature: the thing being interrupted was the person. docs/VOICE.md
+ * says so in one sentence, and so does the Settings row that switches talking on.
  *
  * PLAYBACK IS WEB AUDIO, which is a design decision with a cost. PCM16 deltas become AudioBuffers
  * on AudioBufferSourceNodes, scheduled OFF the socket's onmessage path -- draining the player inline
@@ -65,25 +74,53 @@
     "no-microphone": "This page has not been given the microphone yet. Allow it in your browser and press Talk again.",
     // No second clause telling the person to open settings: the control beside this sentence is that
     // clause, and MEASURED on screen the two together read as the same words twice.
-    "no-key": "Talking is not available on this workspace yet.",
+    //
+    // VOICE-2. The shipped sentence ended "Add one on the Voice card in Settings and press the button
+    // again", and the last clause INSTRUCTED THE LOOP Jason got stuck in: the press that reads this
+    // line cannot succeed, so "press the button again" is the one thing a person must not be told to
+    // do. The words are his own, and the relay says the same string, so retitleNote cannot put two
+    // wordings on one row.
+    "no-key": "Voice is not switched on for this workspace yet.",
     "day-cap": "This workspace has used all of today's talking time. It starts again at midnight UTC.",
     "session-cap": "That call reached its length limit. Press Talk to start another one.",
     "box-not-running": "Your agent's computer is not running, so there is nobody to talk to yet. Start it and press Talk again.",
     "line-dropped": "The line dropped. Press Talk to start again.",
   };
-  // The one note that leads somewhere: nothing is set up, so offer the card that sets it up.
-  const NOTE_ACTIONS = { "no-key": "Open voice settings" };
+  // The one note that leads somewhere. There is no Voice card any more -- a key is the operator's and
+  // lives in the admin console -- so this opens the workspace's own settings at the Talking row.
+  // These words are the control's TITLE and not its label: the sentence itself is what a person
+  // presses, because measured at 1440x900 a labelled button beside the sentence does not fit the
+  // composer's row without taking the message box under 150 px.
+  const NOTE_ACTIONS = { "no-key": "Open settings" };
   // A refusal the relay makes mid-call closes with a code, because by then there is no longer a
   // socket to send a frame down. The code names the condition so the right sentence -- and, for a
   // missing key, the right control -- can still be put in front of the person.
   const CLOSE_CONDITIONS = { 4001: "no-key", 4002: "day-cap", 4003: "session-cap", 4004: "box-not-running" };
 
-  const STRIP_ID = "voice-strip";
-  const CARD_ATTRIBUTE = "data-voice";
-
-  const escapeHtml = (value) => String(value ?? "")
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  // THE LIVE LINE. One node, two homes, and it clears itself.
+  //
+  // WHY IT IS NOT A STRIP ANY MORE, and this is the whole of VOICE-2. The strip was inserted
+  // `beforebegin` #composer, which made it a FOURTH auto-placed child of .control-shelf's
+  // three-column grid with no grid-column of its own -- the third time that bug has been found in
+  // this file (.composer-status and .attachment-tray each carry a written comment about it).
+  // MEASURED on grok-bot-local-vm in real Chrome at 1440x900, one press of Talk on a workspace with
+  // no voice: the shelf went 1392x106@24,776 to 1392x196.02@24,685.98, the composer 600x54@459 to
+  // 407.98x54@991, the message box 370.05 to 178.03, .shelf-utilities wrapped to row two at x41,
+  // .composer-aside rose 90 px onto the right rail's Skills row and the transcript lost 45.5 px. A
+  // person could not read the sentence, leave the mode, or type.
+  //
+  // `grid-column: 1 / -1` where the strip sat is WORSE than shipped, not better: measured
+  // 1392x208.55, three rows, the composer in column one, because the strip is mounted AFTER
+  // #workspace-list and a full-width row there pushes everything onto a third. The two children that
+  // DO span the shelf are its first two, which is why the phone home below is `afterbegin`.
+  const LINE_ID = "voice-line";
+  // The width at or below which the line takes a row of the shelf instead of a slot in the composer.
+  // The phone composer is 358 px with a 178.98 px message box: there is no room in it for a sentence.
+  const LINE_SHELF_WIDTH = 900;
+  // How long a note stays before it takes itself away. Nothing used to clear one -- clearNotes ran
+  // only from start() and the ready frame -- so the sentence sat in the footer for the life of the
+  // tab and the only way out was a reload.
+  const NOTE_DISMISS_MS = 6000;
 
   const sentenceFor = (condition) => NOTES[condition] ?? NOTES["line-dropped"];
   const orbStateFor = (value) => (ORB_STATES.includes(String(value)) ? String(value) : null);
@@ -182,9 +219,17 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       throw new Error("this browser has no audio worklet");
     }
 
+    // deviceId is added ONLY when Settings holds one, so a workspace that never opened the row asks
+    // for exactly what it always asked for and `exact` can never refuse a microphone nobody chose.
+    const deviceId = String(options.deviceId ?? "").trim();
     const stream = source === "microphone"
       ? await getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        },
         video: false,
       })
       : source;
@@ -310,54 +355,33 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     };
   }
 
-  // ------------------------------------------------------------------ the strip a person reads
+  // ------------------------------------------------------------------ the line a person reads
   //
   // The transcript is rebuilt wholesale on every render (app.js's renderAll), so nothing this file
   // draws can live inside it. The durable record of a spoken turn is the transcript row itself,
   // which carries the spoken chip because the relay sends the prompt under a "voice:" nonce. This
-  // strip is the LIVE half: what is being heard, what is being said, and any note.
-  function stripMarkup() {
-    return `<div class="voice-strip" id="${STRIP_ID}" data-voice-strip hidden>`
-      + `<p class="voice-caption" data-voice-caption></p>`
-      + `<div class="voice-notes" data-voice-notes></div>`
-      + `</div>`;
+  // line is the LIVE half, and it is ONE capped line: what is being heard or said, or one note.
+  //
+  // TWO CHILDREN, EXACTLY ONE SHOWN. A sentence that leads somewhere IS the control -- the button
+  // carries the sentence and NOTE_ACTIONS' words are its accessible name -- because a labelled
+  // button beside the sentence does not fit the composer's row (see NOTE_ACTIONS above). A sentence
+  // that leads nowhere is a span, because a status that cannot be pressed must not look pressable.
+  function lineMarkup() {
+    return `<span class="voice-line" id="${LINE_ID}" data-voice-line hidden>`
+      + `<span class="voice-line-say" data-voice-line-say hidden></span>`
+      + `<button class="voice-line-do" type="button" data-voice-line-do data-voice-open-settings hidden></button>`
+      + `</span>`;
   }
 
-  // A quiet row. Detail-less on purpose: an expander here would be a machine's innards beside a
-  // conversation. is-system is the console's own muted bubble; is-turn-failed is the one class this
-  // row may never carry, because none of these six sentences is a failed turn.
-  function noteMarkup(condition, text) {
-    const sentence = text && String(text).trim().length > 0 ? String(text).trim() : sentenceFor(condition);
-    const action = NOTE_ACTIONS[condition];
-    return `<article class="message-row is-system voice-note" data-voice-note="${escapeHtml(condition)}">`
-      + `<div class="message-bubble">${escapeHtml(sentence)}`
-      + (action ? `<button class="quiet-button voice-note-action" type="button" data-voice-open-settings>${escapeHtml(action)}</button>` : "")
-      + `</div></article>`;
-  }
-
-  // ------------------------------------------------------------------ the Voice card
-  //
-  // Rendered into the settings panel this file finds itself, the road cloud-browser.js takes. It
-  // reads and writes /voice/settings on the relay; the answer only ever carries apiKeySet, so the
-  // field is paste-or-clear and can never show a value back.
-  //
-  // The agent choice is the one control that decides whether the first press reaches the head of
-  // the team or a narrow worker, so it is a list of names and not a box to type an id into.
-  function voiceCardMarkup() {
-    return `<section class="settings-section" ${CARD_ATTRIBUTE}><h3>Talking</h3>`
-      + `<p>Press Talk beside the message box and say what you want. What you say goes into your agent's own conversation and he answers out loud, so it is the same thread you type in and the same memory. He is the only one who can act on it.</p>`
-      + `<div class="setting-row"><div><strong>Talking</strong><small data-voice-enabled-note>Reading from the relay…</small></div><button class="switch" type="button" data-voice-enabled aria-pressed="false"></button></div>`
-      + `<div class="field"><label for="voice-agent">Who you are talking to</label><select id="voice-agent" data-voice-agent></select><small class="field-hint">The head of your team, normally. Everything you say goes to this one agent.</small></div>`
-      // Model and Voice are PLACEHOLDERS and are never prefilled. The relay falls back to the
-      // service's own default when either is empty, so an empty field is the whole of "use theirs" --
-      // and a prefilled one put a vendor's product name on a customer's own card, which is the one
-      // place in this product that names no vendor anywhere else.
-      + `<div class="voice-grid"><label>Service<select data-voice-vendor></select></label><label>Model<input type="text" autocomplete="off" placeholder="The service's own" data-voice-model /></label><label>Voice<input type="text" autocomplete="off" placeholder="The service's own" data-voice-voice /></label></div>`
-      + `<div class="mail-block"><strong>Key</strong><small class="field-hint" data-voice-key-note>Reading from the relay…</small><div class="mail-secret-row"><input type="password" autocomplete="off" placeholder="Paste your key" data-voice-key /><button class="ghost-button" type="button" data-voice-key-set>Save key</button><button class="danger-button" type="button" data-voice-key-clear>Clear</button></div><small class="field-hint">The key stays on the relay and never reaches this page again. Nothing is spoken to the service from your browser; the relay holds that line, which is how the minutes below can be counted at all.</small></div>`
-      + `<div class="setting-row"><div><strong>Time used today</strong><small data-voice-usage>Reading from the relay…</small></div></div>`
-      + `<p class="field-hint">Speaking while your agent is speaking interrupts nothing: the microphone is shut while he talks, and for a third of a second after, so he never hears himself through your speakers. Wait for him to finish.</p>`
-      + `<div class="form-actions"><button class="primary-button" type="button" data-voice-save>Save</button></div>`
-      + `</section>`;
+  // What the line says and whether it leads anywhere, with no DOM in sight, so a test can pin the
+  // words and item A can read the same two facts.
+  function lineFor(notes, caption) {
+    const first = Array.isArray(notes) ? notes[0] : null;
+    if (first == null) return { text: String(caption ?? ""), action: null };
+    const text = first.text != null && String(first.text).trim().length > 0
+      ? String(first.text).trim()
+      : sentenceFor(first.condition);
+    return { text, action: NOTE_ACTIONS[first.condition] ?? null };
   }
 
   // ------------------------------------------------------------------ the session
@@ -375,11 +399,12 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     settings: null,
     byeReason: "",
     available: null,
+    /** The microphone the person picked in Settings, or "" for whichever the browser hands over. */
+    micDeviceId: "",
     /** The relay's hop ledger for the last turn, when it sent one. Never drawn. */
     hops: null,
   };
 
-  function ui() { return global.__mrUi ?? null; }
   function adapter() { return global.__machineRoomAdapter ?? null; }
 
   function relayFetch(path, init) {
@@ -417,8 +442,30 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   }
 
   function clearNotes() {
+    clearDismiss();
     state.notes = [];
     paint();
+  }
+
+  // ------------------------------------------------------------------ the note takes itself away
+  //
+  // Nothing ever cleared one. clearNotes ran from start() and from the ready frame and nowhere else,
+  // so the sentence sat in the footer for the life of the tab: Jason's screenshot is a footer with a
+  // note in it and no way out. The timer is the module's own global.setTimeout so the unit tests can
+  // drive it, and it is unref'd where that exists because stop() is called six times in a row by
+  // tests/machine-room-voice.test.mjs and a pending timer keeps a node test process alive. It also
+  // fires from visibilitychange, pagehide and beforeunload, where a timer must not outlive the page.
+  let dismissTimer = null;
+  function clearDismiss() {
+    if (dismissTimer == null) return;
+    try { global.clearTimeout(dismissTimer); } catch { /* a fake window may not have one */ }
+    dismissTimer = null;
+  }
+
+  function armDismiss() {
+    clearDismiss();
+    dismissTimer = global.setTimeout(() => { dismissTimer = null; state.notes = []; paint(); }, NOTE_DISMISS_MS);
+    dismissTimer?.unref?.();
   }
 
   function caption(text) {
@@ -436,14 +483,73 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       button.setAttribute("aria-pressed", state.on ? "true" : "false");
       button.classList.toggle("is-live", state.on);
     }
-    const strip = document_.getElementById(STRIP_ID);
-    if (strip == null) return;
-    const captionNode = strip.querySelector("[data-voice-caption]");
-    if (captionNode != null) captionNode.textContent = state.caption;
-    const notesNode = strip.querySelector("[data-voice-notes]");
-    if (notesNode != null) notesNode.innerHTML = state.notes.map((one) => noteMarkup(one.condition, one.text)).join("");
-    const empty = state.caption.length === 0 && state.notes.length === 0;
-    strip.hidden = empty;
+    const line = mountLine();
+    if (line == null) return;
+    const { text, action } = lineFor(state.notes, state.caption);
+    const say = line.querySelector("[data-voice-line-say]");
+    const does = line.querySelector("[data-voice-line-do]");
+    const shown = action == null ? say : does;
+    const other = action == null ? does : say;
+    // EVERY WRITE IS GUARDED ON A CHANGE. The body-wide observer below watches childList, and
+    // textContent replaces child nodes: an unguarded write repaints on its own mutation forever.
+    if (shown != null && shown.textContent !== text) shown.textContent = text;
+    if (other != null && other.textContent !== "") other.textContent = "";
+    if (say != null) say.hidden = action != null || text.length === 0;
+    if (does != null) {
+      does.hidden = action == null;
+      // NO aria-label HERE, on purpose. An aria-label REPLACES a button's own text for a screen
+      // reader, so labelling this "Open settings" would read the control out and swallow the sentence
+      // that is the whole reason it is on screen. The sentence is the accessible NAME; the action's
+      // words are the title, which is the accessible DESCRIPTION beside it.
+      if (action != null) does.setAttribute("title", action);
+    }
+    if (say != null) {
+      if (text.length > 0) say.setAttribute("title", text); else say.removeAttribute("title");
+    }
+    line.hidden = text.length === 0;
+    // THE FIFTH TRACK COSTS NOTHING AT REST. An unconditional empty track was measured to take 4 px
+    // off the message box through the composer's own 4 px gap, so the attribute the track hangs on
+    // is written only while the line is really in the form with something to say.
+    const form = document_.getElementById("composer");
+    if (form != null) {
+      if (!line.hidden && line.parentElement === form) form.setAttribute("data-voice-line", "up");
+      else form.removeAttribute("data-voice-line");
+    }
+  }
+
+  // ------------------------------------------------------------------ where the line lives
+  //
+  // Two homes and no third. In the composer's own row the shelf does not move at all, which is the
+  // whole point: at 1440x900 the shipped strip moved six rects and cost the transcript 45.5 px. On a
+  // phone the composer is 358 px wide with a 178.98 px message box and there is no room in it for a
+  // sentence, so the line takes the shelf's FIRST row, full width, beside .composer-status and
+  // .attachment-tray -- the only two children of that grid already placed that way, and the only
+  // placement measured not to open a row nobody asked for.
+  //
+  // It never replaces a node app.js owns: it inserts its own and moves its own.
+  function mountLine() {
+    const document_ = global.document;
+    if (document_ == null) return null;
+    const form = document_.getElementById("composer");
+    const shelf = document_.querySelector(".control-shelf");
+    const width = Number(global.innerWidth ?? 0);
+    const inShelf = shelf != null && width > 0 && width <= LINE_SHELF_WIDTH;
+    const host = inShelf ? shelf : form;
+    if (host == null) return null;
+    let line = document_.getElementById(LINE_ID);
+    if (line == null) {
+      const talk = inShelf ? null : form?.querySelector("[data-voice-talk]");
+      if (talk != null) talk.insertAdjacentHTML("beforebegin", lineMarkup());
+      else host.insertAdjacentHTML(inShelf ? "afterbegin" : "beforeend", lineMarkup());
+      line = document_.getElementById(LINE_ID);
+      if (line == null) return null;
+    } else if (line.parentElement !== host) {
+      const talk = inShelf ? null : form?.querySelector("[data-voice-talk]");
+      try { host.insertBefore(line, inShelf ? host.firstChild : (talk ?? null)); }
+      catch { /* a host that will not take it keeps the line where it already is */ }
+    }
+    line.classList.toggle("is-shelf", inShelf);
+    return line;
   }
 
   async function start() {
@@ -469,6 +575,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     try {
       state.capture = await captureAudio({
         source: "microphone",
+        deviceId: state.micDeviceId,
         sampleRate: SAMPLE_RATE,
         frameBytes: FRAME_BYTES,
         held: () => state.gate.holding(),
@@ -503,6 +610,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   }
 
   function stop(condition, text) {
+    clearDismiss();
     if (heldTimer != null) { global.clearInterval(heldTimer); heldTimer = null; }
     send({ t: "stop" });
     try { state.capture?.stop(); } catch { /* already stopped */ }
@@ -523,11 +631,37 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     state.byeReason = "";
     // The relay's own sentence, already on screen, wins over ours; only the condition is taken from
     // the close, so the row can offer the card when nothing is set up.
-    if (reason && retitleNote(reason, relaySaidIt)) return;
-    if (reason) note(reason, text, relaySaidIt); else paint();
+    if (reason && retitleNote(reason, relaySaidIt)) { armDismiss(); return; }
+    if (reason) { note(reason, text, relaySaidIt); armDismiss(); return; }
+    // Nothing new to say. An ordinary stop leaves nothing standing either, or a note the relay sent
+    // mid-call outlives the call it was about: the button was pressed to leave, so leaving is what it
+    // does. A stop that DOES carry a reason is the two lines above, and that sentence is the whole
+    // point of the press.
+    if (state.notes.length > 0) { clearNotes(); return; }
+    paint();
   }
 
-  function toggle() { return state.on ? stop() : start(); }
+  // PRESSING IT AGAIN LEAVES. It used to read state.on, which the relay had already set false by the
+  // time a person pressed a second time, so the second press called start() and redialled into the
+  // same refusal -- and the sentence the page showed told them to do exactly that. Measured, the
+  // geometry after a second press was byte-identical to the break. A note on screen IS the mode.
+  function toggle() {
+    if (state.on) return stop();
+    if (state.notes.length > 0) { clearNotes(); return undefined; }
+    return start();
+  }
+
+  // Escape leaves too, and it is guarded twice. app.js:6802 already owns a document-level Escape for
+  // the drawer, and this console has native <dialog>s -- the settings panel, onboarding, the report
+  // card -- that close on Escape; stealing it from one of those would read as a broken modal.
+  function onKeyDown(event) {
+    if (event?.key !== "Escape") return;
+    if (!state.on && state.notes.length === 0) return;
+    const document_ = global.document;
+    if (document_?.querySelector?.("dialog[open]") != null) return;
+    // stop() clears a standing note when it has nothing new to say, so both branches really leave.
+    if (state.on) stop(); else clearNotes();
+  }
 
   function socketUrl() {
     const location = global.location;
@@ -650,46 +784,44 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     return parsed;
   }
 
+  // ------------------------------------------------------------------ what item A's rows read
+  //
+  // THE SEAM. There is no Voice card any more: a key belongs to the operator and lives in the admin
+  // console, and a customer's own choices are rows in Settings. Those rows read these four things and
+  // nothing else, so this file stays the only one that knows the relay's voice door.
+  //
+  // `available` is "a key exists for this workspace's service, wherever it came from" -- the control
+  // plane's, or the relay's own file. An older relay answers only apiKeySet, which means the same
+  // thing there, so the fallback keeps a workspace on the old answer working.
+  async function getSettings() {
+    try {
+      state.settings = await readSettings();
+    } catch {
+      return { enabled: false, available: false };
+    }
+    const value = state.settings ?? {};
+    return {
+      enabled: value.enabled === true,
+      available: value.available === true || (value.available == null && value.apiKeySet === true),
+    };
+  }
+
+  async function setEnabled(on) {
+    const saved = await writeSettings({ enabled: on === true });
+    if (saved != null) state.settings = saved;
+    return getSettings();
+  }
+
+  // A picker is drawn only when the browser can name the microphones. enumerateDevices exists on
+  // every browser this console supports and answers empty labels until permission is given, which is
+  // a list worth showing; a browser without it gets no row rather than a control that decides nothing.
+  const supportsMicChoice = () => typeof global.navigator?.mediaDevices?.enumerateDevices === "function";
+  const getMicDeviceId = () => state.micDeviceId;
+  const setMicDeviceId = (id) => { state.micDeviceId = String(id ?? "").trim(); return state.micDeviceId; };
+
   function minutes(seconds) {
     const value = Math.max(0, Math.round(Number(seconds) || 0) / 60);
     return `${value < 10 ? value.toFixed(1) : Math.round(value)} min`;
-  }
-
-  function paintCard(root, settings) {
-    if (root == null || settings == null) return;
-    const set = (selector, value) => { const field = root.querySelector(selector); if (field) field.value = value ?? ""; };
-    const say = (selector, text) => { const field = root.querySelector(selector); if (field) field.textContent = text; };
-    const toggleNode = root.querySelector("[data-voice-enabled]");
-    if (toggleNode != null) toggleNode.setAttribute("aria-pressed", settings.enabled ? "true" : "false");
-    say("[data-voice-enabled-note]", settings.enabled
-      ? "On. The Talk button beside the message box is live."
-      : "Off. The Talk button is there but will not open a line.");
-    const vendor = root.querySelector("[data-voice-vendor]");
-    if (vendor != null) {
-      vendor.innerHTML = (settings.vendors ?? []).map((one) =>
-        `<option value="${escapeHtml(one.id)}"${one.id === settings.vendor ? " selected" : ""}>${escapeHtml(one.label)}</option>`).join("");
-    }
-    const agent = root.querySelector("[data-voice-agent]");
-    if (agent != null) {
-      agent.innerHTML = agentChoices(settings).map((one) =>
-        `<option value="${escapeHtml(one.id)}"${one.id === settings.agentId ? " selected" : ""}>${escapeHtml(one.name)}</option>`).join("");
-    }
-    set("[data-voice-model]", settings.model);
-    set("[data-voice-voice]", settings.voice);
-    say("[data-voice-key-note]", settings.apiKeySet
-      ? "A key is set. Paste a new one to replace it, or clear it."
-      : "No key yet. Talking will say so in plain words until one is set.");
-    say("[data-voice-usage]", `${minutes(settings.dayUsedSeconds)} of ${minutes(settings.dayCapSeconds)} today · up to ${minutes(settings.sessionCapSeconds)} in one call`);
-  }
-
-  function cardValues(root) {
-    return {
-      enabled: root.querySelector("[data-voice-enabled]")?.getAttribute("aria-pressed") === "true",
-      vendor: root.querySelector("[data-voice-vendor]")?.value ?? "",
-      model: root.querySelector("[data-voice-model]")?.value.trim() ?? "",
-      voice: root.querySelector("[data-voice-voice]")?.value.trim() ?? "",
-      agentId: root.querySelector("[data-voice-agent]")?.value ?? "",
-    };
   }
 
   // The roster the relay names, falling back to the console's own. The relay is the authority --
@@ -702,56 +834,31 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     return (Array.isArray(roster) ? roster : []).map((one) => ({ id: one.id, name: one.name }));
   }
 
-  // The settings panel repaints whenever app.js fills one of its cards, and the observer below puts
-  // this card back each time. So a cached answer is painted rather than refetched: a card that asked
-  // the relay on every repaint would be a request loop nobody asked for.
-  async function fillCard(options = {}) {
+  // How the workspace's talking minutes read, in the words the Usage rows use. Item A draws them;
+  // this file owns the numbers because it owns the door they come from.
+  function usage() {
+    const value = state.settings ?? {};
+    return {
+      dayUsedSeconds: Number(value.dayUsedSeconds) || 0,
+      dayCapSeconds: Number(value.dayCapSeconds) || 0,
+      sessionCapSeconds: Number(value.sessionCapSeconds) || 0,
+    };
+  }
+
+  // ------------------------------------------------------------------ the way out of the note
+  //
+  // The line that says talking is not switched on IS the control that opens the row where it is.
+  // window.__mrSettings is item A's; when it is not there yet, or throws, the gear a person would
+  // press themselves is pressed instead, so this never leads nowhere.
+  function openSettings() {
     const document_ = global.document;
-    const root = document_?.querySelector(`[${CARD_ATTRIBUTE}]`);
-    if (root == null) return;
-    if (!options.force && state.settings != null) { paintCard(root, state.settings); return; }
-    try {
-      state.settings = await readSettings();
-      paintCard(root, state.settings);
-    } catch {
-      const note_ = root.querySelector("[data-voice-key-note]");
-      if (note_ != null) note_.textContent = "The relay did not answer about talking. Try again in a moment.";
+    const surface = global.__mrSettings;
+    if (surface != null && typeof surface.open === "function") {
+      try { surface.open("general", "voice"); return; } catch { /* the gear below is the fallback */ }
     }
-  }
-
-  function openCard() {
-    const document_ = global.document;
     if (document_ == null) return;
-    // The road cloud-browser.js takes: find the control a person would press, press it, then put
-    // the card back when the panel has painted. Nothing in app.js has to know this file exists.
-    const settings = document_.getElementById("shelf-settings");
-    if (settings != null) settings.click();
-    else ui()?.openPanel?.("Global router & policy", "Operator settings", "");
-    global.setTimeout(() => { mountCard(); }, 0);
-  }
-
-  function mountCard() {
-    const document_ = global.document;
-    if (document_ == null) return false;
-    if (document_.querySelector(`[${CARD_ATTRIBUTE}]`) != null) return true;
-    const list = document_.querySelector("#panel-content .settings-list");
-    if (list == null) return false;
-    const mail = list.querySelector("[data-mail]");
-    if (mail != null) mail.insertAdjacentHTML("afterend", voiceCardMarkup());
-    else list.insertAdjacentHTML("beforeend", voiceCardMarkup());
-    fillCard();
-    return true;
-  }
-
-  // ------------------------------------------------------------------ mounting
-  function mountStrip() {
-    const document_ = global.document;
-    if (document_ == null) return;
-    if (document_.getElementById(STRIP_ID) != null) return;
-    const composer = document_.getElementById("composer");
-    if (composer == null) return;
-    composer.insertAdjacentHTML("beforebegin", stripMarkup());
-    paint();
+    const gear = document_.getElementById("settings-button") ?? document_.getElementById("shelf-settings");
+    gear?.click?.();
   }
 
   function wire() {
@@ -760,35 +867,22 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     document_.addEventListener("click", (event) => {
       const talk = event.target?.closest?.("[data-voice-talk]");
       if (talk != null) { event.preventDefault(); toggle(); return; }
-      if (event.target?.closest?.("[data-voice-open-settings]") != null) { event.preventDefault(); openCard(); return; }
-      const card = event.target?.closest?.(`[${CARD_ATTRIBUTE}]`);
-      if (card == null) return;
-      const switchNode = event.target.closest("[data-voice-enabled]");
-      if (switchNode != null) {
-        const on = switchNode.getAttribute("aria-pressed") === "true";
-        switchNode.setAttribute("aria-pressed", on ? "false" : "true");
-        return;
-      }
-      if (event.target.closest("[data-voice-save]") != null) {
-        writeSettings(cardValues(card)).then(() => fillCard({ force: true })).catch(() => {});
-        return;
-      }
-      if (event.target.closest("[data-voice-key-set]") != null) {
-        const field = card.querySelector("[data-voice-key]");
-        const value = field?.value ?? "";
-        if (value.trim().length === 0) return;
-        if (field != null) field.value = "";
-        writeSettings({ ...cardValues(card), apiKey: value }).then(() => fillCard({ force: true })).catch(() => {});
-        return;
-      }
-      if (event.target.closest("[data-voice-key-clear]") != null) {
-        writeSettings({ ...cardValues(card), apiKey: "" }).then(() => fillCard({ force: true })).catch(() => {});
-      }
+      if (event.target?.closest?.("[data-voice-open-settings]") != null) { event.preventDefault(); openSettings(); }
     });
+    document_.addEventListener("keydown", onKeyDown);
     // A tab nobody is looking at has no business holding a microphone open.
     document_.addEventListener("visibilitychange", () => { if (document_.hidden && state.on) stop(); });
     global.addEventListener?.("pagehide", () => { if (state.on) stop(); });
     global.addEventListener?.("beforeunload", () => { if (state.on) stop(); });
+    // The line has two homes and the window's width picks one. Without this, a window dragged narrow
+    // keeps a sentence inside a composer that no longer has room for it. Debounced to a frame, the
+    // way the repaint observer below is, because a drag fires this continuously.
+    let resizing = false;
+    global.addEventListener?.("resize", () => {
+      if (resizing) return;
+      resizing = true;
+      (global.requestAnimationFrame ?? ((fn) => global.setTimeout(fn, 16)))(() => { resizing = false; paint(); });
+    });
   }
 
   // The console repaints wholesale, which takes the strip with it; one observer puts it back. It is
@@ -802,8 +896,9 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       scheduled = true;
       (global.requestAnimationFrame ?? ((fn) => global.setTimeout(fn, 16)))(() => {
         scheduled = false;
-        mountStrip();
-        mountCard();
+        // paint() mounts the line and then fills it, and every write it makes is guarded on a
+        // change, so putting it here cannot chase its own mutation round the loop.
+        paint();
       });
     });
     observer.observe(document_.body, { childList: true, subtree: true });
@@ -811,7 +906,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
 
   // WHY THE BUTTON IS NOT DISABLED WHEN NO KEY IS SET, which B2 reads as if it should be. A
   // disabled control leads nowhere, and "nothing is set up yet" is precisely the case that has to
-  // lead somewhere -- the note carries the control that opens the card. So the only thing that
+  // lead somewhere -- the sentence itself opens the row that fixes it. So the only thing that
   // disables the button is a relay with no voice door at all (an older one, answering 404): there
   // the press could not produce a sentence, let alone a way forward.
   async function probe() {
@@ -835,7 +930,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   }
 
   function boot() {
-    mountStrip();
+    paint();
     wire();
     observe();
     probe();
@@ -847,6 +942,22 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     toggle,
     captureAudio,
     player,
+    // THE SEAM ITEM A DRAWS ITS ROWS FROM. General/System has two of them -- "Let me talk to Titan"
+    // and "Microphone" -- and neither is drawn at all when this module is absent. readSettings and
+    // saveSettings are here because the operator's own rows (which bot, which service, which voice)
+    // moved out of this file with the card, and the relay's door should still have exactly one
+    // caller in the console.
+    getSettings,
+    setEnabled,
+    supportsMicChoice,
+    getMicDeviceId,
+    setMicDeviceId,
+    usage,
+    minutes,
+    readSettings,
+    saveSettings: writeSettings,
+    agentChoices,
+    openSettings,
     // The gate reads these from the page, beside the relay's own ledger row, because a held frame
     // is the one claim that needs proving on both sides of the wire.
     stats: () => ({
@@ -874,20 +985,23 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     _FRAME_BYTES: FRAME_BYTES,
     _SAMPLE_RATE: SAMPLE_RATE,
     _CLOSE_CONDITIONS: CLOSE_CONDITIONS,
+    _NOTE_DISMISS_MS: NOTE_DISMISS_MS,
+    _LINE_SHELF_WIDTH: LINE_SHELF_WIDTH,
     _sentenceFor: sentenceFor,
     _orbStateFor: orbStateFor,
     _agentChoices: agentChoices,
-    _noteMarkup: noteMarkup,
-    _stripMarkup: stripMarkup,
-    _voiceCardMarkup: voiceCardMarkup,
-    _paintCard: paintCard,
-    _cardValues: cardValues,
+    _lineMarkup: lineMarkup,
+    _lineFor: lineFor,
+    _mountLine: mountLine,
+    _onKeyDown: onKeyDown,
+    // The pending dismiss timer, so a test can assert it was cleared rather than left to keep a
+    // process alive, and a gate can tell "it went away" from "nothing ever drew it".
+    _dismissTimer: () => dismissTimer,
     _echoGate: echoGate,
     _pcm16FromFloat32: pcm16FromFloat32,
     _float32FromPcm16: float32FromPcm16,
     _onMessage: onMessage,
     _onClose: onClose,
-    _minutes: minutes,
   };
 
   if (global.document != null) {
