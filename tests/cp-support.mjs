@@ -243,6 +243,11 @@ export async function startFakeRelay(options = {}) {
     modelLabel: String(options.modelLabel ?? ""),
     // Set to refuse the purge, so a test can watch the removal carry on and say so.
     purgeRefusal: options.purgeRefusal ?? null,
+    // Where the control plane is, so the sweep can mint the way the real relay does. Set AFTER the
+    // control plane starts, because the control plane needs this relay's url to be built at all.
+    cpUrl: String(options.cpUrl ?? ""),
+    // The roster this relay pretends to have read out of the box before minting.
+    roster: options.roster ?? [{ id: "agent-titan", name: "Titan", isGroup: false }],
     // Product mail sends captured here rather than posted anywhere.
     mail: [],
   };
@@ -266,15 +271,40 @@ export async function startFakeRelay(options = {}) {
       const tenantAdmin = /^\/admin\/tenants\/([^/]+)\/(use-included|ceiling|running)$/.exec(url.pathname);
       if (tenantAdmin) {
         const slug = decodeURIComponent(tenantAdmin[1]);
-        if (tenantAdmin[2] === "use-included") { state.modelLabel = String(body?.model ?? options.modelLabel ?? "plan-included"); return send(200, { ok: true, slug, model: state.modelLabel }); }
-        if (tenantAdmin[2] === "ceiling") return send(200, { ok: true, slug, maxAgents: Number(body?.maxAgents ?? 40) });
-        return send(200, { ok: true, slug, modelLabel: state.modelLabel, running: state.modelLabel.length > 0 });
+        if (tenantAdmin[2] === "use-included") { state.modelLabel = String(body?.model ?? options.modelLabel ?? "plan-included"); return send(200, { ok: true, slug, model: state.modelLabel, pinned: false }); }
+        // `read: true` IS PART OF BOTH ANSWERS ON THE REAL RELAY (ui/server.mjs: the ceiling route at
+        // :1913 and the running route at :1757 both carry it), and it means THE BOX ANSWERED as
+        // against this route merely working. Without it here, a fake relay looked healthy while the
+        // onboarding sequence correctly read every answer as "nothing could be read back" and stopped
+        // amber before the welcome -- a fake disagreeing with the thing it stands in for.
+        if (tenantAdmin[2] === "ceiling") return send(200, { ok: true, read: true, slug, maxAgents: Number(body?.maxAgents ?? 40), bots: 1, pinned: false });
+        return send(200, { ok: true, read: true, slug, model: state.modelLabel, modelLabel: state.modelLabel, running: state.modelLabel.length > 0 });
       }
 
       if (url.pathname === "/mail/sweep") {
         if (state.sweepBusy > 0) { state.sweepBusy -= 1; return send(503, { ok: false, error: "sweep_running", message: "a sweep is already running" }); }
         const slug = String(body?.slug ?? "");
-        return send(200, { ok: true, swept: slug.length > 0 ? [{ slug, addresses: 1, minted: 1 }] : [], scope: slug.length > 0 ? "one" : "fleet" });
+        if (slug.length === 0) return send(200, { ok: true, swept: [], scope: "fleet" });
+        // A SWEEP THAT ONLY ANSWERS MINTS NOTHING, and a fake that answers 200 over a workspace it
+        // never gave an address to is the exact shape of a green light somebody believes. The real
+        // relay does not mint either: it reads the box's roster and POSTs it to the control plane's
+        // own /v1/relay/mail/mint (ui/server.mjs's mailMintSweep), which is what puts the row in the
+        // store that cp/mail.mjs directory(slug) later reads -- and that directory read, in the
+        // control plane's own process, is what the onboarding sequence takes as step 4's green.
+        // So this fake does what the real one does, when it has been told where the control plane is.
+        if (String(state.cpUrl ?? "").length === 0) {
+          return send(200, { ok: true, asked: slug, scope: "one", swept: [{ slug, addresses: 0, minted: 0, retired: 0 }] });
+        }
+        void fetch(`${state.cpUrl}/v1/relay/mail/mint`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify({ slug, agents: state.roster }),
+        }).then(async (minted) => {
+          const answer = await minted.json().catch(() => ({}));
+          const addresses = Array.isArray(answer?.addresses) ? answer.addresses : [];
+          send(200, { ok: true, asked: slug, scope: "one", swept: [{ slug, addresses: addresses.length, minted: Number(answer?.minted ?? 0), retired: Number(answer?.retired ?? 0) }] });
+        }).catch((error) => send(200, { ok: true, asked: slug, scope: "one", swept: [{ slug, addresses: 0, minted: 0, retired: 0 }], why: String(error?.message ?? error) }));
+        return undefined;
       }
 
       if (url.pathname === "/mail/product") {
@@ -354,7 +384,18 @@ export async function startControlPlane(options = {}) {
   // The box probe always refuses, so the only thing that can answer "is it up" is the fake
   // Coolify's container status. There is no docker network in a test process, so a real probe of
   // titanbot-box-svc-1:1340 would be a name lookup that means nothing.
-  const app = createApp({ config, store, probeImpl: () => { throw new Error("there is no docker network in a test"); } });
+  // The box probe refuses by default, because there is no docker network in a test process and a real
+  // probe of titanbot-box-svc-1:1340 would be a name lookup that means nothing. WITH
+  // CP_BOX_URL_OVERRIDE SET the caller has given the box a real address, so the probe becomes a real
+  // fetch: a gate that wants to measure what the onboarding sequence reads off a box needs a probe
+  // that can actually reach one, and a refusing probe would make every box read fail for a reason
+  // that has nothing to do with the code under test.
+  const app = createApp({
+    config, store,
+    probeImpl: config.boxUrlOverride.length > 0
+      ? (options.probeImpl ?? globalThis.fetch)
+      : (options.probeImpl ?? (() => { throw new Error("there is no docker network in a test"); })),
+  });
   const server = createHttpServer(app);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -374,6 +415,11 @@ export async function startControlPlane(options = {}) {
     base, app, store, config, env, root, request,
     admin: (method, pathname, body) => request(method, pathname, { body, token: config.adminToken }),
     async dispose() {
+      // AN INVITE STILL GOING WHEN THE STORE CLOSES is a background job writing into a closed
+      // database, which surfaces as "statement has been finalized" on stderr with no line number an
+      // operator could act on. Settled first, always. ONBOARD-2 made this reachable: before it, no
+      // route on this control plane left work running after it answered.
+      await Promise.resolve(app.onboarding?.settle?.()).catch(() => {});
       await new Promise((resolve) => server.close(resolve));
       store.close();
       await rm(root, { recursive: true, force: true });

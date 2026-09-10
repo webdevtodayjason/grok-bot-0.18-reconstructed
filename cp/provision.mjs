@@ -205,6 +205,14 @@ export function loadConfig(env = process.env) {
     sharedNetwork: text("CP_SHARED_NETWORK", CONFIG_DEFAULTS.sharedNetwork),
     relayHost: text("CP_RELAY_HOST", CONFIG_DEFAULTS.relayHost),
     boxReadyTimeoutMs: Number(text("CP_BOX_READY_TIMEOUT_MS", String(CONFIG_DEFAULTS.boxReadyTimeoutMs))) || CONFIG_DEFAULTS.boxReadyTimeoutMs,
+    // ONBOARD-2. Where the onboarding sequence's box reads go, when something has to redirect them.
+    //
+    // FOR GATES ONLY. A box answers at http://titanbot-box-<uuid>:1340 on the docker bridge, which a
+    // gate running its own control-plane process has no route to, so scripts/verify-onboard.mjs
+    // points these reads at a stub with this. It is empty on the R750 and the control-plane install
+    // never writes it. A value here in production would send every customer's box read to one
+    // address, which reads as the wrong box answering rather than as nothing answering.
+    boxUrlOverride: text("CP_BOX_URL_OVERRIDE", "").replace(/\/+$/, ""),
     boxReadyIntervalMs: Number(text("CP_BOX_READY_INTERVAL_MS", String(CONFIG_DEFAULTS.boxReadyIntervalMs))) || CONFIG_DEFAULTS.boxReadyIntervalMs,
     // CP_COOLIFY_URL first, because COOLIFY_URL is a name Coolify owns. Coolify injects its own
     // COOLIFY_URL into every service container, set to that service's public address, and its

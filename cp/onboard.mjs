@@ -371,8 +371,16 @@ export function createOnboarding(options = {}) {
       tenant: tenant == null ? null : { slug: tenant.slug, name: tenant.name, status: tenant.status, boxReady: tenant.boxReady === true },
       steps: folded.steps.map((one) => ({
         key: one.key,
+        // THE SAME TWO FACTS UNDER BOTH NAMES, and this is not tidiness. cp/admin/admin.js reads
+        // `key` and `state`; cp/cli.mjs's `signup add` printer and scripts/verify-onboard.mjs both
+        // read `name` and `status`. On the merged tip the CLI printed "undefined" for every step and
+        // collapsed all five into one line, and the gate's step-order leg read five undefineds. One
+        // of the two spellings had to win or both had to be carried; carrying both is the change
+        // that breaks no reader.
+        name: one.key,
         label: one.label,
         state: one.state,
+        status: one.state,
         // ISO, because this is what the card renders and what the R750 measurement reads the wall
         // clock of each step out of.
         at: one.at > 0 ? new Date(one.at).toISOString() : null,
@@ -417,7 +425,7 @@ export function createOnboarding(options = {}) {
     if (container.length === 0) {
       return stop(slug, LEDGER.box, "failed", { why: "this workspace has no container name on its row, so there is nothing to ask for its health", next: "Press Provision on this row." });
     }
-    const gateway = `http://${container}:1340`;
+    const gateway = boxBase(container);
     const token = readGatewayToken(slug, config) ?? "";
 
     // WHY ANY ANSWER ON 1340 IS THE PROOF. source/host/main.ts awaits host.start() before it binds
@@ -456,6 +464,22 @@ export function createOnboarding(options = {}) {
     });
   }
 
+  /**
+   * Where a box answers. `http://titanbot-box-<uuid>:1340` on the docker bridge, which is why this
+   * control plane is on titanbot-net at all.
+   *
+   * config.boxUrlOverride (CP_BOX_URL_OVERRIDE) exists for ONE reason: a gate running a real
+   * control-plane process cannot reach a container name, and scripts/verify-onboard.mjs has to point
+   * these reads at a stub box to measure the sequence at all. It is never set on the R750 and the
+   * control-plane install does not write it. A production value here would send every box read for
+   * every customer to one address, which the health step would report as the wrong box answering
+   * rather than as nothing answering.
+   */
+  function boxBase(container) {
+    const override = String(config?.boxUrlOverride ?? "").trim().replace(/\/+$/, "");
+    return override.length > 0 ? override : `http://${container}:1340`;
+  }
+
   // ---- one call into a box, and the two commands this file is allowed to make -------------------
 
   async function boxCall(slug, command, args = {}) {
@@ -465,7 +489,7 @@ export function createOnboarding(options = {}) {
     const token = readGatewayToken(slug, config) ?? "";
     if (token.length === 0) return { ok: false, why: "this workspace's gateway token could not be read, so its box cannot be asked anything" };
     try {
-      const answer = await probeImpl(`http://${container}:1340/api/${command}`, {
+      const answer = await probeImpl(`${boxBase(container)}/api/${command}`, {
         method: "POST",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json" },
         body: JSON.stringify(args ?? {}),
@@ -648,7 +672,38 @@ export function createOnboarding(options = {}) {
       try { sender = await import("./welcome.mjs"); }
       catch { sender = null; }
     }
-    const send = typeof sender?.sendWelcome === "function" ? sender.sendWelcome : (typeof sender?.default === "function" ? sender.default : null);
+    // TWO SHAPES ARE ACCEPTED HERE, and the reason is worth reading. cp/welcome.mjs ships a
+    // FACTORY, createWelcome({store, config, fetchImpl, askRelayPost, now}), whose send() takes the
+    // owner's address as `email` and hands the fresh link back as `signInUrl`. A test double, and
+    // any later sender, may instead be a flat sendWelcome(asked). Both are wired below rather than
+    // one of them being made to look like the other, because a translation layer that exists in
+    // only one direction is how an integration passes its own tests and mails nobody.
+    const send = typeof sender?.createWelcome === "function"
+      ? async (asked) => {
+        const built = sender.createWelcome({
+          store: asked.store, config: asked.config, fetchImpl: asked.fetchImpl,
+          askRelayPost: asked.askRelayPost, now: asked.now,
+        });
+        const answer = await built.send({
+          slug: asked.slug,
+          // The OWNER'S address, which is what the mail greets and what the override is measured
+          // against. It is not the recipient: `to` is, and on the R750 run they are different.
+          email: String(asked.account?.email ?? asked.tenant?.ownerEmail ?? ""),
+          name: String(asked.name ?? ""),
+          company: String(asked.tenant?.name ?? ""),
+          host: String(asked.tenant?.host ?? ""),
+          to: asked.to,
+          temporaryPassword: asked.temporaryPassword,
+          titanAddress: asked.titanAddress,
+          actor: asked.actor,
+          account: asked.account,
+          tenant: asked.tenant,
+        });
+        // The link comes back under its own name and is handed on under this file's. It is read
+        // once here and written to no row, no log and no ledger detail.
+        return { ...answer, signIn: String(answer?.signInUrl ?? answer?.signIn ?? "") };
+      }
+      : (typeof sender?.sendWelcome === "function" ? sender.sendWelcome : (typeof sender?.default === "function" ? sender.default : null));
     if (send == null) {
       return stop(slug, LEDGER.welcome, "amber", { why: WELCOME_NO_SENDER, next: "Copy the welcome note from the card and send it the way you would send any password." });
     }
@@ -667,6 +722,13 @@ export function createOnboarding(options = {}) {
         slug,
         tenant,
         account: owner,
+        // THE PERSON'S NAME, off the account row, and deliberately not plan.name: that one is the
+        // COMPANY (the route passes `name: company` when it starts the job, and it is the workspace's
+        // display name everywhere else in this file). Greeting a new customer "Hi Acme," on the first
+        // line of the first thing the product ever sends them is the kind of wrong that gets noticed
+        // and never reported. cp/welcome.mjs falls back to the local part of the address when an
+        // account has no name at all.
+        name: String(owner.name ?? ""),
         // The override, said in plain words on the card and in the row: ONE recipient, never a bcc.
         // A copy to a third party would put a live sign-in link and a password for a customer's
         // workspace in somebody else's inbox until it expires, and the link is a bearer the relay

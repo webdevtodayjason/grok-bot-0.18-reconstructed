@@ -115,6 +115,15 @@ export async function startStubRelay(options = {}) {
     useIncluded: options.useIncluded ?? { ok: true, pinned: false },
     running: options.running ?? { read: true, model: "plan-zai", modelLabel: "GLM-5.3", pinned: false },
     sweep: options.sweep ?? { ok: true, swept: [] },
+    // POST /mail/product, the relay's product-mail door. Here so the REAL cp/welcome.mjs can be
+    // driven through the real sequencer with nothing stubbed between them: the seam between the two
+    // is the one thing neither item's own suite could test, and the R750 must not be where it is
+    // first tried. The From is the relay's to decide, so the stub decides one too.
+    product: options.product ?? ((request, body) => ({
+      id: `stub-resend-${randomBytes(6).toString("hex")}`,
+      from: "Titanium Bot <welcome@titanium.bot>",
+      to: body?.to ?? "",
+    })),
     boxes: options.boxes ?? { boxes: [] },
     routes: () => calls.map((call) => `${call.method} ${call.path}`),
     callsTo: (route) => calls.filter((call) => `${call.method} ${call.path}` === route),
@@ -151,6 +160,10 @@ export async function startStubRelay(options = {}) {
       if (url.pathname === "/mail/sweep") {
         const answer = resolve(api.sweep, request, body);
         return json(response, answer.status ?? (answer.ok === false ? 503 : 200), answer);
+      }
+      if (url.pathname === "/mail/product") {
+        const answer = resolve(api.product, request, body);
+        return json(response, answer.status ?? (answer.ok === false ? 502 : 200), answer);
       }
       if (url.pathname === "/admin/boxes") return json(response, 200, resolve(api.boxes, request, body));
       return json(response, 404, { error: "not found" });

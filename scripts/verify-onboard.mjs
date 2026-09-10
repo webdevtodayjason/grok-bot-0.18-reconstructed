@@ -413,6 +413,9 @@ async function sequenceArm() {
       CP_BOX_URL_OVERRIDE: box.url,
     },
   });
+  // The sweep mints through the control plane's own relay door, the way the real one does, and it
+  // needs the address of a control plane that could not exist until this relay did.
+  relay.state.cpUrl = cp.base;
   const ask = (method, pathname, body) => fetch(`${cp.base}${pathname}`, {
     method,
     headers: {
@@ -428,7 +431,15 @@ async function sequenceArm() {
     const started = Date.now();
     const answer = await ask("POST", "/v1/admin/clients", {
       email: "owner@onboard.test", company: "Onboard Test Gate", name: "Onboard Test",
-      welcome: true, welcomeTo: "gate@onboard.test", ceiling: 40,
+      // `sendWelcome` is the route's field, which this gate had as `welcome`. With the wrong name the
+      // invite ran all five steps and mailed nobody, and the leg below read that as the welcome
+      // failing rather than as never having been asked for.
+      // A PLAN MODEL IS ASKED FOR ON PURPOSE. writeBoxDefaults leaves a new box with no model, and
+      // the design stops the sequence amber before the welcome when none can be read back, because
+      // Titan would be awake and mute. So an invite that wants a welcome has to point the workspace
+      // at something first, and this leg is the happy path.
+      planModel: "plan-zai",
+      sendWelcome: true, welcomeTo: "gate@onboard.test", ceiling: 40,
     });
     const jobShaped = answer.status === 202 && typeof answer.body?.jobId === "string";
     if (!jobShaped) {
@@ -472,7 +483,10 @@ async function sequenceArm() {
     await checking("the ready step is accepted only on how=gateway", async () => {
       const boxStep = (state?.steps ?? []).find((row) => row.name === "box");
       assert.equal(boxStep?.status, "ok", `the box step is ${boxStep?.status}`);
-      const ledger = cp.store.listSteps(slug).find((row) => row.step === "ready");
+      // THE LAST ready ROW, not the first. The ledger is append-only: provisionTenant writes one when
+      // its own wait ends (how "coolify" when only a container exists) and the sequence writes a
+      // second when the box itself answers on /health. Reading the first is reading the older fact.
+      const ledger = cp.store.listSteps(slug).filter((row) => row.step === "ready").at(-1);
       assert.match(String(ledger?.detail ?? ""), /"how":"gateway"/, "a coolify how was accepted as ready");
       return "a created container is not a booted host";
     });

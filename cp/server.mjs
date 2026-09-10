@@ -1656,7 +1656,12 @@ export function createApp(options = {}) {
     }
   }
 
-  return { config, store, client, handle: guarded, refreshBoxPeers, boxPeers, reconcileFallbacks, marketplaceVerificationState, voice };
+  // ONBOARD-2. `onboarding` is handed out so a SHUTDOWN can wait for an invite that is still going.
+  // It is the first piece of work on this control plane that outlives the response that started it:
+  // closing the store under it writes into a finalized statement, which reaches an operator as
+  // "statement has been finalized" on stderr with nothing to act on, and costs the job its last
+  // ledger row, which is the row that says where it got to.
+  return { config, store, client, handle: guarded, refreshBoxPeers, boxPeers, reconcileFallbacks, marketplaceVerificationState, voice, onboarding: admin.onboarding };
 }
 
 export function createHttpServer(app) {
@@ -1746,7 +1751,18 @@ async function main() {
       process.stdout.write("Coolify is not configured, so tenants can be recorded and adopted but not created. Set COOLIFY_URL and COOLIFY_API_KEY.\n");
     }
   });
-  const shutdown = () => { server.close(() => { app.store.close(); process.exit(0); }); };
+  // The store closes only after an invite still in flight has stopped writing to it. Bounded, because
+  // a shutdown that waits on a ten minute box wait is a shutdown that never happens.
+  const shutdown = () => {
+    server.close(async () => {
+      await Promise.race([
+        Promise.resolve(app.onboarding?.settle?.()).catch(() => {}),
+        new Promise((resolve) => setTimeout(resolve, 5_000).unref()),
+      ]);
+      app.store.close();
+      process.exit(0);
+    });
+  };
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 }

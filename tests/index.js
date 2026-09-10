@@ -176,6 +176,7 @@ import "./gate-agent.test.mjs";
 import "./login-ledger.test.mjs";
 import "./machine-room-onboarding.test.mjs";
 import "./mail-edge-routing.test.mjs";
+import "./onboard-seam.test.mjs";
 import "./onboarding-first-agent.test.mjs";
 import "./onboarding-state.test.mjs";
 import "./relay-admin-routes.test.mjs";

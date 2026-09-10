@@ -2662,8 +2662,34 @@ export function createAdminApi({
   /** cp/decommission.mjs, resolved the same way the welcome sender is, and for the same reason. */
   async function removalModule() {
     if (deps.decommission != null) return deps.decommission;
-    try { return await import("./decommission.mjs"); }
+    let module = null;
+    try { module = await import("./decommission.mjs"); }
     catch { return null; }
+    // TWO SHAPES, for the reason the welcome sender takes two. cp/decommission.mjs ships a FACTORY,
+    // createDecommission({store, config, client, proxy, askRelayPost, mailDirectory}), returning
+    // plan(slug) and remove({slug, confirm, deleteData, actor}). A double may instead be flat. The
+    // factory is built here, once per call, with this file's own proxy and mail directory handed in
+    // so the count on the confirm panel is the same number the operator's Mail page shows.
+    if (typeof module?.createDecommission !== "function") return module;
+    const built = module.createDecommission({
+      store, config, fetchImpl, now, client,
+      proxy: proxy ?? { configured: false },
+      askRelayPost,
+      mailDirectory: mailDirectory(),
+    });
+    return {
+      // The route hands its whole world in; this library only ever wanted the name.
+      plan: async (asked) => built.plan(String(asked?.slug ?? "")),
+      // THE TYPED NAME WAS ALREADY CHECKED BY THE ROUTE, which is what lets a mismatch have no
+      // effect at all, not even a stop. It is passed on here so the library's own refusal stays
+      // armed for every other caller: the CLI reaches remove() directly and is not behind this.
+      removeClient: async (asked) => built.remove({
+        slug: String(asked?.slug ?? ""),
+        confirm: String(asked?.confirm ?? asked?.slug ?? ""),
+        deleteData: asked?.deleteData === true,
+        actor: String(asked?.actor ?? ""),
+      }),
+    };
   }
 
   async function handle(request, response, { segments, method, body, url }) {
@@ -3075,9 +3101,13 @@ export function createAdminApi({
         return true;
       }
       const ok = removed?.ok === true;
+      // The library says `message`; this file has been saying `why`. Both are carried, so neither
+      // the card nor the CLI reads an empty string off a removal that stopped for a named reason.
+      const said = String(removed?.why ?? removed?.message ?? "the removal did not finish");
+      if (removed != null && typeof removed === "object") { removed.why = said; removed.message = String(removed.message ?? said); }
       ledger[ok ? "done" : "failed"](ok
         ? `${slug} is gone${removed?.dataDeleted === true ? ", data and all" : ", data kept"}`
-        : String(removed?.why ?? "the removal did not finish"));
+        : said);
       json(response, ok ? 200 : (Number(removed?.status) > 0 ? Number(removed.status) : 409), removed ?? { error: "remove_failed", message: "The removal answered nothing." });
       return true;
     }

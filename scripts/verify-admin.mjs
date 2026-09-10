@@ -523,6 +523,25 @@ const fixtureBodiesSeen = [];
 const addedClients = [];
 const takenEmails = new Set();
 const mintedPasswords = [];
+// ONBOARD-2. One invite's five steps per workspace, so the card's poll has something to fill with.
+// The labels are Jason's own words and three places in the product render them; a change to one of
+// them here is a change somebody makes on purpose.
+const onboarding = new Map();
+const freshSteps = () => [
+  ["workspace", "Creating the workspace"],
+  ["box", "Building the computer"],
+  ["titan", "Waking Titan"],
+  ["addresses", "Giving the agents their addresses"],
+  ["welcome", "Sending the welcome"],
+].map(([key, label], index) => ({
+  key, name: key, label,
+  // The first one is already done inside the 202: the workspace and the account exist or the route
+  // would have refused instead of accepting.
+  state: index === 0 ? "ok" : "waiting",
+  status: index === 0 ? "ok" : "waiting",
+  at: index === 0 ? nowIso() : null,
+  why: "", next: "", stalled: false, detail: {},
+}));
 
 /**
  * The whole fixture as one Playwright route handler. Returns [status, body] for a request, or null
@@ -620,9 +639,19 @@ function providersFixtureAnswer(method, pathname, body) {
       spend: null,
     });
     fixtureLedger("added a client", slug, `${email}, ceiling ${body?.ceiling ?? "the default"}`);
-    return [201, {
+    // ONBOARD-2. THE INVITE IS A JOB, so this answers 202 with the five steps and the card polls
+    // GET /v1/admin/clients/<slug>/onboarding for the rest. The route cannot be synchronous:
+    // api.titanium.bot is behind Cloudflare, which cuts a proxied request at about 100 s, and a
+    // synchronous invite would 524 with a half-built tenant behind it and the temporary password
+    // lost with the response. So the password is in THIS answer and nowhere else.
+    onboarding.set(slug, { steps: freshSteps(), startedAt: Date.now(), sendWelcome: body?.sendWelcome === true });
+    const welcomeTo = String(body?.welcomeTo ?? "").trim().toLowerCase();
+    return [202, {
       tenant: { slug, name: company },
       account: { email, name: String(body?.name ?? "") },
+      slug,
+      jobId: `onboard-${slug}-${randomBytes(4).toString("hex")}`,
+      steps: onboarding.get(slug).steps,
       temporaryPassword,
       // THE TYPES THE ROUTE REALLY ANSWERS, not the ones that read well on a card. This fixture
       // once answered a model name and a number here while cp/admin.mjs answered two booleans, and
@@ -632,8 +661,35 @@ function providersFixtureAnswer(method, pathname, body) {
       state: "building",
       planModel: { applied: String(body?.planModel ?? "").length > 0, why: "the workspace starts on it at its first turn" },
       ceiling: { applied: String(body?.ceiling ?? "").length > 0, asked: body?.ceiling == null ? null : Number(body.ceiling), maxAgents: null, why: "written into the box's own environment" },
-      welcomeMail: { sent: false, why: "this control plane sends no mail yet" },
-      message: `${company} was added. The workspace is still coming up.`,
+      welcomeMail: body?.sendWelcome === true
+        ? {
+          asked: true, sent: false,
+          to: welcomeTo.length > 0 ? welcomeTo : email,
+          overridden: welcomeTo.length > 0 && welcomeTo !== email,
+          replyTo: "support@titaniumcomputing.com",
+          why: "it goes when the steps above it are done",
+        }
+        : { asked: false, sent: false, to: "", overridden: false, replyTo: "support@titaniumcomputing.com", why: "no welcome was asked for, so nothing will be sent. The temporary password is on this card." },
+      message: `${company} was created. Their computer is being built now.`,
+    }];
+  }
+
+  // ONBOARD-2. The five steps the card polls. Each tick moves one more of them to ok, so the page
+  // leg can watch a strip fill the way an operator does without waiting on a real box.
+  if (at[0] === "clients" && at.length === 3 && at[2] === "onboarding" && method === "GET") {
+    const slug = decodeURIComponent(at[1]);
+    const held = onboarding.get(slug);
+    if (held == null) return [404, { error: "not_found" }];
+    const next = held.steps.find((row) => row.state !== "ok");
+    if (next != null) {
+      next.state = "ok";
+      next.at = nowIso();
+    }
+    const done = held.steps.every((row) => row.state === "ok");
+    return [200, {
+      slug, jobId: `onboard-${slug}`, running: !done, steps: held.steps, done,
+      stopped: null, retryable: false, measuredAt: nowIso(),
+      labels: held.steps.map((row) => row.label),
     }];
   }
 
@@ -2600,12 +2656,18 @@ if (!WANT_BROWSER) {
   await page.click("#addClientShow");
   check(await page.locator("#addClientForm").isVisible(), "pressing it opens the form");
 
-  // THE MAIL TICK IS NOT A GREEN LIGHT. This control plane sends no mail at all, so the box is
-  // present, off, and disabled with the reason beside it.
-  check(await page.locator("#acWelcome").isDisabled(), "the welcome mail box is disabled");
-  check(await page.locator("#acWelcome").isChecked() === false, "and unchecked, so nothing on the screen suggests mail went out");
-  check(String(await page.locator("#acWelcomeWhy").textContent()).includes("does not send mail yet"),
-    "with the reason next to it", String(await page.locator("#acWelcomeWhy").textContent()).replace(/\s+/g, " ").slice(0, 70));
+  // ONBOARD-2 CLOSED ADMIN-2c. Until this wave the control plane sent no mail at all, so this box was
+  // present, off and DISABLED with the reason beside it, and that is what this leg used to assert.
+  // The product now sends the welcome itself, so the box is enabled and ON by default: an operator
+  // who does nothing gets a customer who receives their workspace.
+  check(!(await page.locator("#acWelcome").isDisabled()), "the welcome mail box is live now, not a dead control");
+  check(await page.locator("#acWelcome").isChecked(), "and ON by default, so an invite sends the welcome unless somebody turns it off");
+  check(String(await page.locator("#acWelcomeWhy").textContent()).includes("once their bots have their addresses"),
+    "with the reason next to it, which is the order the steps actually run in",
+    String(await page.locator("#acWelcomeWhy").textContent()).replace(/\s+/g, " ").slice(0, 70));
+  // THE OVERRIDE, not a copy. One recipient, which is what the R750 measurement uses.
+  check((await page.locator("#acWelcomeTo").count()) === 1,
+    "and a field to send that one welcome somewhere else, for a test or an owner who asks");
 
   // Three of the four, because plan-zai-vision is the model everything else falls back TO and no
   // customer is ever put on it: it carries no customer name, so offering it here would put a routing
@@ -2623,13 +2685,24 @@ if (!WANT_BROWSER) {
   await page.click("#addClientSave");
   await page.waitForSelector("#addClientResult .newClient", { timeout: 20_000 }).catch(() => {});
   const newCard = String(await page.locator("#addClientResult").textContent());
-  check(newCard.includes("still coming up"),
+  check(newCard.includes("being built now"),
     "the form adds the client and says what state the workspace is in", newCard.replace(/\s+/g, " ").slice(0, 90));
   check(newCard.includes("This password is shown once. Copy it now."),
     "the card says the password will not be shown again");
   check(newCard.includes("northwind-plumbing"), "and names the workspace the company gave its name to",
     newCard.replace(/\s+/g, " ").slice(0, 90));
-  check(newCard.includes("No welcome mail was sent"), "and says plainly that no mail went out");
+  // The welcome is ASKED FOR on this card now, so what the card must do is say where it is going and
+  // where replies land. Whether it arrives is the fifth step's business, below.
+  check(/Welcome email:/.test(newCard), "and says in words what is happening about the welcome email",
+    (newCard.match(/Welcome email:[^.]{0,70}/) ?? ["not on the card"])[0]);
+  // The strip is drawn from the 202 and then polled, so it is waited for rather than read on the
+  // first frame: a press that answers before the box exists has nothing to draw yet.
+  await page.waitForFunction(() => (document.querySelectorAll("#addClientSteps .stepRow").length >= 5), null, { timeout: 20_000 }).catch(() => {});
+  check((await page.locator("#addClientSteps .stepRow").count()) === 5,
+    "and draws the five named steps, because a press that answers in 89 ms has to show what is still going",
+    `${await page.locator("#addClientSteps .stepRow").count()} rows`);
+  check((await page.locator("#addClientSteps").textContent()).includes("Creating the workspace"),
+    "in Jason's own words");
   // ADMIN-2. THE TWO LINES THAT PRINTED A RAW BOOLEAN. `applied` is a boolean on the route, and the
   // card read it with `?? "not applied"`, which never fires on false: the operator's success card
   // said "Plan model: false" and "Agent ceiling: false" in production while this leg passed, because
@@ -2657,6 +2730,10 @@ if (!WANT_BROWSER) {
   await page.click("#addClientShow");
   await page.fill("#acEmail", NEW_EMAIL);
   await page.fill("#acCompany", "Northwind Heating");
+  // The person's name is a REQUIRED field since ONBOARD-2, because the welcome greets them by it.
+  // Left empty the browser refuses the submit itself, and this leg then measured the previous
+  // success banner and read it as a missing refusal.
+  await page.fill("#acName", "Dale Northwind");
   await page.click("#addClientSave");
   await page.waitForFunction(() => document.getElementById("banner")?.textContent?.includes("already has an account") === true, null, { timeout: 15_000 })
     .catch(() => {});
@@ -2737,7 +2814,13 @@ step("what a successful add really answers");
     token: bossToken,
     body: { email: fresh, company: `Contract ${randomBytes(3).toString("hex")}`, name: "A Person", ceiling: 40 },
   });
-  check(made.status === 201, "a fresh address is added", `status ${made.status} ${String(made.json?.message ?? "").slice(0, 60)}`);
+  // 202 AND NOT 201 SINCE ONBOARD-2. api.titanium.bot is behind Cloudflare, which cuts a proxied
+  // request at about 100 s, and this route now waits on a box, a model, a sweep and a mail. So it
+  // answers the moment the workspace and the account exist, carrying the temporary password, and the
+  // card polls the five steps. The password being in THIS answer is what no timeout can swallow.
+  const body0 = made.json ?? {};
+  check(made.status === 202, "a fresh address is accepted as a job", `status ${made.status} ${String(made.json?.message ?? "").slice(0, 60)}`);
+  check(typeof body0.jobId === "string" && body0.jobId.length > 0, "and the answer names the job the card polls", String(body0.jobId));
   const body = made.json ?? {};
   check(body.tenant != null && typeof body.tenant.slug === "string" && body.tenant.slug.length > 0,
     "and the answer names the workspace it made", String(body.tenant?.slug));

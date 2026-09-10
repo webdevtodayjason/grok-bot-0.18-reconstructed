@@ -401,15 +401,19 @@ test("a sweep that never mints an address leaves the step amber with a second pr
   } finally { await box.close(); await relay.close(); }
 });
 
-test("with no welcome sender in the checkout the step says so rather than throwing", async () => {
+test("a control plane shipped with no welcome sender says so rather than throwing", async () => {
   const box = await startStubBox({ answers: freshBoxAnswers });
   const relay = await startStubRelay();
   try {
     await withPlane(async (plane) => {
       plane.seedTenant({ slug: "acme" });
-      // No welcome dep, and cp/welcome.mjs is resolved by a dynamic import INSIDE the step, so this
-      // is the shape of a control plane built before that file landed.
-      const sequence = sequenceOver(plane, { box, relay, welcome: null, mail: mailAfter("acme") });
+      // `false` is this file's way of saying THERE IS NO SENDER, as against `null`, which means
+      // "resolve cp/welcome.mjs by import". Before the wave merged, the same branch was reached by
+      // that file simply not existing; now that it does, the marker is the only honest way to drive
+      // it. The condition is still real and still worth a test: deploy/r750/sync.sh shipping the
+      // control plane without cp/welcome.mjs lands exactly here, and it must say so rather than
+      // throw inside a background job where nobody would see it.
+      const sequence = sequenceOver(plane, { box, relay, welcome: false, mail: mailAfter("acme") });
       sequence.start({ slug: "acme", sendWelcome: true });
       await sequence.settle("acme");
 
@@ -665,6 +669,10 @@ test("Remove reaches its injected removal with the slug, the data switch and who
 });
 
 test("a control plane with no removal in it touches nothing and says so", async () => {
+  // `decommission: false` is THERE IS NO REMOVAL LIBRARY, where `null` would mean "import
+  // cp/decommission.mjs". That file is in the tree now, so absence is no longer a thing a test can
+  // arrange; the branch it guards is a control plane shipped without it, which must refuse rather
+  // than half-remove a customer.
   await withPlane(async (plane) => {
     plane.seedTenant({ slug: "acme" });
     const answer = await plane.request("DELETE", "/v1/admin/clients/acme", { body: { confirm: "acme", deleteData: true } });
@@ -678,7 +686,7 @@ test("a control plane with no removal in it touches nothing and says so", async 
     assert.equal(plan.body.read, false);
     assert.deepEqual(plan.body.effects, []);
     assert.match(plan.body.why, /no removal in it yet/);
-  });
+  }, { deps: { decommission: false } });
 });
 
 test("a retry while the job is still going is refused rather than run twice", async () => {
@@ -699,6 +707,10 @@ test("a retry while the job is still going is refused rather than run twice", as
 test("the welcome record is read through a guard, so a control plane without that table still draws a row", async () => {
   await withPlane(async (plane) => {
     plane.seedTenant({ slug: "acme" });
+    // cp/store.mjs carries welcome_sends since item B landed, so the missing-table shape is made
+    // here rather than found. The guard is what keeps a control plane whose migration has not run
+    // yet drawing the client row at all instead of answering a stack trace.
+    plane.store.listWelcomeSends = undefined;
     const answer = await plane.request("GET", "/v1/admin/clients/acme/welcome");
     assert.equal(answer.status, 200, answer.text);
     assert.equal(answer.body.read, false);
