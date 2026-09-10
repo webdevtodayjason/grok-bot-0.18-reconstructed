@@ -2825,16 +2825,40 @@ async function codeTaskOpen(row) {
   return { ok: false, error: String(body?.error ?? `HTTP ${response.status}`), message: String(body?.message ?? "the claim was refused") };
 }
 
-/** And what happened to it. Never awaited into a refusal: a close that fails is logged, not raised. */
+/** And what happened to it. Never awaited into a refusal: a close that fails is logged, not raised.
+ *
+ *  THE DEADLINE IS 45 SECONDS AND NOT 10, AND IT RETRIES ONCE. The control plane reads the task's
+ *  model spend off the per-task key before it answers, and the proxy books a key's spend with the
+ *  same batch writer /spend/logs is filled from: measured at about fifteen seconds, so that read
+ *  waits up to twenty. A 10 s deadline here therefore timed out on a close that was working --
+ *  measured on the R750 2026-09-10, "could not close task row 2: The operation was aborted due to
+ *  timeout" on a task that really had ended, which leaves a container's minutes unbilled. The retry
+ *  is safe by the other side's own design: the row's ended_at is written BEFORE that wait, so a
+ *  second close answers {ok:true, already:true} at once and the first one finishes on its own. */
 async function codeTaskClose({ id, outcome, minutes, detail }) {
   if (RELAY == null || !(Number(id) > 0)) return;
-  const response = await fetch(`${RELAY.cpUrl}/v1/relay/code/task/close`, {
-    method: "POST",
-    body: JSON.stringify({ id: Number(id), outcome, minutes, detail }),
-    headers: { authorization: `Bearer ${RELAY.relayToken}`, "content-type": "application/json", accept: "application/json" },
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
+  let last = null;
+  for (const deadline of [45_000, 45_000]) {
+    let response;
+    try {
+      response = await fetch(`${RELAY.cpUrl}/v1/relay/code/task/close`, {
+        method: "POST",
+        body: JSON.stringify({ id: Number(id), outcome, minutes, detail }),
+        headers: { authorization: `Bearer ${RELAY.relayToken}`, "content-type": "application/json", accept: "application/json" },
+        signal: AbortSignal.timeout(deadline),
+      });
+    } catch (error) {
+      // A timeout is the one failure worth asking again about; anything else is this relay's own.
+      last = error;
+      if (error?.name === "TimeoutError") continue;
+      throw error;
+    }
+    if (response.status === 200) return;
+    last = new Error(`HTTP ${response.status}`);
+    // A 404 means the control plane has no such row, and asking twice will not invent one.
+    if (response.status === 404) throw last;
+  }
+  throw last ?? new Error("the close never answered");
 }
 
 /** The E2B key, asked for again rather than held between calls. It is a write-only control plane

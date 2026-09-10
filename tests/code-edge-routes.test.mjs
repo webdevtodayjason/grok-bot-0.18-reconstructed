@@ -593,3 +593,37 @@ test("the rows this workspace keeps fold to one per task and carry the customer'
   assert.equal(folded[0].state, "done");
   assert.equal(folded[0].title, "primes", "the title is the workspace's own, and stays on the relay");
 });
+
+// ---- the seam between this relay and the control plane ------------------------------------------
+
+test("the control plane close is given longer than the proxy takes to book a spend, and asked twice", async () => {
+  // MEASURED ON THE R750 2026-09-10. `codeTaskClose` lives in ui/server.mjs module scope and is not
+  // exported, so this reads it as text -- which is the right shape anyway, because what must not
+  // regress is a NUMBER somebody could reasonably tidy back down. The control plane reads the task's
+  // model spend off the per-task key before it answers, and the proxy books a key's spend with the
+  // same batch writer /spend/logs is filled from: about fifteen seconds, so that read waits twenty.
+  // With a 10 s deadline here the relay logged "could not close task row 2: The operation was
+  // aborted due to timeout" for a close that was working, which leaves a container's minutes
+  // unbilled -- the one thing the claim-before-the-container rule exists to prevent.
+  const text = await readFile(new URL("../ui/server.mjs", import.meta.url), "utf8");
+  const decl = text.indexOf("async function codeTaskClose");
+  assert.ok(decl > 0, "codeTaskClose is still the name of the close");
+  // From its own doc comment, because the reason the retry is safe is written there and a reason is
+  // the half of this that a future reader needs more than the number.
+  const at = text.lastIndexOf("/**", decl);
+  // Bounded to this function alone: the next declaration after it carries its own, shorter deadline,
+  // and a window that runs past the closing brace reads that one and fails for the wrong reason.
+  const rest = text.slice(at + 1);
+  const ends = rest.indexOf("\n/**");
+  const body = rest.slice(0, ends > 0 ? ends : 2400);
+  assert.match(body, /AbortSignal\.timeout\(/, "the close still carries a deadline");
+  const attempts = body.match(/for \(const deadline of \[([^\]]+)\]\)/);
+  assert.ok(attempts != null, "the deadlines are a list, which is what makes the retry readable");
+  const deadlines = attempts[1].split(",").map((n) => Number(n.trim().replace(/_/g, "")));
+  assert.equal(deadlines.length, 2, "asked twice: once, and once more if the first timed out");
+  for (const ms of deadlines) {
+    assert.ok(ms >= 25_000, `a close deadline of ${ms} ms is shorter than the spend read it is waiting on`);
+  }
+  assert.match(body, /TimeoutError/, "a timeout is the failure it asks again about");
+  assert.match(body, /already/, "and the retry is safe because the other side answers already:true");
+});
