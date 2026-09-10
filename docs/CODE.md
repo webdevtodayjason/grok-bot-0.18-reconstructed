@@ -323,6 +323,14 @@ Every one of these cost somebody an afternoon, or would have.
 | **E2B model spend is unattributed** | see §10. Not a zero on a panel |
 | **The 28th tool schema** | on a mail-enabled tenant box this is schema 28. Above Ollama's measured six-tool shim ceiling and below the 26 that vLLM Nemotron and GLM both passed, so small local endpoints are a known risk rather than a discovery. **CODE-10** |
 | **`/spend/logs` batching** | see §8. **CODE-11** |
+| **A box's own `id -u` is 0** | **measured on the R750 2026-09-10:** the boxes there run as root, so `id -u` answers `0`. A `uid > 0` guard read that as "no answer" and fell back to 1000 while the task directory was made root-owned, and the agent inside failed on its very first write: `cannot create /task/SUMMARY.md: Permission denied`. Zero is an answer. The directory owner and `--user` now come from that one number, so they cannot disagree |
+| **A container is not an endpoint before it starts** | so a sweep tick landing between `docker create` and `docker start` saw no sandbox on the task network and removed it. A live task keeps its network; `finish` → `teardown` is what removes it |
+| **Nothing else closes a task that dies early** | the deadline is half an hour away, the relay still holds it live so it is no orphan, and `/code/list` — which is what the bot's watcher polls — reads the rows as they stand. **Measured on the R750 2026-09-10:** the Coding strip read "running, 9m 38s" ten minutes after the container had exited 2, and the bot was never told anything. The sweep settles a live task whose container has stopped, which is §12's job |
+| **The close waits on a spend the proxy has not booked** | the control plane reads the task's spend off the per-task key before it answers, and the proxy books it about fifteen seconds late, so that read waits twenty. **Measured on the R750 2026-09-10** with a 10 s deadline on this side: `could not close task row 2: The operation was aborted due to timeout` for a close that was working, which leaves a container's minutes unbilled. Forty-five seconds, and a timeout is asked again once — safe because the other side writes `ended_at` before the wait and answers `already:true` |
+| **Minutes are the container's, not the waiting's** | **measured on the R750 2026-09-10:** a container that exited after about a second went onto the operator's ledger as **16.78 minutes**, because the clock ran until the sweep noticed. `State.FinishedAt` is the end of a task |
+| **A root box cannot run the agent, and a non-root one cannot own the directory** | the two constraints look symmetrical and are not. **Measured on the R750 2026-09-10, in both directions:** with `--user 1000` on a root-owned directory the agent failed on its first write; with `--user 0` it failed with `--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons`. The artifacts only need to be READABLE by the box, and a root box reads anything, so a root box maps to the image's own `USER 1000:1000` and a non-root box keeps its uid |
+| **A pipe and a redirect cannot both feed one stdin** | the entrypoint piped the prompt into the agent and then wrote `< /dev/null` after the pipe, so the redirect won. **Measured on the R750 2026-09-10:** every task died with `Error: Input must be provided either through stdin or as a prompt argument when using --print`, and the test guarding it asserted the redirect was PRESENT — it pinned the bug. Once the agent has read its prompt, stdin is at EOF, which is all a child process needed anyway |
+| **The deployment can be unpriced** | **measured on the R750 2026-09-10:** `plan-zai` there carries no per-token prices, so `plan-zai-code` is created unpriced, every dollar figure reads *not measured*, and `max_budget` counts a spend that is never booked — **the $2 cap cannot bite until that plan model is priced**. `code deployment ensure` says `NOT PRICED` in those words when it happens. **CODE-13** |
 
 ## 12. The sweep, which is the only real wall clock
 
@@ -367,13 +375,29 @@ No box is recreated and the relay is only restarted, never redeployed.
 E2B's self-hosted cluster; GPU sandboxes; snapshots and forks; an interactive terminal in the console
 (the log strip is enough); any egress inside a task; any repo clone.
 
+## 14b. What the R750 measured, 2026-09-10
+
+Separated from everything above on purpose: these are numbers off `jason-PowerEdge-R750` (x86_64,
+cgroup v2 systemd), not off the Mac the image was first built on, and not plans.
+
+| | |
+|---|---|
+| the image | `titanbot/code-sandbox:1`, **588 MB**, built in **26 s**, base `node:22-bookworm-slim@sha256:83f487e0…`, agent 2.1.267. Nothing started, nothing restarted. The Mac's own arm64 build of the same Dockerfile was 877 MB on disk / 231 MB content in 14 s — a different architecture, so the two are not comparable and neither is "the" size |
+| the model wire | `plan-zai-code` created as `hosted_vllm/glm-5.3` against `plan-zai`'s own api_base and credential slot, own `timeout` 600. One real `/v1/messages` turn on the live pool: **200 in 2,241 ms**, `stop_reason end_turn`, 25 tokens in and 16 out. Key revoked, and the same key then **401** |
+| the spend | **not measured**, and that is the honest answer rather than a zero: `plan-zai` on this machine carries no per-token prices, so the coding deployment is unpriced. See §11 and **CODE-13** |
+| the host rule | `box-isolation.sh` put `ip saddr 10.97.0.0/16 … drop` **first** in the guarded chain, `--verify` then PASS with nothing else moved |
+| the boxes | the demo box and Jason's box both came back `post-swap watch disarmed: host up 60s on af63780b1115 (healthy)`. **Richard's box was never swapped and never written**, so his workspace does not have the coding tool from this ship |
+| the tool count | **40 tools** offered to the demo tenant's Titan with `code_task` among them, read off the box's own `[sand][toolset]` line. The planned figure of 28 was for a tenant box with mail on and nothing else; 40 is what this one really carries. **CODE-10** |
+| the relay | start sweep `removed 0 code container(s) and 0 code network(s)` on a machine that had never had one |
+| the first live task | handed off from the demo Titan through console.titanium.bot. It **failed**, for the three reasons in §11, and every one of them is fixed and re-measured below |
+
 ## 15. The gates
 
 | | |
 |---|---|
 | `tests/code-sandbox-plan.test.mjs` | the argv plan asserted whole, the pool allocator, the copy-in guard, the redactor, the labels, the tar, and that `sync.sh` ships the image directory |
 | `tests/code-edge-routes.test.mjs` | all five box routes against an injected `execFile`, the refusal order, and every half-started case |
-| `tests/code-edge-sweep.test.mjs` | the wall clock, the orphans, and what the sweep must not touch |
+| `tests/code-edge-sweep.test.mjs` | the wall clock, the orphans, what the sweep must not touch, a live task whose container has already stopped, and the minutes being the container's own |
 | `scripts/verify-code-sandbox-isolation.mjs` | the boundary, from inside a real sandbox, against a real daemon. User agent `titanbot-gate/verify-code-sandbox-isolation`, 600 s ceiling |
 
 The gate stands up its own `tbcode-gate-*` containers and removes them on the way in and on the way
