@@ -17,8 +17,15 @@
 //   scrolls sideways is reachable by dragging it, and a drawer parked off canvas at
 //   `visibility: hidden` is not on the page at all. Both are excluded, and the raw count is printed
 //   beside the real one so the two are never confused. The number that matters is the document's
-//   own scrollWidth against innerWidth: 125 px of console used to hang off the right edge with no
-//   scrollbar and no pan.
+//   own scrollWidth against the VISUAL VIEWPORT's width: 125 px of console used to hang off the
+//   right edge with no scrollbar and no pan.
+//
+//   AND IT IS visualViewport.width, NOT innerWidth, FOR A MEASURED REASON. DOOR-1, 2026-09-09: the
+//   login page laid out a 400 px document inside a 390 px device, and Chrome GREW window.innerWidth
+//   to 400 to match it -- so `scrollWidth <= innerWidth` PASSED on a page that pans sideways in the
+//   hand. visualViewport.width stayed 390, which is the screen the thumb is actually on. Every width
+//   assertion below compares against that, and the two numbers are printed side by side so a
+//   divergence is visible rather than silently passing.
 //
 //   THE DESKTOP LEG IS AN A/B, NOT A COMMITTED PNG. The phone pass adds exactly ONE rule outside
 //   `@media (max-width: 690px)`: the hide on the two drawer handles and the scrim, nodes that exist
@@ -225,6 +232,11 @@ const OVERFLOW = () => {
     docScrollWidth: document.scrollingElement.scrollWidth,
     shellScrollWidth: document.querySelector(".app-shell").scrollWidth,
     inner: window.innerWidth,
+    // DOOR-1. THE SCREEN THE THUMB IS ON, which is not always innerWidth: Chrome grows innerWidth to
+    // match a document that is too wide, so comparing against it passes on exactly the defect the
+    // comparison exists to catch. Measured at a 390 px device width on a 400 px document: innerWidth
+    // 400, visualViewport.width 390.
+    visual: Math.round(window.visualViewport?.width ?? window.innerWidth),
   };
 };
 
@@ -262,10 +274,16 @@ async function tap(page, selector) {
 
 async function legWidth(page, phone) {
   const out = await page.evaluate(OVERFLOW);
-  info(`${phone.name}: shell column ${out.shellColumn}, document scrollWidth ${out.docScrollWidth}, ${out.raw} rects past the edge, ${out.real} of them reachable by nobody`);
+  info(`${phone.name}: shell column ${out.shellColumn}, document scrollWidth ${out.docScrollWidth}, visual viewport ${out.visual}, innerWidth ${out.inner}, ${out.raw} rects past the edge, ${out.real} of them reachable by nobody`);
   check(out.shellColumn === `${phone.w}px`, `${phone.name}: the shell's column is the viewport`, `${out.shellColumn} (515.406px before this ship, at every viewport)`);
   check(out.real === 0, `${phone.name}: nothing is off the right edge`, `${out.real} (402 at 390 and 392 at 430 before this ship)${out.worst.length ? ` — ${out.worst.join(", ")}` : ""}`);
-  check(out.docScrollWidth <= out.inner + 1, `${phone.name}: the document does not scroll sideways`, `${out.docScrollWidth} vs ${out.inner}`);
+  // Against visualViewport.width, never innerWidth. DOOR-1 measured the difference: a 400 px document
+  // inside a 390 px device grew innerWidth to 400, so the obvious comparison passed on a page that
+  // pans sideways in the hand.
+  check(out.docScrollWidth <= out.visual + 1, `${phone.name}: the document does not scroll sideways`,
+    `scrollWidth ${out.docScrollWidth} vs visual viewport ${out.visual}`
+    + (out.inner !== out.visual ? ` (innerWidth says ${out.inner}, which is the number that hid this)` : ""));
+  check(out.visual === phone.w, `${phone.name}: and the visual viewport is the device width`, `${out.visual}`);
   check(out.shellScrollWidth <= phone.w + 1, `${phone.name}: and neither does the shell`, `${out.shellScrollWidth}`);
   await shoot(page, `mobile-width-${phone.name}`);
 }

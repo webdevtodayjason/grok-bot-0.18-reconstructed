@@ -1,9 +1,14 @@
 // Local frontend host for the sand gateway.
 //
-// The gateway rejects any request carrying an Origin header (gateway-server.ts:23,
-// "browser-origin gateway requests are not allowed"), so a browser cannot call it
-// directly. This process is the shim: it serves the UI and relays to the gateway
+// The gateway 403s any request carrying an Origin header (gateway-server.ts:25,
+// rejectUntrustedBrowserRequest, "browser-origin gateway requests are not allowed"), so a browser
+// cannot call it directly. This process is the shim: it serves the UI and relays to the gateway
 // without an Origin, adding the Bearer token the browser must never hold.
+//
+// STORE-1 leaves that refusal exactly as it is, behind this relay, and answers CORS HERE instead. A
+// phone or desktop shell that bundles its own assets is cross-origin, so it gets a device bearer
+// (ui/auth-device.mjs) and an exact-string origin allow-list on this process; the gateway keeps
+// never talking to a browser, which is the property this file exists for. docs/APPS.md.
 //
 // Reaching this process has always been equivalent to holding the gateway token, so it now has a
 // login of its own. ui/auth.json (0600, never in git) holds a scrypt hash and a cookie signing
@@ -78,6 +83,12 @@ import {
   CODE_DEFAULTS, CODE_SWEEP_MS, appendTaskRow as appendCodeTask, createCodeEdge,
   readTaskRows as readCodeTasks,
 } from "./code-edge.mjs";
+import {
+  DEVICE_TOKEN_TTL_MS, MINT_BODY_LIMIT, corsHeaders, createDeviceStore, deviceBearerOf,
+  looksLikeDeviceBearer, mintRequest, newDeviceId, parseAppOrigins, publicDevice, readDeviceToken,
+  signDeviceToken,
+} from "./auth-device.mjs";
+import { loadRelayHooks } from "./relay-hooks.mjs";
 import { stateDir, stateFile } from "./state-dir.mjs";
 import { createLoginLedger, filterAttempts } from "./login-ledger.mjs";
 import { readBoxHealth } from "./box-health.mjs";
@@ -752,15 +763,95 @@ function sessionPayload(req) {
 }
 const hasSession = (req) => sessionPayload(req) != null;
 
+// ---- STORE-1, the device bearer ----------------------------------------------------------------
+//
+// A store app bundles its own assets, so its page origin is not this one and a browser never sends a
+// SameSite=Strict cookie from there. The credential it can send is a header, and this is where one is
+// read. ui/auth-device.mjs holds the token format, the row store and the CORS rules, and the comment
+// at the top of it is the argument for each.
+//
+// ONE STORE PER TENANT, keyed on the context, because the rows live in that tenant's own state
+// directory beside mail.json -- the same t.file() split endpoints.json and the mail ledgers use. The
+// Map is keyed on the context object rather than the slug so a registry entry that MOVES (a box
+// recreated, a state directory repointed) gets a fresh store rather than one aimed at the old path.
+const deviceStores = new Map();
+function deviceStoreFor(t) {
+  if (t == null) return null;
+  const found = deviceStores.get(t);
+  if (found != null) return found;
+  const store = createDeviceStore(t.file("devices.json"), { own: (file) => { void ownLikeParent(file); } });
+  deviceStores.set(t, store);
+  // One entry per live context. contextOf rebuilds a context only when its registry row actually
+  // changed, so this is bounded by the tenant count and not by the request count; the sweep keeps a
+  // long-lived relay from holding a store for every box that was ever recreated under it.
+  if (deviceStores.size > 256) {
+    for (const key of deviceStores.keys()) { if (deviceStores.size <= 128) break; if (key !== t) deviceStores.delete(key); }
+  }
+  return store;
+}
+
+// A bad bearer is rate limited and does NOT charge the password lockout, which is the one decision in
+// this whole item that is about a customer's day rather than about an attacker. The shared `throttle`
+// object is also the job bus's and the console login's, so an app looping on a token that expired
+// while the phone was in a drawer would lock its owner out of his own laptop's console. 60 a minute
+// per address is the same fixed-window shape the job bus uses, and it is plenty: an app is told to
+// stop on a 401, re-mint once, then ask the person.
+const deviceUseLimiter = createRateLimiter({ limit: 60, windowMs: 60_000 });
+
+// The verified device payload for a request, or null. Two gates, in this order: the signature and the
+// clock (no I/O at all), then the row on disk through the mtime-gated cache. The row is what makes
+// Revoke mean something, and the cache window is what bounds how long a revoked device keeps working.
+//
+// The tenant comes off the VERIFIED payload and the row is read out of THAT tenant's directory, so a
+// token minted for one workspace cannot be presented against another: the slug it names is the slug
+// whose devices.json is consulted, and a row under a different tenant is simply not there.
+// Once per REQUEST, not once per caller. tenantOf asks, subOf asks, the gate asks and then the tenant
+// resolution asks again, so a single /api call from a phone would otherwise verify the same HMAC four
+// times and stat the same file four times. The answer is stamped on the request object, which lives
+// exactly as long as the answer is true for.
+const DEVICE_SESSION = Symbol("deviceSession");
+
+function deviceSessionOf(req) {
+  if (req != null && Object.prototype.hasOwnProperty.call(req, DEVICE_SESSION)) return req[DEVICE_SESSION];
+  const answer = readDeviceSession(req);
+  if (req != null) Object.defineProperty(req, DEVICE_SESSION, { value: answer, enumerable: false, configurable: true });
+  return answer;
+}
+
+function readDeviceSession(req) {
+  if (AUTH == null) return null;
+  const token = deviceBearerOf(req.headers.authorization);
+  if (token.length === 0) return null;
+  const payload = readDeviceToken(token, AUTH.cookieSecret);
+  if (payload == null) return null;
+  const t = contextOf(String(payload.tenant ?? ""));
+  if (t == null) return null;
+  const store = deviceStoreFor(t);
+  const row = store?.live(payload.did, payload.iat);
+  if (row == null) return null;
+  // At most one write per device per ten minutes, so the device list on a console page is honest to
+  // the minute without the hot path touching the disk per request.
+  try { store.touch(payload.did); } catch { /* a read-only volume is not a reason to refuse a request */ }
+  return { payload, row, tenant: String(payload.tenant), sub: String(payload.sub ?? ""), context: t };
+}
+
 // Which tenant this request is for, or null when it is not signed in at all.
 //
 // With no password configured the console is a loopback developer console and every request is the
 // operator's, which is the shape it has always had. The gateway bearer is the operator's too. A
 // cookie minted before this shipped carries no tenant claim and reads back as the operator, which
 // is what keeps a session alive across the deploy.
+//
+// The device arm is the THIRD and last way in, and it is deliberately the narrowest: it answers a
+// tenant and nothing more, so every route below the gate treats a phone exactly as it treats a
+// browser, and a device bearer can never do more than the cookie can. It cannot mint a cookie
+// (mintSessionFromBearer returns early for it), it cannot open /v1 (handleJobBus refuses it by
+// shape), and it cannot open the websocket upgrade at all, because a browser WebSocket carries no
+// headers. A phone therefore gets no live screen by construction as well as by design.
 function tenantOf(req) {
   if (AUTH == null) return OPERATOR_SLUG;
   if (bearerMatches(req)) return OPERATOR_SLUG;
+  if (looksLikeDeviceBearer(req.headers.authorization)) return deviceSessionOf(req)?.tenant ?? null;
   const payload = sessionPayload(req);
   if (payload == null) return null;
   const claimed = typeof payload.tenant === "string" ? payload.tenant.trim() : "";
@@ -770,6 +861,25 @@ function isAuthorized(req) {
   return tenantOf(req) != null;
 }
 
+// WHICH PERSON this request is, or "" for the workspace itself.
+//
+// "" means the operator, or a session minted by the INSTANCE password, which is the machine's door and
+// names nobody. Everything per-person -- the device list, a push registration, quiet hours -- keys on
+// this, and "" reads as the workspace's own, which is the same precedent the tenant claim already set:
+// the comment on tenantOf records that an absent claim means the operator, and that is a test rather
+// than an assumption (tests/relay-device-bearer.test.mjs, "a sub-less cookie reads as the operator").
+//
+// It exists because accounts.tenant carries no UNIQUE constraint (cp/store.mjs:116-124), so two people
+// can share one workspace and nothing else in this process could tell them apart.
+function subOf(req) {
+  if (AUTH == null) return "";
+  if (bearerMatches(req)) return "";
+  if (looksLikeDeviceBearer(req.headers.authorization)) return deviceSessionOf(req)?.sub ?? "";
+  const payload = sessionPayload(req);
+  const claimed = typeof payload?.sub === "string" ? payload.sub.trim() : "";
+  return claimed;
+}
+
 // A bearer on a page request also mints a session, so a browser handed the token as a header can
 // go on to do the things a browser does: an EventSource carries no custom header, an iframe
 // carries none either, and a page opened with the bearer would otherwise paint and then be
@@ -777,9 +887,16 @@ function isAuthorized(req) {
 // this process forwards carries it -- so the cookie adds no capability, it only puts the access
 // somewhere the browser will keep sending. /api is excluded because a script calling the API is
 // not a session and does not want one.
+//
+// A DEVICE BEARER NEVER MINTS ANYTHING. That early return pays twice. Once because a cookie is strictly
+// more than a device token is meant to be -- the cookie opens the websocket upgrade, which is the box's
+// screen and keyboard, and a phone is deliberately not given that. And once because a Set-Cookie on an
+// asset response is a Cloudflare cache bypass: every stamped asset a shell read would come back with
+// one and the edge would stop caching the console's own code for everybody.
 function mintSessionFromBearer(req, res, url) {
   if (AUTH == null) return;
   if (url.pathname.startsWith("/api/")) return;
+  if (looksLikeDeviceBearer(req.headers.authorization)) return;
   if (!bearerMatches(req) || hasSession(req)) return;
   res.setHeader("set-cookie", serializeCookie(SESSION_COOKIE, createSession(AUTH.cookieSecret, { tenant: OPERATOR_SLUG }),
     { maxAgeSeconds: SESSION_LIFETIME_MS / 1000, secure: secureOf(req) }));
@@ -794,8 +911,22 @@ const RELAY_AUTH_HEADER = { "x-relay-auth": "required" };
 // A browser asking for a page gets sent to the login; anything else gets JSON it can act on. The
 // Accept header is the only honest way to tell those apart, because /api and a stylesheet and a
 // document all arrive as plain GETs.
+//
+// STORE-1. A REQUEST CARRYING AN AUTHORIZATION HEADER IS NEVER REDIRECTED. Measured on
+// grok-bot-local-vm 2026-09-09: `Accept: text/html` is what a web view sends on a document fetch and
+// what fetch() sends when an app copies the browser's own headers, so a cross-origin read whose bearer
+// had expired followed a 302 into the login page and the shell got 200 OK with a sign-in form in it.
+// An app cannot branch on that. With a header present the answer is always the JSON 401 with
+// x-relay-auth: required, which docs/APPS.md tells a shell to read: stop, re-mint once, then ask the
+// person, never loop.
+//
+// The other half of that refusal is documented rather than coded, because it is the shell's job: the
+// 401 body is application/json, which Chrome's Opaque Response Blocking turns into
+// net::ERR_BLOCKED_BY_ORB for a bare <script> or <img> rather than an error the page can see. So the
+// contract is fetch plus blob URLs for images, never a bare subresource on a cross-origin read.
 function denyUnauthenticated(req, res, url) {
-  const wantsHtml = req.method === "GET" && String(req.headers.accept ?? "").includes("text/html");
+  const presentedHeader = String(req.headers.authorization ?? "").length > 0;
+  const wantsHtml = !presentedHeader && req.method === "GET" && String(req.headers.accept ?? "").includes("text/html");
   if (!wantsHtml) return fail(res, 401, "not signed in", RELAY_AUTH_HEADER);
   res.writeHead(302, { location: `/login?next=${encodeURIComponent(url.pathname + url.search)}`, "cache-control": "no-store" });
   return res.end();
@@ -814,51 +945,101 @@ const escapeHtml = (value) => String(value)
 // operator has always used and the one that still works when the control plane does not answer.
 // Two separate forms would have made the customer choose between two words for the same thing
 // before they had any way of knowing which one they hold.
+// The Ti mark, inline, and inline is the whole point: the comment above loginPage says an asset path
+// exempted from the session check would be a hole in the thing this page exists to close. It is the
+// rounded-square signature off the product's own brand board -- the outlined tile, the T, the i stem,
+// and the i's dot in Signal Cyan -- taken from the first four shapes of
+// ui/machine-room/assets/titanium-bot-logo.svg with the wordmark and the gradients dropped, because
+// 6 KB of gradient definitions on a login page buys nothing a flat silver does not.
+const TI_MARK = `<svg class="mark" viewBox="0 0 1024 1024" width="34" height="34" aria-hidden="true" focusable="false">`
+  + `<path fill="#E6EBF2" fill-rule="evenodd" d="M300 60H724Q964 60 964 300V724Q964 964 724 964H300Q60 964 60 724V300Q60 60 300 60Z`
+  + ` M300 155Q155 155 155 300V724Q155 869 300 869H724Q869 869 869 724V300Q869 155 724 155Z"/>`
+  + `<path fill="#E6EBF2" d="M250 280H596V412H494V793H448Q354 793 354 699V412H328Q250 412 250 334Z"/>`
+  + `<path fill="#E6EBF2" d="M648 467H794V682Q794 793 683 793H648Z"/>`
+  + `<rect x="648" y="280" width="146" height="146" rx="42" fill="#00C8F0"/></svg>`;
+
+// DOOR-1. This page is the first screen a customer ever sees, and before this ship it was titled
+// "Machine Room", painted in a purple nothing else in the product uses, and laid out 10 px wider than
+// a 390 px phone. Four things were measured on grok-bot-local-vm at 390x844 on 2026-09-09 and each
+// one is fixed here rather than worked around.
+//
+// THE 10 PX. The form was content-box at `width: min(360px, calc(100vw - 48px))` with 28 px of padding
+// and a 1 px border on each side, so at 390 it laid out 342 + 56 + 2 = 400 and the document panned
+// sideways. `box-sizing: border-box` is the fix. Correcting the subtrahend instead would have left the
+// same arithmetic one padding change away from being wrong again.
+//
+// THE ZOOM. iOS Safari zooms the page whenever a focused control's text is under 16 px, and body set
+// 14 px with both the inputs and the button at `font: inherit`. So BOTH move, explicitly, and the
+// autofocus attribute is REMOVED OUTRIGHT rather than media-queried, because HTML has no media query
+// and an attribute that only matters on a phone has no business being on the desktop page either.
+//
+// WHAT CHROME CANNOT PROVE. visualViewport.scale stayed 1 through focus at both phone widths in real
+// headless Chrome, so no gate in this repo can claim a measured no-zoom on iOS. The evidence
+// scripts/verify-door.mjs prints instead is the computed font-size on every control plus the absent
+// attribute, which are the two things the behaviour is defined in terms of.
+//
+// THE PALETTE is the product's own board and not the parent company's: Midnight #090D14, Graphite
+// #172232, Titanium #E6EBF2, Signal Cyan #00C8F0. The two doors behave exactly as they did -- the
+// email field only when there is a control plane, filled means the account, empty means the instance
+// password, one form, one button, the error inline.
 function loginPage({ error = "", next = "/", tenant = false } = {}) {
   return `<!doctype html>
 <html lang="en" data-theme="dusk">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Sign in - Machine Room</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Sign in - Titanium Bot</title>
 <link rel="icon" href="data:," />
 <style>
-  :root { color-scheme: dark; }
+  :root { color-scheme: dark;
+    --midnight: #090D14; --graphite: #172232; --titanium: #E6EBF2; --cyan: #00C8F0; }
   body { margin: 0; min-height: 100vh; display: grid; place-items: center;
-    background: radial-gradient(1200px 700px at 20% -10%, #23323a 0%, #0f151a 60%) #0f151a;
-    color: rgba(255,255,255,0.94);
+    /* env() on the body so the card clears a notch in landscape as well as the home indicator. */
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+             max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    box-sizing: border-box;
+    background: radial-gradient(1100px 640px at 18% -12%, #13243A 0%, var(--midnight) 62%) var(--midnight);
+    color: var(--titanium);
     font: 400 14px/1.5 Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-  form { width: min(360px, calc(100vw - 48px)); padding: 28px; border-radius: 20px;
-    background: rgba(17,25,30,0.82); border: 1px solid rgba(255,255,255,0.1);
-    box-shadow: 0 30px 90px rgba(4,10,13,0.5), inset 0 1px 0 rgba(255,255,255,0.12); }
-  .lights { display: flex; gap: 6px; margin-bottom: 18px; }
-  .lights span { width: 10px; height: 10px; border-radius: 999px; background: rgba(255,255,255,0.18); }
-  h1 { margin: 0 0 4px; font-size: 17px; font-weight: 600; letter-spacing: 0.01em; }
-  p.sub { margin: 0 0 20px; font-size: 13px; color: rgba(233,239,239,0.46); }
-  label { display: block; font-size: 12px; color: rgba(233,239,239,0.68); margin-bottom: 6px; }
-  input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 10px;
-    border: 1px solid rgba(255,255,255,0.18); background: rgba(31,42,47,0.46);
-    color: inherit; font: inherit; }
-  input:focus { outline: none; border-color: #8b69ea; box-shadow: 0 0 0 3px rgba(139,105,234,0.28); }
-  button { margin-top: 16px; width: 100%; padding: 10px 12px; border-radius: 10px; border: 0;
-    background: #8b69ea; color: #fffaf2; font: inherit; font-weight: 600; cursor: pointer; }
-  button:hover { background: #9a7cf0; }
+  /* border-box, so the padding and the border are INSIDE the 360, which is what the 400 px document
+     on a 390 px screen was. */
+  form { box-sizing: border-box; width: min(360px, 100%); padding: 28px; border-radius: 20px;
+    background: rgba(23,34,50,0.86); border: 1px solid rgba(230,235,242,0.10);
+    box-shadow: 0 30px 90px rgba(3,6,11,0.58), inset 0 1px 0 rgba(230,235,242,0.10); }
+  /* The brand lockup IS the h1: the mark and the product's name, once, rather than a wordmark above a
+     heading that repeats it. */
+  h1 { display: flex; align-items: center; gap: 10px; margin: 0 0 6px;
+    font-size: 17px; font-weight: 600; letter-spacing: 0.01em; }
+  .mark { display: block; flex: none; }
+  h1 b { font-weight: 600; color: var(--cyan); }
+  p.sub { margin: 0 0 20px; font-size: 13px; color: rgba(230,235,242,0.52); }
+  label { display: block; font-size: 13px; color: rgba(230,235,242,0.72); margin-bottom: 6px; }
+  /* 16px on both controls, explicitly: body is 14px and font: inherit would carry that down, which
+     is the size iOS zooms for. 44px minimum height is the touch target. */
+  input { width: 100%; box-sizing: border-box; min-height: 44px; padding: 11px 12px; border-radius: 10px;
+    border: 1px solid rgba(230,235,242,0.18); background: rgba(9,13,20,0.55);
+    color: var(--titanium); font: inherit; font-size: 16px; }
+  input:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(0,200,240,0.26); }
+  button { margin-top: 18px; width: 100%; min-height: 44px; padding: 11px 12px; border-radius: 10px;
+    border: 0; background: var(--cyan); color: var(--midnight); font: inherit; font-size: 16px;
+    font-weight: 600; cursor: pointer; }
+  button:hover { background: #2BD6F5; }
+  button:focus-visible { outline: 2px solid var(--titanium); outline-offset: 2px; }
   .error { margin-top: 14px; padding: 9px 11px; border-radius: 10px; font-size: 13px;
-    background: rgba(255,111,114,0.14); border: 1px solid rgba(255,111,114,0.38); color: #ffb3b4; }
-  p.also { margin: 8px 0 0; font-size: 12px; color: rgba(233,239,239,0.46); }
+    background: rgba(255,111,114,0.14); border: 1px solid rgba(255,111,114,0.38); color: #FFB3B4; }
+  p.also { margin: 8px 0 0; font-size: 13px; color: rgba(230,235,242,0.52); }
   label.second { margin-top: 14px; }
 </style>
 </head>
 <body>
 <form method="post" action="/login">
-  <div class="lights" aria-hidden="true"><span></span><span></span><span></span></div>
-  <h1>Machine Room</h1>
+  <h1>${TI_MARK}<span>Titanium <b>Bot</b></span></h1>
   <p class="sub">${tenant ? "Sign in with your Titanium Bot account" : "This console drives the box. Sign in to reach it."}</p>
   <input type="hidden" name="next" value="${escapeHtml(next)}" />
   ${tenant ? `<label for="email">Email</label>
-  <input id="email" name="email" type="email" autocomplete="username" autofocus />
+  <input id="email" name="email" type="email" autocomplete="username" inputmode="email" />
   <label class="second" for="password">Password</label>` : `<label for="password">Password</label>`}
-  <input id="password" name="password" type="password" autocomplete="current-password"${tenant ? "" : " autofocus"} required />
+  <input id="password" name="password" type="password" autocomplete="current-password" required />
   ${tenant ? `<p class="also">or the instance password</p>` : ""}
   <button type="submit">Sign in</button>
   ${error ? `<div class="error" role="alert">${escapeHtml(error)}</div>` : ""}
@@ -1022,8 +1203,17 @@ function mintAccountSession(req, res, payload, location) {
   const lifetimeMs = Math.min(Math.max(0, Number(payload.exp) - now), SESSION_LIFETIME_MS);
   // The tenant claim comes off the VERIFIED token, never off the form. It is what every seam in
   // this file resolves a box, a token and a state directory from for the rest of this session.
+  //
+  // STORE-1 adds `sub`, the account id, off the same verified token. It was already here and thrown
+  // away, and it is what every per-person thing keys on: two people can share a workspace
+  // (accounts.tenant has no UNIQUE constraint), so "my devices" and "my pushes" cannot be the
+  // workspace's.
   const cookie = serializeCookie(SESSION_COOKIE,
-    createSession(AUTH.cookieSecret, { nowMs: now, lifetimeMs, tenant: String(payload.tenant ?? "") }),
+    createSession(AUTH.cookieSecret, {
+      nowMs: now, lifetimeMs,
+      tenant: String(payload.tenant ?? ""),
+      sub: String(payload.sub ?? ""),
+    }),
     { maxAgeSeconds: lifetimeMs / 1000, secure: secureOf(req) });
   res.writeHead(302, { location, "set-cookie": cookie, "cache-control": "no-store" });
   return res.end();
@@ -1113,6 +1303,171 @@ function handleSso(req, res, token) {
   return sendLoginPage(res, 401, { error: "That sign-in link is not valid here." });
 }
 
+// ---- POST /auth/token, the token door (STORE-1, docs/APPS.md) -----------------------------------
+//
+// An app signs in once and holds a named, revocable, thirty-day device bearer. ui/auth-device.mjs
+// holds the format, the rows and the CORS rules, and the five rules at the top of it are the argument
+// for every choice here.
+//
+// WHY THIS ROUTE SITS IN THE PRE-LOGIN BAND, beside GET /auth/state, rather than below the gate: a
+// caller minting a token has no cookie and no bearer by definition, and anything below the gate is
+// refused before it is reached. Measured on grok-bot-local-vm 2026-09-09: OPTIONS /api/getHealth with
+// an Origin answered 401 with x-relay-auth: required, because no OPTIONS handler existed anywhere in
+// this file. So the preflight is answered above the gate too (handleCors, called from the entry).
+//
+// THREE WAYS IN, and the third is the one that makes an app pleasant to own:
+//
+//   {email, password, device}  the account door, verified by the control plane exactly as the login
+//                              page's is -- same call, same verdict, same ledger row.
+//   {password, device}         the instance password, the operator's door, which still works when the
+//                              control plane does not answer.
+//   {device}                   a silent re-mint, allowed ONLY when the request already carries a live
+//                              device bearer. So an app in regular use never meets a password prompt
+//                              again and a phone left in a drawer for a month is dead.
+//
+// A FAILED MINT CHARGES THE PASSWORD LOCKOUT, through clientOf and never through a raw header: a
+// bearer is guessed exactly the way a password is, and the shared throttle object is the one that
+// carries the TENANT-5 box-peer special case for a reason. The USE of a bad bearer does not, which is
+// deviceUseLimiter's whole job.
+const DEVICE_MINT_REFUSAL = "that sign-in did not work";
+
+async function handleDeviceTokenMint(req, res) {
+  if (req.method !== "POST") return fail(res, 405, "POST");
+  if (AUTH == null) return fail(res, 404, "not found");
+  const key = clientOf(req);
+  const wait = throttle.retryAfterMs(key);
+  if (wait > 0) {
+    const seconds = Math.ceil(wait / 1000);
+    // The DOOR is the credential, not the client: ui/login-ledger.mjs keeps `account` and `instance`,
+    // and a mint from an app is one of those two. What says it came from an app is the user agent,
+    // which every row already carries, so the panel can tell a phone from a browser without this file
+    // inventing a third door in a ledger it does not own.
+    noteLoginAttempt(req, { door: "instance", outcome: "locked" });
+    return endAndClose(req, res, 429, { "content-type": "application/json", "retry-after": String(seconds) },
+      JSON.stringify({ error: `too many attempts; wait ${seconds}s` }));
+  }
+
+  let raw;
+  try { raw = await readBody(req, MINT_BODY_LIMIT); }
+  catch (error) {
+    if (error?.code !== "BODY_TOO_LARGE") throw error;
+    throttle.recordFailure(key);
+    noteLoginAttempt(req, { door: "instance", outcome: "refused" });
+    return drainThenEnd(req, res, 413, { "content-type": "application/json" },
+      JSON.stringify({ error: "that is not a sign-in" }));
+  }
+  const shaped = mintRequest(raw);
+  if (shaped.error != null) return fail(res, 400, shaped.error);
+
+  // The silent re-mint. Checked FIRST and before the throttle is ever charged, because a live bearer
+  // is already a proved credential and re-proving it must not be able to lock anybody out.
+  const live = deviceSessionOf(req);
+  if (live != null && shaped.password.length === 0 && shaped.email.length === 0) {
+    return answerDeviceToken(req, res, {
+      t: live.context, sub: live.sub, device: { ...shaped.device, id: shaped.device.id || live.row.id }, renewed: true,
+    });
+  }
+
+  // The account door. The same call the login page makes, so a password that works on one works on
+  // the other and there is one place that decides.
+  if (RELAY != null && shaped.email.length > 0) {
+    const verdict = await accountSignIn({
+      config: RELAY, email: shaped.email, password: shaped.password, client: key, keyOf: sessionKeyFor,
+    });
+    const note = (outcome, tenant = "") =>
+      noteLoginAttempt(req, { door: "account", email: shaped.email, outcome, tenant, password: shaped.password });
+    if (verdict.kind === "session") {
+      throttle.recordSuccess(key);
+      note("ok", String(verdict.payload.tenant ?? ""));
+      const t = contextOf(String(verdict.payload.tenant ?? ""));
+      if (t == null) return fail(res, 503, NOT_AVAILABLE_SENTENCE);
+      console.log(`device token minted for ${t.slug} by account from ${key}`);
+      return answerDeviceToken(req, res, { t, sub: String(verdict.payload.sub ?? ""), device: shaped.device, renewed: false });
+    }
+    if (verdict.kind === "unknown") { note("refused"); return fail(res, 503, NOT_AVAILABLE_SENTENCE); }
+    if (verdict.kind === "busy") return fail(res, 429, "too many attempts; wait a minute", { "retry-after": "60" });
+    if (verdict.kind === "unreachable") return fail(res, 503, "the sign-in service is not answering");
+    if (verdict.kind === "message") { note("refused"); return fail(res, 401, verdict.text); }
+    throttle.recordFailure(key);
+    note("refused");
+    return fail(res, 401, DEVICE_MINT_REFUSAL, RELAY_AUTH_HEADER);
+  }
+
+  // The instance door. The operator's, which means the operator's workspace and names no person.
+  if (!verifyPassword(shaped.password, AUTH.password)) {
+    throttle.recordFailure(key);
+    noteLoginAttempt(req, { door: "instance", outcome: "refused", password: shaped.password });
+    console.log(`device token refused from ${key}`);
+    return fail(res, 401, DEVICE_MINT_REFUSAL, RELAY_AUTH_HEADER);
+  }
+  throttle.recordSuccess(key);
+  noteLoginAttempt(req, { door: "instance", outcome: "ok", tenant: OPERATOR_SLUG });
+  const t = contextOf(OPERATOR_SLUG);
+  if (t == null) return fail(res, 503, NOT_AVAILABLE_SENTENCE);
+  console.log(`device token minted for ${OPERATOR_SLUG} by the instance password from ${key}`);
+  return answerDeviceToken(req, res, { t, sub: "", device: shaped.device, renewed: false });
+}
+
+/**
+ * The row, then the token over it. In that order, and it matters: the row's id is what the token
+ * names, and the row's tokenIat is what makes the PREVIOUS token for the same device stop working --
+ * so a person who re-mints because a phone was stolen does not leave the stolen phone live for a
+ * month.
+ *
+ * The token is in the body and nowhere else: not a cookie, not a URL, not a log line. It is answered
+ * once, at the mint, and the device list never shows it again.
+ */
+function answerDeviceToken(req, res, { t, sub, device, renewed }) {
+  const store = deviceStoreFor(t);
+  if (store == null) return fail(res, 503, NOT_AVAILABLE_SENTENCE);
+  t.ensureDir();
+  const nowMs = Date.now();
+  let row;
+  try { row = store.upsert({ ...device, id: device.id || newDeviceId(), sub, tokenIat: nowMs }); }
+  catch (error) { return fail(res, 500, `the device list could not be written: ${error?.message ?? error}`); }
+  const { token } = signDeviceToken({ tenant: t.slug, sub, did: row.id, nowMs }, AUTH.cookieSecret);
+  res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+  return res.end(JSON.stringify({
+    token,
+    expiresAt: nowMs + DEVICE_TOKEN_TTL_MS,
+    renewed: renewed === true,
+    tenant: t.slug,
+    device: publicDevice(row),
+  }));
+}
+
+// ---- GET /auth/devices and DELETE /auth/devices/<id>, below the gate ---------------------------
+//
+// What a person sees and what they can take away. It is scoped by PERSON and not by workspace
+// (subOf), because two accounts can share one workspace and one customer's phone list is not the
+// other's. The operator, and any session minted by the instance password, sees the workspace's own
+// rows -- the ones with no person on them -- which is the same precedent as the tenant claim.
+//
+// A revoked device's next /api call is a 401 within one cache window, which is at most two seconds
+// (DEVICE_CACHE_MS). That bound is a gate leg rather than a claim.
+const DEVICE_ROUTE = /^\/auth\/devices(?:\/([^/]+))?$/;
+
+function handleDeviceList(req, res, t, sub) {
+  const store = deviceStoreFor(t);
+  const rows = (store?.forSub(sub) ?? []).map(publicDevice)
+    .sort((a, b) => Number(b.lastSeenAt ?? 0) - Number(a.lastSeenAt ?? 0));
+  res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+  return res.end(JSON.stringify({ tenant: t.slug, devices: rows }));
+}
+
+function handleDeviceRevoke(req, res, t, sub, id) {
+  const store = deviceStoreFor(t);
+  if (store == null) return fail(res, 503, NOT_AVAILABLE_SENTENCE);
+  let gone;
+  // The sub is part of the match, so one person cannot revoke another's phone by guessing an id.
+  try { gone = store.revoke(id, { sub }); }
+  catch (error) { return fail(res, 500, `the device list could not be written: ${error?.message ?? error}`); }
+  if (!gone) return fail(res, 404, "no such device");
+  console.log(`device ${id} revoked on ${t.slug}`);
+  res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+  return res.end(JSON.stringify({ revoked: id, tenant: t.slug }));
+}
+
 // ---- what the control plane asks this relay for (ADMIN-1) --------------------------------------
 //
 // Two GETs, both read-only, both behind CP_RELAY_TOKEN, and neither reachable with a console
@@ -1188,6 +1543,17 @@ const TENANT_CEILING_ROUTE = /^\/admin\/tenants\/([^/]+)\/ceiling$/;
 // -- nothing pushes a control-plane slug into a box -- so the answer carries the slug this relay
 // resolved the container by, which is.
 const TENANT_CLOUD_BROWSER_ROUTE = /^\/admin\/tenants\/([^/]+)\/cloud-browser$/;
+// STORE-1. ONE TENANT'S DEVICE ROWS, AND KILLING ONE, from the control plane's own credential.
+//
+// GET lists; DELETE with ?id=<device> revokes. It is on the relay for the same reason box health is:
+// the rows live in the tenant's own state directory beside mail.json, and the control plane's
+// container does not read inside a box or a tenant volume. CP_RELAY_TOKEN is the credential, the same
+// one every other route in this band takes.
+//
+// Why it exists at all: a customer whose phone is lost and who cannot sign in to revoke it himself
+// needs somebody able to do it, and "ssh to the R750 and edit a JSON file" is exactly the hand
+// operation that has to become a command. cp/cli.mjs device list / device revoke is that command.
+const TENANT_DEVICES_ROUTE = /^\/admin\/tenants\/([^/]+)\/devices$/;
 const CLOUD_BROWSER_LEDGER_PATH = "/home/box/sand-data/cloud-browser-ledger.jsonl";
 const sha256Hex = (value) => createHash("sha256").update(String(value ?? ""), "utf8").digest("hex");
 const evidenceOf = (name, value) => ({ name, length: String(value ?? "").length, sha256: sha256Hex(value).slice(0, 12) });
@@ -1199,12 +1565,15 @@ async function handleRelayAdmin(req, res, url) {
   const running = TENANT_RUNNING_ROUTE.exec(url.pathname);
   const ceiling = TENANT_CEILING_ROUTE.exec(url.pathname);
   const cloudBrowser = TENANT_CLOUD_BROWSER_ROUTE.exec(url.pathname);
+  const devices = TENANT_DEVICES_ROUTE.exec(url.pathname);
   // The method refusal still comes before the credential, so a wrong method charges nobody's
   // lockout and learns nothing. The three reads are GET-only; the two migration doors are POST-only,
   // because each of them changes a file inside somebody's box. The ceiling is the one route that
   // reads and writes, so it takes either -- and the two existing branches are untouched: the
-  // expression below still answers exactly "GET" or "POST" for every path they match.
-  const allowed = ceiling != null ? ["GET", "POST"] : (action == null ? "GET" : "POST");
+  // expression below still answers exactly "GET" or "POST" for every path they match. The device
+  // route lists and revokes, so it takes GET or DELETE.
+  const allowed = devices != null ? ["GET", "DELETE"]
+    : ceiling != null ? ["GET", "POST"] : (action == null ? "GET" : "POST");
   if (Array.isArray(allowed) ? !allowed.includes(req.method) : req.method !== allowed) {
     return fail(res, 405, Array.isArray(allowed) ? allowed.join(" or ") : allowed);
   }
@@ -1236,10 +1605,44 @@ async function handleRelayAdmin(req, res, url) {
 
   if (ceiling != null) return await handleTenantCeiling(req, res, decodeURIComponent(ceiling[1]));
   if (cloudBrowser != null) return await reportCloudBrowser(res, decodeURIComponent(cloudBrowser[1]));
+  if (devices != null) return handleAdminDevices(req, res, url, decodeURIComponent(devices[1]));
 
   if (action != null) return await handleTenantMigration(req, res, decodeURIComponent(action[1]), action[2]);
 
   return fail(res, 404, "not found");
+}
+
+/**
+ * One tenant's device rows for the control plane, and killing one.
+ *
+ * EVERY ROW, not one person's: the caller is the operator holding CP_RELAY_TOKEN and the question they
+ * are answering is "which devices can reach this workspace at all". That is also why the revoke here
+ * takes no sub -- an operator revoking a lost phone for a customer who cannot sign in does not know
+ * which of two people on a shared workspace it belongs to, and making them guess would be the hand
+ * operation this route exists to replace.
+ *
+ * No token is ever in the answer. A token is answered once, at the mint, and nothing reads one back.
+ */
+function handleAdminDevices(req, res, url, slug) {
+  const t = contextOf(slug);
+  if (t == null) return fail(res, 404, NOT_AVAILABLE_SENTENCE);
+  const store = deviceStoreFor(t);
+  if (store == null) return fail(res, 503, NOT_AVAILABLE_SENTENCE);
+  if (req.method === "DELETE") {
+    const id = String(url.searchParams.get("id") ?? "").trim();
+    if (id.length === 0) return fail(res, 400, "name a device with ?id=");
+    let gone;
+    try { gone = store.revoke(id); }
+    catch (error) { return fail(res, 500, `the device list could not be written: ${error?.message ?? error}`); }
+    if (!gone) return fail(res, 404, "no such device");
+    console.log(`device ${id} revoked on ${slug} by the control plane`);
+    res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+    return res.end(JSON.stringify({ slug, revoked: id }));
+  }
+  const rows = store.all().map((row) => ({ ...publicDevice(row), sub: String(row.sub ?? "") }))
+    .sort((a, b) => Number(b.lastSeenAt ?? 0) - Number(a.lastSeenAt ?? 0));
+  res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+  return res.end(JSON.stringify({ slug, measuredAt: new Date().toISOString(), devices: rows }));
 }
 
 /**
@@ -1807,6 +2210,25 @@ async function relayCommand(t, req, res, method) {
     return fail(res, 502, `the gateway refused this relay's token (HTTP ${upstream.status}): ` +
       `SAND_HOST_GATEWAY_TOKEN is stale or the box was recreated. Signing in again will not help.`);
   }
+  // COST-1's seam (ui/relay-hooks.mjs). One gateway answer on its way to a browser, with the chance
+  // to send less of it: the outline paged rather than whole, a digest header so a repeat read can be
+  // answered with "unchanged" in the body instead of a megabyte of it. With no ui/api-diet.mjs this is
+  // the body unchanged and no extra headers, which is byte for byte what this function did before the
+  // seam existed.
+  //
+  // The status stays 200: every gateway command is a POST, and a 304 on a POST is not a thing a
+  // browser's cache understands. A projection says "you already have this" in the body it returns,
+  // which is the shape the console's own reader can act on.
+  //
+  // Only on a 200: a refusal's body is the gateway's sentence and must reach the console whole.
+  if (upstream.status === 200) {
+    const shaped = HOOKS.shapeApiAnswer(method, body, req.headers, text);
+    res.writeHead(200, {
+      "content-type": upstream.headers.get("content-type") ?? "application/json",
+      ...shaped.headers,
+    });
+    return res.end(shaped.bytes);
+  }
   res.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") ?? "application/json" });
   res.end(text);
 }
@@ -1833,7 +2255,25 @@ async function relayAvatar(t, req, res, pathname) {
   const upstream = await fetch(`${t.gateway}${pathname}`, { headers: t.headers() });
   if (!upstream.ok) return fail(res, upstream.status, "no avatar");
   const bytes = Buffer.from(await upstream.arrayBuffer());
-  res.writeHead(200, { "content-type": upstream.headers.get("content-type") ?? "image/png", "cache-control": "no-store", "content-length": bytes.byteLength });
+  // COST-1. An avatar is a picture of a bot and it changes when somebody changes it, which is almost
+  // never -- and it was measured fetched NINE times in one first paint at 390x844 on grok-bot-local-vm
+  // 2026-09-09, every one of them `no-store`. So it goes through the asset policy hook, which answers
+  // a validator the browser can revalidate against. With no ui/asset-cache.mjs it stays `no-store`,
+  // which is what it does today.
+  //
+  // PRIVATE, never public, and that is the whole reason this goes through a hook rather than a literal
+  // header: the avatar route is behind the login, and a publicly cacheable answer would let an edge
+  // hand one workspace's bot picture, or a 401, to everybody.
+  const policy = HOOKS.assetPolicy(pathname, new URL(pathname, "http://relay.invalid"), req);
+  if (policy.status === 304) {
+    res.writeHead(304, policy.headers);
+    return res.end();
+  }
+  res.writeHead(200, {
+    "content-type": upstream.headers.get("content-type") ?? "image/png",
+    "content-length": bytes.byteLength,
+    ...policy.headers,
+  });
   res.end(bytes);
 }
 
@@ -2004,6 +2444,16 @@ function answerUpstream(res, upstream, status = upstream.status, text = upstream
 
 async function handleJobBus(req, res, url) {
   const client = clientOf(req);
+
+  // STORE-1. A DEVICE BEARER IS REFUSED HERE, BY SHAPE, AND CHARGES NOTHING.
+  //
+  // The job bus keeps its own token and the two doors never see each other's credential, which is
+  // what the comment on the /v1 route line says out loud. A device token could never MATCH a bus
+  // token -- a bus token is 48 hex and this one starts tbd1. -- so the only thing reaching the
+  // compare below would achieve is spending an app's owner five attempts on the shared lockout over
+  // an app that aimed at the wrong path. Refusing by shape is not a bypass for the same reason: a
+  // guesser prefixing tbd1. is guessing in a space no bus token is in.
+  if (looksLikeDeviceBearer(req.headers.authorization)) return fail(res, 401, "unauthorized", RELAY_AUTH_HEADER);
 
   // The same lockout the login uses, keyed the same way, because a bearer is guessed exactly the
   // way a password is and there is no reason the bus should be the cheaper of the two doors to
@@ -3229,12 +3679,57 @@ const sameOriginDesktop = (html) => String(html).replace(LOOPBACK_DESKTOP, (_, f
   return `/vnc/1/${file}?${params}`;
 });
 
+// ---- CORS, for exactly the app origins and nothing else (STORE-1) -------------------------------
+//
+// The rules and the argument for each are at the bottom of ui/auth-device.mjs. In one line: an
+// exact-string set, no allow-credentials ever, and an allowed Origin is never a REQUIREMENT for a
+// bearer request -- it decides only which access-control headers come back, because a native HTTP
+// client sends no Origin at all.
+//
+// SAND_UI_APP_ORIGINS names the set; empty, the default, is capacitor://localhost plus
+// https://localhost. A third origin for the desktop shell is therefore a config line and not a
+// deploy of new code.
+const APP_ORIGINS = parseAppOrigins(process.env.SAND_UI_APP_ORIGINS);
+
+/**
+ * Called from the entry, above every door, and answers true when it already answered the request.
+ *
+ * It is above the login gate because a browser sends NO cookie and NO Authorization on a preflight,
+ * so a preflight below the gate is a 401 and every cross-origin call a shell makes dies on it.
+ * Measured on grok-bot-local-vm 2026-09-09: OPTIONS /api/getHealth with an Origin answered 401 with
+ * x-relay-auth: required, because this file had no OPTIONS handler at all.
+ *
+ * An OPTIONS from an origin nobody named gets 403 and no access-control headers: the browser would
+ * refuse the real request anyway, and a 401 there would be read as "sign in", which is not the fault.
+ */
+function handleCors(req, res, url) {
+  const origin = String(req.headers.origin ?? "");
+  if (origin.length === 0) return false;
+  const headers = corsHeaders(origin, APP_ORIGINS);
+  for (const [name, value] of Object.entries(headers ?? {})) res.setHeader(name, value);
+  if (req.method !== "OPTIONS") return false;
+  // A preflight is never a request for data, so it is answered here whatever path it names.
+  if (headers?.["access-control-allow-origin"] == null) {
+    res.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
+    res.end(JSON.stringify({ error: "that origin is not allowed here" }));
+    return true;
+  }
+  res.writeHead(204, { "cache-control": "no-store", "content-length": "0" });
+  res.end();
+  return true;
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://127.0.0.1:${PORT}`);
   // Set before anything answers, so it is on every response including the login page and the
   // refusals. writeHead's own header object is merged over this rather than replacing it.
   if (secureOf(req)) res.setHeader("strict-transport-security", HSTS);
   try {
+    // After the HSTS line and above every door, for the reason on handleCors: a preflight carries no
+    // credential of any kind, so one answered below the login gate is a 401 and a bundled shell is
+    // dead on its first call. A request with no Origin, or one nobody named, falls straight through
+    // and behaves exactly as it does today.
+    if (handleCors(req, res, url)) return;
     // Before the console's login, and never reaching it: /v1 is the job bus, authenticated with
     // its own bearer. A console session must not open it and its bearer must not open anything
     // else, so the two doors never see each other's credential.
@@ -3297,6 +3792,9 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify({ required: AUTH != null, authenticated: isAuthorized(req) }));
     }
+    // STORE-1. The token door, beside /auth/state and above the login gate for the same reason the
+    // preflight is: the caller minting a token has no credential this console would recognise yet.
+    if (url.pathname === "/auth/token") return await handleDeviceTokenMint(req, res);
     if (AUTH == null) {
       // No password configured, which only a loopback bind reaches (see the listen call below).
       // Send /login somewhere useful rather than 404 at an operator who bookmarked it.
@@ -3320,7 +3818,21 @@ const server = createServer(async (req, res) => {
       }
       // Everything else, without exception. The login page carries its own CSS inline precisely so
       // there is no asset list to exempt here.
-      if (!isAuthorized(req)) return denyUnauthenticated(req, res, url);
+      if (!isAuthorized(req)) {
+        // STORE-1. A BAD DEVICE BEARER IS RATE LIMITED AND CHARGES NOTHING ELSE. An app whose token
+        // expired while the phone was in a drawer must not be able to lock its owner out of his own
+        // laptop's console and the job bus, which is what the shared `throttle` object would do: it
+        // is one bucket per address and all three doors read it. So this gets its own fixed window,
+        // 60 a minute per address, the same shape the job bus limiter has.
+        if (looksLikeDeviceBearer(req.headers.authorization)) {
+          const seconds = deviceUseLimiter.retryAfterSeconds(clientOf(req));
+          if (seconds > 0) {
+            return fail(res, 429, `too many requests; wait ${seconds}s`,
+              { "retry-after": String(seconds), ...RELAY_AUTH_HEADER });
+          }
+        }
+        return denyUnauthenticated(req, res, url);
+      }
       mintSessionFromBearer(req, res, url);
     }
 
@@ -3338,6 +3850,24 @@ const server = createServer(async (req, res) => {
     if (slug == null) return denyUnauthenticated(req, res, url);
     const t = contextOf(slug);
     if (t == null) return sendLoginPage(res, 503, { error: NOT_AVAILABLE_SENTENCE });
+    // STORE-1. The person's own devices: what they are signed in on, and taking one away. Scoped by
+    // subOf, because two accounts can share one workspace and one customer's phone list is not the
+    // other's.
+    if (DEVICE_ROUTE.test(url.pathname)) {
+      const [, id] = DEVICE_ROUTE.exec(url.pathname);
+      const sub = subOf(req);
+      if (req.method === "GET" && id === undefined) return handleDeviceList(req, res, t, sub);
+      if (req.method === "DELETE" && id !== undefined) return handleDeviceRevoke(req, res, t, sub, decodeURIComponent(id));
+      return fail(res, 405, id === undefined ? "GET" : "DELETE");
+    }
+    // PUSH-1, through the hook seam, so this file carries the dispatch and ui/push-edge.mjs carries
+    // every rule. With no push-edge.mjs this falls through to the 404 at the bottom, which is what a
+    // shell needs to read on a relay that has no push: a refusal rather than a hang.
+    if (url.pathname === "/push" || url.pathname.startsWith("/push/")) {
+      const push = HOOKS.pushRoutes();
+      if (push != null && await push.handle({ t, req, res, url, sub: subOf(req) }) === true) return;
+      return fail(res, 404, `not found: ${req.method} ${url.pathname}`);
+    }
     // Before the static branch below, which claims every path ending in .js or .css and would
     // otherwise swallow the box's own noVNC assets at /vnc/<display>/app/ui.js.
     if (req.method === "GET" && VNC_ROUTE.test(url.pathname)) {
@@ -3502,7 +4032,30 @@ const server = createServer(async (req, res) => {
       const types = { ".webp": "image/webp", ".avif": "image/avif", ".mp4": "video/mp4", ".webm": "video/webm", ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".md": "text/plain; charset=utf-8" };
       try {
         const bytes = await readFile(file);
-        res.writeHead(200, { "content-type": types[path.extname(file)] ?? "application/octet-stream", "cache-control": "no-store" });
+        const type = types[path.extname(file)] ?? "application/octet-stream";
+        // COST-1's other seam. Measured on grok-bot-local-vm at 390x844 2026-09-09: every asset of the
+        // 1,547 KiB of JS came back `cache-control: no-store`, and live every one is cf-cache-status
+        // DYNAMIC -- so a second boot pays for the whole bundle again. The policy is the hook's, and
+        // with no ui/asset-cache.mjs it is `no-store`, exactly as today.
+        //
+        // THE POLICY IS PRIVATE, NEVER PUBLIC. denyUnauthenticated runs above this branch and the relay
+        // writes no `vary`, so a publicly cacheable response would let the edge serve a signed-in 200,
+        // or a 401, to everybody. Cloudflare will keep answering BYPASS on a private answer, which is
+        // the intended outcome and is printed by the gate in plain words rather than read as a fault.
+        const policy = HOOKS.assetPolicy(file, url, req);
+        if (policy.status === 304) {
+          res.writeHead(304, policy.headers);
+          return res.end();
+        }
+        // index.html is stamped on the way out, the way sameOriginDesktop already rewrites that same
+        // HTML, so the file on disk is never edited for a cache policy and the content-hashed-names
+        // question never turns into a build step.
+        if (type.startsWith("text/html")) {
+          const html = HOOKS.stampHtml(bytes.toString("utf8"), url);
+          res.writeHead(200, { "content-type": type, ...policy.headers });
+          return res.end(html);
+        }
+        res.writeHead(200, { "content-type": type, ...policy.headers });
         return res.end(bytes);
       } catch { return fail(res, 404, `not found: ${url.pathname}`); }
     }
@@ -3935,6 +4488,28 @@ if (AUTH == null && !isLoopbackHost(BIND)) {
 // operator alone, which is exactly what it did before any of this existed.
 await registry.refresh().catch((error) => console.log(`reg  first read failed: ${error?.message ?? error}`));
 registry.start();
+// The hook seam (ui/relay-hooks.mjs), loaded ONCE here and awaited into boot, before the first
+// request. A hook that was sometimes present and sometimes not would be the worst of both halves, and
+// loading it lazily on the first /api call would put an import on a request path.
+//
+// It is why the apps wave's three items have genuinely disjoint file lists: this file carries every
+// call site and route line, and ui/api-diet.mjs, ui/asset-cache.mjs and ui/push-edge.mjs are each
+// reached only through it. Any of the three being absent is a gate leg (tests/relay-hooks-absent),
+// not a comment.
+const HOOKS = await loadRelayHooks({
+  log: (line) => console.log(line),
+  deps: {
+    // What an optional module cannot reach for itself: a tenant's context, its own state file, and the
+    // one upstream call shape. Nothing here is new capability; it is the same three seams the mail
+    // sweep already uses, handed over rather than re-derived.
+    contextOf,
+    tenants: () => registry.all().map((entry) => contextOf(entry.slug)).filter((one) => one != null),
+    file: (t, name) => t.file(name),
+    gatewayCall: (t, method, args) => jobBusCall(t, method, args),
+    ownLikeParent,
+    operatorSlug: OPERATOR_SLUG,
+  },
+});
 if (!await dockerAvailable()) {
   console.log("box  no docker on this relay, so the model picker, the connectors editor and the desktop view say so rather than failing");
 }
@@ -3957,6 +4532,9 @@ mailSweepStart();
 // same reason the mail sweep is not. On a machine that has never run a coding task its first line says
 // it removed nothing, which is how an operator tells "the sweep is running" from "the sweep is absent".
 codeSweepStart();
+// PUSH-1's sweep, beside the mail one and for the same reason: a pending card turning into a push is
+// a timer over reads the gateway already answers, not a request path. A no-op with no push-edge.mjs.
+HOOKS.pushSweepStart();
 server.listen(PORT, BIND, () => {
   console.log(`ui   http://${BIND}:${PORT}`);
   console.log(`gw   ${OPERATOR_GATEWAY}${OPERATOR_TOKEN.length > 0 ? " (bearer)" : " (no auth)"} `

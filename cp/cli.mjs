@@ -38,6 +38,7 @@
 //   node cp/cli.mjs code e2b-key
 //   node cp/cli.mjs code cap <slug> [--usd n] [--minutes n] [--concurrent n] [--daily n]
 //   node cp/cli.mjs code selftest --tenant <slug>
+//   node cp/cli.mjs device list <slug> | revoke <slug> <device id>
 //   node cp/cli.mjs feedback list|show|approve|suppress|close|issue|digest|github-token
 //   node cp/cli.mjs marketplace list
 //   node cp/cli.mjs marketplace verify [--row <id>] [--fixtures] [--write]
@@ -1397,6 +1398,7 @@ const USAGE = [
   "node cp/cli.mjs code e2b-key",
   "node cp/cli.mjs code cap <slug> [--usd n] [--minutes n] [--concurrent n] [--daily n]",
   "node cp/cli.mjs code selftest --tenant <slug>",
+  "node cp/cli.mjs device list <slug> | revoke <slug> <device id>",
   "node cp/cli.mjs feedback list [--tier critical|quality|observation] [--state new|approved|filed|suppressed|closed] [--tenant <slug>] [--since 7d]",
   "node cp/cli.mjs feedback show <id>",
   "node cp/cli.mjs feedback approve|suppress|close <id>",
@@ -1417,6 +1419,8 @@ const USAGE = [
   "voice cap is the only way the minutes change. A customer's Voice card writes their realtime key and can never raise their own limit.",
   "voice usage reports wall clock, audio seconds and billable events separately and says which each is. One minutes column reconciles against neither provider's invoice.",
   "voice cap --vendors none switches voice off for one workspace in one word, and their talk button says so in plain words rather than failing.",
+  "device list and device revoke go through the relay too: a device row lives in the tenant's state directory, not in this container.",
+  "device revoke is for a phone a customer lost and cannot sign in to kill himself. A person revokes their own in the console.",
   "account promote makes somebody a super admin, which opens the console at /admin.",
   "feedback lists what the agents reported and their operators chose to send. Both gates already happened: approve, file or suppress.",
   "feedback github-token reads the token off the terminal, proves it against the repository, and prints a length and a hash. Never an argument.",
@@ -1897,6 +1901,45 @@ async function voiceUsage(args) {
   out("handed over is how many times what somebody said went into their team's conversation. open counts sessions still running, measured at what they have run so far.");
 }
 
+// STORE-1. The phones and laptops signed in to one workspace, and killing one.
+//
+// Through the relay, because the rows live in the tenant's own state directory beside mail.json and
+// this container does not read inside a tenant volume -- the same reason `mail sweep` goes that way.
+// CP_RELAY_URL and CP_RELAY_TOKEN are the credential.
+//
+// Why this exists at all: a customer whose phone is lost and who cannot sign in to revoke it himself
+// needs somebody able to do it, and "ssh to the R750 and edit a JSON file" is the hand operation every
+// one of these verbs exists to replace.
+async function deviceList(args) {
+  const slug = positional(args)[0] ?? "";
+  if (slug.length === 0) die("node cp/cli.mjs device list <slug>");
+  const answer = await askRelay("GET", `/admin/tenants/${encodeURIComponent(slug)}/devices`);
+  const rows = Array.isArray(answer?.devices) ? answer.devices : [];
+  if (rows.length === 0) {
+    out(`${slug} has no app signed in`);
+    out("an app signs in once at /auth/token and holds a thirty-day bearer; nothing is registered until it does");
+    return;
+  }
+  const when = (ms) => (Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString().slice(0, 19).replace("T", " ") : "-");
+  // The name is last for the reason mail list gives: it is the one column a customer can make any
+  // length, so everything to the left of it stays lined up.
+  out(`${pad("device", 24)}${pad("platform", 10)}${pad("last seen", 21)}${pad("revoked", 21)}${pad("person", 22)}name`);
+  for (const row of rows) {
+    out(`${pad(row.id, 24)}${pad(row.platform, 10)}${pad(when(row.lastSeenAt), 21)}${pad(when(row.revokedAt), 21)}`
+      + `${pad(row.sub || "(the workspace)", 22)}${row.name || "(unnamed)"}`);
+  }
+  out(`${rows.length} device(s). A revoked row stays on the list so it is visible that it was taken away.`);
+  out("rotating the instance password kills every one of them at once, because they are signed with the cookie secret");
+}
+
+async function deviceRevoke(args) {
+  const [slug, id] = positional(args);
+  if (!slug || !id) die("node cp/cli.mjs device revoke <slug> <device id>");
+  await askRelay("DELETE", `/admin/tenants/${encodeURIComponent(slug)}/devices?id=${encodeURIComponent(id)}`);
+  out(`${id} is revoked on ${slug}`);
+  out("its next call is refused within two seconds; the app asks the person to sign in again");
+}
+
 async function mailSweep() {
   const answer = await askRelay("POST", "/mail/sweep");
   for (const row of Array.isArray(answer?.swept) ? answer.swept : []) {
@@ -1950,6 +1993,8 @@ const commands = {
   "code e2b-key": codeE2bKey,
   "code cap": codeCap,
   "code selftest": codeSelftest,
+  "device list": deviceList,
+  "device revoke": deviceRevoke,
   "feedback list": feedbackList,
   "feedback show": feedbackShow,
   "feedback approve": feedbackDecide("approve"),

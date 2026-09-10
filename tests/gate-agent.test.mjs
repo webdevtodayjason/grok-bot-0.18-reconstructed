@@ -52,6 +52,12 @@ const GATES = [
   // takes, and drives real Chrome through the same door. The relay is one it starts itself, but the
   // door is real and the header costs one import, so it is held to the same rule.
   "verify-voice.mjs",
+  // DOOR-1 and STORE-1. The front door IS what this gate measures, and /auth/token is the same door
+  // wearing a different shape: it posts a real password at it and records an attempt in the ledger
+  // exactly as the page does. So it says its own name, at both, including from inside the browser -- the
+  // phone user agent it drives Chrome with carries the name on the end, so the ledger row a minted
+  // bearer writes is labelled too.
+  "verify-door.mjs",
 ];
 
 test("the name is built from the calling file, not typed into it", () => {

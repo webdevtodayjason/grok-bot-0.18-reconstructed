@@ -79,9 +79,24 @@ export function signSession(payload, secretHex) {
 // A cookie minted before this shipped carries no tenant claim and reads back as the operator, which
 // is what keeps Jason signed in across the deploy. That is a property to be aware of rather than to
 // rely on: rotating the cookie secret is what ends every old session at once.
-export function createSession(secretHex, { nowMs = Date.now(), lifetimeMs = SESSION_LIFETIME_MS, tenant = "" } = {}) {
+//
+// STORE-1. `sub` is the second claim, and it is WHICH PERSON rather than which workspace. It has to
+// exist because accounts.tenant carries no UNIQUE constraint (cp/store.mjs): two people can share
+// one workspace, and a device list, a push registration and a quiet-hours setting all belong to a
+// person rather than to the workspace they happen to share. mintAccountSession is already holding a
+// verified account id off the control plane's token and threw it away; this is the field it goes in.
+//
+// Absent reads back as the operator, exactly the way an absent tenant claim does, so a cookie minted
+// before this deploy keeps working and a session from the INSTANCE password -- which is the machine's
+// door and names no person -- carries none on purpose.
+export function createSession(secretHex, { nowMs = Date.now(), lifetimeMs = SESSION_LIFETIME_MS, tenant = "", sub = "" } = {}) {
   const slug = String(tenant ?? "").trim();
-  return signSession({ iat: nowMs, exp: nowMs + lifetimeMs, ...(slug.length > 0 ? { tenant: slug } : {}) }, secretHex);
+  const who = String(sub ?? "").trim();
+  return signSession({
+    iat: nowMs, exp: nowMs + lifetimeMs,
+    ...(slug.length > 0 ? { tenant: slug } : {}),
+    ...(who.length > 0 ? { sub: who } : {}),
+  }, secretHex);
 }
 
 // Returns the payload, or null for anything that is not a live signature: wrong secret, edited

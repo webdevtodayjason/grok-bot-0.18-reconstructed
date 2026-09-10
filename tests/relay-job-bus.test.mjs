@@ -427,9 +427,17 @@ test("the job bearer opens nothing but /v1", async () => {
     assert.equal(api.status, 401);
     assert.equal(api.headers.get("x-relay-auth"), "required");
 
+    // STORE-1 changed this answer from a 302 into /login to a JSON 401, on purpose, and the reason is
+    // worth keeping: a browser cannot set an Authorization header from its address bar, so anything
+    // arriving with one is a PROGRAM -- and a program sent a redirect into a sign-in page gets 200 OK
+    // with an HTML form in it and cannot tell that from success. Measured on grok-bot-local-vm
+    // 2026-09-09: `Accept: text/html` is exactly what a Capacitor web view sends on a document fetch.
+    // What this leg is actually about is unchanged and is asserted below: the job bearer opens nothing
+    // here and mints no console session.
     const page = await fetch(`${relay.base}/`, { redirect: "manual", headers: { accept: "text/html", ...bearer(JOB_TOKEN) } });
-    assert.equal(page.status, 302);
-    assert.match(String(page.headers.get("location")), /^\/login/);
+    assert.equal(page.status, 401);
+    assert.equal(page.headers.get("x-relay-auth"), "required");
+    assert.equal(page.headers.get("location"), null, "a credential-bearing request is never redirected into HTML");
     assert.equal(page.headers.get("set-cookie"), null, "the job bearer must not mint a console session");
 
     const vnc = await fetch(`${relay.base}/vnc/1/vnc.html`, { headers: bearer(JOB_TOKEN) });
