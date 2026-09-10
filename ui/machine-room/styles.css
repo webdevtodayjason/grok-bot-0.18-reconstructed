@@ -4872,6 +4872,24 @@ body[data-composer-drop="1"] .composer {
   gap: 0.6rem;
 }
 
+/* Each cell is a label wrapped round its own control, so the word has to sit ABOVE the control the
+   way every other field on this card does. MEASURED on the R750 2026-09-10: without this the three
+   labels ran into their own boxes on one line -- "Service" hard against the dropdown -- which is the
+   one row on the card that did not look like the rest of the console. */
+.voice-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  color: var(--ink-soft, #9aa4ad);
+}
+
+.voice-grid select,
+.voice-grid input {
+  width: 100%;
+  min-width: 0;
+}
+
 /* The spoken chip. A quiet mark on the person's own row saying that row was said out loud, not
    typed. It rides the send's nonce, so it survives a reload and every wholesale repaint. Attention
    colour, never error red: it is a fact about the row and not a verdict on it. */

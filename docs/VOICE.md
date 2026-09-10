@@ -370,24 +370,82 @@ the server.
 Setting a key over ssh would be exactly the by-hand operation this product is being rebuilt to end;
 the mechanism is the Voice card.
 
+### What the gates actually measured, 2026-09-10
+
+Every number names the machine it came off. Nothing below is a projection.
+
+**On this Mac (MacBook-Pro.local, darwin arm64), against grok-bot-local-vm.** `npm test` 2395 of 2395
+and `npm run source:typecheck` clean at the merged commit. All six legs green, one at a time: cp 38/38,
+relay 7/7, nokey 14/14, caps 5/5, origin 4/4, browser 28/28. The browser leg is the whole path in real
+Chrome with a WAV file as the microphone — 201 frames (964,800 bytes) of microphone audio reached the
+vendor through the relay, one `call_id` was answered exactly once across the three surfaces it can
+arrive on, a real reply came back off the box, 288,000 bytes played through Web Audio at an analyser
+RMS of 0.18, and the microphone was held for 21 frames over 2,100 ms with **zero** frames reaching the
+vendor inside that window.
+
+The hop ledger from that run: the tool call reaches `sendPrompt` in **12 ms**, the first sentence goes
+back **0 ms** after the entry is seen, and the wait in the middle — the team's own thinking, which is
+reported and never asserted — was **22,418 ms**. That middle number is section 5's whole point.
+
+**On the R750 (jason-PowerEdge-R750), through console.titanium.bot in real Chrome**, signed in as a
+throwaway customer minted inside the control-plane container and deleted afterwards. Console ready in
+511–634 ms. The talk button is on the composer. `GET /voice/settings` answers 200 with `apiKeySet:
+false` and no `apiKey` field at all. The press puts the sentence on screen in **1,654–2,069 ms**, with
+the control beside it that opens the Voice card; the orb goes off → thinking → off; no session opens
+and no ledger row is written, and the operator's read says *not measured* rather than zero.
+
+A cross-origin upgrade carrying a **real session cookie** and `Origin: https://evil.example` was
+accepted (101, 952 bytes) and refused **in words**, closing cleanly — while the same raw client with
+the console's own Origin got the no-key sentence instead. The Origin check works through Cloudflare,
+and neither answer was a destroyed socket.
+
+**A real spoken turn on the R750 is not measured**, and the reason is not a hole in the work: no
+realtime key exists on any workspace there. See the paragraph above about ssh.
+
 ---
 
 ## 12. The sentences a person reads, word for word
 
 Nothing below names a vendor, a model, a setting, a tool or a protocol. Every one of them is something
-you can act on.
+you can act on. **These are copied from the code, not written for the document** — `SENTENCE` in
+`ui/voice-edge.mjs` and `NOTES` in `ui/machine-room/voice.js` — and `tests/machine-room-voice.test.mjs`
+sweeps each one for sixteen leak patterns.
 
-- No key yet: **"There is no voice key for this workspace yet. Add one under Settings, on the Voice
-  card, and the talk button will work."**
-- Voice switched off for the workspace: **"Voice is not switched on for this workspace yet."**
-- The day is spent: **"This workspace has used all the voice time it has for today, so nothing was
-  started. It starts again in 9 hours."**
-- The session cap: **"That is half an hour of talking. Press the button again to start another."**
-- No microphone permission: **"Your browser has not given this page the microphone. Allow it in the
-  address bar and press the button again."**
-- No team lead to talk to: **"There is nobody on this workspace's team to talk to yet."**
-- The team did not answer: **"I could not get an answer that time. It is still in your conversation,
-  so nothing was lost."**
-- Two things waiting at once: **"Two things are waiting on you. I will not guess which — say which
-  one, or open it on screen."**
-- A held action that already closed: **"That one already closed."**
+From the relay, on the socket it accepted:
+
+- No key yet: **"This workspace has no realtime voice key yet. Add one on the Voice card in Settings
+  and press the button again."** This is the one that also draws a control opening that card.
+- Voice switched off for the workspace: **"Voice is switched off for this workspace. Turn it on on the
+  Voice card in Settings."**
+- An upgrade from somewhere else: **"That came from a page this console does not serve, so I did not
+  open the microphone."**
+- Nobody to talk to: **"There is no bot in this workspace to talk to yet."**
+- The session cap: **"That is the time limit for one conversation. Press the button again to start a
+  fresh one."**
+- The day is spent: **"This workspace has used its voice time for today. It resets at midnight UTC."**
+- A key the vendor would not take: **"The voice service would not take that key. Check it on the Voice
+  card in Settings."**
+- The line went away: **"The voice line dropped. Press the button again."**
+- Could not start at all: **"I could not start a voice session just now. Try again in a moment."**
+
+From the page, when the page is the one that knows:
+
+- No microphone permission: **"This page has not been given the microphone yet. Allow it in your
+  browser and press Talk again."**
+
+**When both have something to say, the relay wins.** Measured on the R750 with no microphone permission
+on a workspace with no key: the page used to take the relay's row and retitle it as a microphone
+problem, so the sentence still said to add a key while the control that would let you do it
+disappeared and the row named the wrong cause. The relay knows why the line did not open; the page only
+knows about its own microphone, and once the line has already been refused that is the lesser fact.
+
+Spoken back by the model, which is a different voice and a different job:
+
+- Asked the same thing twice: **"I have already asked him twice about that. Say it again and I will
+  take it to him fresh."**
+- He did not answer in time: **"He has not come back in ... seconds. It is still in his conversation on
+  screen."** — the number is the wait cap, 120 seconds by default.
+- He stopped without answering: **"He stopped working without answering that one. Ask again and I will
+  take it back to him."**
+- Two things waiting at once: the relay names them and says it will not guess which.
+- A held action that has already closed: **"that one already closed."**

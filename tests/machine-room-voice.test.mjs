@@ -226,6 +226,29 @@ test("VOICE-1 notes: the relay's reason outranks the page's, so the way forward 
   assert.match(second._sentenceFor("no-microphone"), /microphone/i);
 });
 
+test("VOICE-1 docs: every sentence docs/VOICE.md quotes is a sentence the code really says", async () => {
+  // The document promised nine sentences a person would read and the code said nine different ones,
+  // because nothing compared them. A quoted sentence that has drifted is worse than no quote: it is
+  // what somebody answering a support question will read out. Whitespace is normalised because the
+  // document wraps its lines and the code does not, and a sentence carrying a value is written as a
+  // template in the document and matched on its two halves.
+  const norm = (text) => String(text).replace(/\s+/g, " ").trim();
+  const doc = await readFile(path.join(repoRoot, "docs", "VOICE.md"), "utf8");
+  const code = norm(
+    `${await readFile(path.join(repoRoot, "ui", "voice-edge.mjs"), "utf8")} `
+    + `${await readFile(path.join(repoRoot, "ui", "machine-room", "voice.js"), "utf8")}`,
+  );
+  const quoted = [...doc.matchAll(/\*\*"([^"]{25,})"\*\*/g)].map((m) => norm(m[1]));
+  assert.ok(quoted.length >= 10, `docs/VOICE.md quotes only ${quoted.length} sentences; section 12 lists more than that`);
+  for (const sentence of quoted) {
+    const halves = sentence.split("...").map((half) => half.trim()).filter((half) => half.length > 12);
+    for (const half of halves) {
+      assert.ok(code.includes(half),
+        `docs/VOICE.md quotes "${half}" but no line of ui/voice-edge.mjs or ui/machine-room/voice.js says it`);
+    }
+  }
+});
+
 test("VOICE-1 notes: a 4003 close paints its own reason, not a generic failure", async () => {
   // A close only means anything on a live session, which is the precondition the guard in onClose
   // enforces -- so each case here arms one first.
