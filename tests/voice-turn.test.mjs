@@ -584,3 +584,195 @@ test("\"don't confirm\" spoken at a pending card closes nothing as approved", as
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ================================================================== VOICE-7: the panel's own frames
+//
+// The `heard` frame has been on this wire since VOICE-1 and it carried THREE different things under
+// one shape -- a partial transcript, the transcript the service settled on, and the string actually
+// handed to Titan -- with nothing to tell them apart. A one-line caption strip could paint all three
+// the same way; a panel that has to open, follow the words and then DISSOLVE cannot. These run end to
+// end against the real bridge so the labels are measured on the wire rather than read off a diff.
+
+test("VOICE-7: a turn reaches the page as open, partials, then ONE final carrying the row's own id", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  const gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    tail: (n) => (n >= 2 ? [reply("e1", "We are on the deploy gate.")] : []),
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0007" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+
+    stub.emitSpeechStart();
+    await session.settle(() => session.of("heard").some((f) => f.phase === "open"), "the panel being opened");
+    const opened = session.of("heard").find((f) => f.phase === "open");
+    assert.equal(opened.text, "", "the panel opens with no words, which is also all a service that sends none ever gives");
+    assert.equal(opened.turn, 1, "and it is stamped with the utterance it belongs to");
+
+    // xAI's transcript is CUMULATIVE and self-correcting, so each of these carries the whole sentence
+    // so far. The relay normalises it to replace-whole before it reaches the page.
+    stub.emitUserTranscript("what is");
+    stub.emitUserTranscript("what is the team");
+    stub.emitUserTranscript("what is the team working on");
+    await session.settle(() => session.of("heard").filter((f) => f.phase === "partial").length >= 3, "three partials");
+    const partials = session.of("heard").filter((f) => f.phase === "partial").map((f) => f.text);
+    assert.deepEqual(partials.slice(0, 3), ["what is", "what is the team", "what is the team working on"],
+      "the words arrive as whole sentences to replace, not as pieces to append");
+    assert.ok(session.of("heard").filter((f) => f.phase === "partial").every((f) => f.turn === 1));
+
+    // The settled transcript is ANOTHER PARTIAL on purpose: it races the tool call below, and a panel
+    // that dissolved here would flash back open a moment later.
+    stub.emitUserTranscriptDone("what is the team working on");
+    await session.settle(() => session.of("heard").filter((f) => f.phase === "partial").length >= 4, "the settled transcript");
+    assert.equal(session.of("heard").filter((f) => f.phase === "final").length, 0,
+      "the settled transcript must not end the turn: the tool call does");
+
+    stub.emitSpeechStop();
+    stub.emitToolCall({ name: "titan", args: { message: "what is the team working on" }, triple: true });
+    await session.settle(() => session.of("heard").some((f) => f.phase === "final"), "the final frame");
+    const finals = session.of("heard").filter((f) => f.phase === "final");
+    assert.equal(finals.length, 1, "one call_id on three surfaces is still ONE final, or the panel would dissolve twice");
+    assert.equal(finals[0].lands, true, "these bytes become a row in the conversation");
+    assert.equal(finals[0].text, "what is the team working on");
+
+    // THE SAME BYTES. This is the whole promise: the last words the panel shows are the string the
+    // relay handed to Titan, under the id the durable row will carry.
+    await session.settle(() => gateway.of("sendPrompt").length > 0, "the prompt into Titan's conversation");
+    const prompt = gateway.of("sendPrompt")[0].args;
+    assert.equal(finals[0].text, prompt.prompt, "the panel's last words and the row are not the same bytes");
+    assert.equal(finals[0].nonce, prompt.clientNonce, "the page cannot tell which row its panel became");
+    assert.match(finals[0].nonce, /^voice:/, "gateway-adapter.js reads that prefix to draw the spoken chip");
+    // The id is the session plus a counter, not a bare millisecond clock: two sessions started in the
+    // same millisecond would otherwise mint the same one.
+    assert.match(finals[0].nonce, /^voice:[^:]+:1$/);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-7: one utterance's words never bleed into the next one", async () => {
+  // MEASURED on this Mac (node v22.23.1) 2026-09-10, driving makeCaption directly: on the incremental
+  // service the accumulator was reset ONLY by the settled-transcript event, so an utterance whose
+  // completion never arrived bled into the next -- "open the box" then "what time is it" read "open
+  // the boxwhat time is it". A one-line strip hid that. A panel shows it for the whole of the second
+  // utterance. The reset belongs on the utterance boundary, which is the speech-started event.
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "openai" });
+  const gateway = fakeGateway({ agents: [{ id: "a1", name: "Titan", isRunning: true }], tail: () => [] });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "openai", apiKey: "sk-test-key-0008" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+
+    stub.emitSpeechStart();
+    stub.emitUserTranscript("open ");
+    stub.emitUserTranscript("the box");
+    await session.settle(() => session.of("heard").some((f) => f.text === "open the box"), "the first utterance");
+    // No settled transcript at all for that one, which is the case the defect needed.
+    stub.emitSpeechStart();
+    stub.emitUserTranscript("what ");
+    stub.emitUserTranscript("time is it");
+    await session.settle(() => session.of("heard").some((f) => f.turn === 2 && f.phase === "partial" && f.text.length > 0), "the second utterance");
+    const second = session.of("heard").filter((f) => f.turn === 2 && f.phase === "partial").map((f) => f.text);
+    assert.deepEqual(second, ["what ", "what time is it"], `the second utterance read ${JSON.stringify(second)}`);
+    assert.ok(!second.some((one) => one.includes("box")), "the first utterance bled into the second");
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-7: a transcription that gives up takes the panel away instead of leaving a half sentence over the chat", async () => {
+  // Handled nowhere in the bridge until VOICE-7. With a panel on screen it is the difference between
+  // a turn that ends and somebody's half sentence sitting over their conversation with nothing ever
+  // coming to finish it.
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  const gateway = fakeGateway({ agents: [{ id: "a1", name: "Titan", isRunning: true }], tail: () => [] });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0009" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    stub.emitSpeechStart();
+    stub.emitUserTranscript("half a sent");
+    await session.settle(() => session.of("heard").some((f) => f.phase === "partial"), "a partial");
+    stub.emitUserTranscriptFailed();
+    await session.settle(() => session.of("heard").some((f) => f.phase === "final"), "the panel being taken away");
+    const final = session.of("heard").filter((f) => f.phase === "final").at(-1);
+    assert.equal(final.lands, false, "there is no row, and saying there is one would leave the page waiting for it");
+    assert.equal(final.text, "", "and no words, because none were heard");
+    assert.equal(gateway.of("sendPrompt").length, 0, "nothing reached Titan's conversation");
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-7: a spoken yes that closes a card says plainly that no row is coming", async () => {
+  // A whole-utterance yes while a card is on the table goes through the approval the console already
+  // draws; it never becomes a line of prose. A panel that waited for a row here would hang on every
+  // approval somebody answered out loud.
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  const gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    tail: (n) => (n >= 2 ? [approvalEntry("e1", "req1")] : []),
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0010" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    // Turn one puts the card on the table.
+    stub.emitSpeechStart();
+    stub.emitToolCall({ name: "titan", args: { message: "deploy the relay" }, callId: "call_one", triple: false });
+    await session.settle(() => session.of("said").length > 0, "the card read out as a question");
+    const firstFinal = session.of("heard").filter((f) => f.phase === "final").at(-1);
+    assert.equal(firstFinal.lands, true, "turn one did become a row");
+
+    // Turn two is the answer, and it closes the card rather than becoming prose.
+    stub.emitSpeechStart();
+    stub.emitToolCall({ name: "titan", args: { message: "yes" }, callId: "call_two", triple: false });
+    await session.settle(() => session.of("heard").filter((f) => f.phase === "final").length >= 2, "the answer's own final frame");
+    const answer = session.of("heard").filter((f) => f.phase === "final").at(-1);
+    assert.equal(answer.text, "yes", "the panel still shows what was said");
+    assert.equal(answer.lands, false, "but no row is coming, and the panel must not wait for one");
+    assert.equal(answer.why, "answered-a-card");
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-7: an empty utterance is a turn that ends, not a panel left open", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  const gateway = fakeGateway({ agents: [{ id: "a1", name: "Titan", isRunning: true }], tail: () => [] });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0011" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    stub.emitSpeechStart();
+    stub.emitToolCall({ name: "titan", args: { message: "   " }, triple: false });
+    await session.settle(() => session.of("heard").some((f) => f.phase === "final"), "the turn ending");
+    const final = session.of("heard").filter((f) => f.phase === "final").at(-1);
+    assert.equal(final.lands, false);
+    assert.equal(final.why, "not-caught");
+    assert.equal(gateway.of("sendPrompt").length, 0);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

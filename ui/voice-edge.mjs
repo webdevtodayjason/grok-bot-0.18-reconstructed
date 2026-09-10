@@ -1109,7 +1109,7 @@ export function makeTurnRunner({
      * @returns {Promise<{ok:boolean, accepted:boolean, text:string, pieces:string[], attemptId:string,
      *          afterId:string, afterMs:number, card:object|null, hops:object, nonce?:string}>}
      */
-    async run({ agentId, message, onNudge = () => {}, onSent = () => {} }) {
+    async run({ agentId, message, nonce: given = "", onNudge = () => {}, onSent = () => {} }) {
       const hops = { t1: now(), t2: 0, t3: 0, t4: 0 };
       if (rounds >= maxRounds) {
         return { ok: false, refused: true, accepted: false, text: "I have already asked him twice about that. Say it again and I will take it to him fresh.", pieces: [], attemptId: "", afterId: "", afterMs: 0, card: null, hops };
@@ -1118,7 +1118,11 @@ export function makeTurnRunner({
       const before = await tailOf(agentId);
       const beforeId = before == null ? "" : String(before.at(-1)?.id ?? "");
       const beforeMs = before == null ? 0 : Number(before.at(-1)?.timestampMs ?? before.at(-1)?.createdAt) || 0;
-      const nonce = `voice:${now()}`;
+      // THE ID OF THE ROW THIS IS ABOUT TO BECOME. The caller supplies it when it needs to tell the
+      // page that id BEFORE the five-to-twenty-five second wait for Titan; this own-mint is the
+      // fallback for every caller that does not care. A bare millisecond clock is not unique across
+      // two sessions in the same millisecond, so a supplied one is scoped to its session.
+      const nonce = String(given ?? "").length > 0 ? String(given) : `voice:${now()}`;
       // MEASURED 6-14 ms and fire-and-forget: sendPrompt answers {accepted:true} unconditionally
       // (awaitTurn is gated on SAND_DISABLE_SEND_ACCEPT_RETURN, which is set nowhere), so the
       // answer is a receipt that the host took it and not that Titan replied.
@@ -1498,6 +1502,8 @@ export function makeVoiceSession({
    * utterance, and a send the box refused.
    */
   let hearTurn = 0;
+  // Counts the sends in this session, so a row id is unique without depending on the clock.
+  let sendSeq = 0;
   /** The last turn a `hear-end` closed, so a transcript arriving after it cannot re-open the panel. */
   let hearClosedTurn = 0;
 
@@ -1649,14 +1655,22 @@ export function makeVoiceSession({
       return answerTool(toolCall.callId, { reply: said });
     }
     setState("thinking");
+    // THE ID OF THE ROW THESE BYTES ARE ABOUT TO BECOME, minted here rather than inside the runner so
+    // that it is known before the send rather than after it. A bare millisecond clock is not unique
+    // across two sessions that open in the same millisecond, so it is scoped to this session and
+    // counted within it. `voice:` is the whole of what gateway-adapter.js reads to stamp a row spoken,
+    // so the prefix is load-bearing and the rest of the shape is ours.
+    sendSeq += 1;
+    const nonce = `voice:${sessionId}:${sendSeq}`;
     const result = await runner.run({
       agentId: agent.agentId,
       message,
+      nonce,
       onNudge: (text) => void say(text),
       // The instant the box takes it, and not when Titan answers: these are the bytes that became
       // the row, and the nonce that row carries.
-      onSent: ({ nonce }) => {
-        browser?.sendJson({ t: "heard-confirmed", turn, text: message, nonce: String(nonce ?? ""), landed: true });
+      onSent: () => {
+        browser?.sendJson({ t: "heard-confirmed", turn, text: message, nonce, landed: true });
         hearEnd("sent");
       },
     });

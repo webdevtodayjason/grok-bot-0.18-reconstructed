@@ -261,6 +261,26 @@
             ...f.microphones.map((device) => ({ value: device.id, label: device.label, machine: true }))], "microphone"),
         });
       }
+      // VOICE-7. HOW THE TALK BUTTON BEHAVES, which is the person's own choice and not the
+      // workspace's. One row, one control, two choices in plain words. It is drawn wherever the voice
+      // module is loaded, whether or not talking is switched on for the workspace: somebody who wants
+      // to hold the button rather than toggle it should be able to say so before the first press.
+      //
+      // Remembered per browser, beside Theme and Microphone, which are remembered the same way. The
+      // relay's own /voice/settings is one file per WORKSPACE and two people sharing one would fight
+      // over how their own button behaves, so this choice deliberately never goes there.
+      // docs/VOICE.md says in those words that per browser is not per person.
+      if (f.talkMode != null) {
+        add({
+          id: "talk-mode", group: "system",
+          label: "Talk mode",
+          line: "How the Talk button works when you press it.",
+          control: choose(f.talkMode, [
+            { value: "push", label: "Push to talk: hold the button while you speak" },
+            { value: "always", label: "Always listening: press once to start, press again to stop" },
+          ], "talk-mode"),
+        });
+      }
       if (f.voice != null) {
         add({
           id: "voice", group: "system",
@@ -620,6 +640,9 @@
       canUpdateBox: typeof api?.updateBox === "function",
       updateArmed: armedUpdate != null,
       microphone: typeof voice()?.micDeviceId === "function" ? voice().micDeviceId() : "",
+      // VOICE-7. Read from the voice module rather than from a route, because this one is the
+      // browser's own. A console without the module draws no row at all, the PROXY-1 rule.
+      talkMode: typeof voice()?.talkMode === "function" ? voice().talkMode() : null,
     };
 
     const reads = [];
@@ -857,6 +880,17 @@
     }
     if (action === "theme") { applyTheme(node.value); toast(node.value === "system" ? "Following this device." : `${node.options[node.selectedIndex].text} it is.`); return; }
     if (action === "microphone") { voice()?.setMicDeviceId?.(node.value); toast("That microphone is the one Talk uses."); return; }
+    if (action === "talk-mode") {
+      // Painted back from the module rather than left as typed, so a value it refused shows what it
+      // really is rather than what was asked for. Changing it while a call is up ends that call, which
+      // is why the words say so out loud rather than leaving a microphone in a state nobody can
+      // account for.
+      const was = voice()?.talkMode?.();
+      const next = voice()?.setTalkMode?.(node.value) ?? was;
+      node.value = next ?? node.value;
+      toast(next === "always" ? "Press Talk once to start, once more to stop." : "Hold Talk while you speak.");
+      return;
+    }
     if (action === "voice") {
       const on = node.getAttribute("aria-pressed") !== "true";
       node.setAttribute("aria-pressed", String(on));

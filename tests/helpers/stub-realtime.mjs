@@ -302,6 +302,21 @@ export async function startStubRealtime({
       error: { type: "invalid_request_error", code: "audio_unintelligible", message },
     });
   }
+  /**
+   * The same event under the name the overlay's own legs call it. One implementation, two names: both
+   * halves of this wave were written against their own stub and renaming either one's calls would be
+   * editing tests to fit a merge.
+   */
+  const emitUserTranscriptFailed = ({ itemId = "item_user", code = "transcription_failed" } = {}) =>
+    emitTranscriptFailed({ itemId, message: code === "transcription_failed" ? "the audio could not be transcribed" : code });
+  /**
+   * The two halves of a turn, separately. `emitSpeechStopped` below sends BOTH and is what the
+   * VOICE-1 leg drives; a leg that wants to put words between the start and the stop needs them
+   * apart, and calling the pair version twice would start a second user turn and reset the
+   * transcript the panel is in the middle of showing.
+   */
+  function emitSpeechStart() { send({ type: "input_audio_buffer.speech_started" }); }
+  function emitSpeechStop() { send({ type: "input_audio_buffer.speech_stopped" }); }
 
   /** xAI emits no rate_limits.updated at all, which is why this is a no-op there. */
   function emitRateLimits({ remaining = 38000, resetSeconds = 42 } = {}) {
@@ -363,7 +378,10 @@ export async function startStubRealtime({
     emitUserTranscript,
     emitUserTranscriptDone,
     emitTranscriptFailed,
+    emitUserTranscriptFailed,
     emitSpeechStarted,
+    emitSpeechStart,
+    emitSpeechStop,
     emitRateLimits,
     emitRateLimited,
     emitSpeechStopped,

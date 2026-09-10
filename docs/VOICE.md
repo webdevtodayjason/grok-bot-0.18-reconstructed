@@ -34,7 +34,11 @@ What you get:
 
 - A **talk button** beside the message box, and an orb beside it that shows off, listening, thinking
   or speaking.
-- **Press to start, press to stop.** There is no wake word and nothing is ever listening on its own.
+- **Two ways to talk, and you choose which.** Hold the button while you speak and let go, or press
+  once to start and press again to stop. Holding is the default. Section 13.
+- **A panel over the conversation while you talk**, with your words appearing in it as you say them.
+  When you stop, it dissolves and those words are the next line of the conversation. Section 13.
+- There is no wake word and nothing is ever listening on its own.
 - Everything spoken lands in the **same conversation you type in**, marked as spoken, and it is there
   on your phone afterwards.
 - A **held action** is read out as a question. "Send it?" A yes closes it through the same approval
@@ -163,6 +167,16 @@ Two consequences worth spelling out:
 - **What you said is normalised to replace-the-whole-line** before it reaches the page. On one vendor
   the transcript is cumulative with corrections, so appending each update writes the sentence over
   and over.
+- **Both services send your words while you are still speaking**, which is what the panel in section
+  13 is built out of, and their own documentation is where that is read from rather than measured
+  here: xAI emits a cumulative, self-correcting transcript and says it is for live captions (its
+  voice reference, page dated 2026-08-04, read 2026-09-10), and it only does so when the input
+  transcription model is set, which this bridge already sets. OpenAI emits deltas of newly available
+  text that later deltas may revise, inside an ordinary speech-to-speech session, and tells you to
+  reconcile finals on the item id because their order between turns is not guaranteed (its realtime
+  transcription and conversation guides, read 2026-09-10). **Neither has been observed on a live
+  call from this product**, because no realtime key exists on any workspace to observe one with. The
+  panel is measured against the stub that speaks both event shapes.
 - **On xAI, holding the microphone shut is the only defence** against your team hearing itself. The
   other vendor has a switch for it; xAI documents no equivalent. Section 8.
 
@@ -530,6 +544,7 @@ timeout 300 node scripts/verify-voice.mjs --leg origin    # a cross-origin upgra
 timeout 300 node scripts/verify-voice.mjs --leg refused    # a vendor that says 401, and one that is not there
 timeout 300 node scripts/verify-voice.mjs --leg browser   # real Chrome, a WAV as the microphone
 timeout 300 node scripts/verify-voice.mjs --leg frames    # the words, labelled, at both viewports
+timeout 300 node scripts/verify-voice.mjs --leg overlay   # the panel and the two talk modes, two sizes
 node --test tests/voice-transcription.test.mjs           # the words at the socket, including the
                                                         # turns that never become a line
 ```
@@ -675,3 +690,165 @@ Spoken back by the model, which is a different voice and a different job:
   take it back to him."**
 - Two things waiting at once: the relay names them and says it will not guess which.
 - A held action that has already closed: **"that one already closed."**
+
+---
+
+## 13. The panel over the conversation, and the two ways to talk (VOICE-7)
+
+Jason, 2026-09-10: *"If we are showing what is being captured, a more elegant solution would be to
+have a semi-transparent modal over the current chat window where that is being built out. We see the
+words being created, and when it's done, that just becomes the next line ... Also the talk button
+should be either: press it and it's on, so it's a toggle, on or off; or press and hold to talk and
+let go. That should be a setting for the user."*
+
+### What you see
+
+While you are speaking, a panel floats over the conversation: a small orb that is plainly listening,
+and your words appearing in it as you say them, each update replacing the last rather than adding to
+it. When you stop, the panel dissolves and those words are the next line of the conversation, from
+you, marked as spoken, exactly where a typed message would be. Your team lead answers underneath it
+the way he always did, and while he is speaking there is no panel at all: the orb on the button is
+the only sign.
+
+There is no title on it, no icon, no close control and no border that looks like a dialog. It is
+something to read while you talk, not something to dismiss, and the conversation underneath stays
+clickable the whole time. That is deliberate: a machine-looking sheet over somebody's chat gets read
+as something going wrong.
+
+**Nothing in the footer changes size, at any point.** That is not a fight this code has to win every
+time somebody edits a style: the panel is a child of the conversation area, not of the row the
+message box lives in, so there is no arrangement of it that could make the footer grow. The caption
+strip it replaces was inserted next to the message box and therefore became part of that row's grid,
+which is exactly why the footer used to get taller (VOICE-6).
+
+**The last words you read are the words that become the line.** Those two are not the same thing by
+accident. What you watch being built comes from a transcription model; what actually reaches your
+team lead comes from the realtime model's own tool call, and they are two models producing two
+strings. So the panel's final paint is the second one — the bytes that were sent — and the gate
+compares it, character for character, against the row that lands.
+
+**Three turns produce no line, and the panel still goes.** A yes or no that closes an approval goes
+through that approval and never becomes prose; an utterance nothing was heard in produces nothing;
+and a transcription that gives up produces nothing. Each of those now says on the wire that no line
+is coming, so the panel ends the turn instead of waiting for a row that will never arrive. A turn
+that simply stops mid-way takes the panel away after eight seconds.
+
+### The two ways to talk
+
+In **Settings**, on the **Talking** card, one row, **Talk mode**:
+
+| | what it does |
+|---|---|
+| **Push to talk** (the default) | Hold the button while you speak and let go. Or hold the space bar, when the message box is empty. |
+| **Always listening** | Press once to start and press again to stop. Escape stops it too. |
+
+**Push to talk is the default** because it is the one that cannot leave a microphone open by
+accident.
+
+Holding: the microphone opens on the press — before the line has finished opening, with the first
+couple of seconds held and sent the moment it does, because the line takes one and a half to two
+seconds to open through the console and the first words of a first hold would otherwise be lost every
+time. On the release the microphone shuts. **The line itself stays up for a minute**, so the next
+hold is instant rather than paying that wait again, and then it closes itself — the time limits count
+wall clock rather than audio, so a press somebody walked away from would otherwise spend half an hour
+of a two hour day with nobody in the room. Between holds the orb is dark, because an orb that says
+listening while the microphone is shut is a lie.
+
+Always listening: the microphone is open from the press to the next press and the service's own
+turn-taking decides where one utterance ends and the next begins. The orb shows listening between
+turns.
+
+**In both modes the microphone is still held shut while your team is speaking**, plus the third of a
+second in section 8. Nothing here weakens that, and the panel cannot open while he is talking either
+— if that gate ever slipped, the panel would draw his own words coming back through your speakers as
+though you had said them.
+
+**The release does not itself end the turn; the silence after it does.** The service's own turn
+detection is what decides an utterance is over, about seven tenths of a second after you stop making
+noise, in both modes. The vendors document a tighter way — turn detection switched off and a manual
+commit on release — and it is refused here, because it needs the session frame rewritten per mode and
+this bridge writes that frame exactly once and byte-identically for the life of the socket. Rewriting
+it re-bills the whole conversation every turn on one of the two services (section 7).
+
+**Changing the mode ends the call you are in.** A live microphone whose control has just changed
+meaning underneath you is a state nobody on screen can account for.
+
+### The space bar, and what it is not allowed to interrupt
+
+Holding the space bar is push-to-talk on a keyboard, and only when nothing else wants that key: not
+while any field, box or dropdown has the focus, not while something is being edited in place, not
+while a dialog or a drawer is open, not while the box's own screen has the keyboard (everything typed
+there is meant for the machine on the other side), and not while there is a half-typed message in the
+message box. A held key repeats, so the first press latches and every repeat until the release is
+ignored. A window that loses focus never delivers the release, so losing focus is treated as one.
+
+On a phone the button is a 38 px circle, and a press and hold on one of those is a long-press menu, a
+text selection and a drag unless all three are turned off on that one control. They are, and the gate
+holds a real touch on it rather than tapping.
+
+**Escape has the same rule, and one thing it cannot do anything about.** A drawer or a dialog that is
+open takes Escape first, which is right, and the call is still there afterwards. But when the box's
+own screen has the keyboard, nothing typed reaches the console at all: the screen is a frame and the
+browser hands every keystroke to the machine on the other side. Measured while building this: after a
+scroll that put the focus in that frame, Escape never arrived. There is no fix for that and none is
+wanted — the way out then is the button, which is always on the screen.
+
+### Where the choice is stored, and the one thing about it that is not finished
+
+**It is yours, not your workspace's, and today that means it is per browser.** Everything else on the
+Talking card is written to one settings file per workspace; two people sharing a workspace would then
+fight over how their own button behaves, so this one row deliberately never goes through that door.
+The Save button on that card cannot carry it and the route never sees it. What holds it instead is
+this browser, which means it does not follow you to your phone and it is gone if you clear site data.
+It falls back to holding when there is nothing stored, in a private window, and in a browser set to
+refuse site data.
+
+**That is the honest state and not the intended one.** The only per-person door on this product today
+is the one Notifications uses, and the settings surface being rebuilt in the wave beside this one is
+where a talk mode belongs. When that surface has a place for a person's own preferences, this row
+moves there and starts following the person rather than the browser; the page keeps its local copy
+either way, because the button is live the moment the console paints, before any route has answered,
+and it has to know which of the two things it is before the first press.
+
+Also on the card rather than under General because that surface had not landed when this shipped. The
+card is called Talking and it is where somebody looking for how talking works will open first, so it
+is not a bad home — but it is not the one that was specified, and the move is owned by whichever wave
+lands that surface.
+
+The desktop app's global hotkey is a later wave. It presses this same control through the same pair of
+entry points, so it inherits whichever mode is set rather than being a third behaviour to keep in
+step.
+
+### What was measured, and where
+
+**On this Mac (MacBook-Pro.local, darwin arm64), 2026-09-10**, in headless Chrome through
+playwright-core against grok-bot-local-vm, user agent `titanbot-gate/verify-voice.mjs`.
+`--leg overlay`, **113 of 113 checks**, four combinations: each viewport in each mode, with a real
+touch hold on the phone rather than a tap. The line opened in 40 to 657 ms; the words changed between
+reads rather than merely being present; and the spoken row landed exactly once per turn carrying text
+byte-identical to the panel's last words. The Talk mode row was driven through the real control in the
+real panel at both widths — 764 px wide at 1440x900 and 266 px at 390x844 — opening on the mode the
+page was in and keeping the other one when it was chosen. `npm test` 2834 of 2834.
+
+One thing that leg had to work around, and it is **not** this wave's: at 390x844 the console hides the
+gear on the shelf outright, and that gear is the only thing in the console that opens the settings
+panel. So on a phone there is no visible way into Settings at all — not to the Talking card, not to
+Inference, not to a key field. A person gets there through the control on a voice note, which presses
+that same hidden button. Filed as CONSOLE-PHONE-SETTINGS-1 with its owner and its proof; the Voice
+card has been unreachable that way since voice first shipped.
+
+| | 1440x900 | 390x844 |
+|---|---|---|
+| the footer, before / during / after a turn | 1392x106 at y776, unchanged | 390x133 at y711, unchanged |
+| the message box | 600x54, never narrowed | 358x56, never narrowed |
+| the talk button | 74x38, never moved | 38x38, never moved |
+| the panel | 544 px wide, centred over the conversation | 350 px wide |
+
+The numbers this replaces, measured the same way on the same machine: with the caption strip up, the
+footer went to 1392x160 and then 1392x178 at 1440x900 while the message box narrowed to 568 px, and
+to 390x199 and then 390x255 at 390x844.
+
+**Not measured:** a real spoken turn, on any machine. There is no realtime key on this Mac or on any
+workspace of the production server, so every transcript event in every gate came from the stub that
+speaks both services' event shapes. What the two services do on a live call is read from their
+documentation above and is marked as such.
