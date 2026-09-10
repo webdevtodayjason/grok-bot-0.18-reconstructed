@@ -17,7 +17,8 @@ import path from "node:path";
 import {
   EXPIRING_CARD_TTL_MS, FCM_COLLAPSE_BUCKET, MAX_COLLAPSE_ID_BYTES, MAX_FCM_COLLAPSE_KEYS,
   MAX_PUSH_PAYLOAD_BYTES, MAX_PUSH_REASON_LENGTH,
-  PUSH_CARD_KINDS, PUSH_FILE, PUSH_SENT_FILE, PUSH_STUB_LEDGER_FILE, SENT_LEDGER_CAP,
+  CARD_BODY, PUSH_CARD_KINDS, PUSH_FILE, PUSH_MAX_ATTEMPTS, PUSH_RETRY_BASE_MS, PUSH_SENT_FILE,
+  PUSH_STUB_LEDGER_FILE, SENT_LEDGER_CAP,
   buildApnsMessage, buildFcmMessage, cardKey, cardsFromEntry, cardsFromReports, cardsFromTail,
   clipReason, createPushEdge, createPushStore, createSentLedger, createStubSender, deepLinks,
   prunesDevice, quietHoursEndMs, quietHoursHold,
@@ -176,10 +177,13 @@ test("iOS collapses per card inside the 64-byte ceiling; Android tags per card a
   assert.equal(other.message.android.collapse_key, "decision", "an ask is a decision, like an approval");
 });
 
-test("the payload fits, puts the custom keys beside aps, and carries no transcript prose past the reason", () => {
+test("the payload fits, puts the custom keys beside aps, and carries no transcript prose at all", () => {
   const long = "x".repeat(4000);
   const [card] = cardsFromEntry(approvalEntry({ reason: long, command: long }), context);
-  assert.ok(card.reason.length <= MAX_PUSH_REASON_LENGTH, `the reason is clipped to ${MAX_PUSH_REASON_LENGTH}`);
+  // Not "clipped to 140" any more: the body is one of six fixed sentences, so 4,000 characters of
+  // model prose is not shortened, it is never read. 140 stays as the ceiling every sentence fits.
+  assert.equal(card.reason, CARD_BODY["auto-review"]);
+  assert.ok(card.reason.length <= MAX_PUSH_REASON_LENGTH, `every fixed sentence fits the host's ${MAX_PUSH_REASON_LENGTH}`);
   const built = buildApnsMessage(card, { badge: 4, bundleId: "bot.titanium.app", host: "console.titanium.bot", nowMs: context.nowMs });
   assert.ok(built.bytes < MAX_PUSH_PAYLOAD_BYTES, `${built.bytes} bytes is inside the ${MAX_PUSH_PAYLOAD_BYTES} ceiling`);
   // PEERS of aps, never inside it: anything APNs does not recognise inside aps is undefined.
@@ -295,6 +299,38 @@ test("registration is idempotent per deviceId, scoped by sub, and never answers 
   assert.equal((await store.read()).devices.length, 1);
 });
 
+test("one deviceId held by two people is two rows, and neither person's delete crosses", async () => {
+  // THE CASE THE TEST ABOVE CLAIMED IN ITS TITLE AND NEVER DROVE. A deviceId is chosen by the app and
+  // is readable by anybody signed into the workspace, and two accounts share a workspace -- which is
+  // the whole reason subOf exists. Before this ship the row was keyed on deviceId alone: Richard
+  // registering "iphone-of-jason" rewrote Jason's row to his own sub and his own token, so Jason's
+  // phone stopped being notified and left his own list, and Richard's DELETE of that id answered
+  // removed:true on a row that was never his.
+  const t = tenantContext();
+  const store = createPushStore({ file: t.file(PUSH_FILE) });
+  await store.register({ deviceId: "iphone-of-jason", platform: "ios", token: "APNS-JASON", sub: "acct-jason", name: "Jason's iPhone" });
+  await store.register({ deviceId: "iphone-of-jason", platform: "android", token: "FCM-RICHARD", sub: "acct-richard", name: "Richard's phone" });
+
+  const both = (await store.read()).devices;
+  assert.equal(both.length, 2, "one physical id under two accounts is two rows, not a takeover");
+  assert.equal(both.find((d) => d.sub === "acct-jason").token, "APNS-JASON", "Jason's token is untouched");
+  assert.equal(both.find((d) => d.sub === "acct-richard").token, "FCM-RICHARD");
+
+  // Richard's delete, with Richard's sub. It takes his row and leaves Jason's.
+  assert.equal((await store.forget("iphone-of-jason", { sub: "acct-richard" })).removed, true);
+  const left = (await store.read()).devices;
+  assert.equal(left.length, 1);
+  assert.equal(left[0].sub, "acct-jason", "Jason's phone is still registered and still notified");
+  // And a delete by somebody with no claim on it removes nothing and says so.
+  assert.equal((await store.forget("iphone-of-jason", { sub: "acct-nobody" })).removed, false);
+  assert.equal((await store.read()).devices.length, 1);
+
+  // The instance-password door is sub "" and is the workspace itself: it lists every row and can
+  // clear any of them, which is deliberate and is what docs/APPS.md section 6 says.
+  assert.equal((await store.forget("iphone-of-jason", { sub: "" })).removed, true);
+  assert.equal((await store.read()).devices.length, 0);
+});
+
 test("settings are per person, keyed on sub, and the instance door means the workspace", async () => {
   const t = tenantContext();
   const store = createPushStore({ file: t.file(PUSH_FILE) });
@@ -357,7 +393,7 @@ test("410, UNREGISTERED and a bad-argument 400 prune the row; everything else do
 // ---- the whole loop, with everything injected ---------------------------------------------------
 
 /** A push edge over one workspace, a recording sender, and a clock the test moves by hand. */
-function harness({ devices = [], settings = {}, tail = [], reports = [], nowRef = { at: TEN_AM }, slug = "demo" } = {}) {
+function harness({ devices = [], settings = {}, tail = [], reports = [], nowRef = { at: TEN_AM }, slug = "demo", sender = null } = {}) {
   const t = tenantContext(slug);
   const sent = [];
   const calls = [];
@@ -379,7 +415,7 @@ function harness({ devices = [], settings = {}, tail = [], reports = [], nowRef 
             : {};
       return { status: 200, text: JSON.stringify(body), type: "application/json" };
     },
-    senderFor: () => ({ kind: "recording", async send(row) { sent.push(row); return { ok: true, status: 200 }; } }),
+    senderFor: () => sender ?? ({ kind: "recording", async send(row) { sent.push(row); return { ok: true, status: 200 }; } }),
     log: () => {},
   });
   return { t, edge, sent, calls, roster, nowRef };
@@ -694,4 +730,129 @@ test("a desktop device is sent an APNs payload, not an FCM one", async () => {
   assert.equal(h.sent[0].platform, "desktop");
   assert.equal(h.sent[0].headers["apns-push-type"], "alert", "the desktop app rides APNs");
   assert.ok(h.sent[0].payload.aps != null, "so the payload has an aps, not an android block");
+});
+
+test("no notification body carries a field a model wrote, in any of the six kinds", () => {
+  // THE DEFECT THIS PINS. Before this ship the auto-review body was `approval.reason` plus
+  // `approval.command` verbatim, and auto-review exists BECAUSE the command is risky, which is the
+  // same population of commands that carry credentials. Measured on this Mac 2026-09-10 against the
+  // old builders, the alert body came back as "Writes to a remote curl -X POST
+  // https://api.vendor.io/v1/deploy -H \'Authorization: Bearer sk_live_...\' -d @build.json" -- a live
+  // token on its way to Apple and to Google and onto a locked screen. box-handoff carried the box
+  // instruction and a report carried the model\'s own description the same way.
+  const TOKEN = "sk_live_9f2Kq7TzBw0mNpR4";
+  const poison = `curl -X POST https://api.vendor.io/v1/deploy -H 'Authorization: Bearer ${TOKEN}' -d @build.json`;
+  const entries = [
+    approvalEntry({ reason: "Writes to a remote", command: poison }),
+    askEntry({ description: poison }),
+    widgetEntry(),
+    secretEntry(),
+    handoffEntry({ boxInstruction: poison }),
+  ];
+  const cards = [
+    ...cardsFromTail(entries, context),
+    ...cardsFromReports([{ id: "pr-1", at: new Date(TEN_AM).toISOString(), agentId: "agent-1", agentName: "Books", report: { title: "The deploy call fails", description: poison } }], { tenant: "demo", nowMs: context.nowMs }),
+  ];
+  assert.equal(cards.length, 6, "all six kinds");
+
+  for (const card of cards) {
+    const apns = buildApnsMessage(card, { badge: 1, bundleId: "bot.titanium.app", host: "console.titanium.bot", nowMs: context.nowMs });
+    const fcm = buildFcmMessage(card, { badge: 1, token: "fcm-token", host: "console.titanium.bot", nowMs: context.nowMs });
+    const apnsBody = String(apns.payload.aps.alert.body ?? "");
+    const fcmBody = String(fcm.message.android.notification.body ?? "");
+    assert.ok(!apnsBody.includes(TOKEN), `${card.kind}: no token in the APNs alert body`);
+    assert.ok(!fcmBody.includes(TOKEN), `${card.kind}: no token in the FCM notification body`);
+    assert.ok(!apnsBody.includes("curl"), `${card.kind}: no command text in the APNs alert body either`);
+    // And it is not merely scrubbed: the body IS one of the six sentences this file wrote.
+    assert.equal(apnsBody, CARD_BODY[card.kind], `${card.kind}: the body is the fixed sentence`);
+    assert.equal(fcmBody, CARD_BODY[card.kind]);
+    assert.ok(apnsBody.length > 0 && apnsBody.length <= MAX_PUSH_REASON_LENGTH);
+  }
+
+  // The ids are in the payload, which is how the app fetches the detail with its own bearer and draws
+  // it behind the device unlock, where the command belongs.
+  const built = buildApnsMessage(cards[0], { badge: 1, bundleId: "bot.titanium.app", nowMs: context.nowMs });
+  for (const key of ["cardKey", "kind", "tenant", "agent", "entry", "request", "link"]) assert.ok(Object.hasOwn(built.payload, key), key);
+});
+
+test("a card no device wants is muted once, never re-decided, and stops costing a tail read", async () => {
+  // MEASURED BEFORE THIS SHIP, on this Mac 2026-09-10: one device, quiet hours OFF, the person had
+  // turned the box-handoff switch off. Over five passes the ledger state stayed "held" every time with
+  // heldUntil 0, the agent stayed in the open set every time, and each pass bought another
+  // getAgentTranscriptTail -- 5,760 re-decisions and 5,760 tail reads a day for a card the customer
+  // explicitly switched off, until somebody answered it.
+  const nowRef = { at: TEN_AM };
+  const h = harness({ tail: () => [handoffEntry()], reports: () => [], nowRef });
+  await h.edge.storeFor(h.t).register({ deviceId: "phone-1", platform: "ios", token: "apns-one", sub: "" });
+  await h.edge.storeFor(h.t).saveSettings("", { kinds: { "box-handoff": false } });
+
+  const first = await h.edge.sweepOnce("one");
+  assert.equal(h.sent.length, 0, "nothing is sent for a kind the person switched off");
+  assert.equal(first.swept[0].muted, 1);
+  assert.equal(first.swept[0].held, 0, "it is not held: there is nothing to catch up on and no time to do it at");
+
+  const ledger = () => JSON.parse(readFileSync(h.t.file(PUSH_SENT_FILE), "utf8")).rows;
+  assert.equal(ledger()[0].state, "muted");
+  assert.equal(ledger()[0].heldUntil, 0);
+
+  for (let pass = 2; pass <= 5; pass += 1) {
+    nowRef.at += 15_000;
+    const again = await h.edge.sweepOnce(`pass ${pass}`);
+    assert.equal(h.sent.length, 0, `pass ${pass} sends nothing`);
+    assert.equal(again.swept[0].muted, 0, `pass ${pass} does not re-decide it`);
+  }
+  // ONE tail read in five passes. A muted row is out of the open set, so its agent is only read while
+  // the roster itself moves.
+  const tails = h.calls.filter((call) => call.command === "getAgentTranscriptTail");
+  assert.equal(tails.length, 1, "the agent left the open set on pass one");
+  assert.equal(ledger().length, 1, "and the row is still the same row, written once");
+  assert.equal(ledger()[0].state, "muted");
+});
+
+test("a vendor refusal backs off, and gives up rather than retrying every fifteen seconds for ever", async () => {
+  // The same shape as the muted case and a different right answer: a transient APNs 500 IS worth
+  // retrying, and retrying it every 15 s for ever is how a sender gets itself rate limited, which is
+  // the exact failure the prune rules were written to avoid. 500 is deliberately not a pruning status.
+  const nowRef = { at: TEN_AM };
+  const refused = [];
+  const h = harness({
+    tail: () => [handoffEntry()], reports: () => [], nowRef,
+    sender: { kind: "refusing", async send(row) { refused.push(row); return { ok: false, status: 500, reason: "InternalServerError" }; } },
+  });
+  await h.edge.storeFor(h.t).register({ deviceId: "phone-1", platform: "ios", token: "apns-one", sub: "" });
+
+  const ledger = () => JSON.parse(readFileSync(h.t.file(PUSH_SENT_FILE), "utf8")).rows[0];
+  const first = await h.edge.sweepOnce("one");
+  assert.equal(refused.length, 1, "it was tried");
+  assert.equal(first.swept[0].failed, 1);
+  assert.equal(ledger().state, "failed");
+  assert.equal(ledger().attempts, 1);
+  assert.equal(ledger().retryAt - TEN_AM, PUSH_RETRY_BASE_MS, "the first backoff is a minute");
+
+  // The three sweeps inside that minute cost the vendor nothing at all.
+  for (let i = 0; i < 3; i += 1) { nowRef.at += 15_000; await h.edge.sweepOnce("inside the backoff"); }
+  assert.equal(refused.length, 1, "nothing was sent inside the backoff");
+
+  // And the interval grows: a minute, two, four, eight, sixteen, and then it gives up.
+  const waits = [];
+  for (let attempt = 2; attempt <= PUSH_MAX_ATTEMPTS; attempt += 1) {
+    const due = ledger().retryAt;
+    assert.ok(due > nowRef.at, `attempt ${attempt} is owed a wait`);
+    nowRef.at = due;
+    await h.edge.sweepOnce(`attempt ${attempt}`);
+    assert.equal(refused.length, attempt, `attempt ${attempt} was tried once`);
+    assert.equal(ledger().attempts, attempt);
+    if (attempt < PUSH_MAX_ATTEMPTS) waits.push(ledger().retryAt - nowRef.at);
+  }
+  for (let i = 1; i < waits.length; i += 1) assert.ok(waits[i] > waits[i - 1], `wait ${i} grows: ${waits.join(", ")}`);
+  assert.equal(ledger().gaveUp, true, `it gives up after ${PUSH_MAX_ATTEMPTS} attempts`);
+  assert.equal(ledger().retryAt, 0);
+
+  // And then it is done: hours later, no send and no tail read, because it left the open set too.
+  const tailsBefore = h.calls.filter((call) => call.command === "getAgentTranscriptTail").length;
+  nowRef.at += 6 * 60 * 60 * 1_000;
+  await h.edge.sweepOnce("the next morning");
+  assert.equal(refused.length, PUSH_MAX_ATTEMPTS, "a refusal that gave up is never tried again");
+  assert.equal(h.calls.filter((call) => call.command === "getAgentTranscriptTail").length, tailsBefore,
+    "and its agent is out of the open set, so it costs no tail read either");
 });

@@ -430,7 +430,18 @@ export function parseAppOrigins(value, { fallback = DEFAULT_APP_ORIGINS } = {}) 
 
 export const CORS_ALLOW_HEADERS = "authorization, content-type, x-titan-projection, x-titan-if-digest";
 export const CORS_ALLOW_METHODS = "GET, POST, DELETE, OPTIONS";
-export const CORS_EXPOSE_HEADERS = "x-relay-auth, etag";
+// x-titan-digest IS ON THIS LINE FOR A REASON, and it was missing from it until the review pass.
+// Only the names listed here are readable by cross-origin JavaScript: everything else is dropped by
+// the browser before the page sees it, with no error anywhere. Measured in real Chrome on this Mac
+// 2026-09-10, a cross-origin page reading an /api answer with the live header set: the headers JS
+// could see were `content-type` alone and r.headers.get("x-titan-digest") answered null; with the
+// name added, `content-type, x-titan-digest` and the digest itself. Without it the adapter's memo
+// (gateway-adapter.js:144) is never filled on a bundled origin, x-titan-if-digest is never sent, and
+// every idempotent read is downloaded whole on every tick -- 39.7 KiB instead of 20 bytes on the
+// outline alone, which is the one mechanism the 100 KiB idle ceiling rests on. So the unchanged-answer
+// protocol was dead in exactly the shells this door exists for, and same-origin is the only shape
+// that ever measured it.
+export const CORS_EXPOSE_HEADERS = "x-relay-auth, etag, x-titan-digest";
 export const CORS_MAX_AGE = "600";
 
 /**

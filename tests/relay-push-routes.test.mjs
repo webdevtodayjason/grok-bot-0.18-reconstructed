@@ -295,3 +295,44 @@ test("the seam carries a device revoke through to the push row", async () => {
   assert.deepEqual(await P.forgetDevice("demo", "a-lost-phone"), { ok: true, removed: true });
   assert.deepEqual(asked, ["demo/a-lost-phone"]);
 });
+
+test("a DELETE only reaches the caller's own device, and saving settings reopens a muted card", async (tt) => {
+  const relay = await standUp({ sub: "acct-jason" });
+  tt.after(() => relay.close());
+
+  // TWO PEOPLE, ONE DEVICE ID. The id is chosen by the app and is readable off a device list, and two
+  // accounts share a workspace, so this is the shape that mattered: before this ship the row was keyed
+  // on deviceId alone, so the second registration took the first one's row and a DELETE of that id
+  // removed a row belonging to somebody else and answered removed:true.
+  await relay.ask("POST", "/push/devices", { platform: "ios", token: "APNS-JASON", deviceId: "shared-id", name: "Jason's iPhone" });
+  relay.subRef.value = "acct-richard";
+  await relay.ask("POST", "/push/devices", { platform: "android", token: "FCM-RICHARD", deviceId: "shared-id", name: "Richard's phone" });
+
+  const mine = await relay.ask("GET", "/push/devices");
+  assert.equal(mine.body.devices.length, 1, "a person's list is their own rows and nobody else's");
+  assert.equal(mine.body.devices[0].platform, "android");
+
+  const removed = await relay.ask("DELETE", "/push/devices/shared-id");
+  assert.equal(removed.body.removed, true, "Richard removes Richard's");
+  assert.equal((await relay.ask("DELETE", "/push/devices/shared-id")).body.removed, false, "and there is nothing of his left to remove");
+  relay.subRef.value = "acct-jason";
+  const left = await relay.ask("GET", "/push/devices");
+  assert.equal(left.body.devices.length, 1, "Jason's phone is still registered");
+  assert.equal(left.body.devices[0].platform, "ios");
+
+  // SAVING SETTINGS REOPENS A TERMINAL ROW. A muted card is never retried on a timer, which is the
+  // whole fix; the one event that can change that answer is the person changing the switch, so the
+  // settings write drops those rows and the next pass decides them once.
+  const ledger = relay.edge.ledgerFor(relay.t);
+  await ledger.write(new Map([
+    ["muted-key", { key: "muted-key", kind: "box-handoff", state: "muted", at: Date.now(), deadlineMs: 0, agentId: "agent-1", entryId: "e1", heldUntil: 0, attempts: 0, retryAt: 0, gaveUp: false }],
+    ["held-key", { key: "held-key", kind: "widget", state: "held", at: Date.now(), deadlineMs: 0, agentId: "agent-1", entryId: "e2", heldUntil: Date.now() + 8 * 60 * 60 * 1_000, attempts: 0, retryAt: 0, gaveUp: false }],
+    ["alerted-key", { key: "alerted-key", kind: "secret", state: "alerted", at: Date.now(), deadlineMs: 0, agentId: "agent-1", entryId: "e3", heldUntil: 0, attempts: 0, retryAt: 0, gaveUp: false }],
+  ]));
+  const saved = await relay.ask("PUT", "/push/settings", { kinds: { "box-handoff": true }, quietHours: { on: false, from: 22, to: 7 } });
+  assert.equal(saved.status, 200);
+  const after = await ledger.read();
+  assert.equal(after.has("muted-key"), false, "the muted row is gone, so the card waiting is decided again");
+  assert.equal(after.get("held-key").heldUntil, 0, "a quiet window somebody just changed releases its catch-up on the next pass");
+  assert.equal(after.get("alerted-key").state, "alerted", "and a card already alerted is not alerted twice");
+});

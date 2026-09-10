@@ -1466,7 +1466,9 @@ function handleDeviceRevoke(req, res, t, sub, id) {
   // And its push row with it, in the same action. Not awaited and never able to fail this revoke:
   // the bearer is dead the moment the line above returns, and a person revoking a phone they lost
   // must not be told the revoke failed because a notification row would not delete. It IS logged.
-  void HOOKS.pushForgetDevice(t.slug, id).then((answer) => {
+  // The same sub the bearer store just matched on, so this cannot remove a push row belonging to
+  // another account that happens to have chosen the same device id.
+  void HOOKS.pushForgetDevice(t.slug, id, sub).then((answer) => {
     if (answer?.ok === true && answer?.removed === true) console.log(`device ${id} will not be notified on ${t.slug} either`);
   }).catch(() => {});
   console.log(`device ${id} revoked on ${t.slug}`);
@@ -3697,6 +3699,29 @@ const sameOriginDesktop = (html) => String(html).replace(LOOPBACK_DESKTOP, (_, f
 // deploy of new code.
 const APP_ORIGINS = parseAppOrigins(process.env.SAND_UI_APP_ORIGINS);
 
+// WHICH PATHS CORS IS FOR, named rather than "everything". Until the review pass these headers went
+// on at the top of the entry and therefore on every route on this relay: measured on the R750
+// 2026-09-10, OPTIONS /v1/jobs, /admin/login-ledger, /mail/send and /code/start each answered 204
+// with access-control-allow-origin: capacitor://localhost. Nothing was exploitable -- no cookie is
+// ever sent cross-site and each of those doors wants a credential a page does not hold -- but
+// https://localhost is on the default allow-list and is the commonest dev origin on a customer's own
+// machine, so the blast radius of any future credential a page could hold was the whole relay rather
+// than the console API. These are the paths docs/APPS.md section 3 describes and the only paths the
+// gate's own shell touches; everything else falls through with no access-control headers at all,
+// exactly as it did before this wave.
+const CORS_ASSET = /\.(css|js|mjs|svg|png|jpg|jpeg|gif|webp|avif|ico|woff2?|ttf|otf|mp4|webm|map|webmanifest|txt|md)$/;
+function corsPath(pathname) {
+  if (pathname.startsWith("/api/")) return true;
+  if (pathname === "/events") return true;
+  if (pathname === "/auth/token") return true;
+  if (DEVICE_ROUTE.test(pathname)) return true;
+  if (pathname === "/push" || pathname.startsWith("/push/")) return true;
+  if (pathname.startsWith("/avatars/")) return true;
+  // The static console, by the same test the asset branch itself uses further down.
+  if (pathname === "/" || pathname === "/index.html" || pathname.startsWith("/machine-room/")) return true;
+  return CORS_ASSET.test(pathname);
+}
+
 /**
  * Called from the entry, above every door, and answers true when it already answered the request.
  *
@@ -3711,6 +3736,7 @@ const APP_ORIGINS = parseAppOrigins(process.env.SAND_UI_APP_ORIGINS);
 function handleCors(req, res, url) {
   const origin = String(req.headers.origin ?? "");
   if (origin.length === 0) return false;
+  if (!corsPath(String(url?.pathname ?? ""))) return false;
   const headers = corsHeaders(origin, APP_ORIGINS);
   for (const [name, value] of Object.entries(headers ?? {})) res.setHeader(name, value);
   if (req.method !== "OPTIONS") return false;

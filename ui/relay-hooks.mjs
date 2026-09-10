@@ -169,9 +169,9 @@ export async function loadRelayHooks({ log = (line) => console.log(line), deps =
      * sweep. A no-op with no push-edge.mjs, and never a reason a revoke fails: the bearer is already
      * dead by the time this runs, so the worst case of a failure here is a row nothing can use.
      */
-    async pushForgetDevice(slug, deviceId) {
+    async pushForgetDevice(slug, deviceId, sub) {
       if (P == null || typeof P.forgetDevice !== "function") return { ok: false, error: "no_push" };
-      try { return await P.forgetDevice(slug, deviceId); }
+      try { return await P.forgetDevice(slug, deviceId, sub); }
       catch (error) { log(`hook  a revoked device's push row could not be dropped: ${error?.message ?? error}`); return { ok: false, error: "failed" }; }
     },
 

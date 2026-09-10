@@ -312,6 +312,15 @@ async function legCors(origin) {
     check(res.headers.get("access-control-allow-credentials") == null, `and never allows credentials`,
       "the cookie is SameSite=Strict and is never sent cross-site, so credentials would buy a shell nothing and cost this console its CSRF answer");
     check(/authorization/i.test(String(res.headers.get("access-control-allow-headers"))), "and admits the Authorization header", String(res.headers.get("access-control-allow-headers")));
+    // THE EXPOSE LIST, BY NAME, and x-titan-digest is the name that matters. Only the headers on this
+    // line are readable by cross-origin JavaScript and a missing one fails silently: headers.get
+    // answers null, the adapter's memo is never filled, x-titan-if-digest is never sent, and every
+    // idempotent read is downloaded whole on every tick -- which is the one mechanism the 100 KiB
+    // idle ceiling rests on. It was missing on the R750 until 2026-09-10 and no gate looked.
+    const exposed = String(res.headers.get("access-control-expose-headers") ?? "").toLowerCase().split(",").map((one) => one.trim());
+    for (const name of ["x-relay-auth", "etag", "x-titan-digest"]) {
+      check(exposed.includes(name), `and exposes ${name} to cross-origin JavaScript`, String(res.headers.get("access-control-expose-headers")));
+    }
     // INCLUDES origin, not equals it. A compressing edge adds Accept-Encoding of its own and that is
     // correct: what this assertion is about is that no shared cache can serve one origin's
     // access-control headers to another origin's request.
@@ -322,6 +331,17 @@ async function legCors(origin) {
   for (const liar of ["https://evil.example", "https://localhost.evil.example", "null"]) {
     const res = await ask({ origin: liar, "access-control-request-method": "POST" });
     check(res.headers.get("access-control-allow-origin") == null, `a preflight from ${liar} gets zero access-control headers`, `HTTP ${res.status}`);
+  }
+
+  // AND THE PATHS CORS IS NOT ON. Until 2026-09-10 these headers went on at the top of the request
+  // entry and therefore on every route on this relay: measured live on console.titanium.bot, OPTIONS
+  // /v1/jobs, /admin/login-ledger, /mail/send and /code/start each answered 204 with
+  // access-control-allow-origin: capacitor://localhost. None of them is a path a shell calls and each
+  // holds a credential of its own, so an app origin has no business being told it may talk to them.
+  for (const pathname of ["/v1/jobs", "/admin/login-ledger", "/mail/send", "/code/start"]) {
+    const res = await ask({ origin: "capacitor://localhost", "access-control-request-method": "POST" }, "OPTIONS", pathname);
+    check(res.headers.get("access-control-allow-origin") == null,
+      `a preflight to ${pathname} from an ALLOWED origin still gets no access-control headers`, `HTTP ${res.status}`);
   }
 
   // No Origin at all is not a CORS request: a native HTTP client sends none, and it has to keep working.
@@ -398,6 +418,33 @@ window.__shell = async (relay, password) => {
     say("outline " + outline.status + " " + outline.bytes + " bytes");
   }
 
+  // THE UNCHANGED-ANSWER PROTOCOL, FROM A BUNDLED ORIGIN, which is the only place it was never
+  // measured and the only place it was broken. Two identical reads: the first has to hand this page a
+  // READABLE x-titan-digest (cross-origin JS can only see the headers the relay exposes by name, and a
+  // missing name fails silently), and the second, carrying it back, has to cost 20 bytes instead of the
+  // whole payload. Without it every idle tick re-downloads everything, which is 6.5x the idle ceiling.
+  let digest = null;
+  if (named != null) {
+    const body = JSON.stringify({ id: named.id ?? named.agentId });
+    const head = { ...auth, "content-type": "application/json", "x-titan-projection": "lean" };
+    const one = await fetch(relay + "/api/getConversationOutline", { method: "POST", headers: head, body });
+    const oneText = await one.text();
+    const seen = one.headers.get("x-titan-digest");
+    // What this page can see at all, which is the list the relay's expose header decides.
+    const visible = [];
+    one.headers.forEach((_value, name) => visible.push(name));
+    let twoBytes = null;
+    let unchanged = false;
+    if (seen) {
+      const two = await fetch(relay + "/api/getConversationOutline", { method: "POST", headers: { ...head, "x-titan-if-digest": seen }, body });
+      const twoText = await two.text();
+      twoBytes = twoText.length;
+      unchanged = twoText.indexOf("__unchanged") >= 0;
+    }
+    digest = { readable: seen != null, head: String(seen ?? "").slice(0, 8), visible: visible.sort().join(", "), first: oneText.length, second: twoBytes, unchanged };
+    say("digest " + (seen == null ? "NOT READABLE" : digest.head) + ", " + digest.first + " then " + digest.second + " bytes");
+  }
+
   // /events with fetch plus a stream reader, because EventSource cannot carry a header.
   //
   // HELD FOR A REAL THIRTY SECONDS, and the number is reported rather than assumed. An earlier shape
@@ -442,7 +489,7 @@ window.__shell = async (relay, password) => {
     avatar = { status: res.status, blob: res.ok ? URL.createObjectURL(await res.blob()).startsWith("blob:") : false };
   }
 
-  return { ok: true, log, device: minted.device.id, token: minted.token, roster: list.length, outline, eventsStatus, frames, heldMs, avatar };
+  return { ok: true, log, device: minted.device.id, token: minted.token, roster: list.length, outline, digest, eventsStatus, frames, heldMs, avatar };
 };
 window.__revoke = async (relay, token, device) => {
   const gone = await fetch(relay + "/auth/devices/" + device, { method: "DELETE", headers: { authorization: "Bearer " + token } });
@@ -497,6 +544,16 @@ async function legApp(password) {
         `HTTP ${out.outline.status}, ${out.outline.bytes} decoded bytes`
         + (out.outline.items != null ? `, ${out.outline.items} outline items` : "")
         + (out.outline.body ? ` — ${out.outline.body}` : ""));
+    }
+    if (out.digest == null) skip("and the unchanged-answer protocol works across origins", "the box has no conversation to read twice");
+    else {
+      check(out.digest.readable, "a cross-origin page can READ x-titan-digest off an /api answer",
+        out.digest.readable
+          ? `${out.digest.head}…, and the headers this page can see are: ${out.digest.visible}`
+          : `headers.get("x-titan-digest") answered null; the page can only see: ${out.digest.visible}. The relay's access-control-expose-headers is the thing to fix, not the page`);
+      check(out.digest.unchanged && out.digest.second <= 64,
+        "and sending it back costs 20 bytes instead of the whole answer",
+        `${out.digest.first} bytes, then ${out.digest.second} bytes${out.digest.unchanged ? " ({\"__unchanged\":true})" : ""} — this is the mechanism the 100 KiB idle ceiling rests on, and it was dead on a bundled origin until 2026-09-10`);
     }
     check(out.eventsStatus === 200, "and holds /events open with fetch plus a stream reader", `HTTP ${out.eventsStatus} (EventSource carries no header, which is why it is not used)`);
     check(out.heldMs >= 29_000, "and the stream is still open thirty seconds later", `held ${out.heldMs} ms before this gate closed it`);

@@ -39,10 +39,17 @@
 //    about yesterday's cards on the next redeploy, and a redeploy restarts this relay
 //    (ui/auth.mjs:63-68 records exactly that).
 //
-// 5. A PUSH CARRIES NO PROSE NOBODY ASKED TO SEE ON A LOCK SCREEN. A title, a reason clipped to 140
-//    characters (the host's own MAX_NOTIFICATION_BODY_LENGTH, source/shared/os-notification.ts), the
-//    ids, a deep link, under 4096 bytes, nothing else. No transcript text beyond that reason, and no
-//    credential in any log line this file writes.
+// 5. A NOTIFICATION BODY IS A FIXED SENTENCE THIS FILE WROTE, NEVER FREE TEXT FROM A TURN. A title,
+//    one of the six sentences in CARD_BODY below, the ids, a deep link, under 4096 bytes, nothing
+//    else; and no credential in any log line this file writes. This rule was BROKEN until the review
+//    pass: the auto-review body was the approval's reason plus `approval.command` verbatim, and
+//    auto-review exists precisely because a command is risky, which is the same population of
+//    commands that carry credentials. Measured on this Mac 2026-09-10 with a realistic approval, the
+//    alert body came back as "Writes to a remote curl -X POST https://api.vendor.io/v1/deploy -H
+//    'Authorization: Bearer sk_live_...' -d @build.json" -- a live token on its way to Apple and
+//    Google and onto a locked screen. box-handoff carried the box instruction and report carried the
+//    model's own description the same way. The card's ids are already in the payload, so the app
+//    fetches the detail with its own bearer and draws it inside the app, behind the device unlock.
 //
 // WHAT THIS FILE DELIBERATELY DOES NOT REUSE. source/shared/os-notification.ts is this exact
 // transition diff already solved host-side, dedupe included, and it was read before the decider
@@ -131,6 +138,23 @@ const clampHour = (value) => {
   return Number.isFinite(n) ? ((n % 24) + 24) % 24 : 0;
 };
 
+/**
+ * THE NOTIFICATION BODY, ONE FIXED SENTENCE PER KIND. Rule 5. Nothing a model wrote reaches a lock
+ * screen through this file: not the approval's reason, not its command, not the box instruction, not
+ * a report's description. Each sentence says what kind of answer is wanted and where to give it, and
+ * the detail lives behind the deep link, which the app opens with its own bearer after the device is
+ * unlocked. Titles stay as they are: the host already shows the person's own summary line there, and
+ * a title with no subject would be unreadable on a phone.
+ */
+export const CARD_BODY = Object.freeze({
+  "auto-review": "Open it to read the command before you allow it.",
+  "local-tool": "This runs on the box itself, not in a sandbox.",
+  widget: "Open it to answer.",
+  secret: "It needs a credential before it can carry on.",
+  "box-handoff": "Open it to read what it needs done.",
+  report: "Open it to read the report before it goes.",
+});
+
 /** One line of prose, collapsed and clipped to the host's own ceiling. The ellipsis is the host's. */
 export function clipReason(text) {
   const collapsed = str(text).replace(/\s+/g, " ").trim();
@@ -207,7 +231,9 @@ export function cardsFromEntry(entry, { tenant, agentId, agentName, nowMs }) {
       requestId: str(approval.requestId),
       pending: pendingApproval(approval.status),
       title: str(approval.summary).trim() || "This action needs your review",
-      reason: [str(approval.reason), str(approval.command)].filter((part) => part.length > 0).join(" "),
+      // Never approval.reason and never approval.command: see rule 5. The command is the reason this
+      // card exists and is the likeliest field in the whole transcript to be carrying a credential.
+      reason: CARD_BODY["auto-review"],
     }));
   }
 
@@ -219,7 +245,8 @@ export function cardsFromEntry(entry, { tenant, agentId, agentName, nowMs }) {
       // The console's own title for this card, character for character (gateway-adapter.js:138), so
       // what a person reads on a lock screen is what they then read on the card they open.
       title: `${str(ask.action) || "Run"} · ${str(ask.target) || "a local tool"}`,
-      reason: str(ask.description) || "This runs on the box itself, not in a sandbox.",
+      // Never ask.description: a model writes it and it can name a value it is about to use.
+      reason: CARD_BODY["local-tool"],
     }));
   }
 
@@ -227,7 +254,7 @@ export function cardsFromEntry(entry, { tenant, agentId, agentName, nowMs }) {
     out.push(base("widget", {
       pending: entry.widgetDismissed !== true && entry.respondedValue == null,
       title: str(message.widget.prompt).trim() || "The agent asked you a question",
-      reason: "",
+      reason: CARD_BODY.widget,
     }));
   }
 
@@ -238,7 +265,7 @@ export function cardsFromEntry(entry, { tenant, agentId, agentName, nowMs }) {
       pending: entry.secretProvided !== true,
       title: label.length > 0 ? `The agent asked for ${label}` : "The agent asked for a credential",
       // Never request.description: a model wrote it, and it can name the value it is asking about.
-      reason: "It needs a credential before it can carry on.",
+      reason: CARD_BODY.secret,
     }));
   }
 
@@ -251,7 +278,9 @@ export function cardsFromEntry(entry, { tenant, agentId, agentName, nowMs }) {
       requestId: boxRequestId,
       pending: str(entry.boxResolution).trim().length === 0,
       title: `Take the keyboard for ${str(agentName).trim() || "your agent"}`,
-      reason: str(entry.boxInstruction) || "It did not say what it needs done.",
+      // Never entry.boxInstruction: the agent wrote it, and an instruction about a bank or a vendor
+      // portal is exactly the sentence that names an account.
+      reason: CARD_BODY["box-handoff"],
     }));
   }
 
@@ -289,7 +318,9 @@ export function cardsFromReports(reports, { tenant, nowMs } = {}) {
       at: Date.parse(str(row?.at)) || num(nowMs),
       pending: true,
       title: str(row?.report?.title).trim() || "Your agent wants to report a problem",
-      reason: clipReason(str(row?.report?.description)),
+      // Never the report's description: the model wrote it, and a report about a failing tool quotes
+      // the command that failed.
+      reason: CARD_BODY.report,
       deadlineMs: 0,
     };
     card.key = cardKey({ tenant: card.tenant, agentId: card.agentId, entryId: card.entryId });
@@ -470,6 +501,18 @@ function normaliseDevice(raw) {
 }
 
 /**
+ * Whose row this is, and the ONE predicate the list and the delete both use, so a person can remove
+ * exactly what they can see and nothing else. undefined means the caller is not a person at all (a
+ * vendor prune, a test); "" is the instance-password door, which is the workspace and sees every row.
+ */
+export function ownedBy(device, sub) {
+  if (sub === undefined || sub === null) return true;
+  const want = str(sub);
+  if (want.length === 0) return true;
+  return str(device?.sub) === want;
+}
+
+/**
  * The tenant's own push.json, read through an mtime-free cache of one object per file: this store is
  * written far less often than it is read, and every read is already inside a request or a sweep pass
  * that is doing other IO anyway, so it is read fresh and kept simple.
@@ -497,12 +540,25 @@ export function createPushStore({ file, now = () => Date.now() }) {
   return {
     file,
     read,
-    /** Idempotent per deviceId: a second registration of the same device UPDATES it. */
+    /**
+     * Idempotent per (SUB, deviceId): a second registration of the same device by the same person
+     * UPDATES it, and a registration of the same deviceId by ANOTHER person is another row.
+     *
+     * The sub is half the key, and it was not until the review pass. A deviceId is chosen by the app
+     * and is visible to anybody signed into the workspace through GET /push/devices, and two accounts
+     * share a workspace -- which is the whole reason subOf exists. Measured on this Mac 2026-09-10
+     * against the old shape: Richard POSTing deviceId "iphone-of-jason" rewrote Jason's row to his own
+     * sub and his own token, so Jason's phone stopped being notified and vanished from his own list,
+     * and his DELETE of that id answered {"removed":true} on a row that was never his.
+     *
+     * Two rows for one physical phone signed into two accounts is the CORRECT outcome, not a
+     * duplicate: each row carries that account's cards and each account revokes only its own.
+     */
     async register(row) {
       const device = normaliseDevice({ ...row, tokenAt: num(now()) || Date.now() });
       if (device == null) return { ok: false, error: "bad_request" };
       const state = await read();
-      const found = state.devices.findIndex((d) => d.deviceId === device.deviceId);
+      const found = state.devices.findIndex((d) => d.deviceId === device.deviceId && d.sub === device.sub);
       if (found >= 0) {
         const before = state.devices[found];
         state.devices[found] = { ...device, createdAt: before.createdAt, updatedAt: num(now()) || Date.now() };
@@ -512,20 +568,29 @@ export function createPushStore({ file, now = () => Date.now() }) {
       await write(state);
       return { ok: true, device: state.devices[found >= 0 ? found : state.devices.length - 1], replaced: found >= 0 };
     },
-    /** Removes one device, and answers whether there was one. Revoking its bearer calls this too. */
-    async forget(deviceId) {
+    /**
+     * Removes one device, and answers whether there was one. Revoking its bearer calls this too.
+     *
+     * `sub` is the person doing it and is part of the match: a named account removes only its own
+     * rows. Leaving it out means "whoever owns it", which is the two callers that are not a person --
+     * a vendor pruning a dead token, and a test. The INSTANCE-PASSWORD door is sub "" and reaches
+     * every row on purpose: that door is the workspace itself, it already lists every row, and the
+     * operator holding the instance password is the one person who has to be able to clear a device
+     * whose account is gone. docs/APPS.md section 6 says so in those words.
+     */
+    async forget(deviceId, { sub } = {}) {
       const want = str(deviceId).trim();
       if (want.length === 0) return { ok: false, error: "bad_request" };
       const state = await read();
       const before = state.devices.length;
-      state.devices = state.devices.filter((d) => d.deviceId !== want);
+      state.devices = state.devices.filter((d) => !(d.deviceId === want && ownedBy(d, sub)));
       if (state.devices.length === before) return { ok: true, removed: false };
       await write(state);
       return { ok: true, removed: true };
     },
     /** Prunes a token the vendor told us is dead. Permanent: a 410 is not a retry. */
-    async prune(deviceId, why) {
-      const out = await this.forget(deviceId);
+    async prune(deviceId, why, { sub } = {}) {
+      const out = await this.forget(deviceId, { sub });
       return { ...out, why: str(why) };
     },
     /** Per person, keyed on the session's sub. "" means the workspace, which is the instance door. */
@@ -545,15 +610,35 @@ export function createPushStore({ file, now = () => Date.now() }) {
 
 // ---- the sent ledger, on disk -------------------------------------------------------------------
 //
-// Keyed on the card key. State is what this relay already did about that card:
-//   alerted   an alert went out
-//   held      quiet hours held it, and one catch-up is owed when the window ends
+// Keyed on the card key. State is what this relay already did about that card, and the state IS the
+// retry policy -- which is why there are five of them and not three. Until the review pass every
+// outcome that was not a real send wrote "held", so three different causes shared one state and only
+// one of them should ever be retried: measured on this Mac 2026-09-10, a card whose kind the customer
+// had switched off stayed "held" with heldUntil 0 over five passes, which at a 15 s sweep is 5,760
+// re-decisions and 5,760 getAgentTranscriptTail reads a day for a card nobody will ever be alerted
+// to, until somebody answers it.
+//
+//   alerted   an alert went out. Nothing goes out again (rule 4).
+//   held      QUIET HOURS held it, heldUntil says when the window ends, and exactly one catch-up is
+//             owed on that key on the first pass after it. Never retried before then.
+//   muted     no device wanted it: every device's per-kind switch said no, or there is no device.
+//             TERMINAL, never retried, and out of the open set so it stops earning a tail read.
+//   failed    a vendor refused it. attempts and retryAt carry an exponential backoff; at
+//             PUSH_MAX_ATTEMPTS it gives up, says so in the log, and leaves the open set. Retrying a
+//             transient APNs 500 every 15 s for ever is how a sender gets itself rate limited.
 //   closed    the card is answered or expired and the silent badge update went out
 // Capped at 200 keys or seven days, whichever bites first, so a long-lived workspace does not grow
 // this file without bound and a card nobody answered in two hundred others is not the one that
 // matters.
 export const SENT_LEDGER_CAP = 200;
 export const SENT_LEDGER_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
+
+/** A vendor refusal's backoff: a minute, doubling, capped at half an hour, six attempts and then out. */
+export const PUSH_RETRY_BASE_MS = 60_000;
+export const PUSH_RETRY_MAX_MS = 30 * 60_000;
+export const PUSH_MAX_ATTEMPTS = 6;
+export const retryDelayMs = (attempts) =>
+  Math.min(PUSH_RETRY_MAX_MS, PUSH_RETRY_BASE_MS * 2 ** Math.max(0, Math.trunc(num(attempts)) - 1));
 
 export function createSentLedger({ file, now = () => Date.now() }) {
   async function read() {
@@ -572,6 +657,12 @@ export function createSentLedger({ file, now = () => Date.now() }) {
         deadlineMs: num(row.deadlineMs),
         agentId: str(row.agentId),
         entryId: str(row.entryId),
+        // The retry policy's own fields. A row written before this ship has none of them, and zero is
+        // the right answer for all three: no quiet window to wait out, no attempt spent, retry now.
+        heldUntil: num(row.heldUntil),
+        attempts: num(row.attempts),
+        retryAt: num(row.retryAt),
+        gaveUp: row.gaveUp === true,
       }));
     return new Map(kept.map((row) => [row.key, row]));
   }
@@ -933,7 +1024,15 @@ export function createPushEdge({
     // stamp rewritten in place does not always move newestEntryId.
     const before = seen.get(TENANT_KEY(t)) ?? new Map();
     const after = new Map();
-    const open = new Set([...rows.values()].filter((row) => row.state !== "closed" && row.kind !== "report").map((row) => row.agentId).filter((id) => id.length > 0));
+    // WHAT STAYS OPEN, and what a row has to be before it stops costing a tail read every pass. Closed
+    // is done. Muted is terminal: no device will ever alert on it, so re-reading its agent buys
+    // nothing. A refusal that gave up is terminal the same way. What is left -- alerted-and-unanswered,
+    // a quiet-hours hold owing a catch-up, a refusal still inside its backoff -- is a real obligation:
+    // the CLOSE is what drops the badge, and a stamp rewritten in place does not always move
+    // newestEntryId.
+    const open = new Set([...rows.values()]
+      .filter((row) => row.state !== "closed" && row.state !== "muted" && row.gaveUp !== true && row.kind !== "report")
+      .map((row) => row.agentId).filter((id) => id.length > 0));
     const wanted = [];
     for (const agent of agents) {
       const id = str(agent?.id);
@@ -963,6 +1062,8 @@ export function createPushEdge({
       pending: decided.badge,
       sent: decided.sent,
       held: decided.held,
+      muted: decided.muted,
+      failed: decided.failed,
       // In words, because "3 held" with no end to it reads as three cards dropped.
       heldUntil: decided.heldUntil > 0 ? new Date(decided.heldUntil).toISOString() : "",
       closed: decided.closed,
@@ -982,11 +1083,17 @@ export function createPushEdge({
     const badge = pending.length;
     let sent = 0;
     let held = 0;
+    let muted = 0;
+    let failed = 0;
     let closed = 0;
     let heldUntil = 0;
 
+    // WHY THIS RETURNS FOUR NUMBERS AND NOT A BOOLEAN. "Nothing went out" is three different facts
+    // with three different right answers: a switch the customer turned off is terminal, a quiet window
+    // is owed one catch-up at a known time, and a vendor refusal wants a backoff. A boolean collapsed
+    // all three into one endlessly-retried state.
     const deliver = async (card, { silent }) => {
-      let any = false;
+      const out = { any: false, held: 0, muted: 0, failed: 0, heldUntil: 0 };
       // A copy, because a vendor's "that device is gone" prunes the row mid-loop and the pruned
       // device must not be written to again in this pass.
       for (const device of [...state.devices]) {
@@ -994,18 +1101,40 @@ export function createPushEdge({
         const settings = normaliseSettings(state.settings[device.sub] ?? {});
         // A per-kind switch turns off the ALERT, never the silent badge update: a badge that stays
         // high for a card the person switched off would be a number they cannot clear.
-        if (!silent && settings.kinds[card.kind] === false) continue;
+        if (!silent && settings.kinds[card.kind] === false) { out.muted += 1; continue; }
         if (!silent && quietHoursHold(settings, at)) {
-          held += 1;
+          out.held += 1;
           // When the window ends, so the log and the gate can say WHEN rather than only that something
           // was held. A held card with no end in the line reads as a card that was dropped.
-          heldUntil = Math.max(heldUntil, quietHoursEndMs(settings, at));
+          out.heldUntil = Math.max(out.heldUntil, quietHoursEndMs(settings, at));
           continue;
         }
         const ok = await send({ t, device, card, badge, silent, devices: state.devices });
-        any = any || ok;
+        if (ok) out.any = true; else out.failed += 1;
       }
-      return any;
+      // No device at all, or every device pruned mid-pass: nobody wanted it, which is muted.
+      if (!out.any && out.held === 0 && out.failed === 0) out.muted += 1;
+      return out;
+    };
+
+    /** The outcome of one alert attempt, as the row it writes. The retry policy lives here and nowhere else. */
+    const rowAfter = (card, out, before) => {
+      const base = { key: card.key, kind: card.kind, at, deadlineMs: num(card.deadlineMs), agentId: card.agentId, entryId: card.entryId, heldUntil: 0, attempts: 0, retryAt: 0, gaveUp: false };
+      if (out.any) { sent += 1; return { ...base, state: "alerted" }; }
+      if (out.held > 0) {
+        held += out.held;
+        heldUntil = Math.max(heldUntil, out.heldUntil);
+        return { ...base, state: "held", heldUntil: out.heldUntil };
+      }
+      if (out.failed > 0) {
+        const attempts = num(before?.attempts) + 1;
+        const gaveUp = attempts >= PUSH_MAX_ATTEMPTS;
+        failed += 1;
+        if (gaveUp) log(`push  a ${card.kind} card was refused ${attempts} times and will not be tried again (${TENANT_KEY(t)})`);
+        return { ...base, state: "failed", attempts, retryAt: gaveUp ? 0 : at + retryDelayMs(attempts), gaveUp };
+      }
+      muted += 1;
+      return { ...base, state: "muted" };
     };
 
     // New and changed cards.
@@ -1013,19 +1142,24 @@ export function createPushEdge({
       const row = rows.get(card.key);
       if (card.pending === true) {
         if (row == null) {
-          const ok = await deliver(card, { silent: false });
-          rows.set(card.key, { key: card.key, kind: card.kind, state: ok ? "alerted" : "held", at, deadlineMs: num(card.deadlineMs), agentId: card.agentId, entryId: card.entryId });
-          if (ok) sent += 1;
+          rows.set(card.key, rowAfter(card, await deliver(card, { silent: false })));
           continue;
         }
-        // Quiet hours held it last pass, and one catch-up alert is owed on the SAME key when the
-        // window ends. Exactly one: the row flips to alerted whether or not a device took it.
+        // Quiet hours held it, and one catch-up alert is owed on the SAME key when the window ends --
+        // on the FIRST pass after it and not on the 240 passes before it.
         if (row.state === "held") {
-          const ok = await deliver(card, { silent: false });
-          if (ok) { rows.set(card.key, { ...row, state: "alerted", at }); sent += 1; }
+          if (row.heldUntil > 0 && at < row.heldUntil) { held += 1; heldUntil = Math.max(heldUntil, row.heldUntil); continue; }
+          rows.set(card.key, rowAfter(card, await deliver(card, { silent: false }), row));
           continue;
         }
-        // Already alerted. RULE 4: nothing goes out again.
+        // A vendor refused it. Retried on a backoff, and after PUSH_MAX_ATTEMPTS not at all.
+        if (row.state === "failed") {
+          if (row.gaveUp === true || at < row.retryAt) continue;
+          rows.set(card.key, rowAfter(card, await deliver(card, { silent: false }), row));
+          continue;
+        }
+        // Already alerted (rule 4), or muted because nobody wanted it. Nothing goes out again, and a
+        // muted row is out of the open set above so it stops earning a tail read every 15 s.
         continue;
       }
       // Answered, dismissed or expired. One SILENT badge update, so every other device's number
@@ -1048,7 +1182,7 @@ export function createPushEdge({
       }
     }
 
-    return { badge, sent, held, closed, heldUntil };
+    return { badge, sent, held, muted, failed, closed, heldUntil };
   }
 
   /** One device, one card. Returns whether the vendor took it. */
@@ -1080,7 +1214,7 @@ export function createPushEdge({
     if (answer?.ok === true) return true;
     const prune = prunesDevice({ platform: device.platform, status: num(answer?.status), reason: str(answer?.reason) });
     if (prune.length > 0) {
-      await storeFor(t).prune(device.deviceId, prune);
+      await storeFor(t).prune(device.deviceId, prune, { sub: device.sub });
       // And out of the in-pass list, so a second card in the same pass does not write to a row that
       // is already off the disk.
       if (Array.isArray(devices)) {
@@ -1143,7 +1277,7 @@ export function createPushEdge({
         // token is the one thing on the row that is of no use to a person and of use to anybody else.
         return json(res, 200, {
           devices: state.devices
-            .filter((device) => sub.length === 0 || device.sub === sub || device.sub.length === 0)
+            .filter((device) => ownedBy(device, sub))
             .map((device) => ({ deviceId: device.deviceId, platform: device.platform, name: device.name, env: device.env, createdAt: device.createdAt, updatedAt: device.updatedAt, tokenAt: device.tokenAt })),
         });
       }
@@ -1167,7 +1301,9 @@ export function createPushEdge({
     if (pathname.startsWith("/push/devices/")) {
       const deviceId = decodeURIComponent(pathname.slice("/push/devices/".length));
       if (req.method !== "DELETE") return fail(res, 405, "DELETE") ?? true;
-      const answer = await store.forget(deviceId);
+      // The sub is part of the match. Without it one account removed another's phone by naming an
+      // id it could read off its own device list, and was told it worked.
+      const answer = await store.forget(deviceId, { sub });
       if (!answer.ok) return json(res, 400, { error: "bad_request", message: "Name the device." });
       return json(res, 200, { deviceId, removed: answer.removed === true, message: answer.removed ? "That device will not be notified again." : "There is no device by that name here." });
     }
@@ -1179,7 +1315,24 @@ export function createPushEdge({
       if (req.method === "PUT" || req.method === "POST") {
         let body;
         try { body = JSON.parse(str(await readBody(req)) || "{}"); } catch { return fail(res, 400, "that was not JSON") ?? true; }
-        return json(res, 200, { settings: await store.saveSettings(sub, body), message: "Saved." });
+        const settings = await store.saveSettings(sub, body);
+        // SAVING SETTINGS IS THE ONE EVENT THAT CAN CHANGE A TERMINAL ANSWER, so it is the one event
+        // that reopens one. A `muted` row is terminal on purpose -- that is the fix for a card being
+        // re-decided every 15 s for ever -- but a person who has just turned a switch back ON means the
+        // cards already waiting, not only the next one. So its row is dropped here and decided again on
+        // the next pass: if the switch is still off it goes straight back to muted, which costs one
+        // decision per save rather than one every fifteen seconds. A quiet-hours row has its deadline
+        // cleared for the same reason, so a window somebody just shortened releases its catch-up then
+        // rather than at the hour the old window would have ended.
+        const ledger = ledgerFor(t);
+        const rows = await ledger.read();
+        let woke = 0;
+        for (const [key, row] of [...rows]) {
+          if (row.state === "muted") { rows.delete(key); woke += 1; }
+          else if (row.state === "held" && row.heldUntil > 0) { rows.set(key, { ...row, heldUntil: 0 }); woke += 1; }
+        }
+        if (woke > 0) await ledger.write(rows);
+        return json(res, 200, { settings, message: "Saved." });
       }
       return fail(res, 405, "GET or PUT") ?? true;
     }
@@ -1189,10 +1342,10 @@ export function createPushEdge({
 
   /** Revoking a device bearer removes its push row too, so a revoked phone stops being notified in
    *  the same action rather than on somebody's next sweep. Item A's revoke calls this. */
-  async function forgetDevice(slug, deviceId) {
+  async function forgetDevice(slug, deviceId, sub) {
     const t = contextOf(slug);
     if (t == null) return { ok: false, error: "unknown_workspace" };
-    return await storeFor(t).forget(deviceId);
+    return await storeFor(t).forget(deviceId, { sub });
   }
 
   return {
@@ -1322,7 +1475,9 @@ export function create(deps = {}) {
     // they lost it goes on being notified. The edge wrote this function for item A's revoke and item
     // A never called it; measured on the R750 2026-09-10, a revoked device's row was still in
     // push.json. The seam carries it now.
-    forgetDevice: (slug, deviceId) => edge.forgetDevice(slug, deviceId),
+    // The sub comes through too: a revoke removes the push row of the account that holds the bearer
+    // and never another account's row that happens to carry the same device id.
+    forgetDevice: (slug, deviceId, sub) => edge.forgetDevice(slug, deviceId, sub),
     close() { stopReader?.(); edge.close?.(); },
   };
 }

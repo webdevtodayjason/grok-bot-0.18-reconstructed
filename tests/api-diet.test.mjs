@@ -102,6 +102,16 @@ test("the projection is the measured size, not a hopeful one", () => {
   // adds a field does not fail this, and tight enough that losing the hash or the drop would.
   assert.ok(Buffer.byteLength(lean) < 80_000, `projected to ${Buffer.byteLength(lean)} bytes`);
   assert.ok(Buffer.byteLength(lean) * 10 < Buffer.byteLength(raw), "the projection saves an order of magnitude");
+  // PER ITEM, which is the number the two byte ceilings in docs/APPS.md actually rest on. The host
+  // ignores {limit}, {offset} and {afterId} (HOST-DELTA), so this is a projection and not paging: it
+  // bounds what an ITEM costs and not what the payload costs, and both ceilings are therefore linear in
+  // conversation length. 40,707 bytes over 1,578 items is 25.80 bytes an item, measured on
+  // grok-bot-local-vm 2026-09-10, which puts the 250 KiB first-paint ceiling at about 9,900 items and
+  // the 100 KiB idle ceiling at about 3,970 -- roughly 6x the longest conversation on that box. The
+  // bound here is the rate, so a projection that grows per item fails HERE rather than waiting for
+  // somebody to hold a 10,000-item conversation.
+  const perItem = Buffer.byteLength(lean) / fixture.length;
+  assert.ok(perItem <= 32, `${perItem.toFixed(2)} decoded bytes an item; the ceiling holds to ${Math.floor(250 * 1024 / perItem)} items`);
   const items = JSON.parse(lean);
   assert.equal(items.filter((i) => i.kind === "tool-call").length, fixture.filter((i) => i.kind === "tool-call").length);
   assert.equal(items.some((i) => i.kind === "assistant-text"), false, "assistant text is not sent");

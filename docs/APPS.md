@@ -27,9 +27,9 @@ iPhone UA, real Chrome through playwright-core.
 | Gate | Result | What it is |
 | --- | --- | --- |
 | `npm test` | **2,719 pass, 0 fail** | the whole suite, not only the new files |
-| `verify-door.mjs --all` | **96 pass, 0 fail, 0 skip** | the door at both phone widths, CORS, and a real page on a second origin minting, reading, holding `/events` 30 s and revoking |
+| `verify-door.mjs --all` | **96 pass, 0 fail, 0 skip**, then after the review pass added seven legs: **`--cors` 25 pass, `--app` 15 pass, 0 fail** | the door at both phone widths, CORS, and a real page on a second origin minting, reading, holding `/events` 30 s and revoking |
 | `verify-cost.mjs` (3 runs) | **15 pass, 0 fail, 1 skip** | first paint, idle, hidden, resume, the asset cache, noVNC printed by name, the desktop A/B |
-| `verify-push.mjs --host` | **32 pass, 0 fail, 1 skip** | a real pending hand-off to exactly one recorded send, collapse, quiet hours, the badge, revoke |
+| `verify-push.mjs --host` | **32 pass, 0 fail, 1 skip**, re-run unchanged after the review pass | a real pending hand-off to exactly one recorded send, collapse, quiet hours, the badge, revoke |
 | `verify-push.mjs --console` | **16 pass, 0 fail, 4 skip** | the Notifications card at 390x844 and the absent-module case |
 | the bearer-to-push composition | **11 pass, 0 fail** | the one thing no single item could measure: a bearer from `/auth/token` is what opens `/push/devices`, and revoking it closes both |
 | `verify-mobile.mjs --width --fonts --desktop` | **36 pass, 0 fail** | regression, including the desktop baseline this wave repaired |
@@ -45,6 +45,29 @@ bearer-to-push composition above, and the boot parse by `verify-cost --paint`, w
 paint landed on the conversation the link named** — the deep link decided the first paint rather than
 a second navigation after it. The remaining `--console` skip is a real gap in the product and not in
 the gate: at 390x844 there is no route into Settings at all (section 8).
+
+### What the review pass found after all of that passed, and what it cost to fix
+
+Six conditions, every one of them in a mechanism a gate was already green on. They are written up where
+they belong (sections 3, 5 and 6) and the measurements are below. The shape worth keeping: **four of
+the six were invisible to every gate because every gate measured the console's own origin**, and the
+whole point of this wave is the origin that is not the console's.
+
+| What | Measured | Now |
+| --- | --- | --- |
+| `x-titan-digest` was not exposed to cross-origin JavaScript, so the unchanged-answer protocol was dead on a bundled origin | live R750 preflight answered `access-control-expose-headers: x-relay-auth, etag`; in real Chrome on this Mac a cross-origin page saw `content-type` alone and `headers.get("x-titan-digest")` answered `null` | on the list, asserted by name in `verify-door --cors`, and `verify-door --app` now reads the digest off a real cross-origin answer (`628a2846…`, headers visible to the page: `content-type, x-titan-digest`) and proves the second identical read costs **20 bytes instead of 40,703** |
+| CORS was granted on every route on the relay, not on the console API | live R750: `OPTIONS /v1/jobs`, `/admin/login-ledger`, `/mail/send`, `/code/start` each answered 204 with `access-control-allow-origin: capacitor://localhost` | `corsPath` names the paths in section 3 and nothing else; the four refused paths are asserted by name (401/404/405/401, no access-control headers) |
+| an auto-review push put the command in the notification body, and auto-review exists because the command is risky | calling the shipped builders on this Mac with a realistic approval produced an `aps.alert.body` carrying a live `Authorization: Bearer sk_live_…` | six fixed sentences, one per kind; a test builds all six from model-written fields carrying a token-shaped string and asserts it reaches neither body |
+| push device rows were keyed on `deviceId` alone, so one account could take over or silence another's phone | on this Mac: one account registering another's device id rewrote the row to its own token, and its `DELETE` of that id answered `removed: true` | keyed on (account, deviceId); `forget` and `prune` take the caller's account; the test now drives the case its own title claimed |
+| a card no device would alert on was recorded `held` for ever, re-decided every 15 s, keeping its agent in the open set | on this Mac: five passes, `held` every time, `heldUntil` 0 every time, one tail read per pass | `muted` / `held` / `failed` split out, with the open set and the backoff to match; two tests drive five passes and a refusing sender |
+| the ceilings are linear in conversation length, the break-even was written nowhere, and one stated figure was wrong | 1,239,452 bytes project to 40,707 over 1,578 items, **25.80 bytes an item**, so 250 KiB holds to about **9,900 items** | the break-even is beside the ceilings in section 5, asserted per item by `tests/api-diet.test.mjs`, printed with its break-even by `verify-cost --paint` (**25.80 bytes/item over 1,578 items, ceiling holds to 9,923**), and bounding the projection is filed as **COST-4** |
+
+**One thing to read carefully in section 5.** The idle figures, **56.1 KiB a minute local and 67.3 KiB
+on the R750**, were measured **same-origin**, which before the first row above was the only
+configuration where the digest memo worked at all. They are still same-origin numbers: what is proved
+cross-origin is the mechanism, by `verify-door --app`, one conversation at a time rather than a
+whole idle minute. A shell author measuring an idle minute from a bundled origin should expect the
+local figure and should check the digest first if they do not get it.
 
 
 ### And on the R750, through console.titanium.bot, which is the only thing that makes any of it done
@@ -230,7 +253,8 @@ claim already sets for a cookie minted before the deploy.
 | `Access-Control-Allow-Credentials` | **never sent, on any answer** |
 | allowed headers | `authorization, content-type, x-titan-projection, x-titan-if-digest` |
 | allowed methods | `GET, POST, DELETE, OPTIONS` |
-| exposed headers | `x-relay-auth, etag` |
+| exposed headers | `x-relay-auth, etag, x-titan-digest` |
+| paths it is on | `/api/*`, `/events`, `/auth/token`, `/auth/devices[/<id>]`, `/push/*`, `/avatars/*`, and the static console (`/`, `/index.html`, `/machine-room/*`, any asset extension). **Nothing else** |
 | preflight cache | 600 s |
 | `Vary` | `origin`, on every answer that saw an Origin, including a refused one |
 
@@ -241,6 +265,19 @@ Three things worth knowing:
 - **No credentials, deliberately.** The cookie is `SameSite=Strict` and a browser never sends it
   cross-site, so allowing credentials would buy a shell nothing and would trade away the console's
   CSRF answer. The bearer is the entire mechanism.
+- **`x-titan-digest` is on the exposed list, and it has to be.** Only the names on that line are
+  readable by cross-origin JavaScript; everything else the browser drops before the page sees it, with
+  no error anywhere. It was missing until the review pass, which meant the unchanged-answer protocol
+  below — the mechanism the 100 KiB idle ceiling rests on — was dead in exactly the shells this door
+  exists for. Measured in real Chrome on this Mac 2026-09-10 against the live header set: the headers
+  JS could see were `content-type` alone and `headers.get("x-titan-digest")` answered `null`.
+- **CORS is on the console API and nowhere else.** The paths are the row above. The job bus (`/v1`),
+  the relay's admin reads (`/admin`), the mail webhook and send routes and the code edge answer an app
+  origin's preflight with **no access-control headers at all**, as they did before this wave. Nothing
+  was exploitable when they did answer — no cookie is ever sent cross-site and each of those doors
+  wants a credential a page does not hold — but `https://localhost` is on the default allow-list and is
+  the commonest dev origin on a customer's own machine, so the blast radius of any future credential a
+  page could hold belongs on `/api`, not on the whole relay.
 - **An allowed Origin is never a *requirement*.** A native HTTP client sends no Origin at all; the
   allow-list only decides which access-control headers come back. A preflight from an origin nobody
   named gets 403 and no access-control headers. The desktop shell's origin is **one
@@ -311,6 +348,20 @@ machines. Wire is printed beside decoded on every gate run; every pass or fail i
 A third ceiling, **600 KiB a minute while an agent is working**, is gated but has not been exercised
 (see below).
 
+**How far those ceilings hold, which is a property of today's data and not of the design.** The outline
+is the one payload that grows without bound with a conversation, and it is projected rather than paged:
+the host ignores `{limit}`, `{offset}` and `{afterId}` (measured — see the filed row **HOST-DELTA**),
+so the projection shrinks a payload and does not bound one. Measured over
+`tests/fixtures/outline-atera.json`, the real 1,578-item outline this wave captured, on grok-bot-local-vm
+2026-09-10: **1,239,452 bytes become 40,707, which is 25.80 decoded bytes an item.** At that rate the
+outline alone reaches the **250 KiB first-paint ceiling at about 9,900 items** and 100 KiB at about
+3,970. Jason's longest conversation is the 1,578 in that fixture, so the first-paint ceiling holds to
+roughly **6x today's worst case** and then stops holding, with no cap in the code. Bounding the
+projection — every tool-call row plus the newest N anchors, a `truncated` marker, and the older span
+fetched only when somebody scrolls into it — is filed as **COST-4**, not built here. The per-item figure
+is asserted by `tests/api-diet.test.mjs` and printed by `scripts/verify-cost.mjs --paint`, so a
+projection that grows per item fails a gate rather than waiting for a long conversation to find it.
+
 **Measured on grok-bot-local-vm (this Mac) at 390x844, device scale 3, touch, iPhone UA, real Chrome
 via playwright-core with CDP network capture, 2026-09-10, on the MERGED tree with `ui/relay-hooks.mjs`
 wired — so these are the bytes the relay actually sends, not a shaping proxy standing in for it. All
@@ -339,13 +390,22 @@ figures decoded bytes.**
   shaped answer; no header, or `full`, means the payload is unchanged. Opt-in rather than opt-out is
   deliberate: it is the only shape that cannot silently starve a caller that did not ask.
 - **`x-titan-if-digest: <digest>`** means "I already hold this"; the answer then says so instead of
-  repeating a megabyte. The relay returns **`x-titan-digest`** on a shaped answer so the next call
-  has something to send. The console's own reader does all of this, so a shell that loads the
-  console's bundle gets it for free.
+  repeating a megabyte (20 bytes, `{"__unchanged":true}`). The relay returns **`x-titan-digest`** on
+  every shaped answer so the next call has something to send. The console's own reader does all of
+  this, and a shell that loads the console's bundle inherits it — **but only because
+  `x-titan-digest` is on the exposed-headers line in section 3.** Cross-origin JavaScript cannot read
+  a header that is not exposed, and it fails silently: `headers.get` answers `null`, the memo is never
+  filled, nothing is ever sent back, and every idempotent read is downloaded whole on every tick. That
+  was the state of this door until the review pass. If you are writing a shell and the digest comes
+  back `null`, the relay's allow-list is the thing to check, not your code.
 - **The outline projection discards what the console already throws away.** `weaveToolRows` emits
   rows only for `kind: tool-call` and `outlineKey` returns null for anything that is not a user or
-  send-message item, so 1,239,452 bytes of outline become 57,777 with nothing lost that the page
-  draws. The outline key is **hashed** rather than carried verbatim, because an outline key *is* the
+  send-message item, so the outline shrinks by about 97% with nothing lost that the page draws:
+  **1,239,452 bytes become 40,707** over `tests/fixtures/outline-atera.json` (1,578 items), measured on
+  grok-bot-local-vm 2026-09-10, and **1,210.4 KiB became 39.8 KiB** on the same conversation read
+  through the relay in the gate. (An earlier draft of this section said 57,777 with no machine and no
+  payload named; it is 40,707 on the payload named here, which is what `ui/api-diet.mjs` and
+  `tests/api-diet.test.mjs` have said all along.) The outline key is **hashed** rather than carried verbatim, because an outline key *is* the
   message text: verbatim keys are 416,598 bytes and would blow the 250 KiB ceiling on their own.
 - **Assets answer `private`, never `public`.** A stamped URL gets `private, max-age=31536000,
   immutable`; an unstamped read gets a strong `ETag` and `private, no-cache`, so the repeat read is a
@@ -394,10 +454,24 @@ POST /push/devices
 → 200 { "deviceId": "...", "platform": "...", "replaced": true|false, "message": "..." }
 
 GET    /push/devices              → the person's devices, with NO token on any row
-DELETE /push/devices/<deviceId>   → stops notifying it at once
+DELETE /push/devices/<deviceId>   → stops notifying it at once, and only the person's own rows
 GET    /push/settings             → { settings, kinds, scope }
 PUT    /push/settings             → the per-kind switches, quiet hours and one UTC offset
 ```
+
+**A row is keyed on (account, deviceId), and both halves matter.** The `deviceId` is chosen by the app
+and is readable by anybody signed into the workspace, and two accounts share one workspace — which is
+the whole reason the relay has a `sub` at all. So one physical phone signed into two accounts is **two
+rows**, each carrying that account's cards, and a `DELETE` carries the caller's account: measured on
+this Mac 2026-09-10 against the first draft, which keyed on `deviceId` alone, one person registering
+another's device id rewrote that row to his own token — the other phone stopped being notified, left
+its owner's list, and his `DELETE` of an id he had only read off the list answered `removed: true`.
+A list shows exactly what a delete can remove, and nothing else.
+
+**The instance-password door is the exception, deliberately.** That door has no person behind it, its
+`sub` is `""`, and it sees and can clear **every** row in the workspace. It is the workspace itself: it
+already listed every row before this, it is the operator holding the instance password, and it is the
+only door that can clear a device whose account is gone.
 
 Behind the device bearer for an app, or the session cookie for the console's own Settings card.
 Registering the same `deviceId` twice **updates** the row rather than adding one, and the token's
@@ -437,10 +511,29 @@ place rather than appending: `respondedValue`, `widgetDismissed`, `secretProvide
 
 ### What a push carries, and nothing else
 
-A title, a reason clipped to **140 characters** (the host's own `MAX_NOTIFICATION_BODY_LENGTH`), the
-ids, a deep link, under **4096 bytes**. No transcript prose past that reason. A secret request's
-reason is a fixed sentence and never the model's own description, because a model can name the value
-it is asking about and a lock screen is not the place to read it.
+A title, **one of six fixed sentences as the body**, the ids, a deep link, under **4096 bytes**.
+
+**No field a model wrote ever reaches a notification body.** Not the approval's reason, not the
+command it is about, not the box instruction, not a report's description. The body is whichever of
+these six sentences the kind names (`CARD_BODY` in `ui/push-edge.mjs`), and nothing else:
+
+| Kind | The body, every time |
+|---|---|
+| `auto-review` | Open it to read the command before you allow it. |
+| `local-tool` | This runs on the box itself, not in a sandbox. |
+| `widget` | Open it to answer. |
+| `secret` | It needs a credential before it can carry on. |
+| `box-handoff` | Open it to read what it needs done. |
+| `report` | Open it to read the report before it goes. |
+
+This is tighter than the first draft of this wave, which put the approval's reason and
+`approval.command` verbatim in the body. Auto-review exists *because* a command is risky, which is the
+same population of commands that carry credentials: measured on this Mac 2026-09-10, a realistic
+approval produced an alert body carrying a live `Authorization: Bearer sk_live_…` on its way to Apple
+and Google and onto a locked screen. The ids are in the payload, so **the app fetches the detail with
+its own bearer and draws it inside the app, behind the device unlock**, which is where a command
+belongs. The titles are unchanged: the host already shows the person's own summary line there, and a
+title with no subject is unreadable on a phone.
 
 APNs payload shape: `aps.alert` as `{title, subtitle, body}` where the subtitle is the agent's name,
 `aps.badge` a number, `aps.thread-id` the agent id, and `cardKey`, `kind`, `tenant`, `agent`,
@@ -469,6 +562,30 @@ APNs payload shape: `aps.alert` as `{title, subtitle, body}` where the subtitle 
 One push per card, deduped from a ledger **on disk** (`push-sent.json`, last 200 keys or 7 days). An
 in-memory map would re-notify a customer about yesterday's cards on the next redeploy, and a redeploy
 restarts the relay.
+
+**The ledger's state IS the retry policy, and "nothing went out" is three different facts.** A first
+draft wrote `held` for all of them, so a card nobody would ever be alerted to was re-decided every
+15 s for as long as it stayed unanswered and kept earning its agent a transcript-tail read — measured
+on this Mac 2026-09-10: five passes, state `held` every time, `heldUntil` 0 every time, which at the
+sweep interval is 5,760 re-decisions and 5,760 tail reads a day for one switched-off card.
+
+| State | What it means | Retried |
+|---|---|---|
+| `alerted` | an alert went out | never (one push per card) |
+| `held` | **quiet hours** held it; `heldUntil` says when the window ends | exactly once, on the first pass after `heldUntil` |
+| `muted` | no device wanted it: every device's per-kind switch said no, or there is no device | **never**, and its agent leaves the open set so it stops costing a tail read |
+| `failed` | a **vendor** refused it; `attempts` and `retryAt` carry the backoff | a minute, doubling to half an hour, six attempts, then it gives up and says so in the log |
+| `closed` | answered or expired, and the silent badge update went out | never |
+
+A transient APNs 500 retried every 15 s for ever is how a sender gets itself rate limited, which is
+the same failure the prune rules exist to avoid; a switch the customer turned off is not a failure at
+all and has nothing to retry.
+
+**And `muted` is reopened by the one event that can change the answer**, which is the person saving
+their own switches: `PUT /push/settings` drops this workspace's `muted` rows and clears any `heldUntil`,
+so the cards already waiting are decided once on the next pass rather than only the next new one. A
+switch still turned off puts them straight back to `muted`. One decision per save, not one every
+fifteen seconds.
 
 ### Expiry, quiet hours and the badge
 

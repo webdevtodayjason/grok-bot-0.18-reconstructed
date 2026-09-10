@@ -79,6 +79,10 @@ if (chosen.length === 0) {
 const PAINT_CEILING_KIB = Number(process.env.GROK_BOT_PAINT_CEILING_KIB ?? 250);
 const IDLE_CEILING_KIB = Number(process.env.GROK_BOT_IDLE_CEILING_KIB ?? 100);
 const WORKING_CEILING_KIB = Number(process.env.GROK_BOT_WORKING_CEILING_KIB ?? 600);
+// The outline's RATE, which is what the two byte ceilings above actually rest on: they are linear in
+// conversation length and the projection bounds the bytes an item costs, not the payload. 25.79 on the
+// captured 1,578-item fixture, and 32 is that with room for a tool row's fields to grow a little.
+const OUTLINE_BYTES_PER_ITEM_CEILING = Number(process.env.GROK_BOT_OUTLINE_BYTES_PER_ITEM ?? 32);
 
 const URL_TARGET = value("url");
 const READ_ONLY = URL_TARGET != null;
@@ -451,6 +455,26 @@ async function legPaint(origin, heavy) {
   const decoded = sum(api, "decoded");
   check(decoded <= PAINT_CEILING_KIB * 1024, `first paint is under ${PAINT_CEILING_KIB} KiB of decoded /api`,
     `${kib(decoded)} KiB decoded over ${api.length} calls, ${kib(sum(api, "wire"))} KiB wire, on ${MACHINE} at ${PHONE.name} (548.7 KiB over 47 calls before this ship, plus 1,683.7 on selecting this agent)`);
+  // PER ITEM, not only in total. The ceiling is a number of bytes and the outline is the one payload
+  // that grows without bound with a conversation: the host ignores {limit}, {offset} and {afterId}
+  // (HOST-DELTA), so this is a projection and not paging, and what it holds constant is the bytes an
+  // ITEM costs. Measured over tests/fixtures/outline-atera.json on grok-bot-local-vm 2026-09-10:
+  // 1,239,452 bytes become 40,707 over 1,578 items, 25.80 bytes an item, which puts the 250 KiB
+  // first-paint ceiling at about 9,900 items. Printed with the break-even so nobody has to derive it,
+  // and failed on the rate rather than on the total, which is what a longer conversation would move.
+  const outlineRows = api.filter((row) => row.pathname === "/api/getConversationOutline");
+  if (outlineRows.length === 0 || heavy.items == null || heavy.items <= 0) {
+    skip("the projected outline costs a bounded number of bytes per item", "the paint window read no outline, or its item count was not read");
+  } else {
+    const worst = Math.max(...outlineRows.map((row) => row.decoded));
+    const perItem = worst / heavy.items;
+    check(perItem <= OUTLINE_BYTES_PER_ITEM_CEILING,
+      `the projected outline is under ${OUTLINE_BYTES_PER_ITEM_CEILING} decoded bytes per outline item`,
+      `${perItem.toFixed(2)} bytes/item over ${heavy.items} items (${kib(worst)} KiB), on ${MACHINE} at ${PHONE.name}`
+      + ` — at this rate the ${PAINT_CEILING_KIB} KiB ceiling holds to about ${Math.floor(PAINT_CEILING_KIB * 1024 / perItem).toLocaleString("en-US")} items`
+      + ` and the ${IDLE_CEILING_KIB} KiB idle ceiling to about ${Math.floor(IDLE_CEILING_KIB * 1024 / perItem).toLocaleString("en-US")}; 25.80 bytes/item on the captured fixture`);
+  }
+
   const dupes = new Map();
   for (const row of api) dupes.set(methodOf(row), (dupes.get(methodOf(row)) ?? 0) + 1);
   const repeated = [...dupes.entries()].filter(([, n]) => n > 1);
