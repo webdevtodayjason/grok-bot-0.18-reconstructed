@@ -440,6 +440,12 @@ export function messageFor(name: string, report: {
   if (report.apps.byo.length > 0) {
     missing.push(`${labelsOf(report.apps.byo).join(", ")} ${report.apps.byo.length === 1 ? "is" : "are"} not something we carry yet, so you would add your own`);
   }
+  // The fourth bucket, which used to go unsaid. A row whose every app is page-only -- `tech-demos`
+  // and `webby` in the shipped catalog -- then read as a bot that wanted no apps at all, on this
+  // sentence and on the agent's own, because both were counting three buckets out of four.
+  if (report.apps.informational.length > 0) {
+    missing.push(`${labelsOf(report.apps.informational).join(", ")} ${report.apps.informational.length === 1 ? "has a page to set up" : "have pages to set up"} rather than anything to install here`);
+  }
   if (report.routines.notCreated.length > 0) {
     missing.push(`${countOf(report.routines.notCreated.length, "job", "jobs")} could not be set up because ${report.routines.notCreated.length === 1 ? "it waits" : "they wait"} on something rather than a clock`);
   }

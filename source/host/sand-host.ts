@@ -416,6 +416,10 @@ export class SandHost {
      */
     this.runnerComposition.setMarketplaceImporter(async args => {
       const importMarketplaceBot = this.getApi().importMarketplaceBot;
+      // A guard on a command the api declares unconditionally, so no shipped bundle reaches it. It
+      // is here because a missing command would otherwise be a TypeError inside a turn; it is NOT
+      // the "an older box withholds the setup tool" story, which cannot happen -- the tools and the
+      // verb are the same bundle.
       if (typeof importMarketplaceBot !== "function") {
         throw new Error("this box cannot set a bot up from the catalog");
       }

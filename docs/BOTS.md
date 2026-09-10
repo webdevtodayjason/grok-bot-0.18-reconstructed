@@ -564,6 +564,51 @@ anywhere in the reply. It had found the choice and never put it to the person, w
 Jason's sentence that makes the other half worth anything. The question is QUOTED for the model to
 copy now, and it is the last thing either read tool says.
 
+### And four more the review found, all in the bot's own sentence
+
+Measured on this Mac on 2026-09-10 by driving the real verb against the sequence suite's fake box
+and handing its REAL report to the real tool. Every one of these was a place where the console's card
+and the bot's words disagreed about the same import, which is the one thing this wave exists to make
+impossible.
+
+**The counts were all zero.** The tool's reader accepted `memories` as a number or a list. The verb
+answers `memories {added, duplicates, rejected}`, `skills {imported, reused, skipped}` and
+`routines {created, notCreated}` -- objects -- so all three collapsed to 0 and a bot told a customer
+*"It knows 0 fact(s), brings 0 playbook(s) and carries 0 job(s)"* about an import that had written 7
+facts, 11 playbooks and 3 jobs. The card on the same report said seven. The fix is not a second
+counter: the tool prints `report.message`, the one plain-words receipt the import composed, which IS
+what the card draws. A counter written on the reading side is a counter that can disagree.
+
+**A job the box could not schedule went unmentioned.** The reader looped `report.notCreated` and
+printed `missed.reason`; the verb puts them at `report.routines.notCreated` with the field named
+`why`. Wrong path and wrong field, so the loop never ran once. `deal-hunting` carries a routine with
+no cron: the card said *"1 job could not be set up because it waits on something rather than a
+clock"* and the bot said nothing at all.
+
+**An all-page-only row read as wanting no apps.** Apps come back in FOUR buckets -- connected,
+addable, page-only, bring-your-own -- and both sentences counted three. `tech-demos` and `webby`
+carry nothing but page-only apps, so both doors printed the positive claim *"It needs no apps
+connected"* about a bot that does want one. Page-only apps are named now, on the card and in the
+bot's words, and "needs no apps" is said only when all four buckets are empty.
+
+**And the question fired on a browse.** Jason's sentence has two halves -- *"Titan should be able to
+see all connectors and all the agents as a catalog"* AND *"when creating a new agent ... ask"* -- and
+the first had been wired to the second: the quoted question was appended to BOTH read tools
+unconditionally, so somebody asking "what connectors do you have?" was answered with an offer to
+build a bot and told that nothing would be set up until they chose one. It is conditional now, with
+the quoted sentence kept verbatim because quoting it is what measurably made the model ask it at
+all, and the browse-only case named in the same breath. A leg in the box gate asks exactly that
+question and reads the answer.
+
+Two smaller ones from the same pass. The listing text NAMED two tools to the model (*"SearchPlugins
+lists them"*, *"Full detail on a connector is in GetPlugin"*) and the gate's no-tool-names regex
+listed neither, so a model relaying one would have put a tool name on a customer's screen with the
+gate green; the strings say it in plain words now and both names are in the regex. And the story that
+"an older box withholds the setup tool" was never reachable: `host-gateway-api.ts` declares
+`importMarketplaceBot` unconditionally and `sand-host.ts` hands it to the composition before any turn
+can run, so every running box builds all three tools. The claim is gone from the four places that
+carried it, and a box that answers no to the verb is now a FAILED gate leg instead of a skipped one.
+
 ### What the gates assert, and where
 
 Two scripts, because the two halves are measured differently: `scripts/verify-titan-catalog.mjs`
@@ -608,6 +653,13 @@ the receipt said *"It came with Slack already connected"* — the app-shape fix,
 customer actually uses. Read back on that box, both bots carried the row's facts and their jobs
 with `isEnabled: false`. Neither wrote a first message, which is `BOX-7` and is why that leg is not
 asserted there. Both bots and the account were removed afterwards; the roster is back at 8.
+
+**Titan's own report is closed.** He filed it himself through the Report-a-problem card on
+2026-09-10T01:56:56Z from the `titanium` workspace: **feedback report #5, "No bot template system
+visible to Titan — BOTS-1 not yet landed"** (*"a template system where you pick a pre-built role
+(Instagram Marketer, Scribe, Research Agent, etc.) and it comes with a starter persona, memory seeds,
+and maybe connector configs, that's not here yet"*). It was marked closed in the control plane's
+Feedback panel on 2026-09-10 once this wave was live on that box.
 
 ---
 
@@ -752,6 +804,16 @@ names both.
   as fallbacks. Its regression case is fed `findMarketplaceBot("account-book")` straight out of the
   bundled catalog rather than a fixture, because a fixture written in the reader's own vocabulary is
   exactly what kept this green.
+- **And the same rule binds a check over a REPORT, not just over a row.** The catalog tools' own
+  suite fed `describeImportReport` a hand-written `{memories: 4, skills: ["a","b"], routines: 3}` --
+  a vocabulary the verb has never returned -- and every count the bot read back was 0 for as long as
+  that was the only case. A case about what a bot says after an import drives the real
+  `importMarketplaceBot` against the shared fake box (`tests/helpers/host-marketplace-import.mjs`,
+  `fakeMarketplaceBox`) over a real catalog row, and asserts over THAT report. The hand-written one
+  stays, labelled for the only thing it can honestly pin: the older loose shapes.
+- **The bot's sentence and the card's sentence are the same string.** `report.message` is composed
+  once in the host and both doors print it. Anything that counts the report again on the reading side
+  is a second opinion about the same import, and the first one disagreed with the card for a day.
 
 ## What is not proven yet
 

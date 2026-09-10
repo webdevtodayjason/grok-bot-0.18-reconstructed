@@ -27,17 +27,20 @@
 //   a template was actually read      -> a readAgentTranscriptToolCall row in the same turn
 //   real rows were offered by name    -> the names in the reply exist in listMarketplace
 //   the question was asked            -> "one of those or from scratch", in the reply
+//   and ONLY for a bot request         -> "what connectors do you have" is answered, not answered
+//                                        with an offer to build a bot
 //   no tool name reached the person   -> nothing in the reply names a tool or a proto case
 //   from scratch still works          -> answering "from scratch" still puts a bot on the roster
 //
 // It mints its own scratch agents and deletes every one of them, pass or fail, so the roster ends
 // at the count it started (agent-lifecycle-hygiene). Nothing it creates is left behind.
 //
-// THE SETUP LEG IS CONDITIONAL, and says why when it is skipped. Setting a bot up from a template
-// calls this wave's OTHER half, the host verb `importMarketplaceBot`. A box whose bundle predates
-// that verb builds only the two read-only tools -- deliberately, so a tool is never offered against
-// an importer that is not there -- and this gate probes the gateway for the verb and reports the
-// leg as not measured rather than failing a box for a half that has not landed on it.
+// A BOX WITHOUT THE IMPORT VERB IS A FAILURE, NOT A SKIP. This gate used to probe the gateway for
+// `importMarketplaceBot` and, when the answer was no, print a NOTE and skip the create-from-template
+// leg -- the one leg that proves the feature. Both halves of TITAN-CATALOG-1 ship in one bundle and
+// the api declares the command unconditionally, so a box that answers no is a regression, and
+// skipping the leg would hide exactly the thing this gate exists to catch. The probe stays; its
+// verdict is red.
 //
 //   timeout 300 ./scripts/on-box.sh node scripts/verify-titan-catalog-tools.mjs --box grok-bot-local-vm
 //
@@ -164,7 +167,7 @@ console.log(`  listMarketplace: ${botCards.length} bot(s), ${pluginCards.length}
 const importProbe = await raw("importMarketplaceBot", { id: "__gate_probe__" });
 const hasImporter = !(importProbe.status === 400 && /unknown/i.test(importProbe.text))
   && !/unknown gateway method/i.test(importProbe.text);
-console.log(`  importMarketplaceBot: ${hasImporter ? "on this box" : "NOT on this box yet"}`);
+console.log(`  importMarketplaceBot: ${hasImporter ? "on this box" : "NOT on this box"}`);
 
 // -------------------------------------------------------------------------- driving one turn
 const said = (transcript) => (Array.isArray(transcript) ? transcript : transcript?.entries ?? [])
@@ -230,7 +233,10 @@ const catalogNames = botCards
   .filter((name) => name.length >= 4);
 const namedRows = (reply) => catalogNames.filter((name) => reply.toLowerCase().includes(name.toLowerCase()));
 
-const NO_TOOL_NAMES = /SearchBotCatalog|GetBotTemplate|CreateAgentFromTemplate|getAgentStatus|readAgentTranscript|createAgentToolCall|ToolCall|listMarketplace|getMarketplaceItem/i;
+// SearchPlugins and GetPlugin are here because the catalog listing's own text used to NAME them to
+// the model ("SearchPlugins lists them", "Full detail on a connector is in GetPlugin"), which is a
+// tool name one relay away from a customer's screen with this gate still green.
+const NO_TOOL_NAMES = /SearchBotCatalog|GetBotTemplate|CreateAgentFromTemplate|SearchPlugins|GetPlugin|getAgentStatus|readAgentTranscript|createAgentToolCall|ToolCall|listMarketplace|getMarketplaceItem/i;
 
 let probeAgent = null;
 let scratchBuilt = [];
@@ -294,11 +300,13 @@ try {
   check(!NO_TOOL_NAMES.test(headline), "no tool name reaches the person",
     `got ${JSON.stringify(headline.slice(0, 300))}`);
 
-  // ------------------------------------------------------------- setting one up, if the verb is here
-  if (!hasImporter) {
-    note("setting a bot up from a template was NOT measured: this box's bundle has no"
-      + " importMarketplaceBot, so the setup tool is deliberately not built. Re-run this gate on a"
-      + " box carrying both halves of TITAN-CATALOG-1.");
+  // ------------------------------------------------------------------------------ setting one up
+  if (!check(hasImporter, "this box carries the import the setup tool calls",
+    `importMarketplaceBot answered ${importProbe.status} ${String(importProbe.text).slice(0, 120)};`
+    + " both halves of TITAN-CATALOG-1 ship in one bundle, so this box is behind or broken and the"
+    + " leg that proves the feature cannot run")) {
+    note("setting a bot up from a template could not be measured on this box. Swap it to a bundle"
+      + " built from this tree and run the gate again.");
   } else {
     const setUp = await ask(probeAgent.id,
       "Use the first template you named. Set it up now.", "use-the-template", FOLLOWUP_TIMEOUT_MS);
@@ -338,6 +346,46 @@ try {
     .map((agent) => agent.id);
   check(blank != null, "the from-scratch path still builds a bot",
     `no bot named "Gate Scratch Bot" on the roster after ${JSON.stringify(fromScratch.slice(0, 200))}`);
+
+  // ------------------------------------------- the OTHER half of the sentence, asked on its own
+  //
+  // "Titan should be able to see all connectors and all the agents as a catalog" is a request in
+  // its own right and it is NOT a request for a bot. The question the bot is told to end on was
+  // appended to the catalog listing unconditionally, so somebody asking what connectors exist was
+  // answered with an offer to build a bot -- and told to set nothing up until they had chosen one,
+  // about a question that was never about setting anything up.
+  //
+  // A SECOND scratch agent, and last, for two reasons: a conversation that has already asked for an
+  // Instagram marketer cannot measure this, and the legs above diff the roster against what it held
+  // before, so a second probe agent minted earlier would read as a bot one of them had built.
+  const asker = await call("createAgent", {
+    name: `probe-connectors-${Math.random().toString(36).slice(2, 8)}`,
+    description: "", origin: "user", isKickstartRequested: false,
+  }).then((made) => made?.agent ?? made).catch(() => null);
+  if (check(asker?.id != null, "a second scratch agent for the browse-only question")) {
+    scratchBuilt = [...scratchBuilt, asker.id];
+    const browsed = await ask(asker.id,
+      "What app connectors do you have available? I am not asking you to build anything, I just want"
+      + " to know what is there.", "connectors", FOLLOWUP_TIMEOUT_MS);
+    check(/slack|notion|linear|gmail|google|github/i.test(browsed),
+      "asked what app connectors exist, it answers with connectors",
+      `got ${JSON.stringify(browsed.slice(0, 300))}`);
+    // The mandated sentence, not every offer of help: a bot that says "want me to build something
+    // with one of these?" is being useful. The bug is the question it was told to END on.
+    const THE_QUESTION_ASKED_ANYWAY =
+      /use one of these,? or would you like me to build one from scratch|one of those or .{0,30}from scratch/i;
+    check(!THE_QUESTION_ASKED_ANYWAY.test(browsed),
+      "and it does not end a browse with the template-or-from-scratch question",
+      `got ${JSON.stringify(browsed.slice(0, 300))}`);
+    const afterBrowse = (await call("listAgents").catch(() => [])).map((agent) => agent.id);
+    const builtWhileBrowsing = afterBrowse
+      .filter((id) => !rosterBefore.includes(id) && !scratchBuilt.includes(id) && id !== probeAgent.id);
+    scratchBuilt = [...scratchBuilt, ...builtWhileBrowsing];
+    check(builtWhileBrowsing.length === 0, "and it builds nothing for a question about what exists",
+      `${builtWhileBrowsing.length} bot(s) appeared: ${builtWhileBrowsing.join(", ")}`);
+    check(!NO_TOOL_NAMES.test(browsed), "and the browse names no tool either",
+      `got ${JSON.stringify(browsed.slice(0, 300))}`);
+  }
 } catch (error) {
   failures += 1;
   console.log(`\n  FAIL  ${error instanceof VerificationFailed ? error.message : String(error?.message ?? error)}`);

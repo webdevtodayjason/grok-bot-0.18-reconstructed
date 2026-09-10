@@ -117,6 +117,14 @@ export interface CatalogPluginRow {
  * What the host verb answers. Read defensively on purpose: the verb and these tools are built by
  * two hands at once, so a count that arrives as a list and a list that arrives as a count both
  * have to read the same to a person.
+ *
+ * AND THAT DEFENSIVENESS IS WHY THIS WENT WRONG ONCE. The first version of this interface said
+ * `memories?: number | readonly unknown[]`, which is neither of the things the verb returns: it
+ * answers `memories {added, duplicates, rejected}`, `skills {imported, reused, skipped}` and
+ * `routines {created, notCreated}`. Every count therefore read 0, and "It knows 0 fact(s)" is what
+ * a bot told a customer about an import that had written seven facts, while the console's card on
+ * the same report said seven. A tolerant type that does not include the real shape is worse than a
+ * strict one. The real shapes are named here FIRST and the loose forms are the fallbacks.
  */
 export interface MarketplaceImportReport {
   /** "done" | "already" | "failed" | "refused" on a current box; absent on an older one. */
@@ -125,16 +133,32 @@ export interface MarketplaceImportReport {
   readonly message?: string;
   readonly agentId?: string;
   readonly name?: string;
-  readonly memories?: number | readonly unknown[];
-  readonly skills?: number | readonly unknown[];
-  readonly routines?: number | readonly unknown[];
+  readonly memories?: number | readonly unknown[] | { readonly added?: number };
+  readonly skills?: number | readonly unknown[] | {
+    readonly imported?: readonly unknown[];
+    readonly reused?: readonly unknown[];
+  };
+  readonly routines?: number | readonly unknown[] | {
+    readonly created?: readonly unknown[];
+    readonly notCreated?: readonly MarketplaceImportMissedRoutine[];
+  };
   readonly integrations?: {
     readonly connected?: readonly string[];
     readonly offered?: readonly string[];
+    /** An app with a page to set up rather than a plugin to install. Four buckets, not three. */
+    readonly informational?: readonly string[];
     readonly unavailable?: readonly string[];
   };
   readonly alreadyExisted?: boolean;
-  readonly notCreated?: readonly { readonly name?: string; readonly reason?: string }[];
+  /** Where an older box put them. A current one puts them under `routines`. */
+  readonly notCreated?: readonly MarketplaceImportMissedRoutine[];
+}
+
+/** `why` is the verb's field; `reason` is the older spelling. A reader takes either. */
+export interface MarketplaceImportMissedRoutine {
+  readonly name?: string;
+  readonly why?: string;
+  readonly reason?: string;
 }
 
 export interface CatalogToolDependencies {
@@ -146,8 +170,13 @@ export interface CatalogToolDependencies {
    */
   listPlugins(): Promise<readonly CatalogPluginRow[]>;
   /**
-   * The host-side import. Absent on a box whose bundle predates the verb, and the setup tool is
-   * then not built at all rather than offered and made to fail.
+   * The host-side import. On a running box this is ALWAYS here: `host-gateway-api.ts` carries
+   * `importMarketplaceBot` unconditionally and `sand-host.ts` hands it to the composition before
+   * any turn can run, so all three tools are built. It stays optional because the composition can
+   * be built before the host has handed it over, and because a caller in a test wires one tool at
+   * a time; it is NOT a story about an older bundle withholding the setup tool, which cannot
+   * happen -- both halves of this wave ship in the same bundle. A box that answers no to the verb
+   * is a regression, and the gate fails on it rather than skipping the leg.
    */
   importBot?(args: { readonly id: string; readonly name?: string }): Promise<MarketplaceImportReport>;
 }
@@ -336,10 +365,11 @@ export function describeCatalogPlugin(plugin: CatalogPluginRow): string {
  * A described instruction was not enough; a quoted sentence with "end your message with it" is.
  */
 const THE_QUESTION =
-  "Now answer the person. Name the two or three closest by name with one line each, and END your"
-  + " message with this question, in words as close to these as the conversation allows:"
-  + " \"Would you like to use one of these, or would you like me to build one from scratch?\""
-  + " Set nothing up until they have answered.";
+  "IF THE PERSON ASKED YOU FOR A NEW BOT: answer them now, name the two or three closest by name"
+  + " with one line each, and END your message with this question, in words as close to these as the"
+  + " conversation allows: \"Would you like to use one of these, or would you like me to build one"
+  + " from scratch?\" Set nothing up until they have answered. IF THEY ONLY ASKED WHAT EXISTS --"
+  + " which bots there are, which apps can be connected -- just answer that and offer nothing.";
 
 /** A row that is several bots with a coordinator rather than one bot. */
 export function isTeamCard(card: { readonly members?: readonly unknown[] }): boolean {
@@ -412,12 +442,13 @@ export function describeCatalogListing(
     ? [...plugins].sort((left, right) => left.displayName.localeCompare(right.displayName))
     : rankCatalogPluginsLexically(plugins, asked).slice(0, CATALOG_MAX_MATCHED_PLUGINS);
   lines.push("", matchedPlugins.length === 0
-    ? `No app connector matches "${asked}". ${plugins.length} are in the Marketplace; SearchPlugins lists them.`
+    ? `No app connector matches "${asked}". ${plugins.length} are in the Marketplace; ask for the app`
+      + " connectors on their own to see them all."
     : `App connectors${asked.length === 0 ? "" : ` matching "${asked}"`} (${matchedPlugins.length} of ${plugins.length}):`);
   for (const plugin of matchedPlugins) lines.push(describeCatalogPlugin(plugin));
 
   lines.push("", "Read one in full before you offer it, and set a bot up from it rather than building"
-    + " an empty one. Full detail on a connector is in GetPlugin.");
+    + " an empty one. Ask for a single app connector in full when you need its detail.");
   lines.push("", THE_QUESTION);
   return lines.join("\n");
 }
@@ -497,8 +528,39 @@ export function describeBotTemplate(
   return lines.join("\n");
 }
 
-const countOf = (value: number | readonly unknown[] | undefined): number =>
-  typeof value === "number" ? value : Array.isArray(value) ? value.length : 0;
+/**
+ * How many of something the report says there are, in any of the three shapes it can arrive in:
+ * the verb's own object (`{added}`, `{imported, reused}`, `{created}`), a bare list, or a number.
+ * MEASURED on this Mac 2026-09-10: with only the last two handled, every count read 0 and a bot
+ * told a customer "It knows 0 fact(s)" about an import that had written seven.
+ */
+const countOf = (value: unknown): number => {
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (Array.isArray(value)) return value.length;
+  if (value != null && typeof value === "object") {
+    const row = value as Record<string, unknown>;
+    let total = 0;
+    let found = false;
+    for (const key of ["added", "imported", "reused", "created"]) {
+      const part = row[key];
+      if (part === undefined) continue;
+      found = true;
+      total += typeof part === "number" ? part : Array.isArray(part) ? part.length : 0;
+    }
+    if (found) return total;
+  }
+  return 0;
+};
+
+/** Where the jobs the box could not schedule live, under either spelling. */
+const missedRoutinesOf = (report: MarketplaceImportReport): readonly MarketplaceImportMissedRoutine[] => {
+  const routines = report.routines;
+  if (routines != null && !Array.isArray(routines) && typeof routines === "object") {
+    const held = (routines as { readonly notCreated?: readonly MarketplaceImportMissedRoutine[] }).notCreated;
+    if (Array.isArray(held)) return held;
+  }
+  return Array.isArray(report.notCreated) ? report.notCreated : [];
+};
 
 const listOf = (value: readonly string[] | undefined): string[] =>
   (Array.isArray(value) ? value : []).map((entry) => String(entry)).filter((entry) => entry.length > 0);
@@ -512,23 +574,42 @@ export function describeImportReport(bot: MarketplaceBot, report: MarketplaceImp
   }
   const lines: string[] = [];
   lines.push(`Set up "${name}"${report.agentId ? ` (id ${report.agentId})` : ""} from the catalog.`);
-  lines.push(`It knows ${countOf(report.memories)} fact(s), brings ${countOf(report.skills)} playbook(s)`
-    + ` and carries ${countOf(report.routines)} job(s), every one switched OFF until the person turns`
-    + " it on.");
+  /**
+   * THE HOST'S OWN RECEIPT, NOT A SECOND COUNT OF THE SAME THING. `message` is the one plain-words
+   * sentence the import composed, and it is what the console's card already draws. Printing it here
+   * is what makes the two doors one: a counter written on this side is a counter that can disagree
+   * with the card about the same import, and it did -- see `countOf` above.
+   */
+  const receipt = String(report.message ?? "").trim();
+  lines.push(receipt.length > 0
+    ? receipt
+    : `It knows ${countOf(report.memories)} fact(s), brings ${countOf(report.skills)} playbook(s)`
+      + ` and carries ${countOf(report.routines)} job(s), every one switched OFF until the person turns`
+      + " it on.");
   const connected = listOf(report.integrations?.connected);
   const offered = listOf(report.integrations?.offered);
+  const informational = listOf(report.integrations?.informational);
   const unavailable = listOf(report.integrations?.unavailable);
   if (connected.length > 0) lines.push(`Already connected here: ${connected.join(", ")}.`);
   if (offered.length > 0) lines.push(`Ready to add from the Marketplace: ${offered.join(", ")}.`);
+  if (informational.length > 0) {
+    lines.push(`${informational.join(", ")} ${informational.length === 1 ? "is set up on its own page" : "are set up on their own pages"}`
+      + " rather than by installing anything here.");
+  }
   if (unavailable.length > 0) {
     lines.push(`Not something this product carries yet, so they would bring their own: ${unavailable.join(", ")}.`);
   }
-  if (connected.length === 0 && offered.length === 0 && unavailable.length === 0) {
+  // FOUR buckets, not three. A row whose every app is page-only used to be reported as needing no
+  // apps at all, which is an assertion rather than an omission: `tech-demos` and `webby` are both
+  // in that shape and both told a person "It needs no apps connected" about an app they do want.
+  if (connected.length === 0 && offered.length === 0 && informational.length === 0
+    && unavailable.length === 0) {
     lines.push("It needs no apps connected.");
   }
-  for (const missed of report.notCreated ?? []) {
+  for (const missed of missedRoutinesOf(report)) {
     if (missed?.name == null) continue;
-    lines.push(`"${missed.name}" was not created: ${missed.reason ?? "no cadence this box can schedule"}.`);
+    lines.push(`"${missed.name}" was not created: `
+      + `${missed.why ?? missed.reason ?? "no cadence this box can schedule."}`);
   }
   lines.push("Tell the person in your own plain words what it came with and what still needs"
     + " connecting. Never name a tool, and do not claim anything is connected that is not.");
@@ -679,7 +760,7 @@ function createCatalogTemplateTool(dependencies: CatalogToolDependencies) {
             result: {
               case: "success",
               value: new ReadAgentTranscriptSuccess({
-                transcript: `No ready-made bot with id "${args.template_id}". Run SearchBotCatalog and use an id from it.`,
+                transcript: `No ready-made bot with id "${args.template_id}". Look through the catalog again and use an id from it.`,
               }),
             },
           });
@@ -751,7 +832,7 @@ function createCatalogSetupTool(
           result: {
             case: "error",
             value: new CreateAgentError({
-              error: `No ready-made bot with id "${args.template_id}". Run SearchBotCatalog and use an id from it.`,
+              error: `No ready-made bot with id "${args.template_id}". Look through the catalog again and use an id from it.`,
             }),
           },
         });
@@ -828,9 +909,11 @@ function createCatalogSetupTool(
 }
 
 /**
- * The two read-only tools always, and the setup tool only when this box's bundle carries the
- * import. A tool offered against an importer that is not there is a tool that can only fail, and
- * the toolset's trace line names it as withheld with the reason instead.
+ * All three tools on a running box: the host wires the import in before any turn can run, and the
+ * api carries the command unconditionally, so there is no shipped box with two of these. The
+ * setup tool is still built only when an importer was handed over, because a tool offered against
+ * an importer that is not there can only fail -- which is the case a composition that has not been
+ * handed one yet, or a test wiring one tool at a time, is in.
  */
 export function createCatalogTools(dependencies: CatalogToolDependencies) {
   const tools = [

@@ -2519,10 +2519,12 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
        * So the one adapter is late-bound instead of rebuilt. The host owns both objects: it builds
        * this composition, and `getApi()` builds the gateway api that already holds the adapter. It
        * hands that api's own `importMarketplaceBot` in here through `setMarketplaceImporter` as
-       * soon as the composition exists, which is before any turn can run. Until it does -- and on
-       * any bundle whose api carries no such command -- the holder is undefined,
-       * `createCatalogTools` builds only the two read-only tools, and the setup tool is not offered
-       * at all rather than offered against nothing.
+       * soon as the composition exists, which is before any turn can run. Until it does the holder
+       * is undefined, `createCatalogTools` builds only the two read-only tools, and the setup tool
+       * is not offered at all rather than offered against nothing. That is the ONLY way two tools
+       * can happen: the gateway api carries `importMarketplaceBot` unconditionally, so there is no
+       * shipped bundle that has these tools and not the verb, and a box that answers no to the verb
+       * is a regression the gate fails on.
        */
       const startHandoff = method(extensions.api("session"), "startHandoff");
       const provider: TurnToolsetHostFactoryProvider = {

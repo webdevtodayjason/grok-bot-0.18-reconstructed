@@ -1108,8 +1108,16 @@ test("five failures in a row is not answering, however good the month was", asyn
     for (let index = 0; index < 40; index += 1) {
       proxy.chargeAlias("titanbot-demo", 0, 1, "plan-zai", { recordedModel: "openai/glm-5.3", at: `${month}-03T0${index % 9}:00:00.000Z` });
     }
+    // RELATIVE TO NOW, not pinned to a day of the month. Red here is a claim about the last two
+    // hours (PROVIDERS-8's RECENT_MAX_AGE_MS), and these five were written as `${month}-09T23:5X`:
+    // the case passed on the 9th and went amber for the rest of the month, which is a test that
+    // fails on the calendar rather than on the code. Clamped to the start of the month so all 45
+    // requests stay inside the usage window the month totals below are asserted against.
+    const monthStart = Date.parse(`${month}-01T00:00:00.000Z`);
+    const minutesAgo = (minutes) =>
+      new Date(Math.max(Date.now() - minutes * 60_000, monthStart)).toISOString();
     for (let index = 0; index < 5; index += 1) {
-      proxy.chargeAlias("titanbot-demo", 0, 1, "plan-zai", { recordedModel: "openai/glm-5.3", status: "failure", at: `${month}-09T23:5${index}:00.000Z` });
+      proxy.chargeAlias("titanbot-demo", 0, 1, "plan-zai", { recordedModel: "openai/glm-5.3", status: "failure", at: minutesAgo(5 - index) });
     }
 
     const answer = await call("GET", "/v1/admin/providers");

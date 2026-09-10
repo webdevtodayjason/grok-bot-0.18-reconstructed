@@ -37,6 +37,11 @@ import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
+import {
+  fakeMarketplaceBox,
+  hostMarketplaceImport as hostImport,
+} from "./helpers/host-marketplace-import.mjs";
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const stage = mkdtempSync(path.join(repoRoot, "node_modules", ".titan-catalog-test-"));
 after(() => rmSync(stage, { recursive: true, force: true }));
@@ -241,6 +246,49 @@ test("TITAN-CATALOG-1: a generated row comes back with all four blocks and its o
   assert.match(text, /would you like me to build one from scratch\?/);
 });
 
+// Jason's sentence has TWO halves -- "Titan should be able to see all connectors and all the agents
+// as a catalog" AND "when creating a new agent ... ask" -- and the first was wired to the second:
+// the question was appended to both read tools unconditionally, so somebody asking what connectors
+// exist was answered with an offer to build a bot and told to set nothing up until they chose one.
+test("TITAN-CATALOG-1: the question is for a bot request, not for every browse", () => {
+  for (const [what, text] of [
+    ["a search", tools.describeCatalogListing("slack", CARDS, pluginRows())],
+    ["the whole catalog", tools.describeCatalogListing("", CARDS, pluginRows())],
+    ["one template", tools.describeBotTemplate(generatedRow, new Map())],
+  ]) {
+    // The quoted sentence stays verbatim: quoting it is what measurably made the model ask it.
+    assert.match(text, /would you like me to build one from scratch\?/, what);
+    // But it is conditional now, and the browse-only case is named in the same breath.
+    assert.match(text, /IF THE PERSON ASKED YOU FOR A NEW BOT/, what);
+    assert.match(text, /IF THEY ONLY ASKED WHAT EXISTS/, what);
+    const offer = text.indexOf("IF THE PERSON ASKED YOU FOR A NEW BOT");
+    assert.ok(text.indexOf("Set nothing up until they have answered") > offer,
+      `${what}: the hold on setting anything up has to sit inside the condition`);
+  }
+});
+
+// Two of these used to be in the text the model reads -- "SearchPlugins lists them" and "Full detail
+// on a connector is in GetPlugin" -- and the box gate's own no-tool-names regex did not list either,
+// so a model relaying one would have put a tool name on a customer's screen with the gate green.
+test("TITAN-CATALOG-1: nothing either read tool says names a tool", () => {
+  const NAMES = /SearchBotCatalog|GetBotTemplate|CreateAgentFromTemplate|SearchPlugins|GetPlugin|ToolCall/;
+  for (const [what, text] of [
+    ["a search", tools.describeCatalogListing("slack", CARDS, pluginRows())],
+    ["no match", tools.describeCatalogListing("zzzzqqqq", CARDS, pluginRows())],
+    ["the whole catalog", tools.describeCatalogListing("", CARDS, pluginRows())],
+    ["one template", tools.describeBotTemplate(generatedRow, new Map())],
+  ]) {
+    assert.doesNotMatch(text, NAMES, what);
+  }
+  // And the gate that is supposed to catch it knows all of them.
+  const gate = readFileSync(path.join(repoRoot, "scripts/verify-titan-catalog-tools.mjs"), "utf8");
+  const line = gate.split("\n").find((row) => row.includes("const NO_TOOL_NAMES"));
+  assert.ok(line != null, "the gate still has a no-tool-names regex");
+  for (const name of ["SearchBotCatalog", "GetBotTemplate", "CreateAgentFromTemplate", "SearchPlugins", "GetPlugin"]) {
+    assert.ok(line.includes(name), `${name} is not in the gate's regex`);
+  }
+});
+
 test("TITAN-CATALOG-1: a pack with no apps and no routines reads without throwing", async () => {
   assert.ok(packRow != null, "the catalog still carries a pack");
   const built = tools.createCatalogTools(deps());
@@ -286,8 +334,10 @@ test("TITAN-CATALOG-1: the setup tool hands the verb its arguments and reports w
   assert.equal(result.result.value.agentId, "agent-9");
   const message = result.result.value.message;
   assert.match(message, /Set up "Search Desk" \(id agent-9\) from the catalog/);
-  // A count that arrives as a list and a list that arrives as a count read the same, because the
-  // verb and these tools were written by two hands at the same time.
+  // A count that arrives as a list and a list that arrives as a count read the same. This report is
+  // HAND-WRITTEN and carries no `message`, which is the only thing it can honestly pin: the older
+  // shapes, and the fallback sentence they feed. It cannot say a word about what the verb returns --
+  // see the three cases below, which drive the real verb and read its real report.
   assert.match(message, /knows 4 fact\(s\), brings 2 playbook\(s\) and carries 3 job\(s\)/);
   assert.match(message, /switched OFF/);
   assert.match(message, /Already connected here: Slack\./);
@@ -314,7 +364,76 @@ test("TITAN-CATALOG-1: a bot already on the roster is reported as already there,
   assert.doesNotMatch(message, /^Set up/);
 });
 
-test("TITAN-CATALOG-1: with no import on this box the setup tool is not offered at all", () => {
+// ------------------------------------------------------------- the REAL report, the real verb
+//
+// THE CASES THAT WOULD HAVE CAUGHT IT. Every case above hands the tool a report written by hand, and
+// for a week one of them asserted `memories: 4, skills: ["a","b"], routines: 3` -- a vocabulary the
+// verb has never once returned. It answers `memories {added, duplicates, rejected}`,
+// `skills {imported, reused, skipped}` and `routines {created, notCreated}`, so every count in the
+// sentence the MODEL reads was 0 while the console's card on the same report read them right. The
+// two doors drifted on the one number a customer hears, and no test could see it.
+//
+// So these three drive the real `importMarketplaceBot` against the same fake box the sequence suite
+// uses, over REAL catalog rows, and assert `describeImportReport` over THAT report. Never a literal.
+// (docs/BOTS.md, "What bites": a check over a report is fed a real report.)
+
+const reportFor = async (id, options = {}) => {
+  const row = catalog.findMarketplaceBot(id);
+  assert.ok(row != null, `${id} is not in the catalog any more, so this case has to pick another row`);
+  const report = await hostImport.importMarketplaceBot(fakeMarketplaceBox(options), { id });
+  return { row, report, said: tools.describeImportReport(row, report) };
+};
+
+test("TITAN-CATALOG-1: the counts the bot reads back are the ones the box actually wrote", async () => {
+  const { report, said } = await reportFor("account-book");
+  // What the box really did, off the report rather than off a fixture.
+  assert.ok(report.memories.added >= 5, `only ${report.memories.added} facts were written`);
+  assert.ok(report.skills.imported.length >= 5);
+  assert.ok(report.routines.created.length >= 1);
+  // And the two doors say the same thing about it: the card's sentence IS the bot's sentence.
+  assert.ok(said.includes(report.message), `the bot was told ${JSON.stringify(said)}`);
+  assert.match(said, new RegExp(`${report.memories.added} facts it now remembers`));
+  assert.doesNotMatch(said, /0 fact|0 playbook|0 job/);
+});
+
+test("TITAN-CATALOG-1: a job the box could not schedule is in the bot's own words too", async () => {
+  const { report, said } = await reportFor("deal-hunting");
+  const missed = report.routines.notCreated;
+  assert.equal(missed.length >= 1, true, "deal-hunting carries a routine with no cron; it should not");
+  // The path AND the field name: they were `report.notCreated` and `.reason`, and the verb answers
+  // `report.routines.notCreated` and `.why`, so the loop never ran once.
+  assert.equal(Object.prototype.hasOwnProperty.call(report, "notCreated"), false);
+  for (const row of missed) {
+    assert.ok(said.includes(`"${row.name}" was not created`), `the bot was told ${JSON.stringify(said)}`);
+    assert.ok(said.includes(row.why), "and the reason is the box's own, not a guess in this file");
+  }
+});
+
+test("TITAN-CATALOG-1: a row whose every app is page-only is not reported as needing no apps", async () => {
+  const { row, report, said } = await reportFor("tech-demos");
+  assert.equal(report.integrations.connected.length + report.integrations.offered.length
+    + report.integrations.unavailable.length, 0, "tech-demos is the all-page-only shape or this case moved");
+  assert.ok(report.integrations.informational.length >= 1);
+  for (const label of report.integrations.informational) assert.ok(said.includes(label));
+  // An ASSERTION about a bot that does want an app, which is worse than an omission.
+  assert.doesNotMatch(said, /It needs no apps connected/,
+    `${row.name} wants ${report.integrations.informational.join(", ")}`);
+  // And the console's card, which comes from the same place, says it too.
+  assert.match(report.message, /page to set up/);
+});
+
+test("TITAN-CATALOG-1: a bot with no apps at all still says so", async () => {
+  const { report, said } = await reportFor("deal-hunting");
+  const wanted = Object.values(report.integrations).reduce((sum, bucket) => sum + bucket.length, 0);
+  assert.equal(wanted, 0, "deal-hunting names no apps or this case moved");
+  assert.match(said, /It needs no apps connected/);
+});
+
+test("TITAN-CATALOG-1: an importer that was not handed over builds two tools, which no box is", () => {
+  // NOT a story about an older bundle: `host-gateway-api.ts` declares importMarketplaceBot
+  // unconditionally and sand-host hands it in before any turn can run, so every running box builds
+  // three. This pins the shape a composition is in before that hand-over, and nothing more -- the
+  // box gate FAILS on a box that answers no to the verb rather than skipping the leg.
   const built = tools.createCatalogTools(deps());
   const names = built.map((tool) => tool.name);
   assert.deepEqual(names, [tools.CATALOG_SEARCH_TOOL_NAME, tools.CATALOG_TEMPLATE_TOOL_NAME],
