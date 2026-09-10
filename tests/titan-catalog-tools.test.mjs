@@ -235,7 +235,10 @@ test("TITAN-CATALOG-1: a generated row comes back with all four blocks and its o
   const withLine = generatedRow.apps.find((app) => (app.line ?? "").length > 0);
   if (withLine != null) assert.ok(text.includes(withLine.line), "the bot's own sentence about the app");
   // And the question the whole wave is about is in the tool's own answer, so the model is told.
-  assert.match(text, /one built from scratch/);
+  // The question is QUOTED for the model to copy now, not described, because a described one was
+  // measured not to reach the person at all (grok-bot-local-vm 2026-09-10).
+  assert.match(text, /END your message with this question/);
+  assert.match(text, /would you like me to build one from scratch\?/);
 });
 
 test("TITAN-CATALOG-1: a pack with no apps and no routines reads without throwing", async () => {
@@ -327,6 +330,48 @@ test("TITAN-CATALOG-1: a verb that throws says so and does not claim a bot was m
   const { result } = await runTool(byName(built, tools.CATALOG_SETUP_TOOL_NAME), { template_id: generatedRow.id });
   assert.equal(result.result.case, "error");
   assert.match(result.result.value.error, /the roster is full/);
+});
+
+// A REFUSAL IS AN ERROR. MEASURED on grok-bot-local-vm 2026-09-10: handed a refusal back as a
+// SUCCESS whose message said it had been refused, a bot told the person "Done — Marketing team is
+// set up and on your roster" and then invented a reason it was empty. Nothing had been created.
+// The case is what the model reads first, so no wording inside a success fixes it.
+test("TITAN-CATALOG-1: a refused import is an error, never a success carrying bad news", async () => {
+  const built = tools.createCatalogTools(deps({
+    importBot: async () => ({
+      state: "refused",
+      name: "Marketing team",
+      message: "Marketing team is a team of several bots rather than one, so it is added from its own"
+        + " page in the Marketplace, where the whole team goes on at once.",
+    }),
+  }));
+  const { result } = await runTool(byName(built, tools.CATALOG_SETUP_TOOL_NAME), { template_id: generatedRow.id });
+  assert.equal(result.result.case, "error", "a success is read as a bot that exists");
+  assert.match(result.result.value.error, /added from its own page in the Marketplace/);
+});
+
+test("TITAN-CATALOG-1: a failed import is an error too", async () => {
+  const built = tools.createCatalogTools(deps({
+    importBot: async () => ({ state: "failed", message: "the box would not write its playbooks" }),
+  }));
+  const { result } = await runTool(byName(built, tools.CATALOG_SETUP_TOOL_NAME), { template_id: generatedRow.id });
+  assert.equal(result.result.case, "error");
+  assert.match(result.result.value.error, /would not write its playbooks/);
+});
+
+// A TEAM IS LISTED, BUT NOT AS SOMETHING TO SET UP. Ranked in with the rest, `marketing-team` comes
+// back FIRST for "create me an Instagram marketer" -- it IS the best answer to that sentence -- and
+// a bot then offers it, is told to use it, and cannot. It is still shown, because the person should
+// hear a team exists and where to get it.
+test("TITAN-CATALOG-1: a team is listed under its own heading, away from the ones that can be set up", () => {
+  const teamRow = packRow;
+  assert.ok(teamRow, "no team row in the catalog, so this case is asserting nothing");
+  const listing = tools.describeCatalogListing("marketing", CARDS, []);
+  assert.ok(listing.includes(teamRow.id), "a team the person asked for has to be visible");
+  const heading = listing.indexOf("it is NOT one you can set up");
+  assert.ok(heading > 0, "the teams need a heading that says they are not this bot's to set up");
+  assert.ok(listing.indexOf(teamRow.id) > heading,
+    "the team must come after that heading, not ranked in among the ones that can be set up");
 });
 
 // ------------------------------------------------------------------------------------ the chips

@@ -119,6 +119,10 @@ export interface CatalogPluginRow {
  * have to read the same to a person.
  */
 export interface MarketplaceImportReport {
+  /** "done" | "already" | "failed" | "refused" on a current box; absent on an older one. */
+  readonly state?: string;
+  /** The plain-words sentence the import wrote, which is the whole of a refusal. */
+  readonly message?: string;
   readonly agentId?: string;
   readonly name?: string;
   readonly memories?: number | readonly unknown[];
@@ -298,7 +302,13 @@ export function describeBotCard(
     return `${row.displayName}${row.isInstalled ? " (installed)" : ""}`;
   });
   const team = Array.isArray(card.members) && card.members.length > 0
-    ? ` · a team of ${card.members.length}`
+    // MEASURED, grok-bot-local-vm 2026-09-10: with the card saying only "a team of 7", a bot asked
+    // for an Instagram marketer offered `marketing-team`, was told "use the template", called the
+    // setup tool and was refused -- a team goes on from its own page in the Marketplace, all at
+    // once -- and then had nothing true to say. So the card says so before it is offered. It is
+    // still OFFERED, not hidden: a team is often the best answer to what the person asked for, and
+    // they should hear about it and be told where it is added.
+    ? ` · a team of ${card.members.length}, added from its own page in the Marketplace, not by you`
     : "";
   return `- ${card.id} · ${card.name} · ${card.category}${team}\n`
     + `    ${clamp(card.description, 220)}\n`
@@ -309,6 +319,31 @@ export function describeBotCard(
 export function describeCatalogPlugin(plugin: CatalogPluginRow): string {
   return `- ${plugin.pluginId} · ${plugin.displayName} · ${plugin.category} · `
     + `${plugin.isInstalled ? "installed on this box" : "not installed"}`;
+}
+
+/**
+ * THE QUESTION, quoted rather than described, and it is the LAST thing either read tool says.
+ *
+ * Jason, 2026-09-09 17:40, asked for it in these words: "When creating a new agent, it should be
+ * able to pull from those templates and ask, 'Would you like to use this template or would you like
+ * me to create one from scratch?'"
+ *
+ * MEASURED on grok-bot-local-vm 2026-09-10: told in prose, in three separate places, to "ask
+ * whether they want one of those or one built from scratch", a bot asked for an Instagram marketer
+ * looked at the catalog, read two rows in full, named three of them with a line each -- and then
+ * stopped. There was no question mark anywhere in the reply. It had offered a choice and never put
+ * it to the person, which is the half of Jason's sentence that makes the other half worth anything.
+ * A described instruction was not enough; a quoted sentence with "end your message with it" is.
+ */
+const THE_QUESTION =
+  "Now answer the person. Name the two or three closest by name with one line each, and END your"
+  + " message with this question, in words as close to these as the conversation allows:"
+  + " \"Would you like to use one of these, or would you like me to build one from scratch?\""
+  + " Set nothing up until they have answered.";
+
+/** A row that is several bots with a coordinator rather than one bot. */
+export function isTeamCard(card: { readonly members?: readonly unknown[] }): boolean {
+  return Array.isArray(card.members) && card.members.length > 0;
 }
 
 const CATALOG_MAX_MATCHED_BOTS = 15;
@@ -348,12 +383,29 @@ export function describeCatalogListing(
     }
   } else {
     const shown = matchedBots.slice(0, CATALOG_MAX_MATCHED_BOTS);
+    /**
+     * THE TEAMS COME LAST AND UNDER THEIR OWN HEADING, because they are the one thing here that is
+     * not mine to set up: a team goes on from its own page in the Marketplace, where all of its
+     * members arrive at once. MEASURED on grok-bot-local-vm 2026-09-10: ranked in with the rest,
+     * `marketing-team` came back FIRST for "create me an Instagram marketer" -- it is the best
+     * answer to that sentence -- and a bot offered it first, was told to use it, and could not.
+     * They are still shown, because the person should hear a team exists and where to get it.
+     */
+    const single = shown.filter((bot) => !isTeamCard(bot));
+    const teams = shown.filter((bot) => isTeamCard(bot));
     lines.push(`${matchedBots.length} ready-made bot(s) match "${asked}", best first`
       + `${matchedBots.length > shown.length ? `, showing ${shown.length}` : ""}. Each one comes with the`
       + " facts it already knows, the playbooks it runs, the jobs it can run on its own and the apps"
       + " it uses.");
     lines.push("");
-    for (const bot of shown) lines.push(describeBotCard(bot, byId));
+    for (const bot of single) lines.push(describeBotCard(bot, byId));
+    if (teams.length > 0) {
+      lines.push("", `And ${teams.length} team(s) match too. A team is several bots with a coordinator`
+        + " and it is NOT one you can set up — it goes on from its own page in the Marketplace, where"
+        + " the whole team arrives at once. Mention one if it is the best answer, and say that is"
+        + " where it is added:");
+      for (const bot of teams) lines.push(describeBotCard(bot, byId));
+    }
   }
 
   const matchedPlugins = asked.length === 0
@@ -366,6 +418,7 @@ export function describeCatalogListing(
 
   lines.push("", "Read one in full before you offer it, and set a bot up from it rather than building"
     + " an empty one. Full detail on a connector is in GetPlugin.");
+  lines.push("", THE_QUESTION);
   return lines.join("\n");
 }
 
@@ -425,7 +478,10 @@ export function describeBotTemplate(
 
   const members = Array.isArray(bot.members) ? bot.members : [];
   if (members.length > 0) {
-    lines.push("", `This one is a team of ${members.length}, not a single bot:`);
+    lines.push("", `This one is a team of ${members.length}, not a single bot, and a team is not mine`
+      + " to set up: it goes on from its own page in the Marketplace, where the whole team arrives at"
+      + " once. Offer it if it is the best fit and say that is where it is added.");
+    lines.push("");
     for (const member of members) {
       lines.push(`- ${member.role}${member.summary ? ` — ${member.summary}` : ""}`
         + `${member.reportsTo ? ` · reports to ${member.reportsTo}` : ""}`);
@@ -437,8 +493,7 @@ export function describeBotTemplate(
     for (const need of bot.firstRun.needs ?? []) lines.push(`- ${need}`);
   }
 
-  lines.push("", "Offer this to the person by name with one line about it, and ask whether they want it"
-    + " or one built from scratch. Do not set it up until they say so.");
+  lines.push("", THE_QUESTION);
   return lines.join("\n");
 }
 
@@ -523,7 +578,8 @@ const TEMPLATE_DESCRIPTION =
 const SETUP_DESCRIPTION =
   "Set a new bot up from a ready-made one by its STABLE id: it creates the bot, writes the facts into"
   + " its memory, imports its playbooks, creates its jobs SWITCHED OFF, and reports which apps are"
-  + " connected here, which can be added, and which this product does not carry. ONLY call this after"
+  + " connected here, which can be added, and which this product does not carry. Read the row in full"
+  + " with GetBotTemplate first, so what you tell them afterwards is what it actually holds. ONLY call this after"
   + " the person has said which one they want -- offer them the two or three closest by name first and"
   + " ask whether they want one of those or one built from scratch. A bot already on the roster under"
   + " that name is left exactly as it is and nothing is written. Afterwards, tell them what it came"
@@ -705,6 +761,32 @@ function createCatalogSetupTool(
           id: bot.id,
           ...(args.name == null ? {} : { name: args.name }),
         });
+        /**
+         * A REFUSAL IS AN ERROR, NOT A SUCCESS CARRYING BAD NEWS.
+         *
+         * The import refuses a row it cannot honestly make one bot out of -- a team, which goes on
+         * from its own page in the Marketplace with all its members at once -- and it says so in
+         * plain words. Handed that back as a SUCCESS whose message happened to be a refusal, the
+         * model read it as a success: MEASURED on grok-bot-local-vm 2026-09-10, asked to set the
+         * Marketing team up, a bot answered "Done -- Marketing team is set up and on your roster"
+         * and then invented a reason it was empty ("it arrived as a blank slate"). Nothing had been
+         * created. Telling a customer a bot exists when none does is the worst thing in this file,
+         * and no wording in a success message fixes it, because the case is what the model reads
+         * first. So a report that created no agent comes back as an error.
+         */
+        const refused = report != null
+          && (report.state === "refused" || report.state === "failed"
+            || (report.agentId == null && report.alreadyExisted !== true));
+        if (refused) {
+          return new CreateAgentResult({
+            result: {
+              case: "error",
+              value: new CreateAgentError({
+                error: String(report?.message ?? `${bot.name} was not set up.`),
+              }),
+            },
+          });
+        }
         return new CreateAgentResult({
           result: {
             case: "success",

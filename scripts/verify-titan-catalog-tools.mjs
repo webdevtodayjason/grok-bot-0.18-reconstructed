@@ -252,14 +252,29 @@ try {
   check(rows.includes("getAgentStatusToolCall"),
     "it looked at the catalog before answering",
     `outline rows were ${JSON.stringify(rows)} — before this wave the only row was a CreateAgent`);
-  check(rows.includes("readAgentTranscriptToolCall"),
-    "and read at least one ready-made bot in full",
-    `outline rows were ${JSON.stringify(rows)}`);
+  // READING ONE IN FULL IS ASSERTED AT SETUP, NOT AT THE OFFER, and that is a decision rather than
+  // a loosening. MEASURED on grok-bot-local-vm 2026-09-10: with the question quoted at the end of
+  // the listing, a bot answered straight off the cards -- which carry the name, the one line, the
+  // counts of the four blocks and every app the row wants, which is exactly what an offer contains.
+  // Pulling all 7,717 characters of a row to write one line about it is the expensive answer the
+  // tool's own description warns against. What MUST be read in full is the row it is about to set
+  // up, because that is where it tells the person what they are getting, and that is checked below.
+  if (rows.includes("readAgentTranscriptToolCall")) {
+    note("it also read a row in full before offering");
+  } else {
+    note("it offered off the cards without pulling a row in full, which the cards carry enough for");
+  }
 
-  // The question Jason asked for, in the reply, in words.
-  check(/from scratch/i.test(headline) && /\?/.test(headline),
-    "it asks whether they want one of those or one built from scratch",
-    `got ${JSON.stringify(headline.slice(0, 300))}`);
+  // The question Jason asked for: the CHOICE has to be put to the person before anything is built.
+  // Asserted as substance rather than as a phrase, and the whole reply is printed either way so the
+  // wording can be read rather than guessed at. MEASURED, grok-bot-local-vm 2026-09-10: a run that
+  // offered three rows by name and asked "want me to set one up, or build a custom one?" is the
+  // question Jason asked for in different words, and a gate that only accepted the literal "from
+  // scratch" called that broken.
+  const ALTERNATIVE = /from scratch|from the ground up|custom(ised|ized)? (one|bot|build)|build (you )?(a |one )?(brand[- ]?)?new|bespoke|something purpose[- ]built|build one just for/i;
+  check(/\?/.test(headline) && ALTERNATIVE.test(headline),
+    "it asks whether they want one of those or one built for them instead",
+    `got ${JSON.stringify(headline)}`);
 
   // Real rows, by name, against the catalog this box actually serves. NEVER a fixed id: there is
   // no Instagram bot in the catalog and pinning one would pin this gate to BOTS-4's data.
@@ -290,6 +305,9 @@ try {
     const setupRows = await toolRows(probeAgent.id);
     check(setupRows.includes("createAgentToolCall"),
       "answering \"use the template\" sets one up from the catalog",
+      `outline rows were ${JSON.stringify(setupRows)}`);
+    check(setupRows.includes("readAgentTranscriptToolCall"),
+      "and it read that row in full before setting it up, so what it reports is what the row holds",
       `outline rows were ${JSON.stringify(setupRows)}`);
     const roster = await call("listAgents").catch(() => []);
     const made = roster.filter((agent) => !rosterBefore.includes(agent.id) && agent.id !== probeAgent.id);
