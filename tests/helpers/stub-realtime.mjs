@@ -249,16 +249,58 @@ export async function startStubRealtime({
     return callId;
   }
 
-  /** The caption of what the person said. Cumulative on xAI, incremental on OpenAI. */
-  function emitUserTranscript(text, { itemId = "item_user" } = {}) {
-    if (vendor === "xai") {
-      send({ type: "conversation.item.input_audio_transcription.updated", item_id: itemId, transcript: text, delta: text });
-    } else {
-      send({ type: "conversation.item.input_audio_transcription.delta", item_id: itemId, delta: text });
+  /**
+   * The caption of what the person said, as ONE step or as a whole sequence.
+   *
+   * Cumulative on xAI, incremental on OpenAI, and the caller writes the same thing either way: the
+   * CUMULATIVE transcript at each step. That is the only shape a caller can express once, because
+   * the two vendors disagree about what a step is -- xAI's `.updated` carries the whole utterance so
+   * far and its own reference says it "may have corrections to previous updated transcripts -- this
+   * is different from a transcript delta", while OpenAI's `.delta` carries only newly available text.
+   *
+   * So on OpenAI each step is sent as the SUFFIX it added, and a step that is not an extension of the
+   * one before it throws here rather than going out: an incremental wire cannot un-say a delta, and a
+   * stub that pretended otherwise would let a bridge pass against a shape OpenAI never sends. Drive
+   * corrections against the xAI stub, which is where they really happen.
+   *
+   * The one-argument form is unchanged, so tests written against the frozen contract do not move.
+   *
+   * @param {string|string[]} steps   the cumulative transcript at each step.
+   * @param {object} [options]
+   * @param {string} [options.itemId] the item these belong to; a new one is a new utterance.
+   * @param {number} [options.gapMs]  how long to wait between steps, so a page can be watched.
+   */
+  async function emitUserTranscript(steps, { itemId = "item_user", gapMs = 0 } = {}) {
+    const list = (Array.isArray(steps) ? steps : [steps]).map((step) => String(step ?? ""));
+    let sent = "";
+    for (let i = 0; i < list.length; i += 1) {
+      const whole = list[i];
+      if (i > 0 && gapMs > 0) await new Promise((resolve) => { const timer = setTimeout(resolve, gapMs); timer.unref?.(); });
+      if (vendor === "xai") {
+        send({ type: "conversation.item.input_audio_transcription.updated", item_id: itemId, transcript: whole, delta: whole });
+      } else {
+        if (!whole.startsWith(sent)) {
+          throw new Error(`the incremental vendor cannot un-say a delta: step ${i} "${whole}" does not extend "${sent}"`);
+        }
+        send({ type: "conversation.item.input_audio_transcription.delta", item_id: itemId, delta: whole.slice(sent.length) });
+      }
+      sent = whole;
     }
+    return list.at(-1) ?? "";
   }
   function emitUserTranscriptDone(text, { itemId = "item_user" } = {}) {
     send({ type: "conversation.item.input_audio_transcription.completed", item_id: itemId, transcript: text });
+  }
+  /**
+   * The transcription that never finished. Both vendors document this event and until 2026-09-10 the
+   * bridge handled it nowhere, which is how one utterance came to bleed into the next.
+   */
+  function emitTranscriptFailed({ itemId = "item_user", message = "audio was too short to transcribe" } = {}) {
+    send({
+      type: "conversation.item.input_audio_transcription.failed",
+      item_id: itemId,
+      error: { type: "invalid_request_error", code: "audio_unintelligible", message },
+    });
   }
 
   /** xAI emits no rate_limits.updated at all, which is why this is a no-op there. */
@@ -284,6 +326,10 @@ export async function startStubRealtime({
   function emitSpeechStopped() {
     send({ type: "input_audio_buffer.speech_started" });
     send({ type: "input_audio_buffer.speech_stopped" });
+  }
+  /** The start of an utterance on its own, so a test can drive two utterances that never completed. */
+  function emitSpeechStarted({ itemId = "item_user" } = {}) {
+    send({ type: "input_audio_buffer.speech_started", item_id: itemId });
   }
 
   /** Resolve once `predicate(events)` holds, or throw after `timeoutMs`. */
@@ -316,6 +362,8 @@ export async function startStubRealtime({
     emitToolCall,
     emitUserTranscript,
     emitUserTranscriptDone,
+    emitTranscriptFailed,
+    emitSpeechStarted,
     emitRateLimits,
     emitRateLimited,
     emitSpeechStopped,

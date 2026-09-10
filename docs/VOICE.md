@@ -94,7 +94,7 @@ Both speak a family of events with the same names. They do **not** take the same
 | Session frame | flat: `session.voice`, `session.turn_detection` at the top level, no `session.type` | typed: `session.type: "realtime"`, `audio.output.voice`, `audio.input.transcription` |
 | The other one's frame | — | **refuses it**: `Unknown parameter: 'session.voice'` |
 | `OpenAI-Beta` header | not used | must **not** be sent on the GA endpoint |
-| What you heard, as text | cumulative and self-correcting | incremental deltas |
+| Your own words, live | `conversation.item.input_audio_transcription.updated`: the **cumulative** transcript so far, which may correct itself and is explicitly **not** a delta; only when the transcription model is `grok-transcribe` | `conversation.item.input_audio_transcription.delta`: **newly available** text, which later deltas may revise |
 | Turn-taking controls | turn detection only | also `turn_detection.interrupt_response` |
 | Budget telemetry | **none at all** | `rate_limits.updated` every turn |
 
@@ -106,9 +106,80 @@ Two consequences worth spelling out:
 - **On xAI, holding the microphone shut is the only defence** against your team hearing itself. The
   other vendor has a switch for it; xAI documents no equivalent. Section 8.
 
+**Both services do send your words as you speak them**, and both are asked for them in the session
+frame this relay writes. The two shapes are genuinely different and the row above is the difference,
+read from each vendor's own reference on 2026-09-10:
+
+- xAI, `https://docs.x.ai/developers/rest-api-reference/inference/voice.md` (page dated 2026-08-04):
+  "Emitted as the user speaks, providing the cumulative transcript so far before the final `completed`
+  event. Note that this is the cumulative transcript which may have corrections to previous updated
+  transcripts — this is different from a transcript delta." It arrives **only** when
+  `audio.input.transcription.model` is `grok-transcribe`, which `ui/voice-edge.mjs` already sets.
+- OpenAI, `https://developers.openai.com/api/docs/guides/realtime-transcription`: the `.delta` carries
+  "newly available transcript text", and its own checklist says to decide "how your UI should revise
+  partial text when later deltas correct earlier text" and to "use `item_id` to order and reconcile
+  final transcripts". Ordering between two turns' completion events is explicitly not guaranteed. It
+  streams inside an ordinary speech-to-speech session, not only a transcription-only one.
+
+**Neither has been observed on a live key.** No workspace on this product has a realtime key to
+measure with (VOICE-1's shipped R750 result is the no-key sentence, and VOICE-2 is the row for
+fixing that), so both rows above are read from the vendors' documentation and everything below is
+measured against the stub provider in `tests/helpers/stub-realtime.mjs`, which speaks both shapes.
+
 `REALTIME_VENDORS` in `cp/voice.mjs` is the authoritative table: the wire shape, the address, the
 default model, the voices and the published price with the date it was read. The CLI, your Voice card
 and this document all name those rows.
+
+### What the page is told while you are talking (VOICE-7)
+
+Your words appear in a panel over the conversation while you speak, and when you stop it dissolves
+and those words are the next line in the chat. That needs the page to know which words are still
+being revised, which are finished, and which ones actually went to your team lead — three different
+things that travelled on one indistinguishable frame until 2026-09-10. The relay now says which:
+
+| frame | when | carries |
+|---|---|---|
+| `hear-begin` | you started talking | `turn`, `itemId` |
+| `hear` | the words so far, replacing what was there | `turn`, `itemId`, `text`, `final` |
+| `heard-confirmed` | your words went into your team lead's conversation | `turn`, `text`, `nonce`, `landed` |
+| `hear-end` | this turn is over | `turn`, `reason` |
+
+**`heard-confirmed` is the one that becomes the chat line, and it is not the same string as the last
+`hear`.** What you watch being built is the transcription model's output. What lands in the
+conversation is the realtime model's own tool argument, which is a second model reading the same
+audio. So the panel's last paint is the confirmed text, and the `nonce` on it is the same
+`voice:` nonce the durable entry is stamped with — which is what already draws the **Spoken** chip on
+that row, so the page can tie the panel to the line it turns into rather than drawing a line of its
+own.
+
+**It is sent when your box takes the words, not when your team lead answers.** That is 6 to 14
+milliseconds rather than 5.5 to 25 seconds, and a panel that waited for the answer would sit over the
+conversation for the whole of his thinking time.
+
+`hear-end` always arrives, including on the turns that never become a line at all, because a panel
+waiting for a line that is not coming stays on screen forever:
+
+| reason | what happened |
+|---|---|
+| `sent` | your words went in, and the line is on its way |
+| `answered-card` | a spoken yes or no closed something waiting on you, which is an answer and not a message |
+| `empty` | nothing intelligible came through |
+| `not-accepted` | your box would not take it, so no line will ever appear |
+| `no-words` | the transcription failed |
+| `no-answer` | the model answered without asking your team lead, which the instructions forbid but cannot prevent |
+| `line-closed` | the call ended with words still on screen |
+
+Two more rules the panel depends on. **Nothing is painted while your team lead is speaking**: the
+words the microphone picks up then are his own coming back through the speaker (section 8 has the
+measured case), so the relay drops them for as long as the microphone is held shut, and the orb on
+the button is the only sign while he talks. And **a new utterance starts empty**: the words are
+cleared when speech starts and when a transcription fails, not only when one completes. Before
+2026-09-10 an utterance whose completion never arrived bled into the next one — measured on this Mac
+(node v22.23.1): "open the box" then "what time is it" read `open the boxwhat time is it`. A one-line
+strip beside the box hid that. A panel over the conversation does not.
+
+The older `heard` frame is still sent, unchanged, beside all of these, so a page loaded before a
+relay restart keeps working for the rest of the call.
 
 ---
 
@@ -388,6 +459,9 @@ timeout 300 node scripts/verify-voice.mjs --leg caps      # a spent day: a refus
 timeout 300 node scripts/verify-voice.mjs --leg origin    # a cross-origin upgrade: refused in words
 timeout 300 node scripts/verify-voice.mjs --leg refused    # a vendor that says 401, and one that is not there
 timeout 300 node scripts/verify-voice.mjs --leg browser   # real Chrome, a WAV as the microphone
+timeout 300 node scripts/verify-voice.mjs --leg frames    # the words, labelled, at both viewports
+node --test tests/voice-transcription.test.mjs           # the words at the socket, including the
+                                                        # turns that never become a line
 ```
 
 One leg per run: the live legs hold the host's one active agent, and every gate here fits a 300 second
@@ -435,6 +509,25 @@ vendor inside that window.
 The hop ledger from that run: the tool call reaches `sendPrompt` in **12 ms**, the first sentence goes
 back **0 ms** after the entry is seen, and the wait in the middle — the team's own thinking, which is
 reported and never asserted — was **22,418 ms**. That middle number is section 5's whole point.
+
+**The words of a spoken turn, this Mac (MacBook-Pro.local, darwin arm64), against grok-bot-local-vm
+through a relay on loopback, 2026-09-10.** `--leg frames` **34 of 34**, run twice at two viewports in
+real Chrome with a WAV file as the microphone, reading the frames off the **page's own** voice socket
+rather than the relay's side of it. At **1440x900** and again at **390x844 with touch**, identically:
+25 frames on that socket per turn, of which **4 partials whose text grew** (`what` → `what is the teen`
+→ `what is the team` → `what is the team working on`, so the vendor's correction **replaced** the wrong
+word instead of being appended to it), **1** frame saying the words were finished
+(`What is the team working on?`), and **1** confirmation carrying the exact bytes that went into the
+conversation plus the `voice:` nonce the durable row is stamped with. The confirmation arrived **before**
+the dissolve, so it is the panel's last paint, and the row it became reads
+`You · What is the team working on? · Spoken` — the same bytes on screen. An utterance the model made
+nothing of closed its turn with the reason `empty` and confirmed nothing. The older `heard` frame went
+out 6 times per turn, unchanged. `--leg browser` re-run at the same commit: still **28 of 28**, with the
+tool call reaching `sendPrompt` in **9 ms** and the team's own thinking at **12,638 ms**.
+
+The held-card yes, the third turn that never becomes a line, is measured at the socket instead
+(`tests/voice-transcription.test.mjs`, 15 of 15 on this Mac): a real pending approval cannot be
+manufactured on the shared local box inside the gate's 300 second ceiling.
 
 **On the R750 (jason-PowerEdge-R750), through console.titanium.bot in real Chrome**, signed in as a
 throwaway customer minted inside the control-plane container and deleted afterwards. Console ready in
