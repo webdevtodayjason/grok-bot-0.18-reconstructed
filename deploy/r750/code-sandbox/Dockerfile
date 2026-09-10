@@ -22,9 +22,16 @@ FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3e
 # python3 + venv    the other half of what a coding task is asked for
 # curl, jq, less    the three things a shell task reaches for and then blames the image for
 # procps           the agent shells out and reads its own process table
+# python3-pytest   MEASURED ON THE R750 2026-09-10, on the first task that really finished. It was
+#                  asked to "run the test", found no pytest, and could not install one -- there is no
+#                  egress and that is deliberate -- so it wrote its own runner and said so. Honest,
+#                  and still the wrong answer: running tests is the headline reason a job comes here,
+#                  and the image is the only place a test runner can come from. It is apt's pytest
+#                  rather than pip's for the same reason everything else here is: no network at build
+#                  time beyond apt, and no pip cache in the image.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates git ripgrep python3 python3-venv curl jq less procps \
+      ca-certificates git ripgrep python3 python3-venv python3-pytest curl jq less procps \
  && rm -rf /var/lib/apt/lists/*
 
 # THE CODING AGENT, pinned to an exact version. `@latest` in an image is the same class of mistake as

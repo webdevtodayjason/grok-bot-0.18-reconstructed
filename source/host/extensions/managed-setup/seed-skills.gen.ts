@@ -97,7 +97,9 @@ Give it a short title too, in words the person would recognise. The title is the
 
 ## What the machine has, and what it does not
 
-It has node, python3, git and ripgrep, and whatever files you sent it.
+It has node, python3, pytest, git and ripgrep, and whatever files you sent it. So \`python3 -m pytest\`
+is a check you can ask for and it will really run; a test framework that is not in that list is one
+the machine cannot get, because it has no way to fetch anything.
 
 **It has no internet.** That is not a setting somebody forgot; it is deliberate, and it is what makes it safe to run code on. So in this release it cannot:
 
