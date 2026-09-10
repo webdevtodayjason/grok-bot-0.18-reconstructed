@@ -71,9 +71,13 @@ import {
 } from "./job-bus-edge.mjs";
 import {
   MAIL_BODY_LIMIT, MAIL_LEDGER_FILE, MAIL_SENT_LEDGER_FILE, MAIL_SETTINGS_FILE, appendMailLedger,
-  createMailEdge, createMailSendRoute, domainOf, mailLedgerRow, readMailSettings, svixHeaders,
-  toAddressList, verifySvixSignature,
+  createMailEdge, createMailSendRoute, createProductMailRoute, domainOf, mailLedgerRow,
+  productFrom, readMailSettings, svixHeaders, toAddressList, verifySvixSignature,
 } from "./mail-edge.mjs";
+// ONBOARD-2. The relay's only destructive hand. It is its own module rather than lines in this file
+// for the reason every other edge here is: the rules worth testing have to be reachable without a
+// relay, and the docker socket and the tenant root cannot leave this one.
+import { allDockerNames, createTenantPurgeRoute, removeTreeFs, statTreeFs } from "./purge-edge.mjs";
 // VOICE-1. The relay's half of talking to Titan out loud: the settings door and the browser's
 // audio socket. Everything else that would have had to live in this file -- the per-tenant edge
 // cache, the gateway caller, the caps, the ledger, the RFC 6455 codec -- is in there, because three
@@ -2991,10 +2995,18 @@ async function mailDeliverTo({ slug, agentId, prompt, nonce, ledger = {} }, from
  * does. It is what lets the rollout be control plane, then host swaps, then relay, with mail
  * working at every step.
  */
-async function mailMintSweep(reason = "the timer") {
+async function mailMintSweep(reason = "the timer", { only = "" } = {}) {
   if (RELAY == null) return { ok: false, why: "this relay has no control plane" };
   if (mailSweepRunning) return { ok: false, why: "a sweep is already running" };
   mailSweepRunning = true;
+  // ONBOARD-2. ONE WORKSPACE, when the caller names one, and the whole fleet when it does not.
+  //
+  // This matters more than it looks. The loop below makes a listAgents and a setAgentMail call into
+  // EVERY workspace this console serves, so onboarding one customer reaches inside every other
+  // customer's box, and the cost of giving a new client their addresses grows with the number of
+  // clients. With a slug the work is one box. With no body at all this is exactly today's fleet
+  // sweep, so the five minute timer and `cp mail sweep` are unchanged.
+  const only_ = String(only ?? "").trim();
   const swept = [];
   // Read once per sweep rather than at import, so an operator adds or removes a workspace with a
   // file and a five minute wait instead of a restart.
@@ -3010,13 +3022,30 @@ async function mailMintSweep(reason = "the timer") {
     // control plane outage would otherwise cost one gateway call per customer every five minutes
     // for the length of it, for no result. Measured through tests/relay-one-console, which counts
     // the calls a box receives: with the control plane dead this now makes none at all.
+    // A WORKSPACE MINTED A MINUTE AGO IS NOT IN THIS REGISTRY YET. The schedule reads the control
+    // plane once a minute, and the caller naming a slug is the control plane saying "this one exists
+    // now", so the read happens before the lookup rather than a minute after it. Only on the named
+    // path: the fleet sweep already refreshes through mailDirectoryRefresh below and a second full
+    // read every five minutes buys nothing.
+    if (only_.length > 0) await registry.refresh().catch(() => {});
     const warmed = await mailDirectoryRefresh();
     if (!warmed.ok) {
       console.log(`mail  the control plane did not answer (${warmed.why}), so no roster was read `
         + `and no address was minted this pass; ${mailAddressCount()} address(es) still route from the last read`);
-      return { ok: false, why: warmed.why, swept };
+      return { ok: false, why: warmed.why, swept, ...(only_.length > 0 ? { asked: only_ } : {}) };
     }
-    for (const entry of registry.all()) {
+    // A NAMED WORKSPACE THIS CONSOLE CANNOT REACH IS A REFUSAL AND NOT AN EMPTY SUCCESS. A sweep
+    // that answered 200 over a workspace it never looked at is the exact shape of a green light
+    // somebody believes, which is why the control plane's own green is a directory read rather than
+    // this answer -- but this answer still has to be honest.
+    let workspaces = registry.all();
+    if (only_.length > 0) {
+      const entry = registry.get(only_);
+      if (entry == null) return { ok: false, why: `${only_} is not a workspace this console knows yet`, asked: only_, swept };
+      if (entry.reachable === false) return { ok: false, why: `${only_} is not a workspace this console can reach yet`, asked: only_, swept };
+      workspaces = [entry];
+    }
+    for (const entry of workspaces) {
       if (entry.reachable === false) continue;
       const t = contextOf(entry.slug);
       if (t == null) continue;
@@ -3077,7 +3106,7 @@ async function mailMintSweep(reason = "the timer") {
     const refreshed = minted + retired > 0 ? await mailDirectoryRefresh() : warmed;
     console.log(`mail  swept ${swept.length} workspace(s) for addresses (${reason}); ${minted} minted, ${retired} retired, `
       + (refreshed.ok ? `${refreshed.addresses} in the directory` : `the directory could not be re-read: ${refreshed.why}`));
-    return { ok: true, swept, directory: refreshed };
+    return { ok: true, swept, directory: refreshed, ...(only_.length > 0 ? { asked: only_ } : {}) };
   } finally { mailSweepRunning = false; }
 }
 
@@ -3207,9 +3236,87 @@ async function handleMailSweepRoute(req, res) {
   const header = String(req.headers.authorization ?? "");
   const presented = /^bearer\s+/i.test(header) ? header.replace(/^bearer\s+/i, "").trim() : "";
   if (presented.length === 0 || !safeEqual(presented, expected)) return fail(res, 401, "unauthorized");
-  const answer = await mailMintSweep("the operator asked for it");
+  // ONBOARD-2. An OPTIONAL {slug}. No body is exactly what this route did before -- the whole fleet,
+  // which is what `cp mail sweep` sends and what the timer runs -- and a slug sweeps that one
+  // workspace so giving a new customer their addresses does not reach into every other customer's
+  // box. A body that will not parse is treated as no body rather than refused, because the caller
+  // that sends none is the one this route was written for.
+  let only = "";
+  try {
+    const raw = await readBody(req, 4096);
+    if (String(raw ?? "").trim().length > 0) {
+      const body = JSON.parse(raw);
+      if (body != null && typeof body === "object" && !Array.isArray(body)) only = String(body.slug ?? "").trim();
+    }
+  } catch { only = ""; }
+  const answer = await mailMintSweep(only.length > 0 ? `the control plane asked for ${only}` : "the operator asked for it", { only });
   res.writeHead(answer.ok ? 200 : 503, { "content-type": "application/json", "cache-control": "no-store" });
   return res.end(JSON.stringify(answer));
+}
+
+// ---- POST /mail/product and POST /tenant/purge (ONBOARD-2) -------------------------------------
+//
+// Both behind CP_RELAY_TOKEN, both called only by the control plane, and both built once and cached
+// the way mailSendRoute is. What cannot leave this file is in here and nothing else: the stored key's
+// owner, the docker socket, the tenant root and the registry.
+//
+// THEY ARE MOUNTED AT THE TOP LEVEL AND NOT UNDER /admin/, which is not a style choice.
+// handleRelayAdmin computes its method allow-list from which of five regexes matched the path, so a
+// POST to a path none of them match is answered 405 BEFORE the credential is even read -- and a 405
+// there reads, from the control plane's side, as the relay refusing it. Beside /mail/sweep is where a
+// control-plane door belongs on this server.
+
+let productMailRouteBuilt = null;
+function productMailRoute() {
+  if (productMailRouteBuilt != null) return productMailRouteBuilt;
+  productMailRouteBuilt = createProductMailRoute({
+    readBody,
+    drainThenEnd,
+    relayToken: RELAY?.relayToken ?? "",
+    // THE DIRECTORY OWNER'S settings and never a tenant's, the same resolution the bot's send door
+    // uses: a customer's own mail.json has an empty apiKey, so a route written the obvious way would
+    // find no key and the bug would read as "Resend refused".
+    ownerSettings: () => {
+      const owner = contextOf(mailDirectoryOwnerSlug());
+      return owner == null ? Promise.resolve(null) : readMailSettings(owner.mailSettingsFile);
+    },
+    productFrom,
+    log: (line) => console.log(line),
+  });
+  return productMailRouteBuilt;
+}
+
+// Where this host keeps workspaces. The relay's compose mounts /data/titanbot at the identical path
+// the host uses, which is why that is the default; the two environment names are an escape hatch for
+// an install that put it somewhere else, read in the order an operator would expect.
+const TENANT_DATA_ROOT = process.env.SAND_UI_TENANT_ROOT?.trim()
+  || process.env.CP_TENANT_ROOT?.trim()
+  || "/data/titanbot";
+
+let tenantPurgeRouteBuilt = null;
+function tenantPurgeRoute() {
+  if (tenantPurgeRouteBuilt != null) return tenantPurgeRouteBuilt;
+  tenantPurgeRouteBuilt = createTenantPurgeRoute({
+    readBody,
+    drainThenEnd,
+    relayToken: RELAY?.relayToken ?? "",
+    tenantRootOf: () => TENANT_DATA_ROOT,
+    // A registry that still routes to a workspace is a workspace that is still there, whatever
+    // docker says about one container name.
+    registryKnows: (slug) => {
+      const entry = registry.get(String(slug ?? ""));
+      return entry != null && entry.reachable !== false;
+    },
+    containerFor: (slug) => registry.get(String(slug ?? ""))?.box ?? "",
+    // `docker ps -a`, not `docker ps`: a stopped container still exists, still holds the customer's
+    // mounts and still comes back on a reboot, so "not running" is not "gone".
+    dockerNames: allDockerNames(execFile),
+    removeTree: removeTreeFs,
+    statTree: statTreeFs,
+    operatorSlug: OPERATOR_SLUG,
+    log: (line) => console.log(line),
+  });
+  return tenantPurgeRouteBuilt;
 }
 
 // ---- coding tasks, in a throwaway computer (CODE-1, docs/CODE.md) -----------------------------
@@ -3781,6 +3888,14 @@ const server = createServer(async (req, res) => {
     // of band from the five minute timer. Its credential is CP_RELAY_TOKEN, the same one the two
     // routes below take, so it sits here rather than behind the console login.
     if (url.pathname === "/mail/sweep") return await handleMailSweepRoute(req, res);
+    // ONBOARD-2, and here for the same reason /mail/sweep is: the caller is the control plane and not
+    // a person, its credential is CP_RELAY_TOKEN, and a console session must not open either of them.
+    // The first sends the product's own mail, which is the only mail on this server whose sender is
+    // the product rather than a bot. The second is the only destructive route on this relay, and the
+    // only place in the product that can delete a customer's data at all: the control plane runs as
+    // uid 1001 and a box's volumes are 0700 owned by uid 1000, measured on the R750 2026-09-10.
+    if (url.pathname === "/mail/product") return await productMailRoute().handleProductMail(req, res);
+    if (url.pathname === "/tenant/purge") return await tenantPurgeRoute().handlePurge(req, res);
     // MAIL-3, and before the console's login for the same reason the runtime bundle is: the caller
     // is a bot inside a box, which holds no session cookie. Its credential is the box's own gateway
     // token, presented as a bearer and matched against the registry -- the one credential a box

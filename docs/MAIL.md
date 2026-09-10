@@ -617,6 +617,165 @@ it belongs to, and a way to tell the bot afterwards. Filed as MAIL-3e.
 
 ---
 
+## 6b. The mail the product sends (ONBOARD-2)
+
+Everything above is a BOT sending or receiving. This section is the one mail on the server that
+comes from the product itself: the welcome a new customer gets when the operator adds them from the
+Clients panel. It is a second door, `POST /mail/product`, and it exists because the door above
+cannot be made to do this.
+
+### Why `POST /mail/send` could not be reused
+
+Four reasons, each one enough on its own, all read off the live code before this was written.
+
+1. Its credential is a **box's gateway token**. The control plane does not hold one.
+2. `buildFrom` forces the From to that bot's own `agent<code>@myagents.email` and deliberately
+   ignores a caller's. A welcome from a robot's address is not a welcome from the product.
+3. `reply_to` is hard-wired to the same agent address.
+4. `cp/mail.mjs` `openSend` refuses an empty `agentId`, and every product mail has one. A send that
+   got past it would charge the new customer's own 30-an-hour and 200-a-day caps for their own
+   welcome and leave a bot-less row in their Sent list on their first morning.
+
+`createMailSendRoute` is not edited by any of this. The two doors share `resendSend`,
+`sanitizeFromName` and the relay's stored key, and nothing else.
+
+### `POST /mail/product`
+
+Behind `CP_RELAY_TOKEN`, mounted beside `/mail/sweep` in the pre-login band. The caller is the
+control plane and there is no other: a box cannot open it and neither can a person at the console.
+
+```
+POST /mail/product
+authorization: Bearer <CP_RELAY_TOKEN>
+{ "kind": "welcome", "slug": "acme-roofing", "to": "jane@acmeroofing.com",
+  "subject": "...", "html": "...", "text": "...", "replyTo": "...", "idempotencyKey": "..." }
+```
+
+**The From is not a request field.** It is resolved by the relay: `PRODUCT_MAIL_FROM` in its own
+environment, then `welcomeFrom` in `mail.json`, then `Titanium Bot <welcome@titanium.bot>`. A value
+that is not a usable address falls back to the default rather than sending as something malformed,
+and a value carrying CR or LF is refused entirely.
+
+That is not fussiness. The stored Resend key is **account wide**: measured read-only on the R750 on
+2026-09-10 it lists 39 of the operator's domains, `titanium.bot` among them with status verified in
+`us-east-1`. So a route that took a sender from its caller would be one bad config value upstream
+away from sending as somebody's personal address, with no way for a recipient to tell. The relay
+holds the sender; the control plane sends words.
+
+A body carrying `from`, `sender`, `headers`, `cc`, `bcc` or `attachments` is refused **by name**
+rather than ignored. A bot that guesses at a field is a bot; a control plane sending one of these is
+a bug upstream, and a bug that is silently dropped is a bug that ships.
+
+**One recipient**, as an array or with a comma both refused. A product mail carries a sign-in link,
+which is a bearer credential with no revocation, so a second recipient is a second key to somebody's
+workspace.
+
+**The page** is capped at 128 KB and refused if it contains a `<script` tag or an `<img>` whose src
+is plain `http:`. Both checks are about what a recipient's client would do with it: a script tag is
+stripped by every mail client worth the name and is evidence the page did not come from where it
+should have, and an insecure image is a tracking pixel or a mixed-content warning on somebody's
+phone. The product's own mail draws its mark in HTML and CSS precisely so it needs no image at all.
+
+**The reply address** is the one place this route bends rather than refuses. A `replyTo` that is not
+a single address stops the send. One that IS a single address but sits on another domain is dropped,
+the mail still goes, and the answer carries a `replyToWhy` sentence saying where replies will land.
+The reason is live rather than theoretical: the operator's support address is
+`support@titaniumcomputing.com`, a domain that already receives mail, while the From is on
+`titanium.bot`, where inbound is not switched on yet. Refusing the send over that would mean no
+customer ever gets a welcome on the default install. The From is what a recipient sees and what is
+signed; Reply-To is a convenience, and the copy inside the mail names the support address in words
+anyway.
+
+A refusal from the mail service answers **the status and never the provider's body**, because the
+control plane writes what it is told into a row an operator reads.
+
+### The welcome itself
+
+`cp/welcome.mjs` mints the link, renders the words and posts them here. Two shapes and no third:
+
+- `link+password`, an invite. The button, plus the console address and the temporary password on a
+  quiet second line.
+- `link`, a Send again. The button and no password, and `render` **refuses** a `link` shape carrying
+  one so no code path can drift into sending a second copy of a password.
+
+Both ship because there is no customer-facing set-your-own-password door in the product yet
+(`POST /v1/accounts/{id}/password` is behind `requireAdmin`; ONBOARD-3 is filed). A link-only mail
+would lock a customer out at hour 25 with the operator as the only recovery.
+
+**The sign-in link is an unrevocable bearer credential in a URL.** It is `ui/session-token.mjs`'s
+ordinary session token, minted with that tenant's derived key, and the relay already consumes it at
+`GET /login?sso=<token>`. The relay checks the signature and the expiry and no revocation list, so
+it works as many times as it is clicked until it expires, and the only cancel is rotating
+`CP_SESSION_SECRET`, which signs the whole fleet out. Hence: 24 hours is a **ceiling** and not a
+target; click tracking stays off for `titanium.bot` so a scanner does not fetch it; and the link is
+handed to the caller exactly once, in the answer, and written to no row, no log and no screenshot.
+The relay caps the cookie it sets from the link at its own 12 hour session lifetime, so a 24 hour
+link yields a 12 hour session.
+
+The mark and the wordmark are drawn in HTML and CSS. An `<svg>` is dropped by every major client, a
+data URI in an `<img>` is stripped by Gmail, and `titanium.bot` hosts no raster mark (measured
+2026-09-10: `logo.png` 404s), so an image would be the one element most readers never see. Every
+colour is inline **as well as** in the `prefers-color-scheme` block, because Gmail ignores that query
+outright: the inline value is the floor and the query is the extra.
+
+### The row, and what it never holds
+
+Its own table, `welcome_sends`, deliberately not `mail_send_log`, keeping the split this document
+already draws: `tenant`, `email`, `instead_of`, `at`, `actor`, `outcome`, `resend_id`, `shape`,
+`detail`. Who, whom, when, what happened and the provider's id.
+
+**No subject, no body, no html, no sign-in link and no password**, and no column that could hold one.
+A row is a receipt, not a copy of the mail. `instead_of` is the owner's address when the operator
+sent the welcome somewhere else, so the panel can say that in plain words; sending somewhere else is
+an **override and never a copy**, because a bcc would put a live sign-in link and a password for
+somebody's workspace in a third party's inbox until the link expired.
+
+The idempotency key is `welcome:<slug>:<sha256(recipient) first 16>:<yyyymmddhh>`. The recipient is
+hashed because this string travels in a header, and the hour is in it so a double press inside the
+hour cannot mail a real human twice while a deliberate second send later still sends.
+
+### The address sweep, now per workspace
+
+`POST /mail/sweep` takes an optional `{slug}`. No body is exactly what it did before, which is what
+`cp mail sweep` and the five minute timer send. A slug reads the workspace list again first, then
+sweeps that one workspace.
+
+Per slug matters more than it looks: the fleet sweep makes a `listAgents` and a `setAgentMail` call
+into **every** workspace this console serves, so onboarding one customer reached inside every other
+customer's box and the cost grew with the number of customers. The re-read first is what makes a
+workspace created a minute ago findable at all, since that list is otherwise on its own sixty second
+cycle. A slug this console does not know answers 503 with a sentence rather than an empty success: a
+green sweep over a workspace it never named is the exact shape of a light somebody believes.
+
+### The relay's other new door
+
+`POST /tenant/purge` is mounted in the same band and takes the same credential, and it is not mail.
+It is the only route in the product that can delete a customer's data, and it lives on the relay
+because the control plane physically cannot: measured from inside `titanbot-cp` on the R750 on
+2026-09-10, cp runs as uid 1001, a box's volumes are 0700 owned by uid 1000, and both `ls` and
+`touch` answer Permission denied. `docs/TENANCY.md` carries its rules.
+
+### The gate
+
+```
+node --test tests/cp-welcome.test.mjs tests/relay-product-mail.test.mjs tests/relay-purge.test.mjs
+node scripts/verify-welcome-mail.mjs
+```
+
+Nothing repeatable touches `api.resend.com`. `verify-welcome-mail` renders both shapes at 600 px in
+light and dark in a real browser, walks every text run against the colour actually painted behind it,
+and fails under 4.5:1. That gate exists because the first draft of this mail rendered the temporary
+password at 1.11:1 in dark: the right words, in the right place, invisible. A unit test reads the
+string and not the pixels.
+
+Measured on this Mac 2026-09-10, node v22.23.1, playwright-core, deviceScaleFactor 2: 35 checks
+passed and 0 failed; 23 text runs in the invite and 18 in the second welcome, **zero below 4.5:1 in
+either scheme**; the password reads 16.55:1 in light and 14.92:1 in dark; zero `<img>` and zero
+`<svg>` in both; the card lands at 596 px in a 620 px viewport with no sideways scroll; the button is
+209x46 at `#00C8F0`; the invite is 7382 bytes of page and 1223 bytes of hand written plain text.
+
+---
+
 ## 7. The gate
 
 ```
