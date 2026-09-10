@@ -141,6 +141,9 @@ import "./cursor-free.test.mjs";
 import "./agent-cap.test.mjs";
 import "./read-fence.test.mjs";
 import "./problem-report-tool.test.mjs";
+// PUSH-1: the decider and the senders, then the four relay routes plus the console's card.
+import "./push-edge.test.mjs";
+import "./relay-push-routes.test.mjs";
 import "./send-email-tool.test.mjs";
 import "./code-task-tool.test.mjs";
 import "./code-task-watch.test.mjs";

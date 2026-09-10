@@ -1248,7 +1248,130 @@
       `${answer.counts.tenants} workspaces, ${answer.counts.accounts} people, ${answer.counts.superAdmins} super admin${answer.counts.superAdmins === 1 ? "" : "s"}`));
 
     $("version").textContent = `control plane ${answer.version} - measured ${when(answer.measuredAt)}`;
+
+    // PUSH-1. The two push credentials, at the bottom of System health, because that is where the
+    // other facts about "can this deployment do the thing it claims" already are. Drawn from here
+    // rather than written into cp/admin/index.html for one reason: three worktrees were open on this
+    // repo the week it landed and index.html was one of them, so the whole block is built in script
+    // and the page file is untouched. It renders once per loadSystem and reads its state from the
+    // same answer every other card on this panel comes from.
+    await drawPushDoors(host);
   }
+
+  // ---- PUSH-1: the two push credentials ---------------------------------------------------------
+  //
+  // TWO PASTE FORMS, shaped exactly like the Feedback panel's repository-token form, because they
+  // are the same kind of thing and a second shape for the same act is how one of them grows a habit
+  // the other does not have. The rules, stated on the forms themselves so nobody has to find this
+  // comment:
+  //
+  //   Nothing here ever shows a stored value again. What comes back is a length and eight characters
+  //   of a digest, which is the same string the ledger keeps forever.
+  //   The vendor is asked whether it takes the credential BEFORE anything is stored, and one it
+  //   refuses is not kept. Apple is asked by sending to a deliberately malformed device token, where
+  //   400 BadDeviceToken means the key worked and a 403 means it did not; Firebase is asked with
+  //   validate_only, which is a free dry run.
+  //   Neither credential is ever pushed into a customer's box.
+  //   With neither stored the relay still runs the whole mechanism and records what it WOULD have
+  //   sent, which is what this wave's gates measured. That is said on the screen, not assumed.
+
+  const PUSH_BLOCK_ID = "pushDoors";
+
+  function pushPasteForm({ id, fields, submit, why, onSave }) {
+    const form = el("form", "keyForm");
+    form.id = `${id}Form`;
+    const inputs = new Map();
+    for (const field of fields) {
+      const node = document.createElement(field.rows ? "textarea" : "input");
+      node.id = `${id}-${field.name}`;
+      if (!field.rows) node.type = field.secret ? "password" : "text";
+      else node.rows = field.rows;
+      node.autocomplete = "off";
+      node.placeholder = field.placeholder;
+      if (field.value) node.value = field.value;
+      inputs.set(field.name, { node, field });
+      form.appendChild(node);
+    }
+    const button = el("button", "ghost small", submit);
+    button.type = "submit";
+    form.appendChild(button);
+    form.appendChild(el("span", "why", why));
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const payload = {};
+      for (const [name, held] of inputs) payload[name] = held.node.value;
+      const missing = [...inputs.values()].filter((held) => held.field.required !== false && String(held.node.value).trim().length === 0);
+      if (missing.length > 0) { banner(`Fill in ${missing.map((held) => held.field.placeholder).join(" and ")} before storing anything.`); return; }
+      // Cleared on the way OUT, not on the way back, so a failed request leaves nothing in the field
+      // either. Nothing on this page ever writes a secret value back into one.
+      for (const held of inputs.values()) if (held.field.secret || held.field.rows) held.node.value = "";
+      button.disabled = true;
+      try {
+        const result = await onSave(payload);
+        banner(`${String(result.message)} It is stored as ${result.evidence}, checked against ${result.checkedWith}.`, true);
+        await loadSystem();
+      } catch (error) { banner(String(error.message)); }
+      finally { button.disabled = false; }
+    });
+    return form;
+  }
+
+  async function drawPushDoors(host) {
+    let door;
+    try { door = await api("GET", "/v1/admin/push"); }
+    catch (error) {
+      host.appendChild(card("Waking a phone", null, `the push credentials could not be read: ${String(error.message)}`));
+      return;
+    }
+    const old = document.getElementById(PUSH_BLOCK_ID);
+    if (old) old.remove();
+    const block = el("section", "pushDoors");
+    block.id = PUSH_BLOCK_ID;
+    block.appendChild(el("h3", null, "Waking a phone"));
+    block.appendChild(el("p", "quiet", door.stub
+      ? door.stub
+      : "A card that needs a person reaches their phone through these two. Each is checked with the vendor before it is stored and neither is ever pushed into a customer's box."));
+
+    block.appendChild(el("h4", null, "Apple, for iPhones and Macs"));
+    block.appendChild(el("p", "quiet", door.apns.stored
+      ? `Stored for ${door.apns.bundleId}, key ${door.apns.keyId}, team ${door.apns.teamId}. The key is ${door.apns.evidence}, and nothing here can show it. Paste a new one to replace it.`
+      : String(door.apns.why)));
+    block.appendChild(pushPasteForm({
+      id: "apns",
+      submit: "Check it with Apple and store it",
+      fields: [
+        { name: "keyId", placeholder: "key id", value: door.apns.keyId },
+        { name: "teamId", placeholder: "team id", value: door.apns.teamId },
+        { name: "bundleId", placeholder: "bundle id, like bot.titanium.app", value: door.apns.bundleId },
+        { name: "key", placeholder: "paste the whole .p8 file, including the BEGIN PRIVATE KEY line", rows: 4, secret: true },
+      ],
+      why: "Apple is sent one notification addressed to a token that cannot be a real device. It has to answer"
+        + " BadDeviceToken, which means it read the key and refused only the address; a refusal of the key itself"
+        + " is not stored. The key never leaves this service except to the console relay, and never into a box.",
+      onSave: (payload) => api("POST", "/v1/admin/push/apns", payload),
+    }));
+
+    block.appendChild(el("h4", null, "Firebase, for Android phones"));
+    block.appendChild(el("p", "quiet", door.fcm.stored
+      ? `Stored for project ${door.fcm.projectId}. The service account is ${door.fcm.evidence}, and nothing here can show it. Paste a new one to replace it.`
+      : String(door.fcm.why)));
+    block.appendChild(pushPasteForm({
+      id: "fcm",
+      submit: "Check it with Firebase and store it",
+      fields: [
+        { name: "projectId", placeholder: "project id (or leave it, the JSON carries one)", value: door.fcm.projectId, required: false },
+        { name: "serviceAccount", placeholder: "paste the service account JSON Firebase downloaded", rows: 4, secret: true },
+      ],
+      why: "Firebase is sent one message with validate_only, which is a free dry run it never delivers."
+        + " A service account it will not mint a messaging token for is not stored. The JSON never leaves this"
+        + " service except to the console relay, and never into a box.",
+      onSave: (payload) => api("POST", "/v1/admin/push/fcm", payload),
+    }));
+
+    host.parentNode.appendChild(block);
+  }
+
+  // ---- end PUSH-1 ------------------------------------------------------------------------------
 
   // ---- panel 5: spend --------------------------------------------------------------------------
 

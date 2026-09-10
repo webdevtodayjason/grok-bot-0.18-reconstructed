@@ -1,0 +1,51 @@
+/*
+ * The Notifications card (PUSH-1). Four rules, and the card inherits everything else.
+ *
+ * It claims its own stylesheet rather than a block in styles.css for the reason files-viewer.css
+ * already gives: styles.css is edited by several hands a wave, and a module that carries its own
+ * styles is one fewer line for one of them to land wrong. push-settings.js adds the <link> itself.
+ *
+ * Everything that can be inherited IS inherited: .settings-section, .setting-row, .switch,
+ * .form-actions, .ghost-button and .primary-button are the panel's own classes, so this card reads
+ * as a sibling of Inference and Mail rather than as a visitor. Only the four things the panel has no
+ * rule for are here.
+ */
+
+/* The quiet-hours window: two hour pickers on one line, with the offset sentence wrapping under
+   them. It has to wrap: shortening it to fit would leave a person guessing which clock "ten in the
+   evening" is read against, which is the one thing this line exists to answer. */
+.push-quiet-window {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 2px;
+  font-size: 13px;
+  color: var(--text-tertiary);
+}
+/* 16px, not 13px, and this is the one rule on this card that is not cosmetic. iOS zooms the whole
+   layout viewport on focus for any form control under 16px, and a <select> is a form control: a
+   13px picker here would zoom the console the moment somebody set their quiet hours, which is the
+   exact defect DOOR-1 fixed on the screen before this one. scripts/verify-push.mjs measures the
+   computed size of every control on this card and fails under 16. It caught this at 13px. */
+.push-quiet-window select { padding: 7px 10px; font-size: 16px; }
+.push-quiet-window small { flex-basis: 100%; white-space: normal; }
+
+/* "Saved", or the refusal's own words. Never red for a refusal that is only an older relay: the card
+   says that in a sentence of its own instead, and this line is for a save that actually failed. */
+.push-note { margin-left: 10px; font-size: 12.5px; color: var(--text-tertiary); }
+.push-note.bad { color: var(--danger-500); }
+
+/* No device yet is a real answer, not an empty box. */
+.push-empty { margin: 6px 0 0; font-size: 13px; color: var(--text-tertiary); white-space: normal; }
+
+/* The known divergence between the app's badge and this console's own count. Quiet, and present:
+   a customer who notices the two numbers differ has to be able to read why on the same screen. */
+.push-divergence {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  color: var(--text-tertiary);
+  white-space: normal;
+  border-top: 1px solid var(--glass-edge-soft);
+  padding-top: 10px;
+}

@@ -453,3 +453,20 @@ form.stack .controls { margin: 0; }
    allowed to wrap: shortening it to fit would turn "not reported by this vendor" into something an
    operator reads as a zero, which is the one thing this column must never say. */
 #marketplaceLedger td.num .quiet { font-family: var(--sans); white-space: normal; }
+
+/* ---- PUSH-1: the two push credential forms ---------------------------------------------------
+   Appended at the end, like the marketplace rules above it, so three worktrees can each add a block
+   to this file without meeting in a diff. It reuses .keyForm outright -- the two paste forms ARE the
+   Feedback panel's token form, and a second look for the same act is how one of them drifts. The
+   only thing that is new is the textarea: a .p8 and a service account JSON are multi-line, and a
+   single-line input for them means a paste that silently loses its newlines and a vendor refusal
+   nobody can explain. */
+.pushDoors { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 14px; }
+.pushDoors h3 { margin: 0 0 4px; }
+.pushDoors h4 { margin: 16px 0 4px; font-size: 13px; color: var(--quiet); font-weight: 600; }
+.pushDoors p { margin: 0; white-space: normal; }
+.pushDoors .keyForm textarea {
+  flex-basis: 100%; padding: 7px 9px; font-size: 12.5px; font-family: var(--mono);
+  background: #0C131C; color: var(--ink); border: 1px solid var(--line); border-radius: 6px;
+  resize: vertical; min-height: 68px;
+}

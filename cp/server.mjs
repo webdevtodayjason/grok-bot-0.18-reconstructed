@@ -36,6 +36,9 @@
 // a test that names it is the difference between a decision and a fleet-wide key leak.
 
 import http from "node:http";
+// PUSH-1. Only the Apple proof speaks http2, and it is handed to cp/admin.mjs rather than imported
+// there, so a test reaches every branch of its verdict table with no network.
+import http2Impl from "node:http2";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -631,6 +634,11 @@ export function createApp(options = {}) {
       const profileDir = adoption.profileDir || tenantPaths(slug, config).profile;
       return readProxyKey(slug, config, { file: proxyKeyFileIn(profileDir) });
     },
+    // PUSH-1. node:http2, for the one thing on this service that speaks it: the Apple proof, which
+    // sends to a deliberately malformed device token and requires 400 BadDeviceToken rather than a
+    // 403 about the provider token. Handed in rather than imported inside admin.mjs so a test can
+    // drive every branch of that verdict table with no Apple account and no network.
+    http2Impl,
   });
 
   /**
@@ -1137,6 +1145,40 @@ export function createApp(options = {}) {
       if (!guard.ok) return undefined;
       const answer = codeTasks.setSettings({ ...body, actor: guard.account?.email ?? "the operator token" });
       return json(response, answer.ok ? 200 : 400, answer);
+    }
+
+    // ---- the two push credentials, for the relay (PUSH-1, docs/APPS.md) -------------------------
+    //
+    // The fifth route of this kind, beside the registry and the three mail ones, behind the same one
+    // credential and for the same reason: what the one relay needs from this service to serve a
+    // customer. It is the ONLY route on this service that answers with either value, and the only
+    // caller is the relay, which holds them in memory, never writes them to disk, and never pushes
+    // them into a box -- every exec daemon in a customer's container runs as uid 0, so an Apple key
+    // inside one is readable by that customer's own agents.
+    //
+    // The method refusal is first, so a wrong method charges nobody and learns nothing, exactly as
+    // the mail routes above do it. The super admin's own read is GET /v1/admin/push, which answers
+    // presence, the evidence and the non-secret ids and never a value.
+    if (segments[1] === "relay" && segments[2] === "push" && segments[3] === "credentials" && segments.length === 4) {
+      if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
+      if (!requireRelay(request, response)) return undefined;
+      const apnsKey = store.getSetting("push.apns.key", "");
+      const fcmAccount = store.getSetting("push.fcm.serviceAccount", "");
+      let serviceAccount = null;
+      try { serviceAccount = fcmAccount.length > 0 ? JSON.parse(fcmAccount) : null; } catch { serviceAccount = null; }
+      return json(response, 200, {
+        apns: apnsKey.length > 0
+          ? {
+            key: apnsKey,
+            keyId: store.getSetting("push.apns.keyId", ""),
+            teamId: store.getSetting("push.apns.teamId", ""),
+            bundleId: store.getSetting("push.apns.bundleId", ""),
+          }
+          : null,
+        fcm: serviceAccount != null
+          ? { serviceAccount, projectId: store.getSetting("push.fcm.projectId", "") }
+          : null,
+      });
     }
 
     // The operator's own read of that log. It is HERE, at /v1/mail/sends, and NOT under /v1/admin,

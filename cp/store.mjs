@@ -420,7 +420,12 @@ export const FEEDBACK_FIELD_LIMIT = 256 * 1024;
  * wholesale, so the two facts together would put that token in any answer that ever renders the
  * settings. getSetting still returns it, for the one caller that files an issue.
  */
-export const SECRET_SETTINGS = new Set(["github.token"]);
+// PUSH-1 adds the second and third. An Apple .p8 signing key and a Firebase service account are the
+// same kind of thing the GitHub token is -- a super admin's credential, held by this service, never
+// pushed into a box (every exec daemon in a customer's container runs as uid 0, so a key inside one
+// is readable by that customer's own agents) -- so they go through the same door and come back out of
+// listSettings with no value at all.
+export const SECRET_SETTINGS = new Set(["github.token", "push.apns.key", "push.fcm.serviceAccount"]);
 
 const accountRow = (row) => (row == null ? null : {
   id: row.id,

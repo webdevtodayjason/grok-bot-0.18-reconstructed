@@ -436,6 +436,12 @@
     <script src="gap-badge.js"></script>
     <script src="screen-tile.js"></script>
     <script src="files-viewer.js"></script>
+    <!-- PUSH-1. The fourth module on the same seam, and the same contract: it publishes
+         window.__pushSettings at load, reads window.__mrUi lazily, carries its own stylesheet, and
+         appends one section to the Settings panel when that panel opens. With this line removed the
+         console boots exactly as it did before and Settings simply has one fewer card, which is a
+         gate assertion in scripts/verify-push.mjs rather than a claim made here. -->
+    <script src="push-settings.js"></script>
     <script>
       // app.js builds its adapter synchronously, so the gateway is read first and app.js is
       // loaded after. If the gateway is unreachable the demo adapter runs and the page still

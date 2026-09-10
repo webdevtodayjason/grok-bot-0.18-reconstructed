@@ -1,0 +1,810 @@
+#!/usr/bin/env node
+// verify-push.mjs -- a card that needs a person reaches the person (PUSH-1, docs/APPS.md).
+//
+// What this gate is for. A phone app is worth building for exactly one capability, and this is it: an
+// agent parks on something only a person can answer, and the person's phone lights up once, with the
+// card's own words, and the number on the app icon matches what is actually waiting. Everything else
+// in the apps wave is plumbing for this.
+//
+// IT MEASURES THE STUB, ON PURPOSE. This wave holds no Apple key and no Firebase service account --
+// those are Jason's to paste into the admin console the item also builds. So the sender is the stub,
+// which records exactly what WOULD have been sent: the target, the headers and the whole payload, one
+// JSON line each. Every assertion below is therefore an assertion about bytes rather than about a log
+// sentence, and the day a real credential lands nothing in this file has to change except which
+// sender the edge picks.
+//
+// THREE THINGS IT DOES NOT PRETEND ABOUT, each printed in the run rather than hidden:
+//
+//   1. ITEM A'S ROUTE LINE. ui/server.mjs is item A's file outright this wave, so the /push routes are
+//      not mounted in the relay in this worktree. The gate therefore runs the REAL handler --
+//      pushRoutes(deps), the same function with the same arguments item A wires at one call site -- on
+//      a front port that passes everything else through to the live relay. The console the browser
+//      loads is the real console off the real relay; the only thing standing in for item A is one
+//      line of dispatch. That is said out loud in the run's first lines.
+//
+//   2. ITEM B'S BOOT PARSE. The https deep link lands on /?agent=&entry=, and the twelve-line parse
+//      that reads those two and reveals the entry is item B's. With it absent this gate still proves
+//      the link is well formed and that the console opens, and SKIPS the "the right card is revealed"
+//      leg naming item B rather than banking a pass on a console that opened on its default
+//      conversation.
+//
+//   3. A REAL PHONE. Chrome is not iOS. Nothing here claims a notification arrived on a device; what
+//      is claimed is that one send was recorded, with the right collapse key, title, badge and link.
+//
+// TWO MODES, so each invocation fits the 300 s these gates run under, and they share the box, so they
+// are run ONE AT A TIME under the box lock:
+//
+//   node scripts/verify-push.mjs --host     no browser: registration, a real pending hand-off, the
+//                                          one send, the collapse, quiet hours, the badge, revoke,
+//                                          and a sweep of every recorded byte for a secret.
+//   node scripts/verify-push.mjs --console  a real browser at 390x844: the Notifications card opens
+//                                          and saves, the deep link opens the console, and the
+//                                          console still boots with push-settings.js absent.
+//
+// Both create their own scratch agent and delete it on EVERY exit path including a thrown assertion
+// and a SIGTERM from the `timeout` these are run under, because Node's default signal handler ends
+// the process outright and never reaches a finally.
+import { createServer } from "node:http";
+import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { acquireBoxLock } from "./lib/box-lock.mjs";
+import {
+  EXPIRING_CARD_TTL_MS, PUSH_CARD_KINDS, PUSH_FILE, PUSH_STUB_LEDGER_FILE, pushRoutes,
+} from "../ui/push-edge.mjs";
+
+const MODES = { host: process.argv.includes("--host"), console: process.argv.includes("--console") };
+const chosen = Object.entries(MODES).filter(([, on]) => on).map(([name]) => name);
+if (chosen.length !== 1) {
+  console.log("usage: node scripts/verify-push.mjs (--host | --console)");
+  console.log("  --host     registration, a real pending hand-off, one send, collapse, quiet hours, the badge, revoke. No browser.");
+  console.log("  --console  the Notifications card, the deep link and the absent-module boot, in a real browser at 390x844.");
+  process.exit(2);
+}
+const MODE = chosen[0];
+
+const RELAY = process.env.SAND_GATEWAY_URL ?? "http://127.0.0.1:7777";
+const PW_DIR = process.env.GROK_BOT_PLAYWRIGHT_DIR ?? new URL("../.cache/playwright", import.meta.url).pathname;
+const CHROME = process.env.GROK_BOT_CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const UA_GATE = "titanbot-gate/verify-push.mjs";
+// The phone the whole wave is aimed at, and the one it is measured at. Every number this gate prints
+// names this viewport and this machine.
+const PHONE = { width: 390, height: 844, deviceScaleFactor: 3, isMobile: true, hasTouch: true };
+const PHONE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1";
+const RUN_BUDGET_MS = Number(process.env.GROK_BOT_PUSH_BUDGET_MS ?? 270_000);
+const TURN_TIMEOUT_MS = Number(process.env.GROK_BOT_TURN_TIMEOUT_MS ?? 75_000);
+const CALL_TIMEOUT_MS = 30_000;
+
+// The budget is the RUN's, and it starts when the box lock is taken rather than at import. Measured
+// on grok-bot-local-vm 2026-09-10: another wave held the lock for 176 s and this gate then had 94 s
+// left for a hand-off that takes 15 s to appear and a hand-back that takes up to 40 s to land. A gate
+// that reports SKIP because it queued is a gate that lies about the product.
+let deadline = Date.now() + RUN_BUDGET_MS;
+const budgetLeft = () => deadline - Date.now();
+const within = (ms) => Math.max(0, Math.min(ms, budgetLeft()));
+
+let passes = 0;
+let failures = 0;
+let skips = 0;
+const check = (ok, label, detail = "") => { console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}`); if (ok) passes += 1; else failures += 1; };
+// A leg that deliberately did not measure, with its reason. Never a pass: a gate that banks a vacuous
+// PASS for a leg it never ran stops meaning the same thing twice.
+const skip = (label, why) => { console.log(`  SKIP  ${label} — ${why}`); skips += 1; };
+const notReached = (why, ...labels) => { for (const label of labels) { console.log(`  SKIP  ${label} — not reached: ${why}`); skips += 1; } };
+const info = (line) => console.log(`  INFO  ${line}`);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
+const until = async (fn, ms, step = 2000) => {
+  const stop = Date.now() + ms;
+  for (;;) {
+    const value = await fn().catch(() => null);
+    if (value) return value;
+    if (Date.now() > stop || budgetLeft() <= 0) return null;
+    await sleep(step);
+  }
+};
+class NothingToMeasure extends Error {}
+
+// Every relay call is bounded: a gateway method that never answers would otherwise stop the whole
+// gate forever with no failure and no line, and a gate that hangs is worse than one that fails.
+const gw = async (method, args = {}) => {
+  const response = await fetch(`${RELAY}/api/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "user-agent": UA_GATE },
+    body: JSON.stringify(args),
+    signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+  });
+  const text = await response.text();
+  if (!response.ok) { const error = new Error(`${method} failed (${response.status}): ${text.slice(0, 200)}`); error.status = response.status; error.body = text; throw error; }
+  return text.length > 0 ? JSON.parse(text) : null;
+};
+
+// listAgents answers a BARE ARRAY on this host and listProblemReports beside it answers an object.
+// Measured on grok-bot-local-vm 2026-09-10, and it cost a gate run to find out, so it is one function
+// here rather than three hopeful reads.
+const rosterOf = (answer) => (Array.isArray(answer) ? answer : (Array.isArray(answer?.agents) ? answer.agents : []));
+
+// THE GATE'S OWN COUNT OF WHAT IS WAITING, written out here rather than borrowed from the module under
+// test, so "the badge matches what is actually waiting" is measured against the box and not against
+// the decider's opinion of the box. It reads the same stamps the host writes in place, which is what
+// makes an independent count possible at all: a card is answered when the host has stamped it, and
+// every stamp is on the entry or on its message.
+//
+// It counts the WHOLE WORKSPACE, because that is what a badge is. This box is shared with waves D and
+// V, so their pending cards are in the number too -- which is correct, and is why the legs below
+// assert on this card's own collapse key rather than on a total of one.
+async function pendingCardsOnTheBox(gwCall) {
+  const roster = rosterOf(await gwCall("listAgents", {}).catch(() => null));
+  let total = 0;
+  const perAgent = [];
+  for (const agent of roster) {
+    const tail = await gwCall("getAgentTranscriptTail", { id: agent.id, limit: 5 }).catch(() => null);
+    let here = 0;
+    for (const entry of tail?.entries ?? []) {
+      const message = entry?.message ?? {};
+      // A hand-off: stamped on the entry, resolved by boxResolution.
+      if (String(entry?.boxRequestId ?? "").length > 0 && String(entry?.boxResolution ?? "").length === 0) here += 1;
+      // An approval and a local-tool ask: status on the message, and both die in ten minutes, so an
+      // old one is not waiting for anybody even with no stamp on it.
+      for (const [type, slot] of [["auto-review-approval", "approval"], ["local-tool-permission", "ask"]]) {
+        if (message.type !== type) continue;
+        const status = String(message[slot]?.status ?? "").toLowerCase();
+        const fresh = Date.now() - Number(entry?.timestampMs ?? 0) < EXPIRING_CARD_TTL_MS;
+        if ((status === "" || status === "pending") && fresh) here += 1;
+      }
+      // A widget question and a secret request: stamped on the entry.
+      if (message.type === "widget" && entry?.widgetDismissed !== true && entry?.respondedValue == null) here += 1;
+      if (message.type === "secret-request" && entry?.secretProvided !== true) here += 1;
+    }
+    if (here > 0) perAgent.push(`${String(agent.name ?? agent.id).slice(0, 24)}:${here}`);
+    total += here;
+  }
+  const reports = await gwCall("listProblemReports", {}).catch(() => null);
+  const offered = (Array.isArray(reports) ? reports : reports?.reports ?? []).length;
+  return { total: total + offered, perAgent, offered, agents: roster.length };
+}
+
+
+// ---- the front port: the real handler, plus everything else through to the live relay -------------
+//
+// This is the ONE thing standing in for another item's work, and it stands in for exactly one line:
+// `if (await pushRoutes(req, res, url, t)) return;` at the top of ui/server.mjs's route table. The
+// handler is the real one, its dependencies are the real shapes, and every other request -- the
+// console's HTML, its modules, /api, /auth/state -- is forwarded to the relay untouched, so the page
+// the browser loads is the production page off the production relay.
+function standUpFront({ stateDir, nowRef, subRef }) {
+  const t = {
+    slug: "operator",
+    name: "operator",
+    file: (name) => path.join(stateDir, name),
+    ensureDir: () => {},
+  };
+  const readBody = (req) => new Promise((resolve, reject) => {
+    let text = "";
+    req.on("data", (chunk) => { text += String(chunk); if (text.length > 1 << 20) reject(new Error("too big")); });
+    req.on("end", () => resolve(text));
+    req.on("error", reject);
+  });
+  const fail = (res, status, message) => {
+    res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
+    res.end(JSON.stringify({ error: message }));
+    return true;
+  };
+  const handler = pushRoutes({
+    readBody, fail,
+    tenants: () => [t],
+    contextOf: () => t,
+    // The live relay's own /api, which is where the gateway bearer lives. In production this is
+    // jobBusCall, and the shape is the same: {status, text, type}. Given a timeout here for the same
+    // reason the module gives its own call helper one -- an unreachable box must not hang a sweep.
+    gatewayCall: async (_t, command, args) => {
+      try {
+        const upstream = await fetch(`${RELAY}/api/${command}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "user-agent": UA_GATE },
+          body: JSON.stringify(args ?? {}),
+          signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+        });
+        return { status: upstream.status, text: await upstream.text(), type: upstream.headers.get("content-type") ?? "application/json" };
+      } catch (error) {
+        return { status: 0, text: String(error?.message ?? error), type: "" };
+      }
+    },
+    // The instance-password door has no person behind it, so it means the workspace. On a relay with
+    // a control plane this is the session's `sub` claim, which is item A's.
+    subOf: () => subRef.value,
+    hostOf: () => "console.titanium.bot",
+    now: () => nowRef.at ?? Date.now(),
+    credentials: () => ({}),
+    // The stub, named explicitly rather than left to SAND_PUSH_STUB, so a run cannot accidentally
+    // reach a vendor because an environment variable was not set.
+    stub: true,
+    log: (line) => { recordedLog.push(line); },
+  });
+
+  // THE SECOND THING THE FRONT STANDS IN FOR, and it is the deploy rather than another item's code.
+  // The live relay serves ui/machine-room/ out of the SHARED working copy, which does not have this
+  // worktree's files: index.html without the one <script> line, and no push-settings.js at all. So the
+  // three files this item adds are served from THIS worktree and every other asset, every /api call and
+  // the whole session come from the live relay. That is the console as it will be after the ship, which
+  // is the thing worth measuring; it is printed in the run rather than left for a reader to work out.
+  const MINE = new Map([
+    ["/", { file: "ui/machine-room/index.html", type: "text/html; charset=utf-8" }],
+    ["/index.html", { file: "ui/machine-room/index.html", type: "text/html; charset=utf-8" }],
+    ["/push-settings.js", { file: "ui/machine-room/push-settings.js", type: "text/javascript; charset=utf-8" }],
+    ["/push-settings.css", { file: "ui/machine-room/push-settings.css", type: "text/css; charset=utf-8" }],
+  ]);
+  const here = new URL("..", import.meta.url).pathname;
+
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url, "http://127.0.0.1");
+    try {
+      if (await handler(req, res, url, t)) return;
+
+      const own = req.method === "GET" ? MINE.get(url.pathname) : null;
+      if (own != null) {
+        const body = readFileSync(path.join(here, own.file));
+        res.writeHead(200, { "content-type": own.type, "cache-control": "no-store" });
+        res.end(body);
+        return;
+      }
+
+      // Through to the live relay, headers and body intact.
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
+      const headers = { ...req.headers };
+      delete headers.host;
+      delete headers["content-length"];
+      const upstream = await fetch(`${RELAY}${req.url}`, {
+        method: req.method,
+        headers,
+        ...(body && body.length > 0 ? { body } : {}),
+        redirect: "manual",
+        signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+      });
+      const bytes = Buffer.from(await upstream.arrayBuffer());
+      // A browser that navigated away aborts the socket mid-flight, and writing to it then throws
+      // ERR_HTTP_HEADERS_SENT and takes the whole gate down with no summary. Measured once, on the
+      // deep-link leg. So every write checks first, and a dead socket is dropped rather than thrown.
+      if (res.headersSent || res.writableEnded) return;
+      res.writeHead(upstream.status, Object.fromEntries([...upstream.headers].filter(([name]) => !/^(content-encoding|transfer-encoding|connection)$/i.test(name))));
+      res.end(bytes);
+    } catch (error) {
+      if (res.headersSent || res.writableEnded) { try { res.end(); } catch { /* already gone */ } return; }
+      try {
+        res.writeHead(502, { "content-type": "text/plain" });
+        res.end(`the front could not reach the relay: ${String(error?.message ?? error)}`);
+      } catch { /* the client is gone */ }
+    }
+  });
+  return { t, handler, server, edge: handler.edge };
+}
+
+const recordedLog = [];
+
+/** Every line the stub sender wrote, newest last. */
+function recordedSends(stateDir) {
+  const file = path.join(stateDir, PUSH_STUB_LEDGER_FILE);
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8").trim().split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line));
+}
+
+// ---- the scratch agent ---------------------------------------------------------------------------
+const AGENT_NAME = `push gate ${MODE} ${Date.now()}`;
+const ASK = "I need to sign in to something on your computer myself. Hand the computer over to me "
+  + "for the sign-in with a one-line instruction and wait for me. Do not try to sign in yourself.";
+let agentId = null;
+let sweeping = false;
+const sweep = async () => {
+  if (!agentId || sweeping) return;
+  sweeping = true;
+  const id = agentId;
+  agentId = null;
+  let why = "";
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try { await gw("deleteAgent", { id }); info(`scratch agent ${id} deleted${attempt > 1 ? ` (attempt ${attempt})` : ""}`); sweeping = false; return; }
+    catch (error) { why = error.message; if (attempt < 3) await sleep(4000); }
+  }
+  console.log(`  WARN  the scratch agent ${id} could not be deleted (${why}); sweep it by hand`);
+  sweeping = false;
+};
+
+async function makeScratchAgent() {
+  const startedAt = Date.now();
+  let created = null;
+  for (;;) {
+    created = await gw("createAgent", { name: AGENT_NAME, description: `verify-push ${MODE} scratch agent` }).catch((error) => ({ error: error.message }));
+    if (created?.error == null || !/gateway unreachable/i.test(String(created.error))) break;
+    if (Date.now() - startedAt > Math.min(60_000, budgetLeft())) break;
+    info(`the host is not up (${String(created.error).slice(0, 60)}); waiting for the supervisor`);
+    await sleep(5000);
+  }
+  const id = created?.agent?.id ?? created?.id ?? null;
+  if (id == null && /holds Titan and \d+ more bots|Remove one to add another/i.test(String(created?.error ?? ""))) {
+    skip("a scratch agent could be created for this run", "the box's roster is at the ONBOARD-1 cap (Titan plus twelve), so this run had nowhere to put its scratch agent. Sweep the leftover gate agents and re-run; nothing below was measured");
+    throw new NothingToMeasure("the roster is at the cap");
+  }
+  if (id == null && /gateway unreachable/i.test(String(created?.error ?? ""))) {
+    skip("a scratch agent could be created for this run", `the box's host did not answer for ${seconds(Date.now() - startedAt)}; nothing below was measured`);
+    throw new NothingToMeasure("the host is not up");
+  }
+  check(id != null, "a scratch agent could be created for this run", id ?? JSON.stringify(created).slice(0, 160));
+  if (id == null) throw new NothingToMeasure("no scratch agent");
+  agentId = id;
+  return id;
+}
+
+// ---- the run -------------------------------------------------------------------------------------
+
+let release = () => {};
+let front = null;
+let browser = null;
+const stateDir = mkdtempSync(path.join(tmpdir(), `push-gate-${MODE}-`));
+const nowRef = { at: null };
+const subRef = { value: "" };
+
+const shutdown = async () => {
+  await sweep();
+  try { await browser?.close(); } catch { /* already gone */ }
+  try { front?.edge?.close?.(); } catch { /* already gone */ }
+  await new Promise((resolve) => { if (front?.server) front.server.close(resolve); else resolve(); });
+  try { rmSync(stateDir, { recursive: true, force: true }); } catch { /* already gone */ }
+  release();
+};
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => { void shutdown().then(() => process.exit(130)); });
+}
+
+try {
+  // Up to 120 minutes of waiting, because waves D and V share this box and queueing behind one of
+  // them is normal. The run's own budget starts on the line after.
+  release = await acquireBoxLock({ what: `verify-push ${MODE}`, waitMs: 120 * 60_000, log: (line) => info(line) });
+  deadline = Date.now() + RUN_BUDGET_MS;
+
+  console.log(`\nverify-push --${MODE} · grok-bot-local-vm on this Mac · relay ${RELAY} · ${MODE === "console" ? `${PHONE.width}x${PHONE.height}, scale ${PHONE.deviceScaleFactor}, touch, iPhone UA` : "no browser"} · budget ${Math.round(RUN_BUDGET_MS / 1000)}s`);
+  info("the sender is the STUB: this wave holds no Apple key and no Firebase service account, so every assertion below is on the bytes that would have gone out");
+  info("the /push routes run through pushRoutes(deps) -- the real handler item A wires at one call site -- on a front port that passes every other request to the live relay, so the session, /api and every other asset are the production ones");
+  info("the front also serves this worktree's index.html, push-settings.js and push-settings.css, because the live relay serves ui/machine-room/ out of the shared working copy, which has neither. Everything else on the page comes off the relay");
+
+  front = standUpFront({ stateDir, nowRef, subRef });
+  await new Promise((resolve) => front.server.listen(0, "127.0.0.1", resolve));
+  const FRONT = `http://127.0.0.1:${front.server.address().port}`;
+  info(`front ${FRONT} · push state ${stateDir}`);
+
+  const ask = async (method, pathname, body) => {
+    const response = await fetch(`${FRONT}${pathname}`, {
+      method,
+      headers: { "user-agent": UA_GATE, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+    });
+    const text = await response.text();
+    let parsed = null;
+    try { parsed = text.length > 0 ? JSON.parse(text) : null; } catch { parsed = null; }
+    return { status: response.status, body: parsed, text };
+  };
+
+  // ---- the door the app comes through ----------------------------------------------------------
+  //
+  // Item A's POST /auth/token mints the device bearer an app holds. If it is live on this relay the
+  // gate uses it, because that is the real path; if it is not, the registration goes through the
+  // console's own door, which is the other half of the same contract ("behind the device bearer, or
+  // the cookie for the console's own settings page"), and the run says which it used.
+  let bearer = "";
+  const door = await fetch(`${RELAY}/auth/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "user-agent": UA_GATE },
+    body: JSON.stringify({ deviceId: `push-gate-${MODE}`, name: `verify-push ${MODE}` }),
+    signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+  }).catch(() => null);
+  if (door != null && door.status === 200) {
+    const minted = await door.json().catch(() => null);
+    bearer = String(minted?.token ?? "");
+  }
+  if (bearer.length > 0) check(true, "a device bearer was minted through item A's door", "POST /auth/token answered 200");
+  else skip("a device bearer was minted through item A's door", `this relay has no /auth/token yet (it answered ${door == null ? "nothing" : door.status}), so registration below goes through the console's own door, which is the other half of the same contract`);
+
+  if (MODE === "host") {
+    // ===========================================================================================
+    // --host: registration, a real pending hand-off, the one send, collapse, quiet hours, revoke.
+    // ===========================================================================================
+
+    console.log("\n== registration");
+    const registered = await ask("POST", "/push/devices", { platform: "ios", token: "gate-device-token-0123456789abcdef", deviceId: "gate-phone-1", name: "the gate's iPhone" });
+    check(registered.status === 200 && registered.body?.deviceId === "gate-phone-1", "a device registers behind the door", `HTTP ${registered.status} ${JSON.stringify(registered.body).slice(0, 120)}`);
+    check(!registered.text.includes("gate-device-token"), "and the answer never carries the token back", "no token in the response body");
+    const again = await ask("POST", "/push/devices", { platform: "ios", token: "a-refreshed-token", deviceId: "gate-phone-1" });
+    check(again.body?.replaced === true, "a second registration of the same device updates rather than duplicating", `replaced ${again.body?.replaced}`);
+    const listed = await ask("GET", "/push/devices");
+    check(listed.body?.devices?.length === 1, "one device is on the list", `${listed.body?.devices?.length} device(s)`);
+    check(!Object.hasOwn(listed.body?.devices?.[0] ?? {}, "token"), "and the list never carries a token", "deviceId, platform, name, env and timestamps only");
+
+    console.log("\n== a real pending hand-off on the local box");
+    await makeScratchAgent();
+    const askedAt = Date.now();
+    await gw("sendPrompt", { agentId, prompt: ASK }).catch((error) => info(`sendPrompt rejected (${error.message})`));
+    const handoff = await until(async () => (await gw("getForeverBoxStatus", { id: agentId }).catch(() => null))?.handoff ?? null, within(TURN_TIMEOUT_MS), 2500);
+    if (handoff == null) {
+      skip("a real pending hand-off appears on the box", `the agent produced none inside ${seconds(within(TURN_TIMEOUT_MS))} (that is the box's provider, not the push path)`);
+      notReached("no card to push",
+        "exactly one send is recorded for one pending card",
+        "and it carries the card's own title",
+        "and the collapse key is this card's own",
+        "and the badge equals the gate's own count of pending cards read from the box",
+        "the same card a second time sends nothing",
+        "quiet hours hold the alert",
+        "and release exactly one catch-up on the same key",
+        "answering the card drops the badge through a silent send");
+    } else {
+      check(true, "a real pending hand-off appears on the box", `${seconds(Date.now() - askedAt)} from prompt to pending, requestId ${String(handoff.requestId).slice(0, 12)}`);
+
+      // The gate's OWN count of what is waiting across the whole workspace, read straight from the box
+      // rather than from the thing under test. It is the number the badge has to match, and it is the
+      // workspace's and not this agent's, because that is what a badge on a home screen means.
+      //
+      // THIS BOX IS SHARED with waves D and V, so their pending cards are in the number too. That is
+      // correct, and it is why every leg below asserts on THIS card's own collapse key rather than on a
+      // total of one: a gate that demanded a total of one would be a gate that only passes on an idle
+      // box, which is a gate that passes for the wrong reason.
+      const waiting = await pendingCardsOnTheBox(gw);
+      info(`the gate counts ${waiting.total} pending card(s) across ${waiting.agents} agent(s) on this box, read straight from the box${waiting.perAgent.length > 0 ? ` (${waiting.perAgent.join(", ")}${waiting.offered > 0 ? `, ${waiting.offered} report offer(s)` : ""})` : ""}`);
+
+      console.log("\n== one card, one push");
+      // Swept until the card lands, not once. Measured on grok-bot-local-vm 2026-09-10: this box's
+      // host restarts under the other waves' gates, and listAgents answers an EMPTY roster for a few
+      // seconds after each restart (countAgents went 11, 11, unreachable, unreachable, 10 over two
+      // minutes). A single pass landing in that window would report FAIL about the box blinking, which
+      // is the kind of green-or-red-for-the-wrong-reason this whole gate exists to avoid. The sweep is
+      // idempotent by construction -- the ledger is on disk -- so sweeping more than once cannot
+      // manufacture a send, which is what makes the retry safe rather than a way to pass.
+      let lastSweep = null;
+      let passCount = 0;
+      const mine = (rows) => rows.filter((row) => row.kind === "box-handoff" && String(row.payload?.agent ?? "") === agentId);
+      const sends = await until(async () => {
+        lastSweep = await front.edge.sweepOnce(`the gate's pass ${passCount += 1}`);
+        const rows = mine(recordedSends(stateDir));
+        return rows.length > 0 ? rows : null;
+      }, within(60_000), 4000) ?? [];
+      if (sends.length === 0) {
+        const roster = await gw("listAgents", {}).catch(() => null);
+        const onRoster = rosterOf(roster).some((agent) => agent.id === agentId);
+        info(`${passCount} sweep pass(es) recorded nothing for this agent; it was ${onRoster ? "" : "NOT "}on the roster at the last read (${rosterOf(roster).length} agent(s)), sweep said ${JSON.stringify(lastSweep?.swept?.[0] ?? null)}`);
+      }
+      check(sends.length === 1, "exactly one send is recorded for this pending card", `${sends.length} for this agent out of ${recordedSends(stateDir).length} on the box, after ${passCount} pass(es)`);
+      const sent = sends[0] ?? {};
+      const title = `Take the keyboard for ${AGENT_NAME}`;
+      check(sent.payload?.aps?.alert?.title === title, "and it carries the card's own title", JSON.stringify(sent.payload?.aps?.alert ?? null).slice(0, 160));
+      check(String(sent.payload?.aps?.alert?.body ?? "").length > 0 && String(sent.payload.aps.alert.body).length <= 140, "and a reason clipped to the host's own 140 characters", `${String(sent.payload?.aps?.alert?.body ?? "").length} characters`);
+      check(/^[0-9a-f]{32}$/.test(String(sent.headers?.["apns-collapse-id"] ?? "")) && sent.headers["apns-collapse-id"] === sent.cardKey,
+        "and the collapse key is this card's own", String(sent.headers?.["apns-collapse-id"] ?? "absent"));
+      check(sent.headers?.["apns-push-type"] === "alert" && sent.headers?.["apns-priority"] === "10", "and it goes out as a priority alert", `${sent.headers?.["apns-push-type"]} at priority ${sent.headers?.["apns-priority"]}`);
+      // One badge number, and the gate's own count is what it is compared against. They are read a few
+      // seconds apart on a live shared box, so a one-card drift is the box moving rather than the badge
+      // being wrong; anything wider is the badge being wrong and is a FAIL with both numbers printed.
+      const drift = Math.abs(Number(sent.badge) - waiting.total);
+      check(Number.isFinite(Number(sent.badge)) && sent.payload?.aps?.badge === sent.badge && drift <= 1,
+        "and the badge equals the gate's own count of pending cards read from the box",
+        `badge ${sent.badge}, the gate counted ${waiting.total} across the workspace${drift === 0 ? "" : ` (${drift} apart; the two reads are seconds apart on a box three waves share)`}`);
+
+      check(String(sent.payload?.link ?? "").startsWith("titaniumbot://card?") && String(sent.payload?.web ?? "").startsWith("https://"),
+        "and both deep links are on the payload, beside aps and never inside it", `${String(sent.payload?.link ?? "").slice(0, 64)} / ${String(sent.payload?.web ?? "").slice(0, 64)}`);
+      check(Buffer.byteLength(JSON.stringify(sent.payload ?? {}), "utf8") < 4096, "and the whole payload fits a notification", `${Buffer.byteLength(JSON.stringify(sent.payload ?? {}), "utf8")} bytes of 4096`);
+
+      // THE CONSOLE'S OWN NUMBER, printed beside the badge. It counts AGENTS, at most one per agent,
+      // and misses two of the six kinds, so the two disagree the moment one agent holds two cards.
+      // PUSH-3 is the filed row; this line is why it is filed.
+      const consoleNeedsYou = rosterOf(await gw("listAgents", {}).catch(() => null)).filter((agent) => agent.awaitingUserResponse != null).length;
+      info(`the app badge says ${sent.badge} (cards) and the console's needs-you count says ${consoleNeedsYou} (agents, at most one each, two kinds missing) — ${sent.badge === consoleNeedsYou ? "they agree here and will not once an agent holds two cards" : "they already disagree on this box"}. Filed as PUSH-3`);
+
+      console.log("\n== the same card, again");
+      const beforeSecond = recordedSends(stateDir).length;
+      await front.edge.sweepOnce("the gate's second pass");
+      const afterSecond = recordedSends(stateDir);
+      check(mine(afterSecond).length === 1, "the same card a second time sends nothing", `still ${mine(afterSecond).length} for this agent`);
+      info(`${afterSecond.length - beforeSecond} send(s) on the second pass in total, which is whatever the other waves' agents did between the two passes`);
+
+      console.log("\n== quiet hours");
+      // A fresh workspace state, so the held card is a NEW card as far as the ledger is concerned.
+      // The clock is moved by hand: a gate that waited for 23:00 would be a gate that runs once a day.
+      const quietDir = mkdtempSync(path.join(tmpdir(), "push-gate-quiet-"));
+      const quiet = standUpFront({ stateDir: quietDir, nowRef: { at: Date.UTC(2026, 8, 10, 23, 0, 0) }, subRef: { value: "" } });
+      try {
+        await quiet.edge.storeFor(quiet.t).register({ deviceId: "gate-phone-1", platform: "ios", token: "gate-token", sub: "" });
+        await quiet.edge.storeFor(quiet.t).saveSettings("", { quietHours: { on: true, from: 22, to: 7 }, utcOffsetMinutes: 0 });
+        // The same live hand-off, read through a second edge pointed at the same box. Swept until the
+        // card is seen, for the blinking-roster reason above; what is asserted is that nothing was
+        // recorded and that the pass counted a hold.
+        let held = null;
+        await until(async () => {
+          held = await quiet.edge.sweepOnce("inside the window");
+          return Number(held?.swept?.[0]?.held) > 0 ? held : null;
+        }, within(40_000), 4000);
+        check(recordedSends(quietDir).length === 0 && Number(held?.swept?.[0]?.held) > 0, "quiet hours hold the alert", `nothing recorded at all, ${held?.swept?.[0]?.held} card(s) held on this box`);
+
+        // The window ends. One catch-up, on the same collapse key, and one only.
+        const after = standUpFront({ stateDir: quietDir, nowRef: { at: Date.UTC(2026, 8, 11, 7, 30, 0) }, subRef: { value: "" } });
+        try {
+          let out = null;
+          const catchUp = await until(async () => {
+            out = await after.edge.sweepOnce("the window ended");
+            const rows = mine(recordedSends(quietDir));
+            return rows.length > 0 ? rows : null;
+          }, within(40_000), 4000) ?? [];
+          check(catchUp.length === 1 && catchUp[0].silent === false && catchUp[0].cardKey === sent.cardKey,
+            "and release exactly one catch-up on the same key", `${catchUp.length} for this card, key ${String(catchUp[0]?.cardKey ?? "absent")}${catchUp[0]?.cardKey === sent.cardKey ? ", the same one the first alert used" : ""}`);
+          await after.edge.sweepOnce("and again");
+          check(mine(recordedSends(quietDir)).length === 1, "and one only, not one a pass", `${mine(recordedSends(quietDir)).length} for this card after a second pass`);
+        } finally { after.edge.close(); await new Promise((resolve) => after.server.close(resolve)); }
+      } finally {
+        quiet.edge.close();
+        await new Promise((resolve) => quiet.server.close(resolve));
+        rmSync(quietDir, { recursive: true, force: true });
+      }
+
+      console.log("\n== answering it");
+      // handBackForeverBox is the host's own name for "the person did the step" (HANDBACK-1). Skip is
+      // a separate command on purpose, because the trigger form would stamp the entry as a hand-back
+      // and the card would read Done on a step nobody did.
+      const handedBack = await gw("handBackForeverBox", { id: agentId, trigger: "button" }).catch((error) => ({ error: error.message }));
+      if (handedBack?.error != null) {
+        skip("answering the card drops the badge through a silent send", `this host has no hand-back command the gate could call (${String(handedBack.error).slice(0, 90)})`);
+      } else {
+        // The SILENT update for THIS card, found by its own collapse key rather than by being the last
+        // row in the file: on a shared box another wave's card can land between the two.
+        const closed = await until(async () => {
+          await front.edge.sweepOnce("after the hand-back");
+          return recordedSends(stateDir).find((row) => row.cardKey === sent.cardKey && row.silent === true) ?? null;
+        }, within(40_000), 3000);
+        if (closed == null) skip("answering the card drops the badge through a silent send", "the hand-back did not reach the transcript inside 40s");
+        else {
+          check(closed.payload?.aps?.["content-available"] === 1 && closed.payload?.aps?.alert == null && closed.payload?.aps?.sound == null,
+            "answering the card drops the badge through a silent send", `badge ${closed.badge}, content-available 1, no alert and no sound`);
+          check(closed.headers?.["apns-collapse-id"] === sent.headers?.["apns-collapse-id"], "and on the same collapse key, so it lands on the notification it closes", String(closed.headers?.["apns-collapse-id"] ?? "absent"));
+          check(Number(closed.badge) < Number(sent.badge), "and the number on the icon went down", `${sent.badge} before, ${closed.badge} after`);
+          check(mine(recordedSends(stateDir)).filter((row) => row.silent === false).length === 1, "and no second alert went out for a card that is done", `${mine(recordedSends(stateDir)).filter((row) => row.silent === false).length} alert(s) for this card in the whole run`);
+        }
+      }
+    }
+
+    console.log("\n== revoking the device");
+    const removed = await ask("DELETE", "/push/devices/gate-phone-1");
+    check(removed.body?.removed === true, "a device can be revoked", `removed ${removed.body?.removed}`);
+    const onDisk = existsSync(path.join(stateDir, PUSH_FILE)) ? JSON.parse(readFileSync(path.join(stateDir, PUSH_FILE), "utf8")) : { devices: [] };
+    check((onDisk.devices ?? []).length === 0, "and its row is gone from the workspace's own file", `${(onDisk.devices ?? []).length} device(s) left in ${PUSH_FILE}`);
+    const sendsBefore = recordedSends(stateDir).length;
+    const empty = await front.edge.sweepOnce("after the revoke");
+    check(recordedSends(stateDir).length === sendsBefore, "and a revoked device gets no send", `still ${recordedSends(stateDir).length} recorded`);
+    check(empty.swept?.[0]?.skipped === "no device is registered", "and a workspace with no device reaches its box zero times", String(empty.swept?.[0]?.skipped ?? ""));
+
+    console.log("\n== what was written down");
+    // THE LEG THIS WHOLE FILE WOULD BE WORTHLESS WITHOUT. Every recorded byte and every log line,
+    // swept for a credential and for transcript prose past the clipped reason.
+    const ledgerFile = path.join(stateDir, PUSH_STUB_LEDGER_FILE);
+    const everything = `${existsSync(ledgerFile) ? readFileSync(ledgerFile, "utf8") : ""}\n${recordedLog.join("\n")}`;
+    const leaks = [
+      ["a whole device token", /gate-device-token-0123456789abcdef|a-refreshed-token/],
+      ["a private key", /BEGIN (EC |RSA )?PRIVATE KEY/],
+      ["a bearer", /eyJ[A-Za-z0-9_-]{10,}/],
+      ["a gateway token", /SAND_HOST_GATEWAY_TOKEN|Bearer [A-Za-z0-9]{20,}/],
+    ];
+    for (const [what, pattern] of leaks) check(!pattern.test(everything), `no recorded payload or log line carries ${what}`, pattern.test(everything) ? "FOUND ONE" : "swept clean");
+    const bodies = recordedSends(stateDir).map((row) => String(row.payload?.aps?.alert?.body ?? "")).filter((body) => body.length > 0);
+    check(bodies.every((body) => body.length <= 140), "and no notification body is longer than the host's own ceiling", `${bodies.length} bodies, longest ${Math.max(0, ...bodies.map((body) => body.length))} characters`);
+  }
+
+  if (MODE === "console") {
+    // ===========================================================================================
+    // --console: the Notifications card, the deep link and the absent-module boot, in real Chrome.
+    // ===========================================================================================
+    const require = createRequire(import.meta.url);
+    let chromium = null;
+    let why = "";
+    // Two places, because a detached worktree has no .cache of its own: playwright is installed in
+    // the main working copy and is never in the repo, so a gate run out of a worktree has to be able
+    // to find it there. GROK_BOT_PLAYWRIGHT_DIR overrides both.
+    for (const dir of [PW_DIR, ...(process.env.GROK_BOT_PLAYWRIGHT_DIR ? [] : [path.resolve("/Users/sem/orca/workspaces/grok-bot-0.18-reconstructed/gb/.cache/playwright")])]) {
+      try { chromium = require(path.join(dir, "node_modules", "playwright-core")).chromium; info(`playwright-core from ${dir}`); break; }
+      catch (error) { why = `${dir}: ${String(error?.message).slice(0, 70)}`; }
+    }
+    if (chromium == null) { skip("a real browser could be started", `playwright-core could not be loaded (${why}); nothing below was measured`); throw new NothingToMeasure("no browser"); }
+
+    browser = await chromium.launch({ executablePath: CHROME, headless: true, args: ["--no-sandbox"] });
+    const page = await (await browser.newContext({
+      viewport: { width: PHONE.width, height: PHONE.height },
+      deviceScaleFactor: PHONE.deviceScaleFactor,
+      isMobile: PHONE.isMobile,
+      hasTouch: PHONE.hasTouch,
+      userAgent: `${PHONE_UA} ${UA_GATE}`,
+    })).newPage();
+    const consoleErrors = [];
+    page.on("pageerror", (error) => consoleErrors.push(String(error?.message ?? error)));
+
+    await front.edge.storeFor(front.t).register({ deviceId: "gate-phone-1", platform: "ios", token: "gate-token-for-the-card", sub: "", name: "the gate's iPhone" });
+
+    console.log("\n== the console boots, at 390x844");
+    await page.goto(FRONT, { waitUntil: "domcontentloaded", timeout: within(45_000) });
+    const live = await page.waitForFunction(() => window.__machineRoomAdapter != null, { timeout: within(45_000) }).then(() => true).catch(() => false);
+    check(live, "the console boots with push-settings.js loaded", live ? "window.__machineRoomAdapter is up" : "the adapter never appeared");
+    const published = await page.evaluate(() => typeof window.__pushSettings?.mount === "function");
+    check(published, "and the module published itself on the seam", `window.__pushSettings.mount is ${published ? "a function" : "absent"}`);
+
+    if (!live) {
+      notReached("the console never came up",
+        "the Notifications card appears inside Settings",
+        "and every card kind the server knows has a switch a thumb can reach",
+        "and every control on the card is 16px or more, so iOS does not zoom the page",
+        "and saving it answers in one word",
+        "and the device list shows the registered phone");
+    } else {
+      console.log("\n== how a phone reaches Settings at all");
+      // MEASURED FIRST, because the answer decides how the rest of this mode has to be run. At 390x844
+      // `.shelf-utilities` computes display:none (styles.css, inside the 690px block) and the gear is the
+      // ONLY control bound to openSettings (app.js:6662). So on a phone there is no route into Settings
+      // whatsoever -- not a cramped one, none -- and that is as true of the Mail card, the job bus card
+      // and the endpoint picker as it is of this one.
+      //
+      // It is pre-existing, it lives in two files this item does not own, and it already has owners:
+      // MOBILE-2 moves the needs-you count into the window bar and PHONE-IA-1 is the six-screen phone
+      // shape. So it is filed as MOBILE-2c against the phone pane with this measurement, and REPORTED
+      // here rather than asserted: a FAIL on somebody else's stylesheet in this gate would read as a
+      // defect in the card, which is the opposite of what was measured.
+      const route = await page.evaluate(() => {
+        const gear = document.getElementById("shelf-settings");
+        const shelf = document.querySelector(".shelf-utilities");
+        const box = gear?.getBoundingClientRect();
+        return {
+          gear: gear != null,
+          shelfDisplay: shelf ? getComputedStyle(shelf).display : "absent",
+          reachable: box != null && box.width > 0 && box.height > 0,
+          others: [...document.querySelectorAll("button, a")].filter((node) => /settings/i.test(node.getAttribute("aria-label") ?? node.textContent ?? "")).length,
+        };
+      });
+      info(`at ${PHONE.width}x${PHONE.height} the gear is ${route.gear ? "in the DOM" : "absent"}, .shelf-utilities computes display:${route.shelfDisplay}, and the gear's own box is ${route.reachable ? "laid out" : "0x0"}; ${route.others} control(s) on the page mention settings at all`);
+      if (!route.reachable) {
+        skip("the Notifications card can be opened by a thumb at this width",
+          `Settings has NO phone entry point in today's console: .shelf-utilities is display:${route.shelfDisplay} at ${PHONE.width}px and the gear is the only control bound to openSettings. Pre-existing, in two files this item does not own, filed as MOBILE-2c with the phone pane as owner. The card itself is measured at a phone viewport below`);
+      } else {
+        check(true, "the Notifications card can be opened by a thumb at this width", "the gear is laid out and hit-testable");
+      }
+
+      console.log("\n== the Notifications card, opened where the gear exists and measured at a phone viewport");
+      // Opened at a desktop width because that is the only width the gear exists at, then the viewport is
+      // taken down to the phone and the card is measured there. The card is the thing under test; the
+      // route to it is MOBILE-2c.
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.click("#shelf-settings");
+      const card = await page.waitForSelector("[data-push-settings]", { timeout: within(20_000) }).catch(() => null);
+      check(card != null, "the Notifications card appears inside Settings", card == null ? "no [data-push-settings] section after pressing the gear" : "appended to the panel's own settings list");
+
+      if (card == null) {
+        notReached("the card did not appear",
+          "and every card kind the server knows has a switch a thumb can reach",
+          "and every control on the card is 16px or more, so iOS does not zoom the page",
+          "and saving it answers in one word",
+          "and the device list shows the registered phone");
+      } else {
+        await page.waitForFunction(() => document.querySelectorAll("[data-push-kind]").length > 0, { timeout: within(15_000) }).catch(() => {});
+        await page.setViewportSize({ width: PHONE.width, height: PHONE.height });
+        await page.waitForTimeout(300);
+
+        // EVERY switch hit-tested at its own centre, which is the lesson verify-mobile's drawers leg paid
+        // for: page.click() calls scrollIntoViewIfNeeded first and passes on controls a thumb can never
+        // reach. Three of eight conversation cards shipped dead behind exactly that.
+        const reach = await page.evaluate((kinds) => {
+          const out = [];
+          for (const kind of kinds) {
+            const node = document.querySelector(`[data-push-kind="${kind}"]`);
+            if (node == null) { out.push({ kind, drawn: false }); continue; }
+            node.scrollIntoView({ block: "center" });
+            const box = node.getBoundingClientRect();
+            const at = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+            out.push({ kind, drawn: true, reachable: node.contains(at) || node === at, w: Math.round(box.width), h: Math.round(box.height), landed: at?.tagName ?? "nothing" });
+          }
+          return out;
+        }, PUSH_CARD_KINDS);
+        const missing = reach.filter((row) => !row.drawn).map((row) => row.kind);
+        const blocked = reach.filter((row) => row.drawn && !row.reachable).map((row) => `${row.kind} lands on ${row.landed}`);
+        check(missing.length === 0 && blocked.length === 0, "and every card kind the server knows has a switch a thumb can reach",
+          missing.length > 0 ? `not drawn: ${missing.join(", ")}` : blocked.length > 0 ? `drawn but unreachable: ${blocked.join("; ")}` : `${reach.length} switches, each answering its own centre at ${PHONE.width}x${PHONE.height} (${reach.map((row) => `${row.w}x${row.h}`).join(", ")})`);
+
+        // DOOR-1's rule, applied to this item's own card: iOS zooms the layout viewport on focus for any
+        // control under 16px, and a select is a control. A card that zoomed the console the moment
+        // somebody set their quiet hours would undo the front door's whole fix on the screen after it.
+        const fonts = await page.evaluate(() => [...document.querySelectorAll("[data-push-settings] select, [data-push-settings] input, [data-push-settings] textarea")]
+          .map((node) => ({ tag: node.tagName.toLowerCase(), px: Number.parseFloat(getComputedStyle(node).fontSize) })));
+        const small = fonts.filter((row) => row.px < 16);
+        check(fonts.length > 0 && small.length === 0, "and every control on the card is 16px or more, so iOS does not zoom the page",
+          fonts.length === 0 ? "the card has no controls to measure" : small.length > 0 ? small.map((row) => `${row.tag} at ${row.px}px`).join(", ") : `${fonts.length} control(s), smallest ${Math.min(...fonts.map((row) => row.px))}px`);
+
+        console.log("\n== saving it");
+        await page.click('[data-push-kind="widget"]');
+        await page.click("[data-push-quiet]");
+        await page.click("[data-push-save]");
+        const note = await page.waitForFunction(() => document.querySelector("[data-push-note]")?.textContent?.trim().length > 0, { timeout: within(15_000) }).then(async () => await page.$eval("[data-push-note]", (node) => node.textContent.trim())).catch(() => "");
+        check(note === "Saved.", "and saving it answers in one word", note || "nothing was written into the note");
+        const stored = await ask("GET", "/push/settings");
+        check(stored.body?.settings?.kinds?.widget === false && stored.body?.settings?.quietHours?.on === true,
+          "and the switches come back off the relay, not out of the page", JSON.stringify(stored.body?.settings?.kinds ?? {}).slice(0, 120));
+        check(Number.isFinite(stored.body?.settings?.utcOffsetMinutes), "and the browser's own offset went with it, so quiet hours mean the person's clock", `UTC offset ${stored.body?.settings?.utcOffsetMinutes} minutes`);
+
+        console.log("\n== the device list");
+        const shown = await page.$$eval("[data-push-revoke]", (nodes) => nodes.map((node) => ({ id: node.dataset.pushRevoke, label: node.textContent.trim() })));
+        check(shown.length === 1 && shown[0].id === "gate-phone-1", "and the device list shows the registered phone", JSON.stringify(shown));
+        const onScreen = await page.evaluate(() => document.querySelector("[data-push-settings]")?.textContent ?? "");
+        check(!onScreen.includes("gate-token-for-the-card"), "and no device token is anywhere on the screen", "the card's own text is clean");
+        // The known divergence is ON the card, where a customer comparing two numbers can read it.
+        check(/counts cards/.test(onScreen) && /counts conversations/.test(onScreen), "and the card says in plain words why the app's number can differ from this console's", "both sentences are on screen");
+      }
+    }
+
+    console.log("\n== the deep link");
+    // The https fallback, which is the one a tap lands on when the app is not installed. The shape is
+    // this item's; the twelve-line boot parse that reveals the entry is item B's.
+    // The LAST agent on the roster, not the first. The console selects a default on boot, and on this
+    // box the default is the first row, so a link naming the first agent would pass whether or not any
+    // parse ran. Naming the last one makes the leg mean something.
+    const roster = rosterOf(await gw("listAgents", {}).catch(() => null));
+    const linkAgent = roster.at(-1) ?? null;
+    if (linkAgent == null) skip("the https deep link opens the console on the named conversation", "this box has no conversation to land on");
+    else {
+      const tailForLink = await gw("getAgentTranscriptTail", { id: linkAgent.id, limit: 5 }).catch(() => null);
+      const entry = (tailForLink?.entries ?? []).at(-1)?.id ?? "";
+      const link = `${FRONT}/?agent=${encodeURIComponent(linkAgent.id)}&entry=${encodeURIComponent(entry)}`;
+      // Back to the phone: the card legs above took the viewport up to 1440 to reach the gear, and a
+      // deep link is tapped on a phone.
+      await page.setViewportSize({ width: PHONE.width, height: PHONE.height });
+      await page.goto(link, { waitUntil: "domcontentloaded", timeout: within(45_000) });
+      const up = await page.waitForFunction(() => window.__machineRoomAdapter != null, { timeout: within(45_000) }).then(() => true).catch(() => false);
+      check(up, "the https deep link opens the console", up ? `landed on ${link.replace(FRONT, "")}` : "the console did not come up on the link");
+      if (up) {
+        const landed = await page.evaluate((want) => {
+          const selected = document.querySelector(".worker-card.is-active, .worker-card[aria-selected=true], [data-context-id].is-active");
+          return { on: selected?.dataset?.contextId ?? selected?.dataset?.agentId ?? "", want, revealed: document.querySelector(`[data-entry-id="${want.entry}"]`) != null };
+        }, { agent: linkAgent.id, entry });
+        if (landed.on === linkAgent.id) check(true, "and the named conversation is the one selected", `${landed.on.slice(0, 8)} is on screen`);
+        else skip("and the named conversation is the one selected", `the console opened on ${landed.on ? landed.on.slice(0, 8) : "its default conversation"}: the boot parse that reads ?agent= and ?entry= is item B's and is not in this worktree. The link's SHAPE is proved above and in the unit suite`);
+        if (entry.length > 0 && landed.revealed) check(true, "and the entry the card names is revealed", entry);
+        else skip("and the entry the card names is revealed", "item B's boot parse is what reveals and flashes it; this gate proves the link carries the entry id");
+      }
+    }
+
+    console.log("\n== with the module absent");
+    // CONSOLE-4's lesson as a gate leg rather than a comment: backgrounds.js destructured a missing
+    // global and took the picker down. The module is blocked at the network, which is exactly what a
+    // deploy that did not ship the file looks like.
+    const bare = await (await browser.newContext({
+      viewport: { width: PHONE.width, height: PHONE.height },
+      deviceScaleFactor: PHONE.deviceScaleFactor, isMobile: PHONE.isMobile, hasTouch: PHONE.hasTouch,
+      userAgent: `${PHONE_UA} ${UA_GATE}`,
+    })).newPage();
+    const bareErrors = [];
+    bare.on("pageerror", (error) => bareErrors.push(String(error?.message ?? error)));
+    await bare.route("**/push-settings.js", (route) => route.abort());
+    await bare.goto(FRONT, { waitUntil: "domcontentloaded", timeout: within(45_000) });
+    const bareLive = await bare.waitForFunction(() => window.__machineRoomAdapter != null, { timeout: within(45_000) }).then(() => true).catch(() => false);
+    check(bareLive, "the console still boots with push-settings.js absent", bareLive ? "the adapter is up without it" : "the console did not come up");
+    if (bareLive) {
+      // Desktop width for this one press, for the same reason the card legs above needed it: the gear
+      // is display:none at 390px (MOBILE-2c), so a phone viewport would time out on a finding that has
+      // nothing to do with the module being absent.
+      await bare.setViewportSize({ width: 1440, height: 900 });
+      await bare.click("#shelf-settings");
+      const settings = await bare.waitForSelector(".settings-list", { timeout: within(20_000) }).catch(() => null);
+      const has = await bare.evaluate(() => document.querySelector("[data-push-settings]") != null);
+      check(settings != null && !has, "and Settings simply has one fewer card", settings == null ? "the panel did not open" : "no [data-push-settings] section, and the panel is otherwise whole");
+      check(bareErrors.length === 0, "and nothing threw on the way", bareErrors.length === 0 ? "no page errors" : bareErrors.slice(0, 2).join(" · "));
+    }
+    check(consoleErrors.length === 0, "and nothing threw with the module loaded either", consoleErrors.length === 0 ? "no page errors" : consoleErrors.slice(0, 2).join(" · "));
+  }
+} catch (error) {
+  if (error instanceof NothingToMeasure) info(`stopped early: ${error.message}`);
+  else { failures += 1; console.log(`  FAIL  the run itself — ${String(error?.stack ?? error).split("\n").slice(0, 3).join(" | ")}`); }
+} finally {
+  await shutdown();
+}
+
+console.log(`\nverify-push --${MODE}: ${passes} pass, ${failures} fail, ${skips} skip · grok-bot-local-vm on this Mac${MODE === "console" ? ` at ${PHONE.width}x${PHONE.height}` : ""} · stub sender`);
+process.exit(failures > 0 ? 1 : 0);

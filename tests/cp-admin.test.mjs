@@ -4,6 +4,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { rm } from "node:fs/promises";
+// PUSH-1. The two credential tests sign with keys generated per run rather than with a fixture: a
+// fixture private key is a private key in git whatever it happens to open.
+import { generateKeyPairSync } from "node:crypto";
 import path from "node:path";
 
 import { openStore } from "../cp/store.mjs";
@@ -613,5 +616,274 @@ test("a box that could not be asked reads as not measured, never as the default"
     // A ceiling shown over a box nobody asked is the made-up green light this console refuses.
     assert.equal(ceiling.maxAgents, null);
     assert.ok(String(ceiling.why).length > 0);
+  });
+});
+
+// ---- PUSH-1: the two push credentials ------------------------------------------------------------
+//
+// Appended at the end of this file, beside the marketplace and ceiling blocks above it, because the
+// end of a test file is where three parallel worktrees can each add a group without meeting.
+//
+// Everything here drives the REAL routes through api.handle, with the vendor answers injected: Apple
+// over a fake node:http2 and Firebase over a fake fetch. That is the only way to reach every branch
+// of the two verdict tables without an Apple developer account and a Firebase project, and the
+// branches are the point -- the difference between "Apple read the key and refused the address" and
+// "Apple refused the key" is the whole proof.
+
+/** Drives one admin route and hands back {status, body}. The operator token opens the guard. */
+function adminCall(api, { method, segments, body = null, adminToken }) {
+  let answer = null;
+  const response = { writeHead: () => response, end: () => response, setHeader: () => response };
+  const request = { method, headers: { authorization: `Bearer ${adminToken}` }, socket: { remoteAddress: "127.0.0.1" } };
+  const json = (_res, status, payload) => { answer = { status, body: payload }; };
+  return api({ json }).handle(request, response, {
+    segments: ["v1", "admin", ...segments], method, body,
+    url: new URL(`http://cp.invalid/v1/admin/${segments.join("/")}`),
+  }).then(() => answer);
+}
+
+/** An Apple that answers one status and one reason word, over the http2 shape the prover uses. */
+function fakeApple({ status, reason }) {
+  const seen = [];
+  return {
+    seen,
+    http2: {
+      connect() {
+        const session = {
+          on: () => session,
+          close: () => {},
+          request(headers) {
+            seen.push(headers);
+            const handlers = new Map();
+            const stream = {
+              on: (event, fn) => { handlers.set(event, fn); return stream; },
+              setTimeout: () => stream,
+              close: () => {},
+              end: () => {
+                // Next tick, so the prover's own listeners are attached before anything fires, which
+                // is exactly the order a real http2 stream delivers them in.
+                setTimeout(() => {
+                  if (status === 0) { handlers.get("error")?.(new Error("no answer")); return; }
+                  handlers.get("response")?.({ ":status": status });
+                  if (reason) handlers.get("data")?.(Buffer.from(JSON.stringify({ reason })));
+                  handlers.get("end")?.();
+                }, 0);
+                return stream;
+              },
+            };
+            return stream;
+          },
+        };
+        return session;
+      },
+    },
+  };
+}
+
+/** A Firebase that mints a token and then answers the dry run with one status and one error code. */
+function fakeFirebase({ mint = 200, send = 200, code = "" } = {}) {
+  const seen = [];
+  return {
+    seen,
+    fetchImpl: async (url, init) => {
+      seen.push({ url: String(url), body: String(init?.body ?? "") });
+      if (String(url).includes("oauth2")) {
+        return { ok: mint === 200, status: mint, json: async () => (mint === 200 ? { access_token: "ya29.a-minted-token", expires_in: 3600 } : { error: "invalid_grant" }) };
+      }
+      return { ok: send === 200, status: send, json: async () => (send === 200 ? { name: "projects/p/messages/1" } : { error: { status: code, details: [{ errorCode: code }] } }) };
+    },
+  };
+}
+
+// A real ES256 key and a real RSA key, generated per run. Nothing in this repo ships a private key,
+// and a fixture one would be a private key in git whatever it opened.
+const PUSH_P8 = generateKeyPairSync("ec", { namedCurve: "prime256v1", privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+const PUSH_RSA = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+const SERVICE_ACCOUNT = JSON.stringify({ type: "service_account", project_id: "titanium-bot", client_email: "push@titanium-bot.iam.gserviceaccount.com", private_key: PUSH_RSA, token_uri: "https://oauth2.googleapis.com/token" });
+const PUSH_ADMIN_TOKEN = "an-operator-token-of-at-least-thirty-two-chars";
+
+function pushApi({ store, root, http2Impl = null, fetchImpl = async () => ({ ok: false, status: 0, json: async () => ({}) }) }) {
+  return ({ json }) => createAdminApi({
+    config: { dataDir: root, tenantRoot: root, adminToken: PUSH_ADMIN_TOKEN },
+    store,
+    client: { base: "", call: async () => ({}) },
+    json, noContent: () => {},
+    publicAccount: (account) => account,
+    publicTenant: (tenant) => tenant,
+    tenantView: async (row) => ({ slug: row.slug }),
+    tenantPower: async () => {}, tenantProvision: async () => {},
+    currentSession: () => ({ ok: false }),
+    log: () => {},
+    http2Impl, fetchImpl,
+  });
+}
+
+test("GET /v1/admin/push says what is stored and never what it is", async () => {
+  await withStore(async (store, root) => {
+    const api = pushApi({ store, root });
+    const empty = await adminCall(api, { method: "GET", segments: ["push"], adminToken: PUSH_ADMIN_TOKEN });
+    assert.equal(empty.status, 200);
+    assert.equal(empty.body.apns.stored, false);
+    assert.equal(empty.body.fcm.stored, false);
+    assert.match(String(empty.body.apns.why), /never woken/);
+    assert.match(String(empty.body.stub), /records what it would have sent/);
+
+    // Stored directly, so this read is tested on its own rather than through the store route.
+    store.setSetting("push.apns.key", PUSH_P8, "a test");
+    store.setSetting("push.apns.bundleId", "bot.titanium.app", "a test");
+    store.setSetting("push.fcm.serviceAccount", SERVICE_ACCOUNT, "a test");
+    store.setSetting("push.fcm.projectId", "titanium-bot", "a test");
+    const full = await adminCall(api, { method: "GET", segments: ["push"], adminToken: PUSH_ADMIN_TOKEN });
+    assert.equal(full.body.apns.stored, true);
+    assert.equal(full.body.apns.bundleId, "bot.titanium.app");
+    assert.match(String(full.body.apns.evidence), /^\d+ characters, sha256 [0-9a-f]{8}$/);
+    assert.equal(full.body.fcm.stored, true);
+    assert.equal(full.body.stub, "", "with both stored there is nothing to warn about");
+    // THE TEST THIS WHOLE ROUTE EXISTS FOR: no fragment of either value is in the answer.
+    const text = JSON.stringify(full.body);
+    assert.ok(!text.includes(PUSH_P8.slice(40, 120)), "the Apple key is not in the answer");
+    assert.ok(!text.includes(PUSH_RSA.slice(40, 120)), "the Firebase key is not in the answer");
+    assert.ok(!text.includes("BEGIN PRIVATE KEY"));
+  });
+});
+
+test("the Apple key is stored only when Apple read it and refused the address", async () => {
+  await withStore(async (store, root) => {
+    const apple = fakeApple({ status: 400, reason: "BadDeviceToken" });
+    const api = pushApi({ store, root, http2Impl: apple.http2 });
+    const answer = await adminCall(api, {
+      method: "POST", segments: ["push", "apns"], adminToken: PUSH_ADMIN_TOKEN,
+      body: { key: PUSH_P8, keyId: "ABCDE12345", teamId: "TEAM123456", bundleId: "bot.titanium.app" },
+    });
+    assert.equal(answer.status, 200, JSON.stringify(answer?.body));
+    assert.equal(answer.body.bundleId, "bot.titanium.app");
+    assert.match(String(answer.body.checkedWith), /refused only the address/);
+    assert.match(String(answer.body.evidence), /^\d+ characters, sha256 [0-9a-f]{8}$/);
+    assert.ok(!JSON.stringify(answer.body).includes("BEGIN PRIVATE KEY"), "the answer never carries the key");
+    // Stored trimmed and with CRLF normalised, which is what parseApnsCredential does on the way in:
+    // a .p8 pasted out of Notepad arrives with \r\n and createPrivateKey is the thing that has to be
+    // able to read it back, not a byte comparison.
+    assert.equal(store.getSetting("push.apns.key", ""), PUSH_P8.trim(), "and it is stored");
+    assert.equal(store.getSetting("push.apns.teamId", ""), "TEAM123456");
+
+    // One request to Apple, addressed to a token that cannot be a device, on the sandbox host.
+    assert.equal(apple.seen.length, 1);
+    assert.match(String(apple.seen[0][":path"]), /^\/3\/device\/0{64}$/);
+    assert.equal(apple.seen[0]["apns-topic"], "bot.titanium.app");
+    // And the ledger row names the act and the evidence and never the value.
+    const rows = store.listAdminActions({ limit: 20 });
+    const row = rows.find((one) => one.action === "push.apns");
+    assert.ok(row != null, "the act is on the record");
+    assert.ok(!String(row.detail).includes("BEGIN PRIVATE KEY"));
+    assert.match(String(row.detail), /characters, sha256/);
+  });
+});
+
+test("a key Apple refuses is not stored, and the refusal says which half was wrong", async () => {
+  await withStore(async (store, root) => {
+    for (const [vendor, pattern] of [
+      [fakeApple({ status: 403, reason: "InvalidProviderToken" }), /refused the signing key itself/],
+      [fakeApple({ status: 400, reason: "TopicDisallowed" }), /refused the bundle id/],
+      [fakeApple({ status: 0, reason: "" }), /did not answer/],
+    ]) {
+      const api = pushApi({ store, root, http2Impl: vendor.http2 });
+      const answer = await adminCall(api, {
+        method: "POST", segments: ["push", "apns"], adminToken: PUSH_ADMIN_TOKEN,
+        body: { key: PUSH_P8, keyId: "ABCDE12345", teamId: "TEAM123456", bundleId: "bot.titanium.app" },
+      });
+      assert.equal(answer.status, 409, JSON.stringify(answer?.body));
+      assert.match(String(answer.body.message), pattern);
+      assert.match(String(answer.body.message), /Nothing was stored/);
+      assert.equal(store.getSetting("push.apns.key", ""), "", "and nothing was");
+    }
+  });
+});
+
+test("a paste that is not a key is refused before any vendor is asked", async () => {
+  await withStore(async (store, root) => {
+    const apple = fakeApple({ status: 400, reason: "BadDeviceToken" });
+    const api = pushApi({ store, root, http2Impl: apple.http2 });
+    for (const [body, pattern] of [
+      [{ key: "not a key", keyId: "ABCDE12345", teamId: "TEAM123456", bundleId: "bot.titanium.app" }, /not a \.p8/],
+      [{ key: PUSH_P8, keyId: "short", teamId: "TEAM123456", bundleId: "bot.titanium.app" }, /ten characters/],
+      [{ key: PUSH_P8, keyId: "ABCDE12345", teamId: "TEAM123456", bundleId: "x" }, /bundle id/],
+    ]) {
+      const answer = await adminCall(api, { method: "POST", segments: ["push", "apns"], adminToken: PUSH_ADMIN_TOKEN, body });
+      assert.equal(answer.status, 400);
+      assert.match(String(answer.body.message), pattern);
+    }
+    assert.equal(apple.seen.length, 0, "a paste that cannot be right costs Apple nothing");
+  });
+});
+
+test("the Firebase service account is proved with a dry run, and stored with its project", async () => {
+  await withStore(async (store, root) => {
+    const firebase = fakeFirebase({ mint: 200, send: 200 });
+    const api = pushApi({ store, root, fetchImpl: firebase.fetchImpl });
+    const answer = await adminCall(api, {
+      method: "POST", segments: ["push", "fcm"], adminToken: PUSH_ADMIN_TOKEN,
+      body: { serviceAccount: SERVICE_ACCOUNT, projectId: "" },
+    });
+    assert.equal(answer.status, 200, JSON.stringify(answer?.body));
+    assert.equal(answer.body.projectId, "titanium-bot", "the project comes out of the JSON when nobody typed one");
+    assert.equal(answer.body.clientEmail, "push@titanium-bot.iam.gserviceaccount.com");
+    assert.match(String(answer.body.checkedWith), /validate_only/);
+    assert.ok(!JSON.stringify(answer.body).includes("BEGIN PRIVATE KEY"));
+    assert.ok(store.getSetting("push.fcm.serviceAccount", "").includes("BEGIN PRIVATE KEY"), "stored whole");
+    assert.equal(store.getSetting("push.fcm.projectId", ""), "titanium-bot");
+
+    // The dry run IS a dry run: validate_only true, so nothing was ever delivered to prove a paste.
+    const send = firebase.seen.find((one) => one.url.includes("messages:send"));
+    assert.ok(send != null);
+    assert.equal(JSON.parse(send.body).validate_only, true);
+    assert.match(JSON.parse(send.body).message.token, /^0{64}$/);
+  });
+});
+
+test("a Firebase refusal names which half was wrong, and a token refusal still stores nothing", async () => {
+  await withStore(async (store, root) => {
+    for (const [firebase, pattern] of [
+      [fakeFirebase({ mint: 400 }), /would not mint a messaging token/],
+      [fakeFirebase({ mint: 200, send: 403, code: "PERMISSION_DENIED" }), /refused the service account/],
+      [fakeFirebase({ mint: 200, send: 404, code: "NOT_FOUND" }), /no such project/],
+    ]) {
+      const api = pushApi({ store, root, fetchImpl: firebase.fetchImpl });
+      const answer = await adminCall(api, {
+        method: "POST", segments: ["push", "fcm"], adminToken: PUSH_ADMIN_TOKEN,
+        body: { serviceAccount: SERVICE_ACCOUNT },
+      });
+      assert.equal(answer.status, 409, JSON.stringify(answer?.body));
+      assert.match(String(answer.body.message), pattern);
+      assert.equal(store.getSetting("push.fcm.serviceAccount", ""), "");
+    }
+    // And a 400 INVALID_ARGUMENT on the deliberately malformed address IS a pass: Google read the
+    // service account and refused only the token, which is the same verdict Apple's 400 is.
+    const good = fakeFirebase({ mint: 200, send: 400, code: "INVALID_ARGUMENT" });
+    const answer = await adminCall(pushApi({ store, root, fetchImpl: good.fetchImpl }), {
+      method: "POST", segments: ["push", "fcm"], adminToken: PUSH_ADMIN_TOKEN, body: { serviceAccount: SERVICE_ACCOUNT },
+    });
+    assert.equal(answer.status, 200, JSON.stringify(answer?.body));
+    assert.match(String(answer.body.checkedWith), /refused only the address/);
+  });
+});
+
+test("listSettings answers the two push names with no value at all", async () => {
+  await withStore((store) => {
+    store.setSetting("push.apns.key", PUSH_P8, "a test");
+    store.setSetting("push.fcm.serviceAccount", SERVICE_ACCOUNT, "a test");
+    store.setSetting("push.apns.bundleId", "bot.titanium.app", "a test");
+    const rows = new Map(store.listSettings().map((row) => [row.name, row]));
+    for (const name of ["push.apns.key", "push.fcm.serviceAccount"]) {
+      assert.equal(rows.get(name).redacted, true, `${name} is a secret name`);
+      assert.equal(rows.get(name).value, "", `${name} comes back with no value`);
+    }
+    // The non-secret ids DO come back: a person has to be able to check they pasted the right app,
+    // and a bundle id opens nothing on its own.
+    assert.equal(rows.get("push.apns.bundleId").redacted, false);
+    assert.equal(rows.get("push.apns.bundleId").value, "bot.titanium.app");
+    // Swept whole: no fragment of either key is anywhere in what listSettings answers.
+    const text = JSON.stringify(store.listSettings());
+    assert.ok(!text.includes("BEGIN PRIVATE KEY"));
+    assert.ok(!text.includes(PUSH_P8.slice(40, 120)));
   });
 });

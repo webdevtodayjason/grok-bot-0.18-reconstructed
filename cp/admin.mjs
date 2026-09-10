@@ -64,6 +64,15 @@ import {
   parseRepo,
   proveRepoToken,
 } from "./feedback.mjs";
+// PUSH-1. The two push credentials and the two proofs, in their own file for the reason
+// cp/feedback.mjs is in its own file: every function in it is a pure function over a pasted
+// credential and none of them needs a store, a config or a request to be tested.
+import {
+  parseApnsCredential,
+  parseFcmCredential,
+  proveApnsCredential,
+  proveFcmCredential,
+} from "./push.mjs";
 import {
   PROVIDER_PRESETS,
   PROVIDER_QUOTA,
@@ -750,6 +759,10 @@ export function createAdminApi({
   // console and the operator's own /v1/marketplace/verification route cannot drift into two
   // different answers about which of our own catalog rows may be stale.
   marketplaceVerificationState = () => ({ measuredAt: new Date().toISOString(), rollup: null, records: [], catalog: [], catalogProblem: "this control plane was built without the marketplace verification job", ignores: [], meteredRuns: 0 }),
+  // PUSH-1. node:http2, handed in rather than imported, for one reason: the Apple proof is the only
+  // thing on this service that speaks http2, and a test has to be able to drive every branch of its
+  // verdict table without an Apple developer account and without a network.
+  http2Impl = null,
 } = {}) {
   // Made on the first refused sign-in rather than at boot, so a data directory that is not writable
   // yet cannot stop the service from starting.
@@ -2373,6 +2386,47 @@ export function createAdminApi({
   // run, and what lets an operator on GitHub Enterprise point this at their own host. Anybody who
   // can set this can already read this service's environment, so it is no weaker than CP_RELAY_URL.
   const githubApiBase = String(config.githubApiUrl ?? process.env.CP_GITHUB_API_URL ?? GITHUB_API).replace(/\/+$/, "");
+
+  // PUSH-1. Six names, two of them secret. The four non-secret ones are ids a person has to be able
+  // to read back to check they pasted the right app, and none of them opens anything on its own.
+  const SETTING_APNS_KEY = "push.apns.key";
+  const SETTING_APNS_KEY_ID = "push.apns.keyId";
+  const SETTING_APNS_TEAM_ID = "push.apns.teamId";
+  const SETTING_APNS_BUNDLE_ID = "push.apns.bundleId";
+  const SETTING_FCM_ACCOUNT = "push.fcm.serviceAccount";
+  const SETTING_FCM_PROJECT = "push.fcm.projectId";
+
+  /**
+   * What is stored about the two push doors: presence, the evidence, and the non-secret ids. Nothing
+   * else, at any caller, ever. This is what the Settings block draws and what GET /v1/admin/push
+   * answers, and neither of them can say more than this object holds.
+   */
+  const pushDoor = () => {
+    const apnsKey = store.getSetting(SETTING_APNS_KEY, "");
+    const fcmAccount = store.getSetting(SETTING_FCM_ACCOUNT, "");
+    return {
+      apns: {
+        stored: apnsKey.length > 0,
+        evidence: apnsKey.length > 0 ? keyEvidence(apnsKey) : "",
+        keyId: store.getSetting(SETTING_APNS_KEY_ID, ""),
+        teamId: store.getSetting(SETTING_APNS_TEAM_ID, ""),
+        bundleId: store.getSetting(SETTING_APNS_BUNDLE_ID, ""),
+        why: apnsKey.length > 0 ? "" : "no Apple push key is stored, so an iPhone or a Mac registers and is never woken. Paste the .p8 below.",
+      },
+      fcm: {
+        stored: fcmAccount.length > 0,
+        evidence: fcmAccount.length > 0 ? keyEvidence(fcmAccount) : "",
+        projectId: store.getSetting(SETTING_FCM_PROJECT, ""),
+        why: fcmAccount.length > 0 ? "" : "no Firebase service account is stored, so an Android phone registers and is never woken. Paste the JSON below.",
+      },
+      // Plain words, because this is the state a reader has to understand at a glance: with neither
+      // credential stored the relay still runs the whole mechanism and records what it WOULD have
+      // sent, which is how every gate in this wave measures it.
+      stub: apnsKey.length === 0 && fcmAccount.length === 0
+        ? "Neither credential is stored, so the relay records what it would have sent and wakes nobody."
+        : "",
+    };
+  };
 
   /** What is stored about the issue door, PROVED and never carried. Evidence only, at every caller. */
   const githubDoor = () => {
@@ -4101,6 +4155,87 @@ export function createAdminApi({
     }
 
     // ---- end MARKET-26 / CLOUD-BROWSER-1 --------------------------------------------------------
+
+    // ---- PUSH-1: the two push credentials -------------------------------------------------------
+    //
+    // Appended at the very bottom for the reason the block above says out loud: the end of this file
+    // is where three parallel worktrees can each add a panel without meeting in a diff.
+    //
+    // These are the SECOND and THIRD secrets this store has ever held, and they go through the same
+    // door the first one did (feedback/github-token above): PROVED before stored, a ledger row with
+    // key evidence, and an answer carrying a length and eight hex characters of a digest and never a
+    // value. SECRET_SETTINGS in cp/store.mjs carries both names, so listSettings answers them with
+    // value "" and redacted true and nothing anywhere renders them.
+    //
+    // They are HERE rather than at the proxy because there is no proxy for a push credential to hide
+    // behind, and they are NEVER pushed into a box: every exec daemon in a customer's container runs
+    // as uid 0, so a super admin's Apple key inside one is readable by that customer's own agents.
+    // The relay reads them through GET /v1/relay/push/credentials, behind CP_RELAY_TOKEN, and keeps
+    // them in memory only.
+    if (rest[0] === "push") {
+      if (rest.length === 1 && method === "GET") {
+        json(response, 200, pushDoor());
+        return true;
+      }
+
+      if (rest.length === 2 && rest[1] === "apns" && method === "POST") {
+        const parsed = parseApnsCredential(body ?? {});
+        if (!parsed.ok) { json(response, 400, { error: "bad_request", message: `${parsed.why} Nothing was stored.` }); return true; }
+        const proof = await proveApnsCredential({ ...parsed, http2: http2Impl });
+        if (!proof.ok) { json(response, 409, { error: "key_refused", message: `${proof.why} Nothing was stored.` }); return true; }
+        const ledger = beginAction(guard, request, {
+          action: "push.apns",
+          target: parsed.bundleId,
+          detail: `an Apple push key for ${parsed.bundleId} (${keyEvidence(parsed.key)})`,
+        });
+        const actor = guard.account?.email ?? "the operator token";
+        store.setSetting(SETTING_APNS_KEY, parsed.key, actor);
+        store.setSetting(SETTING_APNS_KEY_ID, parsed.keyId, actor);
+        store.setSetting(SETTING_APNS_TEAM_ID, parsed.teamId, actor);
+        store.setSetting(SETTING_APNS_BUNDLE_ID, parsed.bundleId, actor);
+        ledger.done(`checked against ${proof.how}`);
+        json(response, 200, {
+          bundleId: parsed.bundleId,
+          keyId: parsed.keyId,
+          teamId: parsed.teamId,
+          checkedWith: proof.how,
+          // NOT the key. Nothing on this service ever answers with it again.
+          evidence: keyEvidence(parsed.key),
+          message: `Apple accepted that key for ${parsed.bundleId}. iPhones and Macs signed in to the console can be woken from now on.`,
+        });
+        return true;
+      }
+
+      if (rest.length === 2 && rest[1] === "fcm" && method === "POST") {
+        const parsed = parseFcmCredential(body ?? {});
+        if (!parsed.ok) { json(response, 400, { error: "bad_request", message: `${parsed.why} Nothing was stored.` }); return true; }
+        const proof = await proveFcmCredential({ serviceAccount: parsed.serviceAccount, projectId: parsed.projectId, fetchImpl });
+        if (!proof.ok) { json(response, 409, { error: "key_refused", message: `${proof.why} Nothing was stored.` }); return true; }
+        const serialised = JSON.stringify(parsed.serviceAccount);
+        const ledger = beginAction(guard, request, {
+          action: "push.fcm",
+          target: parsed.projectId,
+          detail: `a Firebase service account for ${parsed.projectId} (${keyEvidence(serialised)})`,
+        });
+        const actor = guard.account?.email ?? "the operator token";
+        store.setSetting(SETTING_FCM_ACCOUNT, serialised, actor);
+        store.setSetting(SETTING_FCM_PROJECT, parsed.projectId, actor);
+        ledger.done(`checked against ${proof.how}`);
+        json(response, 200, {
+          projectId: parsed.projectId,
+          clientEmail: parsed.serviceAccount.client_email,
+          checkedWith: proof.how,
+          evidence: keyEvidence(serialised),
+          message: `Firebase accepted that service account for ${parsed.projectId}. Android phones signed in to the console can be woken from now on.`,
+        });
+        return true;
+      }
+
+      json(response, 404, { error: "not_found" });
+      return true;
+    }
+
+    // ---- end PUSH-1 -----------------------------------------------------------------------------
 
     json(response, 404, { error: "not_found" });
     return true;
