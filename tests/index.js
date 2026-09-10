@@ -234,3 +234,9 @@ import "./bot-setup.test.mjs";
 // MOBILE-1: the console at phone widths. What the stylesheet has to say for the shell's column
 // track, the two drawers and the scrim, and where those rules are allowed to live.
 import "./machine-room-mobile.test.mjs";
+
+// CODE-1: coding tasks in a throwaway computer. The plan every container is made from, the five
+// box-facing routes against an injected execFile, and the sweep that is the only real wall clock.
+import "./code-sandbox-plan.test.mjs";
+import "./code-edge-routes.test.mjs";
+import "./code-edge-sweep.test.mjs";

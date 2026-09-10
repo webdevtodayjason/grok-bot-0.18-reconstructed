@@ -74,6 +74,10 @@ import {
 // cache, the gateway caller, the caps, the ledger, the RFC 6455 codec -- is in there, because three
 // waves share this file and every line here is a surgical stage after a rebase.
 import { VOICE_SOCKET_PATH, originAllowed, voiceEdgeFor } from "./voice-edge.mjs";
+import {
+  CODE_DEFAULTS, CODE_SWEEP_MS, appendTaskRow as appendCodeTask, createCodeEdge,
+  readTaskRows as readCodeTasks,
+} from "./code-edge.mjs";
 import { stateDir, stateFile } from "./state-dir.mjs";
 import { createLoginLedger, filterAttempts } from "./login-ledger.mjs";
 import { readBoxHealth } from "./box-health.mjs";
@@ -2750,6 +2754,184 @@ async function handleMailSweepRoute(req, res) {
   return res.end(JSON.stringify(answer));
 }
 
+// ---- coding tasks, in a throwaway computer (CODE-1, docs/CODE.md) -----------------------------
+//
+// This relay is the only process on the machine holding /var/run/docker.sock, it mounts
+// /data/titanbot at the identical path the host uses, and it already drives docker through the CLI in
+// its own image. So a coding task's container is made HERE, one per task, on its own internal network
+// that reaches the proxy and nothing else, and removed when the task ends.
+//
+// The credential is the box's OWN gateway token, exactly as POST /mail/send takes it: no new secret is
+// minted anywhere for this, and a box with no relay in front of it resolves nothing and is handed a
+// plain refusal rather than a control that cannot work.
+//
+// Every rule worth testing is in ui/code-edge.mjs. What is here is the four things that cannot leave
+// this file: the per-tenant paths, the control plane claim, the limiter and the route mounting.
+
+/** Where a task's files go. This is the HOST side of the directory the box already mounts as
+ *  /workspace, so the sandbox writes straight where the bot can read it with the tools it already has
+ *  and there is no copy-back at all. cp/provision.mjs: <root>/volumes/workspace is the box's
+ *  /workspace, and entry.stateDir is <root>/state.
+ *
+ *  CODE_TASK_ROOT is the override this Mac's gate uses, because a local relay is a host process with
+ *  no tenant tree under it. */
+function codeTaskRootFor(slug, taskId) {
+  const override = String(process.env.CODE_TASK_ROOT ?? "").trim();
+  if (override.length > 0) return path.join(override, String(slug), "code", String(taskId));
+  const t = contextOf(slug);
+  if (t == null || String(t.stateDir ?? "").length === 0) return "";
+  return path.join(path.dirname(t.stateDir), "volumes", "workspace", "code", String(taskId));
+}
+
+/** The fallback credential directory, used only when a daemon will not take a tar on stdin. It is
+ *  OUTSIDE volumes/, so it is outside every mount the box has: a key the box could read would defeat
+ *  the whole custody argument. Deleted by the end path and by the sweep. */
+function codeCredRootFor(slug) {
+  const override = String(process.env.CODE_TASK_ROOT ?? "").trim();
+  if (override.length > 0) return path.join(override, String(slug), "code-cred");
+  const t = contextOf(slug);
+  if (t == null || String(t.stateDir ?? "").length === 0) return "";
+  return path.join(path.dirname(t.stateDir), "code-cred");
+}
+
+/** The workspace's own task file, beside its two mail ledgers and on the same volume. THIS is where
+ *  the customer's own words live: the title and the instructions. The control plane's row carries
+ *  neither, the same rule mail_send_log holds about subjects. */
+const codeTasksFile = (slug) => {
+  const t = contextOf(slug);
+  return t == null ? "" : t.file("code-tasks.jsonl");
+};
+
+/** The claim, BEFORE the container exists. An unstarted task is recoverable; an unbilled container
+ *  hour is not. The response carries the per-task key, which this process holds for the length of one
+ *  create and never writes down. */
+async function codeTaskOpen(row) {
+  if (RELAY == null) return { ok: false, error: "unreachable", message: "this relay has no control plane" };
+  let response;
+  try {
+    response = await fetch(`${RELAY.cpUrl}/v1/relay/code/task/open`, {
+      method: "POST",
+      body: JSON.stringify(row),
+      headers: { authorization: `Bearer ${RELAY.relayToken}`, "content-type": "application/json", accept: "application/json" },
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (error) {
+    return { ok: false, error: "unreachable", message: error?.name === "TimeoutError" ? "timed out" : "no answer" };
+  }
+  let body = null;
+  try { body = await response.json(); } catch { body = null; }
+  if (response.status === 200 && body?.ok === true && Number(body.id) > 0) return { ...body, ok: true, id: Number(body.id) };
+  if (response.status === 429) return { ...body, ok: false, error: "rate_limited" };
+  return { ok: false, error: String(body?.error ?? `HTTP ${response.status}`), message: String(body?.message ?? "the claim was refused") };
+}
+
+/** And what happened to it. Never awaited into a refusal: a close that fails is logged, not raised. */
+async function codeTaskClose({ id, outcome, minutes, detail }) {
+  if (RELAY == null || !(Number(id) > 0)) return;
+  const response = await fetch(`${RELAY.cpUrl}/v1/relay/code/task/close`, {
+    method: "POST",
+    body: JSON.stringify({ id: Number(id), outcome, minutes, detail }),
+    headers: { authorization: `Bearer ${RELAY.relayToken}`, "content-type": "application/json", accept: "application/json" },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (response.status !== 200) throw new Error(`HTTP ${response.status}`);
+}
+
+/** The E2B key, asked for again rather than held between calls. It is a write-only control plane
+ *  setting an operator pastes, and it is never read from any file on this machine. CODE-3. */
+async function codeE2bKey(slug) {
+  if (RELAY == null) return "";
+  try {
+    const response = await fetch(`${RELAY.cpUrl}/v1/relay/code/e2b-key`, {
+      method: "POST",
+      body: JSON.stringify({ slug }),
+      headers: { authorization: `Bearer ${RELAY.relayToken}`, "content-type": "application/json", accept: "application/json" },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (response.status !== 200) return "";
+    return String((await response.json())?.key ?? "");
+  } catch { return ""; }
+}
+
+// The cheap door in front of the caps. The real policy is the control plane's -- two concurrent and
+// twenty a day per workspace, counted over rows nobody in a box can reach -- and this is not that.
+// This is the transport refusal that keeps a looping caller from costing this process a control plane
+// round trip and a `docker network ls` per attempt. The key is a HASH of the bearer and never the
+// bearer, so no token is held in a limiter's Map. Thirty a minute is far above what a bot starting
+// two tasks at a time ever asks for, and it covers status polling too.
+const codeLimiter = createRateLimiter({ limit: 60, windowMs: 60_000 });
+const codeLimiterKey = (req) => mailSendLimiterKey(req);
+const codeTooMany = (req, res, wait) => drainThenEnd(req, res, 429,
+  { "content-type": "application/json", "cache-control": "no-store", "retry-after": String(wait) },
+  JSON.stringify({
+    message: "That is more coding than this box may ask for right now, so nothing started. Try again in a minute.",
+    started: false,
+    error: "rate_limited",
+  }));
+
+let codeEdgeBuilt = null;
+function codeEdge() {
+  if (codeEdgeBuilt != null) return codeEdgeBuilt;
+  codeEdgeBuilt = createCodeEdge({
+    execFile,
+    readBody,
+    drainThenEnd,
+    // The bearer proves the WORKSPACE. Every entry is compared with no early break, so the time this
+    // takes says nothing about which one matched or how many there are.
+    workspaceOf: (bearer) => {
+      const entry = registry.matchToken(bearer);
+      return entry == null ? null : { slug: entry.slug, name: entry.name };
+    },
+    taskRootFor: codeTaskRootFor,
+    credRootFor: codeCredRootFor,
+    boxOf: (slug) => String(contextOf(slug)?.box ?? ""),
+    ownLikeParent,
+    readTasks: async (slug) => {
+      const file = codeTasksFile(slug);
+      return file.length === 0 ? [] : await readCodeTasks(file);
+    },
+    writeTask: async (slug, row) => {
+      const t = contextOf(slug);
+      if (t == null) return;
+      t.ensureDir();
+      await appendCodeTask(t.file("code-tasks.jsonl"), row, { ownLikeParent });
+    },
+    openTask: codeTaskOpen,
+    closeTask: codeTaskClose,
+    e2bKeyFor: codeE2bKey,
+    dockerAvailable,
+    // The per-workspace settings the control plane owns. Read through the registry entry, so a change
+    // there takes effect on the next call with nothing restarted; CODE_DEFAULTS is the shape and the
+    // fallback, and CODE-9 is the row about these wanting a control in the admin console.
+    settingsFor: (slug) => ({ ...CODE_DEFAULTS, ...(registry.get(slug)?.code ?? {}) }),
+    log: (line) => console.log(line),
+  });
+  return codeEdgeBuilt;
+}
+
+/** One sweep at start and one every 60 s: the wall clock, the orphans a restart left behind, and the
+ *  networks with nothing in them. Mounted exactly where mailSweepStart is and never awaited, for the
+ *  same reason: a docker daemon that is slow must not stop this console coming up.
+ *
+ *  It is the ONLY thing enforcing the wall clock. A timer in this process's memory does not survive
+ *  the restart that ends every ship, and the deadline lives on the container's own label so that a
+ *  relay which has never heard of a task can still end it. */
+function codeSweepStart() {
+  void (async () => {
+    // What this process believes is running, rebuilt from every workspace's rows BEFORE the first
+    // sweep, so a restart does not read its own live tasks as orphans and kill them.
+    for (const entry of registry.all()) {
+      const file = codeTasksFile(entry.slug);
+      if (file.length === 0) continue;
+      codeEdge().adopt(entry.slug, await readCodeTasks(file).catch(() => []));
+    }
+    await codeEdge().sweep("this relay started").catch((error) => console.log(`code  first sweep failed: ${error?.message ?? error}`));
+  })();
+  setInterval(() => {
+    void codeEdge().sweep("the timer").catch((error) => console.log(`code  sweep failed: ${error?.message ?? error}`));
+  }, CODE_SWEEP_MS).unref();
+}
+
 // ---- POST /hooks/resend, for a console with more than one tenant on it ------------------------
 //
 // The webhook carries no session and no bearer: its credential is the Svix signature, and the
@@ -3056,6 +3238,23 @@ const server = createServer(async (req, res) => {
       const wait = mailSendLimiter.retryAfterSeconds(mailSendLimiterKey(req));
       if (wait > 0) return await mailSendTooMany(req, res, wait);
       return await mailSendRoute().handleSend(req, res);
+    }
+    // CODE-1, and before the console's login for the same reason /mail/send is: the caller is a bot
+    // inside a box, which holds no session cookie. Its credential is the box's own gateway token,
+    // presented as a bearer and matched against the registry. Five routes, one limiter, and every
+    // refusal is a plain sentence the bot reads back to the person. docs/CODE.md section 3.
+    if (url.pathname.startsWith("/code/") && req.method === "POST") {
+      const verb = url.pathname.slice("/code/".length);
+      if (["start", "status", "stop", "result", "list"].includes(verb)) {
+        const wait = codeLimiter.retryAfterSeconds(codeLimiterKey(req));
+        if (wait > 0) return await codeTooMany(req, res, wait);
+        const edge = codeEdge();
+        if (verb === "start") return await edge.handleStart(req, res);
+        if (verb === "status") return await edge.handleStatus(req, res);
+        if (verb === "stop") return await edge.handleStop(req, res);
+        if (verb === "result") return await edge.handleResult(req, res);
+        return await edge.handleList(req, res);
+      }
     }
     // Before the console's login as well, and behind a credential the console session cannot
     // present: this is the CONTROL PLANE asking the relay for the two things only the relay can
@@ -3614,6 +3813,24 @@ const server = createServer(async (req, res) => {
     // under, what it has spent today, and the key as a write-only field. Behind the session like
     // every other console route, and it reports the key as a boolean and never as a value.
     if (url.pathname === "/voice/settings") return await voiceEdgeFor(t, voiceDeps).handleSettings(req, res);
+    // The console's half of coding tasks: what is running, a Stop, and the limits in plain words.
+    // Behind the session like every other console route, scoped to the session's own tenant, and it
+    // reads the SAME rows the box route reads so the strip in the Computer card and the bot can never
+    // disagree about what is running. No new gateway command, so none of the void-RPC class. CODE-1.
+    if (req.method === "GET" && url.pathname === "/code/tasks") {
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify(await codeEdge().handleConsoleTasks(t.slug)));
+    }
+    if (req.method === "POST" && url.pathname === "/code/tasks/stop") {
+      let asked;
+      try { asked = JSON.parse(await readBody(req, 64 * 1024) || "{}"); } catch { return fail(res, 400, "that was not JSON"); }
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify(await codeEdge().handleConsoleStop(t.slug, String(asked?.taskId ?? ""))));
+    }
+    if (req.method === "GET" && url.pathname === "/code/settings") {
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify(codeEdge().handleConsoleSettings(t.slug)));
+    }
     if (req.method === "GET" && url.pathname === "/health") {
       const upstream = await fetch(`${t.gateway}/health`, { headers: t.headers() });
       const text = await upstream.text();
@@ -3711,6 +3928,11 @@ if (String(process.env.TITAN_JOB_TOKEN ?? "").trim().length > 0) {
 // same reason the job bus arm above is not: a control plane or a gateway that is not up yet must
 // not stop this console coming up, and the sweep logs either way.
 mailSweepStart();
+// CODE-1. One sweep now and one every minute: the wall clock off each container's own deadline label,
+// the orphans a restart left behind, and the task networks with nothing in them. Not awaited, for the
+// same reason the mail sweep is not. On a machine that has never run a coding task its first line says
+// it removed nothing, which is how an operator tells "the sweep is running" from "the sweep is absent".
+codeSweepStart();
 server.listen(PORT, BIND, () => {
   console.log(`ui   http://${BIND}:${PORT}`);
   console.log(`gw   ${OPERATOR_GATEWAY}${OPERATOR_TOKEN.length > 0 ? " (bearer)" : " (no auth)"} `

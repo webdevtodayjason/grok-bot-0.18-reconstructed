@@ -372,15 +372,33 @@ test("box-isolation.sh finds the proxy by its label and never by an address writ
   // literal the script acts on.
   const code = script.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
   const literals = [...code.matchAll(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g)].map((m) => m[0]);
-  // One exception, named rather than pattern-matched: --verify opens a socket to 1.1.1.1:443 before
-  // it believes a "closed" result. Without that sanity leg a broken probe reads as a locked-down
-  // host, which is exactly the false negative TENANT-3 already recorded once (a probe written with
-  // `sh`, which is dash on the box image and has no /dev/tcp, reported every port shut).
-  const unexplained = literals.filter((address) => address !== "1.1.1.1");
+  // Two exceptions, both NAMED rather than pattern-matched, because the rule this test exists to
+  // protect is "nothing the script acts on is a literal that can go stale", and each of these is a
+  // literal that cannot.
+  //
+  // 1.1.1.1 -- --verify opens a socket to 1.1.1.1:443 before it believes a "closed" result. Without
+  // that sanity leg a broken probe reads as a locked-down host, which is exactly the false negative
+  // TENANT-3 already recorded once (a probe written with `sh`, which is dash on the box image and has
+  // no /dev/tcp, reported every port shut).
+  //
+  // 10.97.0.0 -- CODE-1's coding sandbox pool. It is the opposite case from the proxy's address: the
+  // nftables rule has to cover a network THAT DOES NOT EXIST YET, because a task's network is created
+  // per task and torn down with it, so there is nothing to discover at apply time and a lookup would
+  // find nothing on every run. The pool is therefore a fixed constant in exactly two places, here as
+  // CODE_POOL and in ui/code-edge.mjs as CODE_POOL, and tests/code-sandbox-plan.test.mjs asserts the
+  // two are the same string. It is declared once as a variable with an env override and used through
+  // that variable, never repeated in a rule.
+  const unexplained = literals.filter((address) => address !== "1.1.1.1" && address !== "10.97.0.0");
   assert.deepEqual(unexplained, [], `an address is written into the script: ${unexplained.join(", ")}`);
   for (const line of code.split("\n").filter((l) => l.includes("1.1.1.1"))) {
     assert.match(line, /dev\/tcp\/1\.1\.1\.1\/443|^\s*say /, `1.1.1.1 is used for something other than the sanity leg: ${line.trim()}`);
   }
+  // And the pool literal appears exactly once, in its own declaration, so the rule below it cannot
+  // drift from the constant ui/code-edge.mjs allocates out of.
+  const poolLines = code.split("\n").filter((l) => l.includes("10.97.0.0"));
+  assert.equal(poolLines.length, 1, `the pool literal is repeated: ${poolLines.map((l) => l.trim()).join(" | ")}`);
+  assert.match(poolLines[0], /^CODE_POOL="\$\{TITANBOT_CODE_POOL:-10\.97\.0\.0\/16\}"$/);
+  assert.match(code, /ip saddr %s counter drop comment "CODE-1 /, "and the rule is written through the variable");
 });
 
 test("and its accept rule sits ahead of the drop, so the drop is still what catches everything else", () => {

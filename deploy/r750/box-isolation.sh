@@ -195,6 +195,11 @@ WATCH_PORTS="${TITANBOT_HOST_GUARD_WATCH_PORTS:-2049,445,11434,5000,80,443}"
 # Dropped for BOXES ONLY, whatever the counters say for the rest of the host. See the box-scoped
 # rule below for why these two are decidable today and 11434 and 5000 are not.
 BOX_DROP_PORTS="${TITANBOT_HOST_GUARD_BOX_DROP_PORTS:-2049,445}"
+# CODE-1. The fixed pool every coding sandbox's network is cut from, which ui/code-edge.mjs's
+# allocator also holds as CODE_POOL. It is a constant in both places on purpose: the nftables rule has
+# to cover a network that does not exist yet, so it cannot be derived from what docker currently holds.
+# Changing it means changing both, and the test on the planner asserts the prefix.
+CODE_POOL="${TITANBOT_CODE_POOL:-10.97.0.0/16}"
 
 MODE=apply
 case "${1:-}" in
@@ -693,6 +698,30 @@ else
     # entry chain decides "did this arrive on a docker bridge and is it a new TCP connection to this
     # machine", and jumps; the guarded chain holds the exemptions and the ports.
     printf '  chain guarded {\n'
+    # ---- CODE-1: THE CODING SANDBOX POOL, dropped first and dropped in every mode ---------------
+    #
+    # A coding task runs in a container on its own `docker network create --internal` network, cut
+    # from the fixed pool below. MEASURED on this Mac (Docker Desktop 29.5.3) and on the R750:
+    # --internal is a real boundary outward -- no default route, no external DNS, Errno 101 to any
+    # public address -- but it leaves THE BRIDGE GATEWAY ON-LINK, and this machine really does listen
+    # on 22, 47291, 8000, 2049, 445, 11434, 5000, 80 and 443. Without this rule a sandbox knocks on
+    # every one of them, and the box-scoped drop below cannot help: it is built from the addresses of
+    # containers labelled com.titanbot.role=box, and a sandbox is not a box.
+    #
+    # FIRST in the chain, so no exemption above it can let a sandbox past. Nothing exempt is ever on
+    # one of these networks: the exemptions are Coolify's own containers and the control plane, and the
+    # only container the relay ever attaches to a task network is the proxy, which is not exempt and
+    # whose route to a local address goes out its default interface and not this one.
+    #
+    # ONE RULE FOR EVERY TASK, FOREVER, because the pool is fixed and the rule is written on the pool
+    # and not on a container. No per-task rule writing, nothing for the relay to clean up, and it is
+    # already in place before the first task of a ship exists. The 60 s timer re-applies it.
+    #
+    # AND IT DROPS IN SHADOW MODE TOO, which is the one place this table's own rule is set aside
+    # deliberately. Shadow exists to accumulate evidence before taking away something that might be in
+    # use; nothing has ever used this pool, so there is no evidence to gather and nothing to break.
+    # A counter on a rule that never fires would be the only thing shadow bought here.
+    printf '    ip saddr %s counter drop comment "CODE-1 coding sandboxes reach the proxy and nothing on this host"\n' "$CODE_POOL"
     # One accept per bridge, not one flat address set. See pairs_of_container: an exemption matched
     # on source address alone is claimable by any container that shares that address's L2 segment,
     # and a box does share one with coolify-proxy.

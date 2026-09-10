@@ -173,7 +173,15 @@ rsync -a "$REPO/deploy/coolify/init-box.sh" "$HOST:$ROOT/deploy/"
 # ~/.config/systemd/user. A directory, because the units name paths inside it.
 ssh "$HOST" "mkdir -p '$ROOT/deploy/backup'"
 rsync -a --delete "$REPO/deploy/backup/" "$HOST:$ROOT/deploy/backup/"
-say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,move-relay-state.sh,one-console-migrate.sh,box-isolation.sh,titanbot-isolation.{service,timer},control-plane-install.sh,proxy-install.sh,apply-start-window-fix.sh,init-box.sh,backfill-box-defaults.mjs,box-defaults/,backup/}"
+# CODE-1: the coding sandbox image, its entrypoint and the script that builds it. A directory, on the
+# backup precedent above, because the Dockerfile's build context is the directory it sits in: the
+# entrypoint is COPYd from beside it, so shipping the three files anywhere else builds nothing.
+#
+# The image is built ON THE HOST by that script and never by the relay, whose CLI has no buildx, and
+# nothing here starts or restarts anything. A task's container is made by the relay, one per task.
+ssh "$HOST" "mkdir -p '$ROOT/deploy/code-sandbox'"
+rsync -a --delete "$REPO/deploy/r750/code-sandbox/" "$HOST:$ROOT/deploy/code-sandbox/"
+say "deploy/{common.sh,install.sh,uninstall.sh,enable-route.sh,disable-route.sh,relay.Dockerfile,move-relay-state.sh,one-console-migrate.sh,box-isolation.sh,titanbot-isolation.{service,timer},control-plane-install.sh,proxy-install.sh,apply-start-window-fix.sh,init-box.sh,backfill-box-defaults.mjs,box-defaults/,backup/,code-sandbox/}"
 
 step "ship the control plane"
 # TENANT-1. docs/TENANCY.md section 9 tells the operator to run this script and then build the

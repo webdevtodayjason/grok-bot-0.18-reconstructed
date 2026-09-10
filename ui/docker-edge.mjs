@@ -35,6 +35,10 @@ export const NOT_AVAILABLE = {
   // version file is served from the mounted runtime directory either way, so a host that asks gets
   // an honest refusal for the tarball instead of a truncated download.
   hostBundle: "This instance cannot build a host update of its own.",
+  // CODE-1. A coding task runs in a container this relay makes, so without the socket there is no
+  // local computer to run one on. The answer that carries this sentence also offers a cloud sandbox,
+  // which is the only road on a customer's own instance: see CODE-5 and docs/CODE.md section 9.
+  codeTask: "This instance cannot run a coding task on its own computer yet.",
   // TENANT-5. A subscription is a login already sitting in the OPERATOR's own home directory (the
   // Codex and Claude ones), so there is nothing for a customer's console to scan and nothing of
   // theirs to adopt. Said plainly rather than answered with an empty success.
