@@ -991,6 +991,11 @@ operator back to the door a couple of seconds after they sign in — which is ex
 `api(method, path)` literal, stands this service up in process, mints a super admin and probes all of
 them. 400, 404 and 405 pass. 401 fails the suite.
 
+It fails just as loudly, naming the byte offset, if the page calls `api()` in a shape that reader
+cannot parse, because a route the sweep cannot see is a route it does not protect. So keep the method
+a quoted literal at the call site, in whichever of the three quotes you like, rather than handing it
+to the page through a variable or a wrapper.
+
 The page itself at `/admin` is public, and it has to be, because it carries the sign-in form. There
 is no customer data in those three files: no count, no name, no hostname. Every byte the panel
 renders arrives from a route that refuses anything but a super admin. The page loads nothing from

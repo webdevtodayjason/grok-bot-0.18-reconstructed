@@ -16,10 +16,11 @@
 //
 // This test is written so the NEXT wave cannot do it again. It does not carry a hand-written list
 // of routes that would go stale the day someone adds a panel. It reads cp/admin/admin.js, pulls out
-// every api("METHOD", "<path>") literal the page can call, stands the control plane up in process,
-// mints a super admin, signs in, and probes all of them with that session token. A 400 or a 404 or
-// a 405 is fine -- the probe sends no body and substitutes a placeholder for every ${...} in a
-// template path, so a route is entitled to say the request is wrong. A 401 is the outage.
+// every api(METHOD, "<path>") literal the page can call, in whichever quotes the method is written,
+// stands the control plane up in process, mints a super admin, signs in, and probes them all with
+// that session token. A 400 or a 404 or a 405 is fine: the probe sends no body and substitutes a
+// placeholder for every ${...} in a template path, so a route is entitled to say the request is
+// wrong. A 401 is the outage.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
@@ -36,6 +37,11 @@ const ADMIN_JS = fileURLToPath(new URL("../cp/admin/admin.js", import.meta.url))
 // probes safe to fire at POST routes.
 const PLACEHOLDER = "admin4-probe";
 
+// The head of one call: api( then the method in any of the three quotes then the comma. Single
+// quotes and backticks are accepted on purpose -- a wave reformatting one call from api("GET", ...)
+// to api('GET', ...) is a style change, and a style change must not drop a route out of the sweep.
+const OPENER = () => /\bapi\(\s*["'`](GET|POST|PUT|PATCH|DELETE)["'`]\s*,\s*/g;
+
 /**
  * Every route cp/admin/admin.js can call, read out of the file itself.
  *
@@ -49,7 +55,7 @@ const PLACEHOLDER = "admin4-probe";
  */
 export function pageRoutes(source) {
   const found = new Map();
-  const opener = /\bapi\(\s*"(GET|POST|PUT|PATCH|DELETE)"\s*,\s*/g;
+  const opener = OPENER();
   let match;
   while ((match = opener.exec(source)) != null) {
     const method = match[1];
@@ -93,11 +99,46 @@ export function pageRoutes(source) {
   return [...found.values()].sort((a, b) => `${a.method} ${a.path}`.localeCompare(`${b.method} ${b.path}`));
 }
 
+/**
+ * Every api(...) call in the file that the reader above cannot turn into a route, as {offset, line,
+ * text}. The definition of api() itself is not one of them.
+ *
+ * This is the second half of the barrier. The sweep can only protect a route it can SEE, so a call
+ * shaped in a way the opener does not match -- a method held in a variable, a helper like
+ * const send = (m, p) => api(m, p) -- would leave that route unprotected with every test still
+ * green. A call the reader cannot parse has to fail loudly here instead of vanishing.
+ */
+export function unreadableCalls(source) {
+  const readable = new Set();
+  const opener = OPENER();
+  let match;
+  while ((match = opener.exec(source)) != null) readable.add(match.index);
+  const unreadable = [];
+  for (const call of source.matchAll(/\bapi\(/g)) {
+    if (readable.has(call.index)) continue;
+    // `function api(method, pathname, body)` is the one api( in the file that is not a call.
+    if (/\bfunction\s+$/.test(source.slice(Math.max(0, call.index - 20), call.index))) continue;
+    const line = source.slice(0, call.index).split("\n").length;
+    unreadable.push({ offset: call.index, line, text: source.slice(call.index, call.index + 60).split("\n")[0] });
+  }
+  return unreadable;
+}
+
 test("the console's own file still parses into a real list of routes", () => {
-  const routes = pageRoutes(readFileSync(ADMIN_JS, "utf8"));
-  // A floor, not a count: the point is that a broken reader cannot make this whole file pass by
-  // finding nothing. The number moves whenever a panel gains a button, and that is fine.
-  assert.ok(routes.length >= 30, `only ${routes.length} routes came out of cp/admin/admin.js`);
+  const source = readFileSync(ADMIN_JS, "utf8");
+  const routes = pageRoutes(source);
+  // Not a floor. Every call in the file is read, or this fails and names the one that was not, so a
+  // route cannot quietly fall out of the sweep while the suite stays green. The route COUNT is free
+  // to move whenever a panel gains a button; the coverage is not.
+  const unreadable = unreadableCalls(source);
+  assert.deepEqual(
+    unreadable,
+    [],
+    `cp/admin/admin.js calls api() in a shape this test cannot read, so those routes are unprotected: ${
+      unreadable.map((call) => `byte ${call.offset} (line ${call.line}): ${call.text}`).join(" | ")
+    }`,
+  );
+  assert.ok(routes.length > 0, "no routes came out of cp/admin/admin.js at all");
   const names = routes.map((route) => `${route.method} ${route.path}`);
   // The two that do NOT live under /v1/admin, because cp/admin.mjs claims that whole prefix and
   // answers 404 to anything it does not match itself. They are the ones a wave can add a guard to
