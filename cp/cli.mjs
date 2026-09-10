@@ -153,6 +153,29 @@ function promptHidden(label) {
   });
 }
 
+// A line the operator CAN see, which is the whole point when what they are typing is a name they
+// have to match. promptHidden above is for secrets; a confirm box that hides the thing being
+// confirmed is how somebody removes the wrong workspace.
+function promptLine(label) {
+  return new Promise((resolve, reject) => {
+    const input = process.stdin;
+    process.stdout.write(label);
+    input.resume();
+    input.setEncoding("utf8");
+    let value = "";
+    const onData = (chunk) => {
+      value += chunk;
+      const at = value.indexOf("\n");
+      if (at === -1) return;
+      input.removeListener("data", onData);
+      input.pause();
+      resolve(value.slice(0, at).replace(/\r$/, ""));
+    };
+    input.on("data", onData);
+    input.on("error", reject);
+  });
+}
+
 async function readPassword() {
   if (!process.stdin.isTTY) {
     const chunks = [];
@@ -181,27 +204,136 @@ async function api(method, pathname, body, headers = {}) {
   return parsed ?? {};
 }
 
+// The same call, without the die, for the one verb whose REFUSAL carries what the operator needs to
+// read. `tenant remove` answering "the container is still running" comes back as a 409 with the
+// effects that did land and the command that finishes the job; dying on the status would print one
+// sentence and throw the rest away.
+async function apiRaw(method, pathname, body) {
+  if (!config.adminToken) die("CP_ADMIN_TOKEN is not set. It is the operator password for this service.");
+  const init = { method, headers: { authorization: `Bearer ${config.adminToken}`, accept: "application/json" } };
+  if (body !== undefined) { init.headers["content-type"] = "application/json"; init.body = JSON.stringify(body); }
+  let response;
+  try { response = await fetch(`${BASE}${pathname}`, init); }
+  catch (error) { die(`could not reach the control plane at ${BASE}: ${String(error?.message ?? error)}`); }
+  const text = await response.text();
+  let parsed = null;
+  if (text.length > 0) { try { parsed = JSON.parse(text); } catch { parsed = { message: text.slice(0, 400) }; } }
+  return { status: response.status, ok: response.ok, body: parsed ?? {} };
+}
+
 // One space of gutter always, even when the value is wider than the column. Without it a box name
 // that fills its column runs straight into the next one, which is what
 // "titanbot-box-atonqjq7zx593jsacaccpfaurunning" was.
 const pad = (value, width) => `${String(value ?? "").padEnd(width - 1)} `;
 
-// One line adds a customer: the account, the workspace name from the company name, and the box.
+// One line adds a customer: the account, the workspace name from the company name, the box, the
+// bots' addresses and the welcome mail.
 //
-// The company name is every positional after the email joined back up, so quoting it is optional:
+// ADMIN-2b, NARROWED BY ONBOARD-2. This used to POST /v1/signups, the self-serve door, which made
+// the workspace and stopped there. The console's Add a client runs a different, longer sequence, and
+// two paths that both "add a customer" and do different amounts of it is how Richard ended up with a
+// welcome mail sent by a hand-run script. So this now posts to POST /v1/admin/clients, the SAME
+// sequence the console runs, and watches the same five steps go by. POST /v1/signups stays where it
+// is as the self-serve door, off in production, and it sends no welcome.
+//
+// The company name is every positional after the email joined back up, so quoting is optional:
 // `signup add jane@acme.com Acme Roofing` and `signup add jane@acme.com "Acme Roofing"` are the
-// same command. The password is prompted, never an argument, for the reason at the top of this
-// file.
+// same command. THERE IS NO PASSWORD PROMPT any more: the sequence mints a temporary one and hands
+// it back in the first answer, before any waiting, so nothing that happens to the box or the mail
+// can lose it.
 async function signupAdd(args) {
   const [email, ...rest] = positional(args);
   const company = rest.join(" ").trim();
-  if (!email || company.length === 0) die("usage: node cp/cli.mjs signup add <email> <company> [--name \"Jane Doe\"]");
+  if (!email || company.length === 0) die("usage: node cp/cli.mjs signup add <email> <company> [--name \"Jane Doe\"] [--no-welcome] [--welcome-to <address>] [--ceiling 40] [--model <alias>]");
   const name = flag(args, "--name") ?? "";
-  const password = await readPassword();
-  const answer = await api("POST", "/v1/signups", { email, password, company, name });
-  out(`added ${answer.account.email} on workspace ${answer.tenant.slug}`);
-  out(`they sign in at ${answer.signIn}`);
-  out(answer.message);
+  const welcome = !hasFlag(args, "--no-welcome");
+  const welcomeTo = flag(args, "--welcome-to") ?? "";
+  const ceiling = Number(flag(args, "--ceiling") ?? "") || undefined;
+  const model = flag(args, "--model") ?? undefined;
+
+  const started = await api("POST", "/v1/admin/clients", {
+    email, company, name, welcome, ...(welcomeTo ? { welcomeTo } : {}), ...(ceiling ? { ceiling } : {}), ...(model ? { model } : {}),
+  });
+  const slug = started?.tenant?.slug ?? started?.slug ?? "";
+  out(`added ${started?.account?.email ?? email} on workspace ${slug}`);
+  // FIRST, and on its own line, because everything below this can time out and this cannot be asked
+  // for again: the hash is scrypt and nobody can read it back.
+  if (started?.temporaryPassword) {
+    out("");
+    out(`temporary password: ${started.temporaryPassword}`);
+    out("that is the only time this is shown. Write it down before anything else.");
+    out("");
+  }
+  if (started?.signIn) out(`they sign in at ${started.signIn}`);
+
+  // The five steps, printed as they land. The route answered 202 the moment the rows existed, so
+  // this is a read of the ledger and nothing here is doing the work.
+  await followOnboarding(slug);
+}
+
+// The poll behind `signup add`, and the same one the console's card runs. Every 2 s for the first
+// minute and every 5 s after that, to a 10 minute ceiling, because a server that has never pulled
+// the image takes minutes and a customer's workspace must not be abandoned at 90 seconds.
+async function followOnboarding(slug, { ceilingMs = 600_000 } = {}) {
+  if (String(slug ?? "").length === 0) return;
+  const started = Date.now();
+  const printed = new Map();
+  for (;;) {
+    const state = await api("GET", `/v1/admin/clients/${encodeURIComponent(slug)}/onboarding`);
+    for (const step of Array.isArray(state?.steps) ? state.steps : []) {
+      const line = `${pad(step.status, 10)}${step.label ?? step.name}${step.detail ? ` -- ${step.detail}` : ""}`;
+      if (printed.get(step.name) === line) continue;
+      printed.set(step.name, line);
+      if (step.status !== "waiting") out(`  ${line}`);
+    }
+    if (state?.done === true || state?.status === "failed" || state?.status === "stopped") {
+      if (state?.message) out(state.message);
+      if (state?.status === "failed" || state?.status === "stopped") process.exitCode = 1;
+      return;
+    }
+    const waited = Date.now() - started;
+    if (waited > ceilingMs) {
+      out(`still going after ${Math.round(waited / 1000)}s. It carries on without this command; watch it on the Clients panel.`);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, waited < 60_000 ? 2_000 : 5_000));
+  }
+}
+
+// ONBOARD-2 item 3. Removing a customer, for a test or for churn.
+//
+// The name is typed twice on purpose, the same way `account remove` asks for the email: this closes
+// every door a company has, retires their bots' addresses for ever and can delete their files.
+//
+// It exits NON-ZERO on the one state that matters, `container_still_there`: Coolify answered 200,
+// forgot the service and left titanbot-box-<uuid> running with the customer's gateway token. That is
+// not a removal and a script that carried on from it would be lying to whatever runs it next.
+async function tenantRemove(args) {
+  const [slug] = positional(args);
+  if (!slug) die("usage: node cp/cli.mjs tenant remove <slug> [--delete-data] [--yes]");
+  const deleteData = hasFlag(args, "--delete-data");
+  if (!hasFlag(args, "--yes")) {
+    out(`This removes the workspace ${slug}: its container, its sign-ins, and its bots' email addresses for ever.`);
+    out(deleteData
+      ? "--delete-data is set, so everything they made is deleted too and cannot be recovered."
+      : "Their files are kept. Nothing deletes them on a timer.");
+    const typed = await promptLine(`Type the workspace name to confirm (${slug}): `);
+    if (typed.trim() !== slug) die("that is not the workspace name, nothing was done");
+  }
+  const answer = await apiRaw("DELETE", `/v1/admin/clients/${encodeURIComponent(slug)}`, { confirm: slug, deleteData });
+  for (const effect of Array.isArray(answer.body?.effects) ? answer.body.effects : []) {
+    out(`  ${pad(effect.status, 12)}${effect.step}${effect.detail ? ` -- ${effect.detail}` : ""}`);
+  }
+  out(String(answer.body?.message ?? `the control plane answered ${answer.status}`));
+  // Non-zero on anything that is not a finished removal, and loudest on the one that matters:
+  // Coolify answered 200, forgot the service, and left the container running with the customer's
+  // gateway token. Whatever runs next must not believe this workspace is gone.
+  if (!answer.ok || answer.body?.ok === false) {
+    if (answer.body?.status === "container_still_there") {
+      out("The workspace row was LEFT IN PLACE on purpose, so this is visible and can be finished.");
+    }
+    process.exitCode = 1;
+  }
 }
 
 async function accountAdd(args) {
@@ -1357,7 +1489,7 @@ function marketplaceSayRecord(record) {
 }
 
 const USAGE = [
-  "node cp/cli.mjs signup add <email> <company> [--name \"Jane Doe\"]",
+  "node cp/cli.mjs signup add <email> <company> [--name \"Jane Doe\"] [--no-welcome] [--welcome-to <address>] [--ceiling 40] [--model <alias>]",
   "node cp/cli.mjs account add <email> <tenant> [--name \"Jane Doe\"]",
   "node cp/cli.mjs account list",
   "node cp/cli.mjs account remove <email>",
@@ -1367,6 +1499,7 @@ const USAGE = [
   "node cp/cli.mjs tenant list",
   "node cp/cli.mjs tenant orphans",
   "node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>]",
+  "node cp/cli.mjs tenant remove <slug> [--delete-data] [--yes]",
   "node cp/cli.mjs proxy list",
   "node cp/cli.mjs proxy mint <slug|--all>",
   "node cp/cli.mjs proxy rotate <slug|--all>",
@@ -1387,6 +1520,7 @@ const USAGE = [
   "node cp/cli.mjs mail senders <slug> | allow <slug> <address> | only <slug> on|off",
   "node cp/cli.mjs mail sends <slug>",
   "node cp/cli.mjs mail sweep",
+  "node cp/cli.mjs mail welcome-reply-to [<address>]",
   "node cp/cli.mjs voice policy <slug>",
   "node cp/cli.mjs voice cap <slug> --day-minutes N [--session-minutes N] [--vendors xai,openai|none]",
   "node cp/cli.mjs voice usage [<slug>] [--day YYYY-MM-DD]",
@@ -1409,7 +1543,9 @@ const USAGE = [
   "node cp/cli.mjs marketplace verify [--row <id>] [--fixtures] [--write]",
   "node cp/cli.mjs session verify <token>",
   "",
-  "signup add is the one line that adds a customer: account, workspace and box.",
+  "signup add is the one line that adds a customer: account, workspace, box, the bots' addresses and the welcome mail. It runs the SAME sequence the console's Add a client runs, and prints the temporary password once, first.",
+  "tenant remove closes every door a company has and retires their bots' addresses for ever. It exits non-zero if the container is still running after Coolify said the service was gone.",
+  "mail welcome-reply-to runs in the control plane container, because it writes that service's own setting. Every other mail verb goes over the api.",
   "proxy mint, rotate, revoke, limits, migrate and rollback run in this container: they read the tenant root and CP_PROXY_MASTER_KEY.",
   "proxy providers, seed, key, model, catalog and default-model go over the api, so they keep the same rules the console keeps and write the same record.",
   "a provider key is never an argument. These read it from the terminal with the echo off, or from stdin.",
@@ -1712,6 +1848,41 @@ async function askMessages(model, key, body, timeoutMs) {
 }
 
 
+// ---- the welcome mail's reply address (ONBOARD-2) ----------------------------------------------
+//
+// The one setting the welcome mail takes from the operator, and deliberately ABOVE the mail section
+// below, beside the proxy verbs, because it has their constraint and not the directory's: it reads
+// and writes the control plane's own sqlite, so it RUNS IN THE CONTROL PLANE CONTAINER. The mail
+// DIRECTORY verbs go over HTTP because the answer they want lives in a service that is somewhere
+// else; this one writes the service's own row, and there is no route for it yet (the console control
+// belongs to the settings wave, filed as ONBOARD-5).
+//
+// The default is support@titaniumcomputing.com and not support@titanium.bot, which is worth one
+// sentence: titanium.bot sends mail today and does not yet RECEIVE it, and a reply address nobody
+// reads is worse than one on the wrong brand. The day inbound is on for titanium.bot this is a
+// one-line change.
+export const WELCOME_REPLY_TO_SETTING = "mail.welcome.replyTo";
+export const WELCOME_REPLY_TO_DEFAULT = "support@titaniumcomputing.com";
+
+async function mailWelcomeReplyTo(args) {
+  const [address] = positional(args);
+  const store = openLedger();
+  try {
+    if (!address) {
+      const current = store.getSetting(WELCOME_REPLY_TO_SETTING, "");
+      out(current.length > 0
+        ? `the welcome mail asks people to reply to ${current}`
+        : `the welcome mail asks people to reply to ${WELCOME_REPLY_TO_DEFAULT} (the built-in default; nothing has been set)`);
+      out("a customer who presses reply on their welcome lands there, so it has to be an address somebody reads");
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) die(`${address} is not an email address, nothing was changed`);
+    store.setSetting(WELCOME_REPLY_TO_SETTING, address, "the operator, from cp/cli.mjs");
+    out(`the welcome mail now asks people to reply to ${address}`);
+    out("it takes on the next welcome sent; nothing already delivered changes");
+  } finally { store.close(); }
+}
+
 // The MAIL section follows, and tests/cp-mail.test.mjs reads this file as TEXT from
 // `async function mailList` to the dispatch table and asserts that nothing in that span opens the
 // sqlite store. That is a real rule (a mail verb that opened the store answered "nothing sent yet"
@@ -1973,6 +2144,7 @@ const commands = {
   "tenant list": tenantList,
   "tenant orphans": tenantOrphans,
   "tenant adopt": tenantAdopt,
+  "tenant remove": tenantRemove,
   "proxy list": proxyList,
   "proxy mint": proxyMint,
   "proxy rotate": proxyRotate,
@@ -1993,6 +2165,7 @@ const commands = {
   "mail only": mailOnly,
   "mail sends": mailSends,
   "mail sweep": mailSweep,
+  "mail welcome-reply-to": mailWelcomeReplyTo,
   "voice policy": voicePolicy,
   "voice cap": voiceCap,
   "voice usage": voiceUsage,

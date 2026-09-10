@@ -114,6 +114,7 @@ import "./cp-session.test.mjs";
 import "./cp-store.test.mjs";
 import "./cp-providers.test.mjs";
 import "./cp-provision.test.mjs";
+import "./cp-remove.test.mjs";
 import "./cp-proxy.test.mjs";
 import "./cp-server.test.mjs";
 // ADMIN-2. Adding a client from the console, and the rule that holds it to the same refusals the

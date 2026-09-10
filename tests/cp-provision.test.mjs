@@ -493,9 +493,16 @@ test("the box answering for itself beats Coolify's opinion of it", async () => {
     intervalMs: 10,
   });
   // A 401 is an answer: something is listening on that port, which is the question being asked.
+  // source/host/main.ts awaits host.start() before it binds 1340, so anything answering there means
+  // the host booted and Titan exists.
   assert.equal(verdict.ready, true);
   assert.equal(verdict.how, "gateway");
-  assert.deepEqual(asked, ["http://titanbot-box-svc-1:1340/api/health Bearer a-token"]);
+  // /health, not /api/health. The bundle does not serve /api/health (measured 404 on the live one),
+  // and the relay's own per-tenant health proxy asks ${gateway}/health (ui/server.mjs:4444).
+  assert.deepEqual(asked, ["http://titanbot-box-svc-1:1340/health Bearer a-token"]);
+  // And the status it got is carried out, so a reader can tell a real 200 from an answer that only
+  // proved the socket was open.
+  assert.equal(verdict.status, 401);
 });
 
 test("with no box to probe the wait falls back to Coolify and then gives up in words", async () => {

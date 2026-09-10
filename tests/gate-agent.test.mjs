@@ -109,6 +109,7 @@ const NO_LIVE_LOGIN_DOOR = new Map([
   ["verify-console-polish.mjs", "reads with a bearer; the word login is in a message about being bounced to one"],
   ["verify-job-bus.mjs", "checks that an unauthenticated call is bounced to /login and never posts a password"],
   ["verify-admin.mjs", "drives a control plane and a relay it starts itself, on a throwaway data directory"],
+  ["verify-onboard.mjs", "the sign-in link it reads out of a captured welcome is exercised against a fake relay it starts on 127.0.0.1; nothing it touches is a live door"],
 ]);
 
 test("no other gate reaches a login door without saying its own name at it", () => {
