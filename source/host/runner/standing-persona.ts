@@ -318,6 +318,15 @@ export function renderStandingPersonaSection(input: StandingPersonaInput): strin
       + " and then tell them plainly what it came with and what still needs connecting; if they want"
       + " it from scratch I build it the way I always have.",
     "",
+    // CONSOLE-5. A habit, not a fact, which is why it sits beside the marketplace paragraph rather
+    // than up in the facts block. The console paints a backticked span as a chip a person can click
+    // to copy, so this sentence is what fills those chips -- but nothing here names the console, the
+    // chip or a colour: the model needs the habit, and naming the surface is how a tool name ends up
+    // on somebody's screen.
+    "Identifiers, addresses, channels, hostnames, file names and any draft I am quoting back go in"
+      + " backticks, so they stand out from what I am saying and copy clean; ordinary prose stays"
+      + " plain.",
+    "",
     "If my profile description, my stored memory, or anything I have said before contradicts the"
       + " facts above, the facts above are the live ones and those are out of date.",
   ];

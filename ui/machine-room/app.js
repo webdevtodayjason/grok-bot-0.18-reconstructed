@@ -1494,7 +1494,10 @@
   // introduce a tag the escape did not already remove.
   function inlineMarkup(line) {
     return escapeHtml(line)
-      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      // CONSOLE-5: a backticked span is a chip a person can copy, not just monospace text. The
+      // class is what the stylesheet hangs on; role and tabindex are what put the copy within
+      // reach of a keyboard, and the delegated keydown handler further down answers them.
+      .replace(/`([^`]+)`/g, '<code class="code-chip" tabindex="0" role="button" aria-label="Copy this">$1</code>')
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
   }
@@ -1531,6 +1534,79 @@
     closeList();
     return html;
   }
+
+  // CONSOLE-5, the copy. Everything below here is deliberately AFTER paragraphMarkup's closing
+  // brace: tests/machine-room-markdown.test.mjs and tests/machine-room-files.test.mjs both lift the
+  // renderer out of this file by slicing from "  function inlineMarkup(line) {" to the first
+  // "\n  }\n" after "  function paragraphMarkup(text) {", so a helper wedged between the two would
+  // be pulled into their sandbox and both loaders would break.
+  const CHIP_TICK_MS = 1200;
+
+  // A screen reader hears the tick because the tick itself is generated content, which not every
+  // reader announces. One polite region, made once, off screen, shared by every chip.
+  let chipSpeaker = null;
+  function announceChipCopy(said) {
+    if (!chipSpeaker) {
+      chipSpeaker = document.createElement("div");
+      chipSpeaker.className = "chip-copy-live";
+      chipSpeaker.setAttribute("role", "status");
+      chipSpeaker.setAttribute("aria-live", "polite");
+      document.body.appendChild(chipSpeaker);
+    }
+    // Set NOW when the word is changing, because a region that is empty for even a frame is a
+    // region something else can read as nothing said -- the gate caught exactly that. Only a repeat
+    // needs the clear first, since a reader announces a change and the same identifier copied twice
+    // in a row is the ordinary case.
+    if (chipSpeaker.textContent === said) {
+      chipSpeaker.textContent = "";
+      window.setTimeout(() => { if (chipSpeaker) chipSpeaker.textContent = said; }, 30);
+      return;
+    }
+    chipSpeaker.textContent = said;
+  }
+
+  // navigator.clipboard needs a secure context. https and 127.0.0.1 have one; a relay reached over
+  // plain http on a LAN address does not, and there the promise never arrives. This is the fallback
+  // the composer's own paste path uses, and it works in both.
+  function copyThroughSelection(text) {
+    try {
+      const pad = document.createElement("textarea");
+      pad.value = text;
+      pad.setAttribute("readonly", "readonly");
+      pad.style.cssText = "position:fixed;top:0;left:-9999px;opacity:0";
+      document.body.appendChild(pad);
+      pad.select();
+      const done = document.execCommand("copy");
+      pad.remove();
+      return done === true;
+    } catch { return false; }
+  }
+
+  function markChipCopied(chip, ok) {
+    const flag = ok ? "data-copied" : "data-copy-failed";
+    chip.setAttribute(flag, "");
+    window.setTimeout(() => chip.removeAttribute(flag), CHIP_TICK_MS);
+    // Said, not shouted: no global toast for a copy the person just asked for by clicking the
+    // thing they wanted. The failure says what happened rather than showing a tick that lied.
+    announceChipCopy(ok ? "Copied" : "This browser would not let the page copy that");
+  }
+
+  function copyCodeChip(chip) {
+    // textContent, never a data attribute: escapeHtml runs before the backtick pass, so the markup
+    // holds &amp; and &lt; while textContent is the original the agent wrote.
+    const text = chip?.textContent ?? "";
+    if (!text) return;
+    const fallback = () => markChipCopied(chip, copyThroughSelection(text));
+    if (navigator.clipboard?.writeText) {
+      Promise.resolve(navigator.clipboard.writeText(text))
+        .then(() => markChipCopied(chip, true), fallback);
+      return;
+    }
+    fallback();
+  }
+
+  const chipFromEvent = (event) => event.target?.closest?.("code.code-chip") ?? null;
+  const isActivationKey = (event) => event.key === "Enter" || event.key === " " || event.key === "Spacebar";
 
 
   const DECISION_ACTIONS = {
@@ -6667,6 +6743,10 @@
         .catch((error) => { secret.disabled = false; showToast(`That credential was not stored: ${error.message}`); });
       return;
     }
+    // CONSOLE-5. Ahead of the decide branch: a chip drawn inside a card's own request sentence
+    // would otherwise fall through and be read as a press on the card.
+    const chip = chipFromEvent(event);
+    if (chip) { copyCodeChip(chip); return; }
     const action = event.target.closest("[data-decide]");
     if (!action) return;
     // No toast: the card itself reports what the host did, once the host has done it.
@@ -6677,7 +6757,11 @@
   // without this it was a focusable control that did nothing on Enter or Space. The evidence chip
   // is a real <button>, whose native activation already fires the click handler above.
   elements.transcript.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
+    if (!isActivationKey(event)) return;
+    // CONSOLE-5: the chip carries tabindex="0" and role="button", so a focusable control that did
+    // nothing on Enter would be exactly the bug this listener was written to fix.
+    const chip = chipFromEvent(event);
+    if (chip) { event.preventDefault(); copyCodeChip(chip); return; }
     const evidence = event.target.closest?.("[data-evidence]");
     if (evidence && evidence.tagName === "BUTTON") return;
     const exchange = evidence ? null : event.target.closest?.("[data-exchange]");
@@ -6685,6 +6769,22 @@
     event.preventDefault();
     if (evidence) openEvidenceViewer(evidence.dataset.messageId);
     else openExchangeViewer(exchange.dataset.messageId);
+  });
+
+  // CONSOLE-5: the files viewer draws a markdown file through this same renderer (files-viewer.js
+  // pulls paragraphMarkup off window.__mrUi), so chips appear inside the panel too. They copy there
+  // as well. The alternative was a chip that carries role="button" in one place and is inert in the
+  // other, which is a control that lies to a keyboard.
+  elements.panelContent.addEventListener("click", (event) => {
+    const chip = chipFromEvent(event);
+    if (chip) copyCodeChip(chip);
+  });
+  elements.panelContent.addEventListener("keydown", (event) => {
+    if (!isActivationKey(event)) return;
+    const chip = chipFromEvent(event);
+    if (!chip) return;
+    event.preventDefault();
+    copyCodeChip(chip);
   });
 
   document.querySelectorAll("[data-capability]").forEach((button) => button.addEventListener("click", () => {

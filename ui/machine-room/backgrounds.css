@@ -163,15 +163,9 @@ html[data-demo="true"] .app-shell { outline: 2px solid #ff4d6a; outline-offset: 
 /* SHOT-2: the marker was a hardcoded white at 45%, which is dim on ink and all but gone on the
    mist card. It takes the theme's own secondary text colour instead, in both themes. */
 .message-bubble li::marker { color: var(--text-secondary); }
-.message-bubble code {
-  padding: 1px 5px;
-  border-radius: 5px;
-  font: 0.92em ui-monospace, SFMono-Regular, Menlo, monospace;
-  background: rgba(255, 255, 255, 0.10);
-}
-
-/* A white wash behind code is invisible on the mist card; the same idea in ink. */
-[data-theme="mist"] .message-bubble code { background: rgba(30, 39, 43, 0.09); }
+/* CONSOLE-5 took the two code rules that stood here -- a white wash in ink and its mist twin. This
+   file loads after styles.css, so leaving them would have been two rules arguing over one element
+   with the later one winning by accident. The chip owns the element now: styles.css, code.code-chip. */
 .message-bubble p + p,
 .message-bubble p + ul,
 .message-bubble p + ol,

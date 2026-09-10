@@ -99,13 +99,10 @@
   margin-top: 0;
 }
 
-.file-viewer-markdown code {
-  padding: 1px 5px;
-  border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.08);
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
+/* CONSOLE-5 took this file's own code rule. The viewer renders markdown through app.js's
+   paragraphMarkup, so every <code> in here is the same chip the transcript draws, and it copies in
+   here too -- app.js binds the copy handler to the panel as well as the transcript. One rule, one
+   look, one behaviour, rather than a chip that is pressable in one place and inert in the other. */
 
 /* Wrapped, not scrolled sideways. A log line is read by a person, and a horizontal scrollbar
    inside a modal is a line nobody reads the end of. */
