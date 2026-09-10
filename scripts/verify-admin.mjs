@@ -46,7 +46,7 @@
 //   ceiling     AGENTS-CAP-2: the clients panel reads the number off the box, 0, 5000, "forty",
 //               2.5 and null are each refused in a sentence and never reach the box, a write
 //               answers with what the box read back, and a pin reports a pin and not a success
-//   page        headless Chrome signs in at /admin and the nine panels are walked one at a time
+//   page        headless Chrome signs in at /admin and the ten panels are walked one at a time
 //               through the rail: each opens from its own hash, is the only one on screen, does not
 //               push the document past 900 px at 1440x900, and still carries every control it had
 //               (ADMIN-3). The rail is reachable by Tab and by the pointer, and a cold load at a
@@ -77,7 +77,7 @@
 //
 //   node scripts/verify-admin.mjs
 //   node scripts/verify-admin.mjs --no-browser     the API legs only
-//   CP_GATE_SHOT_DIR=... node scripts/verify-admin.mjs   and a 1440x900 picture of each of the nine
+//   CP_GATE_SHOT_DIR=... node scripts/verify-admin.mjs   and a 1440x900 picture of each of the ten
 //
 // Env: CP_GATE_PORT, CP_GATE_FAKE_PORT, CP_GATE_RELAY_PORT, CP_GATE_GITHUB_PORT to pin ports instead of taking free
 //      ones; CP_GATE_TIMEOUT_MS for the boot wait (default 20000); GROK_BOT_PLAYWRIGHT_DIR for the
@@ -2000,18 +2000,24 @@ if (!WANT_BROWSER) {
   const live = await page.evaluate(() => window.__adminLive ?? null);
   check(live != null, "the super admin gets in and the page finishes loading", live ? `${live.panels} panels at ${live.at}` : "no readiness flag");
 
-  // ---- ADMIN-3: nine panels, one on screen, and a page that never scrolls -----------------------
+  // ---- ADMIN-3: ten panels, one on screen, and a page that never scrolls ------------------------
   //
-  // Nine since the Overview landed, and eight loaders, which are deliberately different numbers: the
-  // Overview fetches nothing and is drawn from what the eight registered. The readiness flag counts
-  // LOADERS, because that is the thing a gate has to wait for.
+  // Ten since KEYS-2, and still eight loaders, which are deliberately different numbers: two panels
+  // fetch nothing. The Overview is drawn from what the eight registered, and Keys is drawn by the
+  // System health loader out of the two answers it already had. The readiness flag counts LOADERS,
+  // because that is the thing a gate has to wait for.
   //
   // The old form of this leg asserted isVisible on all eight ids at once, which was right when they
-  // were stacked and is seven guaranteed failures now. Each panel is opened by its own hash instead,
+  // were stacked and is nine guaranteed failures now. Each panel is opened by its own hash instead,
   // which is also the check that a pasted link opens a panel.
+  //
+  // THE LIST IS THE LEG. Adding an id here extends the hash walk, the only-one-on-screen check, the
+  // document-height and sideways checks, the rail's pointer and Tab legs, and the final em dash
+  // sweep. It does not extend the PROSE, which is why the counts above and at the foot of this file
+  // were edited by hand in the same pass.
   const panels = [
     "panel-overview", "panel-signins", "panel-clients", "panel-boxes", "panel-system",
-    "panel-spend", "panel-providers", "panel-feedback", "panel-marketplace",
+    "panel-keys", "panel-spend", "panel-providers", "panel-feedback", "panel-marketplace",
   ];
 
   // What each panel had before this wave and must still have. Presence, not visibility: several of
@@ -2022,10 +2028,12 @@ if (!WANT_BROWSER) {
     "panel-signins": ["#hours", "#outcome", "#signInsNote", "#addresses", "#accounts", "#attempts"],
     "panel-clients": ["#clients", "#addClientShow", "#addClientForm", "#acEmail", "#acCompany", "#acCeiling", "#acWelcome"],
     "panel-boxes": ["#boxes"],
-    // KEYS-1 appends one block to System health: the three keys the PRODUCT uses. It is drawn in
-    // script rather than written into cp/admin/index.html, so it belongs in this list like every
-    // other control the panel had before.
-    "panel-system": ["#system", "#productKeys"],
+    // KEYS-2 took both appended blocks off this panel and left one pointer in their place. What is
+    // still System health's own is the cards div, which is written in the page file.
+    "panel-system": ["#system"],
+    // KEYS-2. The container is in cp/admin/index.html; both blocks in it are drawn in script by the
+    // System health loader, so they belong in this list like every other control a panel carries.
+    "panel-keys": ["#keys", "#productKeys", "#pushDoors"],
     "panel-spend": ["#spend", "#spendNote", "#panel-spend .placeholder"],
     "panel-providers": [
       "#providersNote", "#providers", "#addProviderShow", "#addProviderForm", "#planModels",
@@ -2103,13 +2111,19 @@ if (!WANT_BROWSER) {
   }
   check((await page.locator(".panel").count()) === panels.length, `${panels.length} panels and no more`, String(await page.locator(".panel").count()));
 
-  // ---- KEYS-1: the keys the product uses -------------------------------------------------------
+  // ---- KEYS-1 and KEYS-2: the keys the product uses, on the panel they are now on ---------------
   //
   // The block that took two vendor keys off every customer's screen. What is measured is that it is
   // THERE, that it says "not set" on a control plane where nobody has pasted anything, that each row
-  // offers a password field rather than a plain one, and that nothing about the rail moved: this is
-  // an additive block appended in script, and a nav change would be somebody else's wave.
-  await openPanel("panel-system");
+  // offers a password field rather than a plain one, and that the rail carries one entry per panel.
+  //
+  // KEYS-2 moved this leg from System health to Keys, because that is the move: Jason, 2026-09-10
+  // 16:34, on the live console, "I didn't see a section to put it in". The block drew the whole time.
+  // It sat 1381 px down inside System health's own scroller, under the two phone forms, on a page
+  // whose document measured exactly the height of the window, so nothing said there was more below.
+  // The reach leg under the block checks is the one that would have caught it: the xAI field has to
+  // be on the panel's FIRST screen with the panel unscrolled.
+  await openPanel("panel-keys");
   {
     const keys = await page.evaluate(() => {
       const block = document.getElementById("productKeys");
@@ -2124,7 +2138,7 @@ if (!WANT_BROWSER) {
         prefilled: Array.from(block.querySelectorAll("input")).filter((one) => String(one.value).length > 0).length,
       };
     });
-    check(keys != null, "the Keys the product uses block is on System health");
+    check(keys != null, "the Keys the product uses block is on the Keys panel");
     check(keys?.heading === "Keys the product uses", "under its own heading", String(keys?.heading));
     check(keys?.rows.length === 3, "with one row per key the product uses", (keys?.rows ?? []).join(", "));
     check((keys?.states ?? []).filter((line) => /^Not set\./.test(line)).length === 3,
@@ -2133,9 +2147,79 @@ if (!WANT_BROWSER) {
       `${keys?.secretFields} password, ${keys?.plainFields} plain`);
     check(keys?.prefilled === 0, "with nothing pre-filled, because this page never writes a value back into a field");
     const railNow = await page.evaluate(() => Array.from(document.querySelectorAll(".rail a")).map((one) => one.getAttribute("href")));
-    check(railNow.length === panels.length, "and the rail is untouched by it", railNow.join(" "));
+    check(railNow.length === panels.length, "and the rail carries one entry per panel and no more", railNow.join(" "));
+
+    // KEYS-2, THE ORDER. Both blocks end in host.parentNode.appendChild, so call order is paint
+    // order, and the keys are what the operator opened this panel for. If somebody swaps the two
+    // calls the xAI field goes back under Apple's paste-the-whole-file textarea, which is most of
+    // what KEYS-2 was.
+    const order = await page.evaluate(() => {
+      const keysBlock = document.getElementById("productKeys");
+      const pushBlock = document.getElementById("pushDoors");
+      if (keysBlock == null || pushBlock == null) return null;
+      return {
+        keysFirst: (keysBlock.compareDocumentPosition(pushBlock) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+        inPanel: keysBlock.closest("#panel-keys") != null && pushBlock.closest("#panel-keys") != null,
+      };
+    });
+    check(order?.inPanel === true, "both paste blocks are inside the Keys panel and not left on another one");
+    check(order?.keysFirst === true, "and the three keys the product uses are drawn above the two phone credentials");
+
+    // KEYS-2, THE WHOLE POINT. The field Jason could not find has to be on the first screen of the
+    // panel with the panel unscrolled, measured against the PANEL's own scroller and not the
+    // document's: the document on this page is always exactly one window tall, which is why it said
+    // nothing about whether anything was reachable.
+    const reach = await page.evaluate(() => {
+      const panel = document.getElementById("panel-keys");
+      const field = document.getElementById("keys-voice-xai-value");
+      if (panel == null || field == null) return null;
+      panel.scrollTop = 0;
+      const box = panel.getBoundingClientRect();
+      const at = field.getBoundingClientRect();
+      return {
+        id: field.id,
+        bottom: Math.round(at.bottom),
+        firstScreen: Math.round(box.top + panel.clientHeight),
+        into: Math.round(at.top - box.top),
+        window: panel.clientHeight,
+        content: panel.scrollHeight,
+      };
+    });
+    check(reach != null, "the xAI paste field is on the Keys panel under the id the form gives it",
+      reach ? reach.id : "keys-voice-xai-value is not on the page");
+    check(reach != null && reach.bottom <= reach.firstScreen,
+      "and it is on the panel's first screen with the panel unscrolled, which is the whole of KEYS-2",
+      reach ? `it ends at ${reach.bottom} px, the first screen ends at ${reach.firstScreen} px, ${reach.into} px into ${reach.content} px of content in a ${reach.window} px window` : "");
+    const reachWhy = reach == null ? "there is no such element" : await hittable("#keys-voice-xai-value");
+    check(reachWhy === "", "and it is what is really under the pointer at its own centre", reachWhy);
   }
   check(live?.panels === 8, "and the readiness flag says eight loaders ran, which is a different number on purpose", String(live?.panels));
+
+  // KEYS-2, THE POINTER. System health lost both blocks, so it says where they went. Static markup in
+  // cp/admin/index.html, named here so a delete of it fails this gate rather than stranding an
+  // operator on the panel the two blocks used to sit at the foot of.
+  await openPanel("panel-system");
+  const pointer = await page.evaluate(() => {
+    const link = document.querySelector("#panel-system p.quiet a");
+    if (link == null) return null;
+    return {
+      href: String(link.getAttribute("href") ?? ""),
+      label: String(link.textContent ?? "").trim(),
+      sentence: String(link.parentElement?.textContent ?? "").replace(/\s+/g, " ").trim(),
+      colour: getComputedStyle(link).color,
+    };
+  });
+  check(pointer != null, "System health carries a line saying where the keys went");
+  check(pointer?.href === "#panel-keys", "and it links to the Keys panel", String(pointer?.href));
+  check(/Keys/.test(String(pointer?.label)), "and the link is the word a person would press", String(pointer?.label));
+  check(/moved/.test(String(pointer?.sentence)), "and the sentence says they moved rather than that they are gone",
+    String(pointer?.sentence));
+  // Not decoration. admin.css has no generic anchor rule, so an unstyled link here paints the
+  // browser's default blue on a dark ground and reads as a rendering fault.
+  check(pointer?.colour !== "rgb(0, 0, 238)" && /^rgb/.test(String(pointer?.colour)),
+    "and it is painted in this console's own link colour rather than the browser's default blue", String(pointer?.colour));
+  const pointerWhy = await hittable("#panel-system p.quiet a");
+  check(pointerWhy === "", "and the link is what is under the pointer at its own centre", pointerWhy);
 
   // ---- the rail, as a person uses it ------------------------------------------------------------
   for (const id of panels) {
@@ -2155,10 +2239,11 @@ if (!WANT_BROWSER) {
   check(await page.locator('.rail a[href="#panel-boxes"]').getAttribute("aria-current") === "page",
     "and the rail says which one you are on, in a way a screen reader can read too");
 
-  // Reachable by keyboard, which for nine plain anchors means Tab and nothing of our own.
+  // Reachable by keyboard, which for ten plain anchors means Tab and nothing of our own. The bound is
+  // off the list rather than a number somebody has to remember to raise with it.
   await page.evaluate(() => document.getElementById("signout").focus());
   const tabbed = [];
-  for (let i = 0; i < 14 && tabbed.length < panels.length; i += 1) {
+  for (let i = 0; i < panels.length + 5 && tabbed.length < panels.length; i += 1) {
     await page.keyboard.press("Tab");
     const href = await page.evaluate(() => {
       const node = document.activeElement;
@@ -2181,6 +2266,43 @@ if (!WANT_BROWSER) {
   check(stacked.above, "on a narrow screen the rail is a strip above the panel and not a column beside it");
   check(stacked.tall <= 844, "and the page still does not scroll", `${stacked.tall} px`);
   check(await page.locator('.rail a[href="#panel-marketplace"]').isVisible(), "with every entry still reachable");
+
+  // KEYS-2 ON A PHONE. The claim that survives a 390 px screen is not "on the first screen", because
+  // at this width the three rows and the two phone forms are a column taller than any window. It is
+  // the claim the move actually made: the keys are the FIRST thing on the panel, so the field is what
+  // an operator lands on rather than something under two other forms. That is true at every width, so
+  // it is what is asserted, and the y it sits at is recorded beside it rather than asserted.
+  await openPanel("panel-keys");
+  const phoneKeys = await page.evaluate(() => {
+    const panel = document.getElementById("panel-keys");
+    const field = document.getElementById("keys-voice-xai-value");
+    if (panel == null || field == null) return null;
+    panel.scrollTop = 0;
+    const fields = Array.from(panel.querySelectorAll("input, textarea")).map((one) => one.id);
+    const box = panel.getBoundingClientRect();
+    const at = field.getBoundingClientRect();
+    return {
+      first: fields[0] === "keys-voice-xai-value",
+      fields: fields.length,
+      into: Math.round(at.top - box.top),
+      window: panel.clientHeight,
+      content: panel.scrollHeight,
+      tall: document.documentElement.scrollHeight,
+      over: panel.scrollWidth - panel.clientWidth,
+    };
+  });
+  check(phoneKeys?.first === true, "on a narrow screen the xAI key is still the first field on the Keys panel",
+    phoneKeys ? `${phoneKeys.fields} fields on the panel, ${phoneKeys.into} px into ${phoneKeys.content} px of content in a ${phoneKeys.window} px window` : "the panel or the field is not there");
+  check((phoneKeys?.tall ?? 9999) <= 844, "and the Keys panel does not scroll the page at 390x844", `${phoneKeys?.tall} px`);
+  check((phoneKeys?.over ?? 1) <= 0, "and it does not scroll sideways either, which is what .keyForm's 210 px inputs could do",
+    `${phoneKeys?.over} px over`);
+  // The panel walk at the foot of this file shoots every panel at 1440x900. This is the one size it
+  // never sees, and KEYS-2 is a claim about what is on a screen, so the phone gets a picture too.
+  if (process.env.CP_GATE_SHOT_DIR) {
+    const shot = path.join(process.env.CP_GATE_SHOT_DIR, "panel-keys-390.png");
+    await page.screenshot({ path: shot }).catch(() => {});
+    console.log(`  shot   ${shot}  ${phoneKeys?.tall} px tall in a 390x844 window`);
+  }
   await page.setViewportSize(VIEW);
 
   // A LINK STRAIGHT TO A PANEL. Not the same check as the hash walk above: this is a cold load, so
@@ -2792,7 +2914,7 @@ if (!WANT_BROWSER) {
   // ---- the whole console, panel by panel, after every write ---------------------------------------
   //
   // Read off the SCREEN and not out of the DOM. `innerText` is what is painted, and with one panel on
-  // screen at a time that means walking all nine: the two rules below are about what a person sees, so
+  // screen at a time that means walking all ten: the two rules below are about what a person sees, so
   // a textContent sweep would fail on an em dash inside a node nobody draws and pass on a page that
   // draws one in a panel it did not happen to open.
   const finalText = [];
@@ -2822,7 +2944,7 @@ if (!WANT_BROWSER) {
     String((wholePage.match(/LiteLLM/g) ?? []).length));
 
   // No em dashes anywhere on the screen. Jason's rule, and the panel is copy a business owner reads.
-  check(!wholePage.includes("—"), "no em dash on any of the nine panels");
+  check(!wholePage.includes("—"), "no em dash on any of the ten panels");
 
   check(pageErrors.length === 0, "and the page threw nothing", pageErrors.slice(0, 2).join(" | "));
   } catch (error) {
@@ -2936,7 +3058,7 @@ step("nothing leaked");
 // ---- out ------------------------------------------------------------------------------------------
 console.log("");
 if (failures === 0) {
-  console.log("PASS  the super admin console holds: the flag, the door, the ledger, the attack rule, nine panels behind a rail on a page that never scrolls, a client added and a duplicate refused, provider health that can go back to green, a duplicate provider removed, a provider key and a repository token that go in through the screen and come back out nowhere, the two gates on every report, and a ceiling read off the box.");
+  console.log("PASS  the super admin console holds: the flag, the door, the ledger, the attack rule, ten panels behind a rail on a page that never scrolls, the five paste forms on a Keys entry of their own with the first field on the first screen, a client added and a duplicate refused, provider health that can go back to green, a duplicate provider removed, a provider key and a repository token that go in through the screen and come back out nowhere, the two gates on every report, and a ceiling read off the box.");
 } else {
   console.log(`FAIL  ${failures} check${failures === 1 ? "" : "s"} did not hold.`);
   if (childLog.length > 0) {

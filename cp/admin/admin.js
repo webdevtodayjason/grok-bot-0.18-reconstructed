@@ -1,6 +1,6 @@
 // cp/admin/admin.js -- the super admin console's whole behaviour. ADMIN-1.
 //
-// No framework and no build step. It fetches eight routes, renders nine panels, and offers the named
+// No framework and no build step. It fetches eight routes, renders ten panels, and offers the named
 // actions below. The session token lives in sessionStorage and nowhere else: it dies with the tab,
 // it is never in a URL, and it is never written into a cookie, so nothing carries it to a route
 // that did not ask for it.
@@ -8,9 +8,11 @@
 // ADMIN-3 MADE IT A DASHBOARD. One panel is on screen at a time, a left rail names them and the URL
 // hash says which, so a link opens a panel. All eight loaders still run together on one Refresh:
 // the rail decides what is SHOWN, never what is fetched, because an operator who opens Box health
-// during an outage must not wait on a fetch that could have happened a second earlier. The ninth
-// panel, the Overview, costs no route at all -- every figure on it was already fetched for one of
-// the eight, and each loader hands its headline number to a registry the Overview draws from.
+// during an outage must not wait on a fetch that could have happened a second earlier. TWO of the
+// ten panels cost no route at all: the Overview, whose every figure was already fetched for one of
+// the eight and comes out of a registry each loader writes to, and Keys (KEYS-2), whose two blocks
+// are drawn by the System health loader that already fetched both their answers. So the numbers on
+// this page are ten panels and eight loaders, and they are different on purpose.
 //
 // PROVIDERS-1 ADDED THE ONE THING THIS PAGE HAD NEVER DONE: it takes a secret IN. Every panel
 // before it was read-only plus seven actions that carried no value, and the only secret that ever
@@ -116,7 +118,7 @@
 
   const PANELS = [
     "panel-overview", "panel-signins", "panel-clients", "panel-boxes", "panel-system",
-    "panel-spend", "panel-providers", "panel-feedback", "panel-marketplace",
+    "panel-keys", "panel-spend", "panel-providers", "panel-feedback", "panel-marketplace",
   ];
 
   const wantedPanel = (raw) => {
@@ -1606,18 +1608,35 @@
 
     $("version").textContent = `control plane ${answer.version} - measured ${when(answer.measuredAt)}`;
 
-    // PUSH-1. The two push credentials, at the bottom of System health, because that is where the
-    // other facts about "can this deployment do the thing it claims" already are. Drawn from here
-    // rather than written into cp/admin/index.html for one reason: three worktrees were open on this
-    // repo the week it landed and index.html was one of them, so the whole block is built in script
-    // and the page file is untouched. It renders once per loadSystem and reads its state from the
-    // same answer every other card on this panel comes from.
-    await drawPushDoors(host);
-    // KEYS-1. The keys the PRODUCT uses, under the two push credentials, because they are the same
-    // kind of fact: "can this deployment do the thing it claims". Drawn from here rather than written
-    // into cp/admin/index.html for exactly the reason written over drawPushDoors -- the page file is
-    // shared and this block is built in script so nothing in the rail or any other panel is touched.
-    await drawProductKeys(host);
+    // KEYS-2 MOVED BOTH BLOCKS OFF THIS PANEL AND LEFT THEM DRAWN FROM HERE. They belong on the Keys
+    // panel, which is where Jason went looking for them and could not find them, but they are still
+    // drawn by this loader and out of this loader's own answer: the push doors and the product keys
+    // each cost one request that only loadSystem makes, and giving the Keys panel a loader of its own
+    // would be a second fetch of the same two answers plus a ninth thing for the readiness flag to
+    // wait on. So the only thing that changed is WHERE they are appended.
+    //
+    // Both blocks are built in script rather than written into cp/admin/index.html for the reason
+    // PUSH-1 recorded: three worktrees were open on this repo the week it landed and index.html was
+    // one of them. That still holds, so the page file carries the shell and nothing else.
+    //
+    // ORDER IS PAINT ORDER AND IT IS THE POINT. Each function ends in host.parentNode.appendChild,
+    // so whichever is called first is the one on top, and the keys are what an operator came to the
+    // panel for: drawProductKeys before drawPushDoors puts the three paste rows above the two phone
+    // forms. Swap these two lines and the xAI field goes back under a .p8 textarea, which is the
+    // whole of what KEYS-2 was.
+    //
+    // The fallback is one token and it keeps a missing container from throwing on .parentNode. It is
+    // reachable only from a build where index.html and admin.js are one deploy apart, which this
+    // service makes impossible on purpose (cp/admin.mjs serves all three files no-store), so it is a
+    // belt and not a behaviour.
+    const keysHost = $("keys") ?? host;
+    // Only when it really is the other container. The error card each draw function falls back to is
+    // appended to the HOST rather than to its own block, and nothing else clears #keys, so without
+    // this a control plane whose key route is down would stack one more card on every Refresh and on
+    // every successful paste. Clearing the fallback instead would wipe the cards drawn just above.
+    if (keysHost !== host) clear(keysHost);
+    await drawProductKeys(keysHost);
+    await drawPushDoors(keysHost);
   }
 
   // ---- PUSH-1: the two push credentials ---------------------------------------------------------
@@ -3010,8 +3029,9 @@
     // 2026-09-10 -- because this panel proves a key by fetching the row's catalog and a realtime
     // address is a websocket. Those rows are deleted (cp/proxy.mjs says why). One line here so the
     // operator who goes looking is sent to the block that does take it, rather than concluding the
-    // feature is broken.
-    note.push("the key the product talks with is under Keys the product uses, on the System health panel, not here");
+    // feature is broken. KEYS-2 moved that block to its own rail entry, so this line names the entry
+    // he can see rather than the panel he would have had to scroll.
+    note.push("the key the product talks with is under Keys the product uses, on the Keys panel, not here");
     $("providersNote").textContent = note.join(" - ");
 
     const host = $("providers");
@@ -3407,8 +3427,9 @@
     renderOverview();
     // The one flag a browser gate waits on, rather than a fixed sleep. It says the render finished,
     // not that everything in it succeeded, which is exactly what a gate wants to inspect. It counts
-    // the LOADERS the refresh runs, which is eight; the page carries nine panels, because the ninth
-    // fetches nothing and is drawn from what the eight registered.
+    // the LOADERS the refresh runs, which is eight; the page carries TEN panels, because two of them
+    // fetch nothing: the Overview is drawn from what the eight registered, and Keys (KEYS-2) is drawn
+    // by the System health loader out of the two answers it already had.
     window.__adminLive = { panels: 8, at: new Date().toISOString() };
     document.body.setAttribute("data-admin-loaded", "true");
   }

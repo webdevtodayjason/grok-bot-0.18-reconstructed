@@ -708,7 +708,9 @@ test("the Providers panel says where the voice key goes instead of offering a ro
   // The one line that replaces the two rows. Without it the operator who goes looking on this panel
   // -- which is where the rows used to be -- finds nothing at all and concludes the feature is gone.
   const source = await readFile(path.join(repoRoot, "cp/admin/admin.js"), "utf8");
-  assert.match(source, /Keys the product uses, on the System health panel, not here/,
+  // KEYS-2 gave the block its own rail entry, so the line names the entry and not the panel the block
+  // used to be appended to. The assertion follows the line a person reads, which is the point of it.
+  assert.match(source, /Keys the product uses, on the Keys panel, not here/,
     "the Providers panel no longer points anywhere for the key the product talks with");
   // In plain words on the operator's side: no vendor name, no route, no setting name.
   const line = /note\.push\("([^"]*Keys the product uses[^"]*)"\)/.exec(source)?.[1] ?? "";

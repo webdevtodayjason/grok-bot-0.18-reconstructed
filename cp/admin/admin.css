@@ -42,7 +42,7 @@
    shipped a roll form and a remove form open under every key because of exactly that: the code set
    hidden, a class set `display: flex`, and Playwright happily typed into a field nobody meant to be
    on screen. ADMIN-3 made this the rule the whole page depends on rather than one panel's patch:
-   `.console` is a grid, `.panels` is a flex column and eight of its nine sections are hidden at any
+   `.console` is a grid, `.panels` is a flex column and nine of its ten sections are hidden at any
    moment, so a single missed override would put every panel on the screen at once. */
 [hidden] { display: none !important; }
 
@@ -127,7 +127,7 @@ button.small { margin-top: 0; padding: 4px 9px; font-size: 12px; }
 /* ADMIN-3. Three rows and two columns, exactly one viewport tall. The top bar and the banner span
    both columns; the rail and the panel column share the last row and each scrolls inside itself, so
    `document.documentElement.scrollHeight` stays at the viewport height whatever a panel holds. The
-   gate asserts that on every one of the nine panels. */
+   gate asserts that on every one of the ten panels. */
 .console {
   display: grid;
   grid-template-columns: 224px minmax(0, 1fr);
@@ -192,7 +192,7 @@ button.small { margin-top: 0; padding: 4px 9px; font-size: 12px; }
 }
 
 /* ---- the panel column ------------------------------------------------------------------------ */
-/* One flex column holding nine sections, eight of them hidden, and the footer. The visible section
+/* One flex column holding ten sections, nine of them hidden, and the footer. The visible section
    takes what is left and scrolls inside itself; the column itself does not scroll, so a panel can
    never push the page taller than the window. */
 
@@ -508,6 +508,22 @@ form.stack .controls { margin: 0; }
 .pushDoors h3 { margin: 0 0 4px; }
 .pushDoors h4 { margin: 16px 0 4px; font-size: 13px; color: var(--quiet); font-weight: 600; }
 .pushDoors p { margin: 0; white-space: normal; }
+/* KEYS-2 GAVE BOTH BLOCKS THEIR OWN PANEL, and the first one on it must not open on a stray rule.
+   `.pushDoors` carries a border-top and 22 px above it because it was appended to the FOOT of System
+   health, under a dozen cards, where a rule is what says "different kind of thing". As the first
+   section on the Keys panel there is nothing above it to be separated from, so the line would draw
+   immediately under the panel's own intro and read as damage. `:first-of-type` counts sections among
+   its siblings, and the keys block is appended before the push block, so this matches the keys block
+   only and the push block keeps the rule that separates the two. */
+#panel-keys .pushDoors:first-of-type { margin-top: 0; border-top: 0; padding-top: 0; }
+
+/* The pointer at the foot of System health. This file has no generic anchor rule -- the only two it
+   carries are `.rail a` and `a.stat` -- so a plain link inside a sentence would paint the browser's
+   default blue on a dark ground, which on this page looks like a rendering fault rather than a link. */
+.panel p.quiet a { color: var(--cyan); text-decoration: none; }
+.panel p.quiet a:hover { text-decoration: underline; }
+.panel p.quiet a:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+
 .pushDoors .keyForm textarea {
   flex-basis: 100%; padding: 7px 9px; font-size: 12.5px; font-family: var(--mono);
   background: #0C131C; color: var(--ink); border: 1px solid var(--line); border-radius: 6px;

@@ -150,8 +150,8 @@ export const PROVIDER_PRESETS = Object.freeze({
   // a vendor outage. A control that cannot succeed is worse than no control: it sends the person
   // who owns the key to the wrong screen and then blames the vendor. PROVIDERS-10, VOICE-4.
   //
-  // WHERE THE REALTIME KEY GOES INSTEAD: the "Keys the product uses" block on the System health
-  // panel of this same console. It proves an xAI key against https://api.x.ai/v1/models and an
+  // WHERE THE REALTIME KEY GOES INSTEAD: the "Keys the product uses" block on the Keys panel of this
+  // same console (it was appended to System health until KEYS-2 gave it its own rail entry). It proves an xAI key against https://api.x.ai/v1/models and an
   // OpenAI key against https://api.openai.com/v1/models -- the same key serves chat and realtime at
   // both vendors -- stores it write-only, and the ONE relay reads it behind CP_RELAY_TOKEN.
   // cp/secrets.mjs is that door and docs/VOICE.md section 2 is the reasoning.
