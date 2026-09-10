@@ -896,15 +896,22 @@ Two things the gate does deliberately, and says so in its own header:
   to be where they can press it, and "it works once you scroll to it" is the failure this gate
   exists to catch.
 
-**One baseline in it went stale and was re-measured 2026-09-10.** The desktop leg pins where Send sits
-at 1440x900, and 959..1053 was measured at `3bfaca9` (2026-09-09 20:53). The Talk button landed beside
-the message box three hours later at `c57dac3`, left of Send in the same flex row, and moved Send
-**63 px** right without anything here noticing — so every wave that ran this gate afterwards read a red
-leg about a deliberate change. It is **1022..1116** now, measured on grok-bot-local-vm 2026-09-10, and
-the leg asserts the button's **width** as well as its position: a Send that changes size at a desktop
-width is the regression this row is for, and a Send that moved because a control was added beside it is
-a baseline somebody owed an update. `verify-mobile --width --desktop`: **27 passed, 0 failed, 1
-skipped** on this Mac after the correction.
+**One baseline in it was an absolute pixel, and it stopped being one on 2026-09-10.** The desktop leg
+pinned where Send sits at 1440x900. It went red twice for things that were not regressions: 959..1053
+was measured at `3bfaca9` (2026-09-09 20:53), the Talk button landed beside the message box at
+`c57dac3` and moved Send to **1022..1116**, that was re-baselined, and then the same leg read
+**959..1053 again** later the same day with the Talk button still in place. The cause is the routine
+chip at the far right of that row: it draws either a countdown with "next routine" under it or the word
+"trigger" with "event routine" under it (`ui/machine-room/app.js`), and those are different widths. Which
+one is drawn depends on whether the **open conversation happens to have a timed routine** — box state
+that differs from run to run — so Send's absolute x is not a property of the layout and no baseline can
+be right for both. The leg now asserts what it is actually for: Send's **width** (94 px — a Send that
+changes size at a desktop width is the regression this row exists for) and the **order** of the three
+controls, that Send sits between Talk and the routine chip. The absolute position is reported as an INFO
+line with the reason it moves. Measured on grok-bot-local-vm 2026-09-10: Talk ends 955, Send
+959..1053, the chip starts 1229. `verify-mobile --width --desktop`: **29 passed, 0 failed** on this
+Mac after the correction (it was 27 passed and 1 failed against the pixel baseline; the position
+assertion became two, the width and the order).
 
 **The budget is the ceiling, and the tail legs can run into it.** Eleven legs at two device sizes do
 not always fit the 260 s that keeps the gate inside the 300 s run ceiling, and the two that wait on
@@ -921,7 +928,8 @@ runs, each inside the ceiling.
 **On the R750 demo tenant through https://console.titanium.bot**, real Chrome, 2026-09-10 01:57Z,
 signed in as a throwaway customer account minted in the cp container and removed afterwards. At
 **1440x900**: shell column `1440px`, `.composer` bottom **856**, `.send-button` x **959..1053** — the
-same three numbers the local box gives; both drawer handles in the DOM and **neither laid out**; the
+same three numbers the local box gives, and the third of them moves with the routine chip's text rather
+than with the layout, which is why the gate asserts Send's width and its order and not its x; both drawer handles in the DOM and **neither laid out**; the
 scrim inside the stage; 0 unreachable past the right edge. At **390x844**, device scale 3, touch,
 iPhone UA: shell column **390px**, **0** unreachable, document exactly the viewport wide, the viewport
 meta carrying `viewport-fit=cover` and `interactive-widget=resizes-content`, the composer at **16px**,

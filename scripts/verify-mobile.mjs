@@ -938,27 +938,42 @@ async function legDesktop() {
   const geometry = await page.evaluate(() => {
     const send = document.querySelector(".send-button").getBoundingClientRect();
     const composer = document.querySelector(".composer").getBoundingClientRect();
+    const talk = document.querySelector(".voice-talk");
+    const chip = document.getElementById("schedule-button");
     return {
       column: getComputedStyle(document.querySelector(".app-shell")).gridTemplateColumns,
       sendX: Math.round(send.x), sendRight: Math.round(send.right),
       composerBottom: Math.round(composer.bottom),
+      // The two controls Send sits between, so this leg can say WHERE Send is without depending on
+      // how wide either of them happens to be on the day.
+      talkRight: talk == null ? null : Math.round(talk.getBoundingClientRect().right),
+      chipX: chip == null ? null : Math.round(chip.getBoundingClientRect().x),
     };
   });
   const overflow = await page.evaluate(OVERFLOW);
   check(geometry.column === "1440px", "1440x900: the shell's column is the viewport", geometry.column);
   check(overflow.real === 0, "1440x900: nothing is off the right edge", String(overflow.real));
   check(geometry.composerBottom === 856, "1440x900: the composer's bottom is where it was", `${geometry.composerBottom} (856 measured on this box before this ship)`);
-  // THIS NUMBER WENT STALE AND NOBODY RE-BASELINED IT, so it was a red leg about nothing for every
-  // wave that ran this gate. 959..1053 was measured at 3bfaca9 (2026-09-09 20:53). The Talk button
-  // landed beside the message box three hours later at c57dac3 (2026-09-09 23:23), left of Send in
-  // the same flex row, and moved Send 63 px right without anything here noticing: measured on
-  // grok-bot-local-vm 2026-09-10, x 1022..1116, the same 94 px wide. The width is what this leg is
-  // for, so the width is asserted as well as the position -- a Send that changes SIZE at a desktop
-  // width is the regression, and a Send that moved because a control was deliberately added beside it
-  // is a baseline somebody owed an update.
-  check(geometry.sendX === 1022 && geometry.sendRight === 1116,
-    "1440x900: and Send is where it was",
-    `x ${geometry.sendX}..${geometry.sendRight}, ${geometry.sendRight - geometry.sendX}px wide (1022..1116 since the Talk button landed at c57dac3; 959..1053 before it)`);
+  // THIS LEG WAS AN ABSOLUTE PIXEL AND IT WENT RED TWICE FOR THINGS THAT WERE NOT REGRESSIONS.
+  // 959..1053 was measured at 3bfaca9 (2026-09-09 20:53); the Talk button landed beside the message
+  // box at c57dac3 and moved Send to 1022..1116; that was re-baselined, and then it read 959..1053
+  // again on 2026-09-10 with the Talk button still there. The cause is the routine chip on the far
+  // right of the same row: it renders either a countdown with "next routine" under it, or the word
+  // "trigger" with "event routine" under it (ui/machine-room/app.js:2098-2117), and those two are
+  // different widths. Which one is drawn depends on whether the OPEN conversation happens to have a
+  // timed routine -- box state that differs from run to run -- so Send's absolute x is not a
+  // property of the layout at all and no baseline can be right for both.
+  // What this leg is actually for is a Send that changes SIZE or falls out of its row at a desktop
+  // width. So the width is the assertion, the ORDER of the three controls is the assertion, and the
+  // absolute position is reported rather than asserted.
+  const sendWidth = geometry.sendRight - geometry.sendX;
+  check(sendWidth === 94, "1440x900: and Send is still its own size",
+    `${sendWidth}px wide (94 on this box since it shipped), x ${geometry.sendX}..${geometry.sendRight}`);
+  check(geometry.talkRight != null && geometry.chipX != null
+    && geometry.talkRight <= geometry.sendX && geometry.sendRight <= geometry.chipX,
+    "1440x900: and Send sits between Talk and the routine chip, in that order",
+    `Talk ends ${geometry.talkRight}, Send ${geometry.sendX}..${geometry.sendRight}, the chip starts ${geometry.chipX}`);
+  info(`1440x900: Send's absolute x is ${geometry.sendX}..${geometry.sendRight} on this run; it moves with the routine chip's text, which is why it is not asserted`);
 
   // FEEDBACK-2b. The aside is out of flow again at this width, so the thing the row was protecting
   // against has to be measured rather than assumed: it floats at the shelf's right edge, and a
