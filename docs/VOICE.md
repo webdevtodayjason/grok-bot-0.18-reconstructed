@@ -913,6 +913,23 @@ the demo tenant, minted inside the control plane's own container and removed aft
 | the hold | holds the microphone, and the button fills | holds, through a real touch and not a tap |
 | the footer, with nothing standing | 1392x106 at y776, composer 600x54, button 74x38, unmoved | 390x133 at y711, composer 358x56, button 44x44, unmoved |
 
+**Re-measured on the production server after the adversarial pass, 2026-09-10**, same method, a fresh
+throwaway customer on the demo tenant minted inside the control plane's own container and removed
+afterwards (throwaway accounts left behind: 0). `scripts/verify-voice-r750.mjs`, **48 of 48** (42
+before; the six new ones are the agent's reply, measured at both sizes).
+
+| | 1440x900 | 390x844 with a real touch hold |
+|---|---|---|
+| the footer with his reply up | shelf 1392x106 at 24,776, unchanged | shelf 390x133 at 0,711, unchanged |
+| the message box with his reply up | 370.05 px, unchanged | 176.98 px, unchanged |
+| the footer's line with his reply up | away, no words | away, no words |
+| the panel while he speaks | not on screen; the orb is the only sign | the same |
+| the talk button | 74x38 | 44x44 at 245,784, and a press at its middle really lands on it |
+
+Still not measured, and for the same reason: a real spoken turn. The talking door for that customer
+answered `{"status":200,"enabled":false,"available":false,"apiKeySet":false}`, so the line a hold opens
+is refused a few hundred milliseconds later and every transcript event in every gate came from the stub.
+
 **What that run could not show, and why.** The demo tenant has talking switched off and the operator
 has pasted no realtime key, so the line a hold opens is refused a few hundred milliseconds later. The
 hold itself is visible in that window — measured: held, the line opening, the orb reading as working at
