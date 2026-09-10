@@ -12,7 +12,10 @@
 //   gateway     http://<box>:1340 on the shared docker network.
 //   token       that box's SAND_GATEWAY_TOKEN. It never reaches a browser.
 //   sessionKey  tenantSessionSecret(master, slug), so the relay can verify that tenant's sign-in
-//               token without ever holding the control plane's master key.
+//               token without ever holding the control plane's master key. SIGNIN-2: the operator's
+//               own entry has no way to derive this, so it is the second field a control plane row
+//               for that slug is allowed to merge on, and an empty one means account sign-in is not
+//               available for that workspace yet (the instance password still is).
 //   stateDir    /data/titanbot/<slug>/state -- endpoints.json, mail.json, mail-inbox.jsonl.
 //   profileDir  /data/titanbot/<slug>/profile -- the job bus token file.
 //   included    PROXY-1. The models this tenant's plan already pays for, and the virtual key that
@@ -32,6 +35,11 @@
 //    entry, every seam in the relay resolves to it, and a developer Mac or a single-box install
 //    behaves precisely as it did before this file existed. It is also why a control plane outage
 //    cannot take Jason's own console down, which is rule 3 of ui/tenant-login.mjs restated.
+//
+//    TWO FIELDS ARE THE EXCEPTION, and both for the same reason: nothing in this relay's own
+//    environment can produce them. `included` is minted at the proxy (PROXY-1) and `sessionKey` is
+//    derived from a master that never leaves the control plane (SIGNIN-2). A row for the operator's
+//    slug has those two merged onto the env-seeded entry and every other field of it ignored.
 //
 // 2. A BOX NAME IS VERIFIED, NEVER GUESSED. The old relay fell back to `docker ps --filter
 //    label=com.titanbot.role=box` and took the first match. On a server with one box that was
@@ -283,24 +291,40 @@ export function createTenantRegistry({
         // from nowhere else. A row for it is dropped rather than merged, because a control plane
         // that got one field wrong would otherwise point Jason's console at somebody else's box.
         //
-        // ONE EXCEPTION, PROXY-1: the included set. Jason's workspace is a tenant of the proxy
-        // like everybody else -- the control plane mints it a virtual key the same way, and that
-        // key arrives on this row and on no other route -- so treating his console as the one
-        // place the plan cannot reach would mean his own box keeps a copied operator key, which
-        // is the exact thing this wave ends. It is MERGED onto the env-seeded entry: box, token,
-        // sessionKey, stateDir and profileDir are not read from this row at all, so the reason
-        // the row is dropped is untouched. Assigned unconditionally so turning the proxy off on
-        // the control plane turns the section off here too, rather than serving a dead key.
+        // TWO EXCEPTIONS, and each one is a value this relay's own environment cannot produce.
+        //
+        // PROXY-1, the included set. Jason's workspace is a tenant of the proxy like everybody
+        // else -- the control plane mints it a virtual key the same way, and that key arrives on
+        // this row and on no other route -- so treating his console as the one place the plan
+        // cannot reach would mean his own box keeps a copied operator key, which is the exact
+        // thing that wave ended.
+        //
+        // SIGNIN-2, the derived session key. It is tenantSessionSecret(master, slug), and the
+        // master that derives it never leaves the control plane, so there is nothing here to
+        // derive it from: the seed starts with none. Without it an account on the operator's own
+        // workspace could not sign in at all. MEASURED on the R750 2026-09-10: a correct password
+        // on an account on this slug read 503 "That workspace is not available right now." while
+        // the byte-identical account on demo was signed in at once, because sessionKeyOf answered
+        // "" and the verdict path in ui/tenant-login.mjs turns a missing key into `unknown`.
+        //
+        // Both are MERGED onto the env-seeded entry: box, token, gateway, stateDir and profileDir
+        // are not read from this row at all, so the reason the row is dropped is untouched -- a
+        // control plane with one of those fields wrong still cannot point Jason's console at
+        // somebody else's box. Both are assigned unconditionally, so the control plane turning one
+        // off turns it off here too rather than leaving this console serving a dead value. A
+        // control plane that is merely DOWN is a different case and a safe one: no row arrives at
+        // all, the seed keeps its last good key, and nobody is signed out over it.
         //
         // In place rather than by replacement, because `seed` is what operator() and the boot
         // path hold: every reader reaches the entry through the registry or through the request
         // context's own `entry`, so one object staying one object is what keeps them agreeing.
         seed.included = entry.included;
-        // Said only when there is nothing on the row worth merging, which is exactly the case the
-        // line was written for. A row carrying a virtual key is this relay doing its job, and a
-        // line that reads as a fault every sixty seconds on a console that is working perfectly is
-        // worse than no line at all.
-        if (entry.included == null) {
+        seed.sessionKey = entry.sessionKey;
+        // Said only when there is nothing on the row worth merging at all, which is exactly the
+        // case the line was written for. A row carrying a virtual key or a derived key is this
+        // relay doing its job, and a line that reads as a fault every sixty seconds on a console
+        // that is working perfectly is worse than no line at all.
+        if (entry.included == null && entry.sessionKey.length === 0) {
           log(`reg  the control plane returned a row for ${seed.slug}; this relay uses its own environment for that one`);
         }
         continue;
@@ -379,8 +403,12 @@ export function operatorEntry({
     box: str(env?.SAND_BOX_CONTAINER) || boxDefault,
     gateway: String(gateway ?? "").replace(/\/+$/, ""),
     token: String(token ?? ""),
-    // Empty on purpose. The operator signs in with the instance password, and the master key that
-    // would derive this one never leaves the control plane.
+    // SIGNIN-2. Empty as a SEED, not as an answer. Nothing in this relay's own environment can
+    // derive this key -- it is tenantSessionSecret(master, slug) and the master never leaves the
+    // control plane -- so the seed starts with none and a refresh merges the control plane's one
+    // on, exactly as it does for `included`. Until one has been merged, the instance password is
+    // the only door to this workspace, which is what a console with no control plane has always
+    // had and is what rule 3 of ui/tenant-login.mjs keeps working when the control plane is down.
     sessionKey: "",
     stateDir: String(stateDir ?? ""),
     profileDir: String(profileDir ?? ""),

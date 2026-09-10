@@ -259,10 +259,24 @@ The control plane is the source of truth. The relay reads it once a minute and h
           "token": "<that tenant's gateway token>",
           "sessionKey": "<that tenant's derived session key>",
           "stateDir": "/data/titanbot/acme/state",
-          "profileDir": "/data/titanbot/acme/profile" }
+          "profileDir": "/data/titanbot/acme/profile" },
+
+        { "slug": "titanium",
+          "sessionKey": "<that tenant's derived session key>" }
       ],
-      "skipped": [ { "slug": "halfbuilt", "why": "no gateway token on disk yet" } ]
+      "skipped": [
+        { "slug": "halfbuilt", "why": "no gateway token on disk yet" },
+        { "slug": "titanium", "what": "tenant",
+          "why": "this workspace has no gateway token on this server" }
+      ]
     }
+
+The second row is the operator's own, and it is a different shape on purpose: an **adopted**
+workspace, where this service holds no box, no gateway token and no directories, gets a row carrying
+only the fields the relay cannot build for itself. Today that is two: `sessionKey` (SIGNIN-2) and
+`included` when a plan is on (PROXY-1). The rest of the row really is absent, so it is also named in
+`skipped` saying why, and the relay is deliberately quiet about that one line rather than reading it
+as a fault every sixty seconds.
 
 `box` is computed as `titanbot-box-<coolify service uuid>`, which is measured on this host rather
 than assumed, so no schema change was needed to carry it. `token` is read off that tenant's own
@@ -287,9 +301,9 @@ a gate that names it, is the difference between a design decision and a fleet-wi
 `scripts/verify-one-console.mjs` asserts all four cases end to end: 401 with no bearer, 401 with the
 admin token, 200 with the relay token, and the master's own bytes appearing nowhere in the body.
 
-### The operator's own entry never comes from here
+### The operator's own entry is built here, and two fields are merged onto it
 
-Tenant `titanium` is not one of the rows. The relay seeds it at boot from the environment it already
+Tenant `titanium` is the relay's own. It seeds that entry at boot from the environment it already
 has: `SAND_BOX_CONTAINER`, `SAND_HOST_GATEWAY_URL`, its gateway token, `SAND_UI_STATE_DIR` and the
 first `SAND_PROFILE_DIRS` entry.
 
@@ -299,8 +313,29 @@ That is the whole compatibility story, and it is load bearing three times over:
   relay behaves on a developer Mac and on a single-box install precisely as it did before TENANT-5.
 - A control plane that is down, or slow, or being redeployed, cannot take Jason's console with it.
   That is rule 3 of `ui/tenant-login.mjs` restated: the control plane is allowed to be down.
-- A refresh never overwrites it. If the control plane ever returns a `titanium` row it is dropped
-  with one line in the log.
+- A refresh never overwrites what the environment decided. `box`, `gateway`, `token`, `stateDir` and
+  `profileDir` are not read off a `titanium` row at all, so a control plane with one of those fields
+  wrong still cannot point Jason's console at somebody else's box.
+
+**Two fields are merged on, and both for the same reason: nothing in the relay's own environment can
+produce them.**
+
+| field | why only the control plane has it |
+| --- | --- |
+| `included` | PROXY-1. The virtual key is minted at the metering proxy with a master the relay does not hold, and it arrives on this row and on no other route. |
+| `sessionKey` | SIGNIN-2. It is `tenantSessionSecret(master, "titanium")`, and that master never leaves the control plane, so there is nothing here to derive it from. |
+
+Both are assigned **unconditionally**, so the control plane turning one off turns it off here rather
+than leaving this console serving a dead value. A control plane that is merely **down** is a
+different case and a safe one: no row arrives at all, the entry keeps its last good key, and nobody
+is signed out over it.
+
+Before SIGNIN-2 the key was not merged, and the cost was specific. MEASURED on the R750
+2026-09-10: the control plane's row for `titanium` carried `slug` and `included` and nothing else,
+`registry.sessionKeyOf("titanium")` was therefore `""`, and an account on Jason's own workspace met
+**503 "That workspace is not available right now."** with a correct password while the
+byte-identical account on `demo` signed in at once. One missing field, and the only visible symptom
+was a sentence about availability.
 
 ### Cache, refresh and box verification
 
@@ -629,17 +664,37 @@ argument.
 
 ### Your own account
 
-Jason's instance is the tenant `titanium`, adopted rather than built, and **you sign in to it with
-the instance password**. That is deliberate and it is also the only door that works there today: an
-account on the `titanium` workspace cannot sign in. MEASURED on the R750 2026-09-10, a throwaway
-account on `titanium` posting the real sign-in form reads **503 "That workspace is not available
-right now"**, while the byte-identical throwaway on `demo` is signed in at once. The reason is the
-session key, not the account and not adoption: `operatorEntry` in `ui/tenant-registry.mjs` gives the
-operator's own entry an empty `sessionKey` on purpose, because the master that derives it never
-leaves the control plane, so `accountVerdict` cannot verify a token claiming that slug. **SIGNIN-2**
-in `docs/GAP-ANALYSIS.md` owns the decision and the change.
+Jason's instance is the tenant `titanium`, adopted rather than built, and it has **two** doors.
 
-So `account add` is for a customer workspace:
+**The instance password** is the one that needs nothing else to be working. It carries no tenant
+claim, so it resolves to `titanium` (section 5), and it keeps working when the control plane is down,
+being redeployed, or not configured at all. It is the door to fix a stopped box from.
+
+**An account on the `titanium` workspace** signs in at `console.titanium.bot` like any customer's,
+since SIGNIN-2. Two things to know before adding one:
+
+- **There is no lesser role on that workspace.** An account on `titanium` is an operator-level user.
+  It gets Jason's box, his agents, his settings and his connectors, because `titanium` is the same
+  workspace the instance password resolves to. Add one for a person you would hand the instance
+  password to, and nobody else.
+- **Removing the account does not end a session it already minted.** The relay holds no revocation
+  table, so a cookie already issued keeps working until it expires, which is at most 12 hours. The
+  control plane says so itself in the answer to `DELETE /v1/accounts/<email>`.
+
+HISTORY, and it is why the two paragraphs above are new. MEASURED on the R750 2026-09-10, BEFORE
+SIGNIN-2: a throwaway account on `titanium` posting the real sign-in form read **503 "That workspace
+is not available right now"** while the byte-identical throwaway on `demo` was signed in at once.
+The cause was the session key, not the account and not adoption: the control plane's registry row
+for that slug carried no `sessionKey`, so `verdictForToken` in `ui/tenant-login.mjs` had no key to
+check the token with and answered `unknown`. MEASURED on the R750 AFTER SIGNIN-2: a throwaway
+account on `titanium` signs in, lands on the operator's own workspace, and sees the same agents the
+instance-password session sees.
+
+Adding one is the account command with the operator's slug:
+
+    node cp/cli.mjs account add somebody@titaniumcomputing.com titanium --name "Somebody"
+
+And `account add` for a customer workspace is the same command with theirs:
 
     ssh dell-remote
     cd /home/sem/titanbot

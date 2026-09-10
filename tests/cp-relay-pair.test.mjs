@@ -15,6 +15,7 @@
 // which is a sign-in the relay can only complete with the key the control plane derived.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -23,13 +24,18 @@ import { randomBytes } from "node:crypto";
 import { createApp, createHttpServer } from "../cp/server.mjs";
 import { ensureProxyKey, loadConfig, tenantPaths } from "../cp/provision.mjs";
 import { openStore } from "../cp/store.mjs";
-import { startRelay } from "./relay-tenant-support.mjs";
+import { RELAY_PASSWORD, startRelay } from "./relay-tenant-support.mjs";
 import { startFakeProxy } from "./cp-proxy-support.mjs";
 
 const SLUG = "acme";
 const ACCOUNT = "owner@acme.test";
 const PASSWORD = "an account password of real length";
 const GATEWAY_TOKEN = "the-gateway-token-of-acmes-own-box";
+// SIGNIN-2. The operator's own account and the bearer of the operator's own box. The bearer comes out
+// of this relay's ENVIRONMENT and never off the registry route, which is the half of the pairing the
+// control plane must not be able to move.
+const OPERATOR_ACCOUNT = "jason@titaniumcomputing.test";
+const OPERATOR_GATEWAY_TOKEN = "the-gateway-token-only-this-relays-env-holds";
 const BOX = "titanbot-box-svc-acme";
 
 // A `docker` that names the two containers this pairing expects to be running. The relay verifies
@@ -43,7 +49,7 @@ function dockerStub(names) {
   return `${dir}:/usr/bin:/bin`;
 }
 
-async function startPair({ extraTenant = null, withProxy = false } = {}) {
+async function startPair({ extraTenant = null, withProxy = false, operator = false } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), "cp-relay-pair-"));
   const master = randomBytes(32).toString("hex");
   const relayToken = randomBytes(32).toString("hex");
@@ -103,13 +109,58 @@ async function startPair({ extraTenant = null, withProxy = false } = {}) {
     assert.equal(extraAccount.status, 201, "the second customer's account was not created");
   }
 
+  // SIGNIN-2. The operator's own workspace, adopted the way the live one is -- a Coolify service and
+  // a host, no box recorded and no token file anywhere on this machine -- plus an account on it and a
+  // stand-in for its box. The box is here because the half of the entry that must NOT come from the
+  // control plane is only measurable by reaching it: a roster that comes back proves the relay used
+  // the container and the bearer out of its own environment, because that gateway refuses any other.
+  let operatorBox = null;
+  if (operator) {
+    const adopted = await ask("POST", "/v1/tenants/titanium/adopt", {
+      token: adminToken,
+      body: { coolifyServiceUuid: "p927bfqm83ioloibamlvyd7g", host: "console.titanium.bot" },
+    });
+    assert.equal(adopted.status, 200, `the operator's workspace could not be adopted: ${await adopted.text()}`);
+    const account = await ask("POST", "/v1/accounts", {
+      token: adminToken, body: { email: OPERATOR_ACCOUNT, password: PASSWORD, tenant: "titanium" },
+    });
+    assert.equal(account.status, 201, `the operator's own account was not created: ${await account.text()}`);
+
+    const asked = [];
+    const boxServer = createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        const bearer = String(req.headers.authorization ?? "").replace(/^Bearer\s+/i, "").trim();
+        asked.push({ path: req.url, bearer });
+        if (bearer !== OPERATOR_GATEWAY_TOKEN) {
+          res.writeHead(401, { "content-type": "application/json" });
+          return res.end(JSON.stringify({ error: "unauthorized" }));
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify([{ id: "titan", name: "Titan" }, { id: "scribe", name: "Scribe" }]));
+      });
+    });
+    await new Promise((resolve) => boxServer.listen(0, "127.0.0.1", resolve));
+    operatorBox = { asked, url: `http://127.0.0.1:${boxServer.address().port}`, close: () => boxServer.close() };
+  }
+
   const relay = await startRelay(
-    { CP_URL: cp, CP_RELAY_TOKEN: relayToken, SAND_BOX_CONTAINER: "titanbot-box-operator" },
+    {
+      CP_URL: cp, CP_RELAY_TOKEN: relayToken, SAND_BOX_CONTAINER: "titanbot-box-operator",
+      ...(operatorBox
+        ? { SAND_HOST_GATEWAY_URL: operatorBox.url, SAND_HOST_GATEWAY_TOKEN: OPERATOR_GATEWAY_TOKEN }
+        : {}),
+    },
     { prefix: "pair-relay-", pathValue: dockerStub([BOX, "titanbot-box-operator"]) },
   );
   return {
-    cp, ask, relay, master, relayToken, adminToken, proxyKey,
-    stop: () => { relay.stop(); server.close(); if (proxy) void proxy.close(); },
+    cp, ask, relay, master, relayToken, adminToken, proxyKey, operatorBox,
+    stop: () => {
+      relay.stop();
+      server.close();
+      if (proxy) void proxy.close();
+      if (operatorBox) operatorBox.close();
+    },
   };
 }
 
@@ -268,5 +319,71 @@ test("a workspace the control plane cannot serve is named, and its customer is a
       body: new URLSearchParams({ email: ACCOUNT, password: PASSWORD }).toString(),
     });
     assert.equal(good.status, 302, "one broken workspace took the working one down with it");
+  } finally { pair.stop(); }
+});
+
+test("the operator's own account signs in at the one console, and the box it lands on is still the relay's own", async () => {
+  // SIGNIN-2, and this is the pairing test for it: the real control plane derives the key and signs
+  // the token, the real relay verifies it with the key that crossed the registry route, and the two
+  // halves could have spelled that field differently with every other test in the tree still green.
+  //
+  // MEASURED ON THE R750 2026-09-10 before the change: the control plane's row for `titanium` carried
+  // `slug` and `included` and nothing else, the relay's key for that slug was "", and an account
+  // there met 503 "That workspace is not available right now." with a correct password while the
+  // byte-identical account on `demo` was signed in at once.
+  const pair = await startPair({ operator: true });
+  try {
+    // The row the control plane actually answers for an adopted workspace with no token here: a slug
+    // and a derived key, and not one field more.
+    const body = await (await pair.ask("GET", "/v1/relay/tenants", { token: pair.relayToken })).json();
+    const row = body.tenants.find((tenant) => tenant.slug === "titanium");
+    assert.ok(row, `the operator's workspace was left out: ${JSON.stringify(body.skipped)}`);
+    assert.deepEqual(Object.keys(row).sort(), ["sessionKey", "slug"]);
+    assert.equal(row.sessionKey.length, 64, "a derived key is a hex sha256");
+    assert.equal(JSON.stringify(body).includes(pair.master), false, "the master's bytes were in the answer");
+
+    // The sign-in, through the real form on the real login page.
+    const login = await fetch(`${pair.relay.base}/login`, {
+      method: "POST", redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html" },
+      body: new URLSearchParams({ email: OPERATOR_ACCOUNT, password: PASSWORD }).toString(),
+    });
+    const text = await login.text();
+    assert.equal(login.status, 302, `the operator's own account could not sign in: ${text.slice(0, 300)}`);
+    assert.equal(login.headers.get("location"), "/");
+    const cookie = (login.headers.getSetCookie?.() ?? []).map((one) => one.split(";")[0]).join("; ");
+    assert.notEqual(cookie, "", "no session was minted");
+
+    // And the workspace it landed on is the one this relay builds out of its own environment. The
+    // fake box refuses any bearer but the one in SAND_HOST_GATEWAY_TOKEN, so a 200 with Jason's own
+    // two agents on it is proof that neither the container nor the token came off the registry route.
+    const roster = await fetch(`${pair.relay.base}/api/listAgents`, {
+      method: "POST", redirect: "manual",
+      headers: { "content-type": "application/json", cookie }, body: "{}",
+    });
+    const rosterText = await roster.text();
+    assert.equal(roster.status, 200, `the operator's own roster did not come back: ${rosterText.slice(0, 300)}`);
+    assert.match(rosterText, /Titan/);
+    assert.equal(rosterText.includes("Acme"), false, "the customer's box answered the operator's session");
+    assert.ok(pair.operatorBox.asked.length > 0, "the relay never reached the box in its own environment");
+    assert.ok(pair.operatorBox.asked.every((one) => one.bearer === OPERATOR_GATEWAY_TOKEN),
+      "the relay presented a bearer that did not come from its own environment");
+
+    // The instance password is still a door to the same workspace, which is what a control plane
+    // outage leaves the operator holding.
+    const byPassword = await fetch(`${pair.relay.base}/login`, {
+      method: "POST", redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html" },
+      body: new URLSearchParams({ password: RELAY_PASSWORD }).toString(),
+    });
+    assert.equal(byPassword.status, 302, "the instance password stopped working");
+
+    // And the customer beside him is untouched: their own account still signs in to their own box.
+    const customer = await fetch(`${pair.relay.base}/login`, {
+      method: "POST", redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "text/html" },
+      body: new URLSearchParams({ email: ACCOUNT, password: PASSWORD }).toString(),
+    });
+    assert.equal(customer.status, 302, "the operator's key took the customer's sign-in with it");
   } finally { pair.stop(); }
 });

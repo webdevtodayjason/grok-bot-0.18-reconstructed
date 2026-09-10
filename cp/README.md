@@ -112,7 +112,7 @@ The console relay only, `Authorization: Bearer $CP_RELAY_TOKEN`:
 
 | route | answer |
 | --- | --- |
-| `GET /v1/relay/tenants` | `{tenants, skipped}`. Per tenant: its box container, its gateway address, its gateway token, its derived session key, its two directories |
+| `GET /v1/relay/tenants` | `{tenants, skipped}`. Per tenant: its box container, its gateway address, its gateway token, its derived session key, its two directories. An **adopted** workspace, where this service holds no token or directories, gets a short row instead: `{slug, sessionKey}` plus `included` when a plan is on, which are the only two fields the relay cannot build from its own environment (SIGNIN-2, PROXY-1). The rest of that row is absent and `skipped` says why |
 | `GET /v1/relay/mail/directory[?slug=]` | MAIL-2. `{domain, tenants}`. Per workspace: each bot's six digit code and address, whether it is active or retired, the approved-senders switch and its list |
 | `POST /v1/relay/mail/mint` | MAIL-2. `{slug, agents}`. Mints an address for every bot on that roster that has none, and answers that workspace's whole directory. Safe to call every five minutes for ever |
 

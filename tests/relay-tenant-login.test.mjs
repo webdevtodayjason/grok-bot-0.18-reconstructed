@@ -29,6 +29,7 @@ import test from "node:test";
 import { createServer } from "node:http";
 
 import { base64urlEncode, mintSessionToken } from "../ui/session-token.mjs";
+import { OPERATOR_SLUG } from "../ui/tenant-registry.mjs";
 import { accountSignIn, relayConfig, ssoVerdict, CP_TIMEOUT_MS } from "../ui/tenant-login.mjs";
 import {
   MASTER, RELAY_PASSWORD, RELAY_TOKEN, cookieOf, form, keyFor, startRelay, tenantRow, tenantsFile,
@@ -335,6 +336,111 @@ test("one console signs an account in, says so about a workspace it does not ser
     assert.deepEqual(cp.seen.map((row) => row.email), ["demo@titanium.bot", "demo@titanium.bot", "someone@acme.example"]);
     assert.ok(cp.seen.every((row) => row.hadPassword));
   } finally { relay.stop(); await cp.stop(); }
+});
+
+// ---- SIGNIN-2: the operator's own workspace, with and without a derived key --------------------
+
+test("an account on the operator's own workspace signs in once the control plane's key has been merged", async () => {
+  // SIGNIN-2, MEASURED ON THE R750 2026-09-10: a correct password on an account on tenant `titanium`
+  // read 503 "That workspace is not available right now." while the byte-identical account on `demo`
+  // was signed in at once. The whole difference was one field. The relay seeds the operator's entry
+  // from its own environment and can derive nothing from it, so the control plane puts that slug's
+  // derived key on the registry row and the refresh merges it -- and the row here is the real live
+  // shape, slug and key and nothing else: no box, no token, no directories.
+  const OPERATOR_KEY = keyFor(OPERATOR_SLUG);
+  const cp = await startFakeControlPlane({
+    accounts: { "jason@titaniumcomputing.com": { password: "the operator account password", tenant: OPERATOR_SLUG, secret: OPERATOR_KEY } },
+  });
+  const relay = await startRelay({
+    CP_URL: cp.url, CP_RELAY_TOKEN: RELAY_TOKEN,
+    SAND_UI_TENANTS_FILE: tenantsFile([{ slug: OPERATOR_SLUG, sessionKey: OPERATOR_KEY }]),
+  }, { pathValue: "/nonexistent" });
+  try {
+    // One workspace, the operator's own, and the key arriving did not turn it into two.
+    assert.match(relay.boot, /work 1: titanium/, relay.boot);
+
+    // 1. The account door. A 302 with a cookie is the whole of SIGNIN-2: the control plane signed
+    //    with the key it derived and the relay verified with the key it was handed, which is two
+    //    derivations in two processes where only one of them holds the master.
+    const inByAccount = await fetch(`${relay.base}/login`,
+      form({ email: "jason@titaniumcomputing.com", password: "the operator account password" }));
+    assert.equal(inByAccount.status, 302, `the operator's own account could not sign in: ${(await inByAccount.text()).slice(0, 200)}`);
+    assert.equal(inByAccount.headers.get("location"), "/");
+    const cookie = cookieOf(inByAccount);
+    assert.ok(cookie.length > 0, "no session was minted for the operator's own workspace");
+    // And it lands on the operator's workspace, not on a stranger's: the dead gateway in this
+    // relay's own environment is what answers behind the cookie.
+    const api = await fetch(`${relay.base}/api/getHostStatus`, {
+      method: "POST", headers: { "content-type": "application/json", cookie }, body: "{}",
+    });
+    assert.notEqual(api.status, 401, "the cookie did not get past the door");
+    assert.notEqual(api.status, 503, "the session resolved to a workspace this console cannot serve");
+
+    // 2. The other door onto the same key: a sign-in link for that slug.
+    const sso = await fetch(`${relay.base}/login?sso=${encodeURIComponent(tokenFor(OPERATOR_SLUG, OPERATOR_KEY))}`,
+      { redirect: "manual", headers: { accept: "text/html" } });
+    assert.equal(sso.status, 302, `a sign-in link for the operator's workspace answered ${sso.status}`);
+    assert.ok(cookieOf(sso).length > 0);
+
+    // 3. The instance password is untouched by any of it. It is still the door that needs no
+    //    control plane, and it still means this same workspace.
+    const byPassword = await fetch(`${relay.base}/login`, form({ email: "", password: RELAY_PASSWORD }));
+    assert.equal(byPassword.status, 302);
+    assert.ok(cookieOf(byPassword).length > 0);
+  } finally { relay.stop(); await cp.stop(); }
+});
+
+test("with no key on the operator's row an account there is answered in words, and the instance password still works", async () => {
+  // The state every console is in before this wave ships, and the state one is in for the minute
+  // between a relay restart and a control plane that has not caught up: the row carries no key. The
+  // account door has to say the sentence rather than 500, and the password door has to keep working,
+  // which is rule 3 of ui/tenant-login.mjs.
+  const cp = await startFakeControlPlane({
+    accounts: { "jason@titaniumcomputing.com": { password: "the operator account password", tenant: OPERATOR_SLUG, secret: keyFor(OPERATOR_SLUG) } },
+  });
+  const relay = await startRelay({
+    CP_URL: cp.url, CP_RELAY_TOKEN: RELAY_TOKEN,
+    SAND_UI_TENANTS_FILE: tenantsFile([{ slug: OPERATOR_SLUG }]),
+  }, { pathValue: "/nonexistent" });
+  try {
+    const noKey = await fetch(`${relay.base}/login`,
+      form({ email: "jason@titaniumcomputing.com", password: "the operator account password" }));
+    assert.equal(noKey.status, 503, `status ${noKey.status}`);
+    assert.equal(cookieOf(noKey), "", "a session was minted for a workspace the relay cannot verify");
+    assert.match(await noKey.text(), /That workspace is not available right now\./);
+
+    // The same answer at the sign-in link, for the same reason.
+    const sso = await fetch(`${relay.base}/login?sso=${encodeURIComponent(tokenFor(OPERATOR_SLUG, keyFor(OPERATOR_SLUG)))}`,
+      { redirect: "manual", headers: { accept: "text/html" } });
+    assert.equal(sso.status, 503);
+    assert.equal(cookieOf(sso), "");
+
+    // And the door that needs nothing from the control plane at all is open, which is the whole
+    // reason a missing key is a sentence and not an outage.
+    const byPassword = await fetch(`${relay.base}/login`, form({ email: "", password: RELAY_PASSWORD }));
+    assert.equal(byPassword.status, 302, "the instance password stopped working when the key was missing");
+    assert.ok(cookieOf(byPassword).length > 0);
+  } finally { relay.stop(); await cp.stop(); }
+});
+
+test("a control plane that cannot be reached at all leaves the operator's password door open", async () => {
+  // Port 1 on loopback: refused rather than hung, so this measures the doors and not a timeout. No
+  // row arrives, so the seed keeps whatever key it had -- which at boot is none -- and the password
+  // is what the operator has. A control plane being DOWN must never read as a console being down.
+  const relay = await startRelay({
+    CP_URL: "http://127.0.0.1:1", CP_RELAY_TOKEN: RELAY_TOKEN,
+  }, { pathValue: "/nonexistent" });
+  try {
+    const byPassword = await fetch(`${relay.base}/login`, form({ email: "", password: RELAY_PASSWORD }));
+    assert.equal(byPassword.status, 302);
+    const cookie = cookieOf(byPassword);
+    assert.ok(cookie.length > 0);
+    const api = await fetch(`${relay.base}/api/getHostStatus`, {
+      method: "POST", headers: { "content-type": "application/json", cookie }, body: "{}",
+    });
+    assert.notEqual(api.status, 401, "the operator's own cookie did not get past the door");
+    assert.notEqual(api.status, 503, "a control plane outage turned the operator's own workspace off");
+  } finally { relay.stop(); }
 });
 
 test("a sign-in link mints a session, and a forged one does not", async () => {

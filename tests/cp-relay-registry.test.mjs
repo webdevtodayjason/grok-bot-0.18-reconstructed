@@ -254,10 +254,16 @@ test("an adopted workspace with no gateway token here still carries its plan, an
       const row = answer.body.tenants.find((one) => one.slug === "titanium");
       assert.ok(row, "the operator's workspace was dropped, so its plan key had no route to the relay");
       assert.equal(row.included.key, minted.record.key);
-      // Its slug and its plan, and NOTHING else. The relay takes box, token, sessionKey and both
-      // directories from its own environment for this one entry and merges only `included`, so
-      // sending anything more would be sending a field that is ignored at best and wrong at worst.
-      assert.deepEqual(Object.keys(row).sort(), ["included", "slug"]);
+      // Its slug, its own derived session key and its plan, and NOTHING else. The relay takes box,
+      // token and both directories from its own environment for this one entry and merges only these
+      // two, so sending anything more would be sending a field that is ignored at best and wrong at
+      // worst. SIGNIN-2 is the second of the two: the relay cannot derive it, because the master
+      // that derives it is on this side and never leaves.
+      assert.deepEqual(Object.keys(row).sort(), ["included", "sessionKey", "slug"]);
+      assert.equal(row.sessionKey, tenantSessionSecret(plane.config.sessionSecret, "titanium"),
+        "the operator's row carried something other than that slug's own derived key");
+      assert.equal(JSON.stringify(answer.body).includes(plane.config.sessionSecret), false,
+        "the master's own bytes were in the registry answer");
       // The skipped note stays, because the reason the rest of the row is absent has not changed.
       assert.ok((answer.body.skipped ?? []).some((one) => one.slug === "titanium" && one.what === "tenant"));
 
@@ -271,6 +277,46 @@ test("an adopted workspace with no gateway token here still carries its plan, an
         "a customer with no gateway token was served a row with no token in it");
     }, { env: { CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey } });
   } finally { await proxy.close(); }
+});
+
+test("an adopted workspace with no plan at all still carries its derived key, and a customer still does not", async () => {
+  // SIGNIN-2, and this is the live shape on the R750 today: CP_PROXY_URL is unset there, so there is
+  // no plan to send and until this wave the operator's row was not sent at all. MEASURED on that
+  // machine 2026-09-10, read only inside the cp container: the titanium row carried `included` and
+  // `slug` and nothing else while demo and richard-avery carried 64-character derived keys, so an
+  // account on Jason's own workspace met 503 and the identical account on demo signed in at once.
+  //
+  // The row has to be answered with a key even when there is no plan, which is what this measures.
+  await withPlane(async (plane) => {
+    const adopted = await plane.admin("POST", "/v1/tenants/titanium/adopt", {
+      coolifyServiceUuid: "svc-operator", host: "console.titanium.bot", boxContainer: "titanbot-box-operator",
+    });
+    assert.equal(adopted.status, 200, adopted.text);
+
+    const answer = await asRelay(plane);
+    const row = answer.body.tenants.find((one) => one.slug === "titanium");
+    assert.ok(row, "the operator's workspace was dropped, so no key could reach the relay at all");
+    // No plan on this server, so no `included` key on the row: a slug and a derived key, exactly the
+    // two fields the relay merges onto the entry it builds from its own environment.
+    assert.deepEqual(Object.keys(row).sort(), ["sessionKey", "slug"]);
+    assert.equal(row.sessionKey, tenantSessionSecret(plane.config.sessionSecret, "titanium"));
+    assert.equal(row.sessionKey.length, 64, "a derived key is a hex sha256");
+    assert.equal(JSON.stringify(answer.body).includes(plane.config.sessionSecret), false,
+      "the master's own bytes were in the registry answer");
+    // The rest of the row really is absent, so the note saying why stays exactly as it was.
+    assert.ok((answer.body.skipped ?? []).some((one) => one.slug === "titanium" && one.what === "tenant"
+      && /gateway token/.test(one.why)), JSON.stringify(answer.body.skipped));
+
+    // And the narrowness has not moved either: an ordinary customer whose token file is missing is
+    // still skipped outright, with no row and therefore no key. A row with no token would have the
+    // relay calling that customer's gateway with an empty bearer instead of saying the workspace is
+    // not available.
+    await plane.admin("POST", "/v1/tenants", { slug: "acme", name: "Acme" });
+    rmSync(tenantPaths("acme", plane.config).profileTokenFile, { force: true });
+    const second = await asRelay(plane);
+    assert.equal(second.body.tenants.some((one) => one.slug === "acme"), false,
+      "a customer with no gateway token was served a row, and it carried a signing key");
+  });
 });
 
 test("a workspace with no plan key is served without one, and the reason is named", async () => {
@@ -371,10 +417,19 @@ test("the adoption of the operator's own instance carries its box and where its 
     assert.equal(other.body.stateDir, "/srv/second/state");
     assert.equal(other.body.profileDir, "/srv/second/profile");
 
-    // Neither is in the registry, because neither has a token file on this machine, and the reason
-    // is said rather than left as a silent gap.
+    // Neither carries a box, a gateway token or a directory here, because neither has a token file
+    // on this machine, and the reason is said rather than left as a silent gap. What each one DOES
+    // carry is its slug and its own derived session key, which is the one thing the relay cannot
+    // build for itself and the whole of SIGNIN-2: without it an account on an adopted workspace
+    // cannot be verified at all, and the console answers 503 to a correct password.
     const registry = await asRelay(plane);
-    assert.deepEqual(registry.body.tenants, []);
+    assert.deepEqual(registry.body.tenants.map((row) => row.slug).sort(), ["second", "titanium"]);
+    for (const row of registry.body.tenants) {
+      assert.deepEqual(Object.keys(row).sort(), ["sessionKey", "slug"]);
+      assert.equal(row.sessionKey, tenantSessionSecret(plane.config.sessionSecret, row.slug));
+    }
+    assert.equal(JSON.stringify(registry.body).includes(plane.config.sessionSecret), false,
+      "the master's own bytes were in the registry answer");
     assert.deepEqual(registry.body.skipped.map((row) => row.slug).sort(), ["second", "titanium"]);
     for (const row of registry.body.skipped) assert.match(row.why, /no gateway token/);
   });
