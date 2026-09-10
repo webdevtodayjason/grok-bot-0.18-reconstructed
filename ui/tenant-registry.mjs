@@ -203,6 +203,20 @@ export function createTenantRegistry({
 
   // Which container names exist on this host right now. One call for the whole fleet.
   async function verifyBoxes(next) {
+    // An entry with no box name at all needs no docker to judge, so it is judged first and it is
+    // judged whatever docker answers or fails to answer. SIGNIN-2 widened the control plane's
+    // registry answer to include an ADOPTED row that carries a slug and a derived key and nothing
+    // else, which is how the operator's own key arrives. A second adopted workspace arrives the
+    // same way, and if the docker sweep below is the only thing that marks it unreachable then a
+    // relay whose `docker ps` failed leaves it reachable WITH a real key: that person gets a
+    // session and a console with no box behind it instead of the sentence. Two conditions at once,
+    // and both of them happen. The operator's own entry is exempt for the reason in rule 2 above:
+    // this console is the door a stopped box gets fixed from.
+    for (const entry of next.values()) {
+      if (entry.operator || entry.box.length > 0) continue;
+      log(`reg  ${entry.slug}: no container named (unset), so that workspace answers "not available"`);
+      entry.reachable = false;
+    }
     if (typeof dockerNames !== "function") return;
     let names = null;
     try { names = await dockerNames(); } catch { names = null; }

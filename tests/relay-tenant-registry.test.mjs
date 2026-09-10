@@ -199,6 +199,29 @@ test("somebody else's adopted workspace, a slug and a key and no box, answers no
   assert.equal(registry.get(OPERATOR_SLUG).box, "titanbot-box-jason");
 });
 
+test("that adopted workspace is still not available when docker cannot be asked", async () => {
+  // The arm above proves it with docker answering. This one is the case that actually bites: the
+  // docker sweep learns nothing (no docker on this relay, or a `docker ps` that failed), so if the
+  // sweep were the only thing marking an entry unreachable, a row carrying a slug and a real
+  // derived key and no box would stay reachable and hand that person a session into a console with
+  // no box behind it. An empty box name is judged without docker.
+  const cp = fakeCp([{ body: { tenants: [{ slug: "second", sessionKey: "a-derived-key-for-second" }] } }]);
+  const said = [];
+  const registry = createTenantRegistry({
+    operator: OPERATOR, cpUrl: "https://api.titanium.bot", relayToken: "a-relay-token", ...cp,
+    dockerNames: async () => null,
+    log: (line) => said.push(line),
+  });
+  await registry.refresh();
+
+  assert.equal(registry.get("second").reachable, false, "no box name is no workspace, docker or no docker");
+  assert.ok(said.some((line) => line.includes("second: no container named (unset)")), said.join("\n"));
+  // And the operator is untouched: its own key and box come from this relay's environment, and it
+  // is never marked unreachable by anything.
+  assert.equal(registry.get(OPERATOR_SLUG).reachable, true);
+  assert.equal(registry.get(OPERATOR_SLUG).box, "titanbot-box-jason");
+});
+
 test("a docker that cannot be asked marks nothing unavailable", async () => {
   const cp = fakeCp([{ body: { tenants: [row("demo")] } }]);
   const registry = createTenantRegistry({

@@ -15,6 +15,7 @@ import {
   writeBoxDefaults,
   RESERVED_SLUGS,
   boxContainerName,
+  configProblems,
   coolifyStatusOf,
   deriveSlug,
   loadConfig,
@@ -109,6 +110,22 @@ test("the messages are plain words with no jargon and no em dashes", () => {
     assert.doesNotMatch(verdict.reason, /—/);
     assert.doesNotMatch(verdict.reason, /regex|slug|validation|invalid/i);
   }
+});
+
+// ---- what the service refuses to start on ------------------------------------------------------
+
+test("the missing-master message forbids the relay rather than telling the operator to copy it", () => {
+  const problems = configProblems({ sessionSecret: "", adminToken: "a-long-enough-admin-token", relayToken: "" });
+  const said = problems.find((line) => line.startsWith("CP_SESSION_SECRET"));
+  assert.ok(said, problems.join("\n"));
+  // This sentence was written in the TENANT-2 shape, where every relay checked sessions with this
+  // one value. In the one-console shape that is the arrangement that ends tenant isolation: a relay
+  // environment is readable by anyone who can run code in it, and a holder of the master mints a
+  // token claiming any workspace. The wording must not drift back.
+  assert.doesNotMatch(said, /on every relay/i);
+  assert.doesNotMatch(said, /the same value/i);
+  assert.match(said, /never set this value on a relay/i);
+  assert.match(said, /derive/i);
 });
 
 // ---- a name from a company name ----------------------------------------------------------------

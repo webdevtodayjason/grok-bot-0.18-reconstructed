@@ -311,7 +311,12 @@ export const NEW_TENANTS_BLOCKED =
 export function configProblems(config) {
   const problems = [];
   if (!config.sessionSecret || config.sessionSecret.length < 32) {
-    problems.push("CP_SESSION_SECRET is missing or shorter than 32 characters. Every tenant relay checks sessions with this value, so set it once and set the same value on every relay.");
+    // The old wording said to set this same value on every relay, which was true in the TENANT-2
+    // shape and is the one arrangement that breaks tenant isolation now: a relay's environment is
+    // readable by anyone who can run code in it, and the sign-in verdict picks its verifying key
+    // from the token's own tenant claim, so a holder of this master mints a token claiming any
+    // workspace it likes. A relay is handed only its own derived key, on the registry route.
+    problems.push("CP_SESSION_SECRET is missing or shorter than 32 characters. It is the MASTER this service derives one session key per tenant from, and each relay is handed only its own derived key on GET /v1/relay/tenants. Never set this value on a relay.");
   }
   if (!config.adminToken || config.adminToken.length < 16) {
     problems.push("CP_ADMIN_TOKEN is missing or shorter than 16 characters. It is the password for the routes that add accounts and tenants.");

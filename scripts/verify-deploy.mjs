@@ -4,8 +4,9 @@
 // It proves six things in order, because a failure in an earlier one explains every later one:
 //   1. shape      both titanbot containers run, their published ports are where they should be
 //                 (the relay on 100.110.83.82 only, the box on 127.0.0.1 only, nothing on 0.0.0.0),
-//                 the box's four data mounts are the titanbot volumes' own directories, and the
-//                 host bundle running inside the box is the one on the server
+//                 the box's four data mounts are the titanbot volumes' own directories, the host
+//                 bundle running inside the box is the one on the server, and the relay's
+//                 environment carries neither TENANT_ID nor CP_SESSION_SECRET
 //   2. gateway    getHostStatus and listAgents answer 200 through http://100.110.83.82:7787
 //   3. login      no credential is turned away, a wrong password is refused, and a request
 //                 carrying the gateway bearer is given a session that reaches the gateway on its
@@ -384,6 +385,33 @@ check(bundleOnServer.length === 64 && bundleInBox === bundleOnServer,
   "the box is running the host bundle that is on the server",
   bundleInBox === bundleOnServer ? `sha256 ${bundleInBox.slice(0, 16)}...`
     : `the box has ${bundleInBox.slice(0, 16) || "nothing"}... and the server has ${bundleOnServer.slice(0, 16) || "nothing"}...`);
+
+// ---- what is NOT in the relay's environment ---------------------------------------------------
+// TENANT-5 took two variables off the relay and the docs say so in three places. TENANT_ID said
+// "this whole process belongs to one customer", which stopped being true. CP_SESSION_SECRET is the
+// name of the control plane's MASTER, the one value that derives every tenant's session key, and a
+// relay holding it could mint a token claiming any workspace on the server: the sign-in verdict
+// picks its verifying key from the token's own tenant claim, so the claim check is no defence
+// against whoever can mint the claim. Each relay is handed only its own tenants' derived keys, on
+// GET /v1/relay/tenants, and it holds those in memory and never in its environment.
+//
+// The compose dropped the two references, but Coolify keeps a service's environment rows after the
+// compose stops mentioning them, so the values sat in the running relay for weeks under a doc that
+// said they were gone. Measured on jason-PowerEdge-R750 2026-09-10: both were present, and the
+// CP_SESSION_SECRET there fingerprinted to the titanium DERIVED key rather than the master, so
+// nothing was exposed -- but a field with the master's name in a relay is the shape of the thing
+// the next reader copies. Only the NAMES cross the tailnet here; no value is read or printed.
+const FORBIDDEN_RELAY_ENV = ["TENANT_ID", "CP_SESSION_SECRET"];
+const relayEnvNames = (await ssh(
+  `docker inspect ${RELAY_NAME} --format '{{range .Config.Env}}{{println .}}{{end}}' | cut -d= -f1 | sort -u`,
+).catch(() => "")).split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+const forbidden = FORBIDDEN_RELAY_ENV.filter((name) => relayEnvNames.includes(name));
+check(relayEnvNames.length > 0 && forbidden.length === 0,
+  "neither TENANT_ID nor CP_SESSION_SECRET is in the relay's environment",
+  relayEnvNames.length === 0 ? "the relay's environment could not be read"
+    : forbidden.length === 0 ? `${relayEnvNames.length} names, and neither of those two`
+      : `${forbidden.join(" and ")} still set on ${RELAY_NAME} -- remove the row from the Coolify `
+        + `service; the relay picks it up at its next restart`);
 
 // The token file is the single source of truth for the gateway bearer. Read it here, hold it in
 // memory, and never let it reach this Mac's disk or this script's output.

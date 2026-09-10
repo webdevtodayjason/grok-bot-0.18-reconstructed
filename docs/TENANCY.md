@@ -122,7 +122,26 @@ cannot be built.
 `TENANT_ID` and `CP_SESSION_SECRET` are **gone from the relay**. `TENANT_ID` said "this whole
 process belongs to one customer", which is the sentence that stopped being true.
 `CP_SESSION_SECRET` was one tenant's derived key; the relay now receives every tenant's derived key
-on the registry route.
+on the registry route. The relay must never be given the master that derives those keys, and the
+message the control plane refuses to start on says so in those words: a relay's environment is
+readable by anyone who can run code in it, and the sign-in verdict picks its verifying key from the
+token's own tenant claim, so a holder of the master mints a token claiming whatever workspace it
+likes and the claim check is no defence.
+
+Gone from the compose is not the same as gone from a relay that is already running, and this caught
+us. Coolify keeps a service's environment rows after the compose stops mentioning them, and a
+`docker restart` reuses the container, so the two names survive every restart until the service is
+redeployed and the container recreated. Measured on jason-PowerEdge-R750 2026-09-10: both were still
+in `docker inspect titanbot-relay-...` on a relay created 2026-09-07, three weeks after the compose
+dropped them. Nothing was exposed there (the `CP_SESSION_SECRET` row fingerprinted to the titanium
+**derived** key, not the master, and no shipped relay file reads that variable at all), but a field
+carrying the master's name inside a relay is the shape of the thing the next reader copies. So:
+
+- Delete both rows from the relay's Coolify service environment, or the next deploy puts them back.
+- They leave the running container only when it is **recreated**, which is a Coolify redeploy of the
+  service, not a restart. Do it on a deploy that was going to recreate it anyway.
+- `scripts/verify-deploy.mjs` reads the running relay's `Config.Env` names and FAILS on either name,
+  so this cannot sit unread again. Only the names cross the wire; no value is read or printed.
 
 `SAND_BOX_CONTAINER` used to be deliberately unset, with the relay falling back to
 `docker ps --filter label=com.titanbot.role=box` and taking the first name back. On a host with one

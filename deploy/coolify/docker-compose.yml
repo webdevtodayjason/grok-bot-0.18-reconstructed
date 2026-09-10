@@ -296,7 +296,15 @@ services:
       # whole process belongs to one customer", which is the thing that stopped being true.
       # CP_SESSION_SECRET was one tenant's derived signing key; the relay now receives every
       # tenant's derived key on the registry route below, over the relay credential, and the
-      # control plane's master still never leaves the control plane.
+      # control plane's master still never leaves the control plane. Never put that master on a
+      # relay: the sign-in verdict takes its verifying key from the token's own tenant claim, so
+      # whoever holds the master mints a token claiming any workspace on the server.
+      #
+      # Dropping the two references here does NOT remove them from a service Coolify already has.
+      # Coolify keeps environment rows after the compose stops mentioning them, and a restart reuses
+      # the container, so an existing relay carries both names until its service is redeployed.
+      # Delete the rows in Coolify; scripts/verify-deploy.mjs fails if either name is in the running
+      # relay's environment.
       #
       # Both empty, or both set. Empty is the single-instance console this has always been: one
       # password box on the login page, one box behind it, no control plane in the request path at
