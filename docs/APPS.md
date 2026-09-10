@@ -26,7 +26,7 @@ iPhone UA, real Chrome through playwright-core.
 
 | Gate | Result | What it is |
 | --- | --- | --- |
-| `npm test` | **2,689 pass, 0 fail** | the whole suite, not only the new files |
+| `npm test` | **2,719 pass, 0 fail** | the whole suite, not only the new files |
 | `verify-door.mjs --all` | **96 pass, 0 fail, 0 skip** | the door at both phone widths, CORS, and a real page on a second origin minting, reading, holding `/events` 30 s and revoking |
 | `verify-cost.mjs` (3 runs) | **15 pass, 0 fail, 1 skip** | first paint, idle, hidden, resume, the asset cache, noVNC printed by name, the desktop A/B |
 | `verify-push.mjs --host` | **32 pass, 0 fail, 1 skip** | a real pending hand-off to exactly one recorded send, collapse, quiet hours, the badge, revoke |
@@ -46,6 +46,38 @@ paint landed on the conversation the link named** — the deep link decided the 
 a second navigation after it. The remaining `--console` skip is a real gap in the product and not in
 the gate: at 390x844 there is no route into Settings at all (section 8).
 
+
+### And on the R750, through console.titanium.bot, which is the only thing that makes any of it done
+
+Measured 2026-09-10 between 07:34Z and 07:55Z as a **throwaway customer account** on the demo
+workspace, removed afterwards along with every device and push row it made. Never Jason's account and
+never Richard's. **No box was swapped**: this wave changes no `source/` file, so `updateHostNow` was
+not run anywhere.
+
+| Leg | Result |
+| --- | --- |
+| the door, `verify-door --url` at 390x844 and 430x932 | **48 pass, 0 fail** — every control 16 px and 48/48/46 px tall, 0 `[autofocus]`, `viewport-fit=cover`, `scrollWidth` equals `visualViewport.width` at both widths, Midnight ground, Signal Cyan button, the inline Ti mark, "Sign in - Titanium Bot", and the string "Machine Room" gone. **Before this ship, on the same live host:** 2,748 bytes titled "Sign in - Machine Room", 1 `[autofocus]`, no `viewport-fit`, button `#8b69ea`, no Signal Cyan and no Midnight |
+| the token door and CORS, from a native client | **28 pass, 0 fail** — a preflight from `capacitor://localhost` answers **204** naming exactly that origin with **no allow-credentials**; `https://evil.example`, `https://localhost.evil.example` and `null` each get **403 and zero access-control headers**. **Before this ship the same preflight answered 401 with zero CORS headers of any kind.** |
+| a bearer, end to end | minted for the throwaway account (251 chars, `tbd1.` prefix, never printed and never in a URL), read the roster cross-origin, held `/events` for **30,007 ms** with `fetch` plus a stream reader, revoked, and the next call was **401 with `x-relay-auth: required` and `redirected: false`** |
+| the projection, live | `getConversationOutline` **37.8 KiB projected against 66.3 KiB whole** (wire, as the edge compresses), carrying `x-titan-digest` |
+| the asset policy, live | `private, no-cache` plus a strong ETag, and a repeat read is a **304**. `cf-cache-status: BYPASS` on both, which is what private caching looks like from an edge |
+| first paint at 390x844 | **173.0 KiB decoded over 33 calls, 46.6 KiB wire**, against the 250 KiB ceiling. Landed on the conversation the `?agent=` link named |
+| 60 s idle at 390x844 | **67.3 KiB decoded, 21.5 KiB wire, 4 ticks**, against the 100 KiB ceiling. 60 s hidden: **0 calls** from this adapter. Coming back: **1** catch-up read |
+| push | registration behind the device bearer (the token never handed back), the per-person switches, and the sweep running with **no credential stored, so a send is recorded by the stub rather than delivered** — the state Jason's paste changes and nothing else about the path |
+
+**One defect only the R750 found, fixed and re-shipped inside this pass.** A device bearer revoked at
+`DELETE /auth/devices/<id>` left its row in the workspace's `push.json`, so a phone a customer revoked
+*because they lost it* went on being notified. `ui/push-edge.mjs` had written `forgetDevice` for
+exactly this and named the revoke as its caller in a comment; nothing called it. Proved fixed on the
+live host: after the fix, revoking `r750-revoke-proof` removed its row and the relay logged
+*"device r750-revoke-proof will not be notified on demo either"*.
+
+**One thing the live host does that this page did not know about.** Cloudflare Web Analytics injects
+`static.cloudflareinsights.com/beacon.min.js` into every page on the zone, including the sign-in page,
+and the page then posts a beacon to `/cdn-cgi/rum`. The door's own markup asks for **no** asset at all
+(its favicon is a `data:` URI and the Ti mark is inline). It is the zone's setting, not this page's
+markup, and it is printed by the gate rather than failed on — but it is worth knowing that the one
+screen which is a credential form loads a third-party script.
 ---
 
 ## 1. The one fact that shaped all of it
@@ -582,7 +614,7 @@ at **390x844, device scale 3, touch, iPhone UA, real Chrome via playwright-core*
   conversation and revealing the entry (item B's boot parse); and the card being openable by a thumb
   at 390x844 — see the next section, which is the one thing this wave measured and did not fix.
 
-`node --test` over the whole suite — **2,689 pass, 0 fail** on the merged tree, including 29 tests of the decider, the
+`node --test` over the whole suite — **2,719 pass, 0 fail** on the merged tree, including 29 tests of the decider, the
 collapse rules, quiet hours, the expiry, the ledger's survival across a restart, the pruning table
 and the zero-gateway-call case, plus 11 of the four routes and the absent-module fallback, plus 7 of
 the two control-plane credential doors.
