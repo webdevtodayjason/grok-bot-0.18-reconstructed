@@ -25,6 +25,12 @@
 //   --leg browser   real Chrome with a WAV file as the microphone, the talk button, all four orb
 //                   states, a real reply from the local box read back and heard, the mic proved held
 //                   from BOTH sides, the spoken row with its chip, and the seven-stamp hop ledger.
+//   --leg frames    VOICE-7's half: the labelled transcription frames, read off the page's OWN voice
+//                   socket in real Chrome at 1440x900 and at 390x844 with touch. The stub emits a
+//                   multi-step utterance that corrects itself; the page has to receive hear-begin,
+//                   three growing partials, one final, and one heard-confirmed whose text is
+//                   byte-identical to the tool argument and whose words are the words on the spoken
+//                   row in the transcript. Then the turns that never become a row.
 //
 // WHY A REFUSAL IS NEVER A DESTROYED SOCKET, which four of these legs exist to hold the line on.
 // MEASURED on this Mac 2026-09-09: an unknown upgrade path on this relay answers 0 bytes with no
@@ -61,7 +67,7 @@ const GATE_AGENT = gateUserAgent(import.meta.url);
 const MACHINE = process.env.GATE_MACHINE ?? `${os.hostname()} (${os.platform()} ${os.arch()})`;
 const GATEWAY = process.env.SAND_GATEWAY_URL ?? "http://127.0.0.1:1340";
 
-const LEGS = ["cp", "relay", "nokey", "caps", "origin", "refused", "browser"];
+const LEGS = ["cp", "relay", "nokey", "caps", "origin", "refused", "browser", "frames"];
 const leg = (() => {
   const at = process.argv.indexOf("--leg");
   return at === -1 ? "" : String(process.argv[at + 1] ?? "");
@@ -85,6 +91,8 @@ if (process.argv.includes("--help") || process.argv.includes("-h") || leg.length
     "  origin   a cross-origin upgrade is refused in words, never by a destroyed socket.",
     "  refused  a vendor that answers 401, and an address with nothing behind it: one sentence each.",
     "  browser  real Chrome, a WAV file as the microphone, the orb, the transcript, the hop ledger.",
+    "  frames   real Chrome at two viewports: the labelled words of a spoken turn, read off the page's",
+    "           own voice socket, and the same bytes landing on the spoken row.",
     "",
     "Env: SAND_PROFILE_DIRS (the live legs), SAND_GATEWAY_URL, GATE_MIC_WAV,",
     "     GROK_BOT_PLAYWRIGHT_DIR, VOICE_GATE_PORT (default 7793), VOICE_GATE_CP_PORT (default 7794).",
@@ -1271,6 +1279,205 @@ async function legBrowser() {
   return;
 }
 
+// ---- VOICE-7: the words, labelled, in a real browser ---------------------------------------------
+//
+// WHY THIS IS ITS OWN LEG. The browser leg above drives the orb, the microphone and the playback and
+// has never once driven a transcript: `grep emitUserTranscript scripts/verify-voice.mjs` returned
+// nothing before 2026-09-10. VOICE-7 puts the person's words in a panel over the conversation, so
+// what has to be measured is the frames that panel is built out of, at the two viewports a person
+// actually uses, read off the PAGE'S OWN socket rather than from the relay's side of it.
+//
+// The recorder is `window.__voiceSocketClass`, the seam ui/machine-room/voice.js already reads before
+// falling back to WebSocket. Nothing in the page is patched to make this leg pass.
+
+const VOICE_VIEWPORTS = [
+  { name: "desktop", width: 1440, height: 900, hasTouch: false },
+  { name: "phone", width: 390, height: 844, hasTouch: true },
+];
+
+/** Every JSON frame the page's voice socket has received, in order. */
+const framesOf = (page) => page.evaluate(() => (window.__voiceGateFrames ?? []).slice());
+
+/** Wait until the page's own socket has received a frame the predicate likes. */
+async function waitForFrame(page, predicate, { timeoutMs = 30_000, label = "a frame" } = {}) {
+  const started = Date.now();
+  for (;;) {
+    const frames = await framesOf(page);
+    const hit = frames.filter((f) => { try { return predicate(f) === true; } catch { return false; } });
+    if (hit.length > 0) return { frames, hit };
+    if (Date.now() - started > timeoutMs) return { frames, hit: [], timedOut: true, label };
+    await sleep(120);
+  }
+}
+
+async function legFrames() {
+  console.log(`verify-voice --leg frames on ${MACHINE}`);
+  requireTheOtherItems(true);
+  const cp = await startControlPlane();
+  const { startStubRealtime } = await import(STUB_REALTIME);
+  const stub = await startStubRealtime({ audioFrames: 20 });
+  cleanups.push(() => { try { stub.close(); } catch { /* gone */ } });
+
+  const dir = mkdtempSync(path.join(os.tmpdir(), "voice-gate-frames-"));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  const voiceJson = path.join(dir, "voice.json");
+  writeFileSync(voiceJson, `${JSON.stringify({ enabled: true, apiKey: `gate-not-a-real-key-${randomBytes(8).toString("hex")}`, vendor: "xai" })}\n`, { mode: 0o600 });
+  const wav = process.env.GATE_MIC_WAV ?? await makeMicWav(dir);
+
+  const relay = await startRelay({
+    port: Number(process.env.VOICE_GATE_PORT ?? 7793) + 6,
+    voiceJson, stubUrl: stub.url, policyUrl: cp.base, relayToken: cp.relayToken,
+  });
+  const session = await signIn(relay);
+
+  // The same choice the browser leg makes, and for the same reason: grok-bot-local-vm is shared and
+  // other waves' gates leave scratch agents on its roster whose names sort first.
+  const settingsBefore = await ask(`${relay.base}/voice/settings`, { headers: { cookie: session.cookie } });
+  const roster = settingsBefore.body?.agents ?? [];
+  const scratch = /^(code gate|voice gate|gate)\b|^new agent$/i;
+  const chosen = roster.find((one) => !scratch.test(String(one.name ?? ""))) ?? roster[0] ?? null;
+  await ask(`${relay.base}/voice/settings`, {
+    method: "POST",
+    headers: { cookie: session.cookie, "content-type": "application/json" },
+    body: JSON.stringify({ agentId: chosen?.id ?? "" }),
+  });
+  info(`this run talks to ${chosen?.name ?? "(nobody)"}`);
+
+  const { chromium } = await loadPlaywright();
+  const browser = await chromium.launch({
+    args: [
+      "--use-fake-ui-for-media-stream",
+      "--use-fake-device-for-media-stream",
+      `--use-file-for-fake-audio-capture=${wav}%noloop`,
+      "--autoplay-policy=no-user-gesture-required",
+    ],
+  });
+  cleanups.push(() => { try { browser.close(); } catch { /* gone */ } });
+
+  for (const viewport of VOICE_VIEWPORTS) {
+    // ONE VIEWPORT AT A TIME, and the previous one is closed first: a workspace is allowed one call,
+    // so two live pages would make the second read the already-in-a-call sentence and measure that.
+    const context = await browser.newContext({
+      userAgent: GATE_AGENT,
+      permissions: ["microphone"],
+      viewport: { width: viewport.width, height: viewport.height },
+      hasTouch: viewport.hasTouch,
+      isMobile: viewport.hasTouch,
+    });
+    // The recorder, installed before any of the page's own script runs. voice.js reads
+    // `__voiceSocketClass` before falling back to WebSocket, so nothing is monkey-patched behind it.
+    await context.addInitScript(() => {
+      window.__voiceGateFrames = [];
+      const Real = window.WebSocket;
+      class RecordingSocket extends Real {
+        constructor(...args) {
+          super(...args);
+          this.addEventListener("message", (event) => {
+            if (typeof event.data !== "string") return;
+            try { window.__voiceGateFrames.push(JSON.parse(event.data)); } catch { /* audio, not JSON */ }
+          });
+        }
+      }
+      window.__voiceSocketClass = RecordingSocket;
+    });
+    const page = await context.newPage();
+    const pageErrors = [];
+    page.on("pageerror", (error) => pageErrors.push(String(error)));
+
+    step(`${viewport.name} ${viewport.width}x${viewport.height}${viewport.hasTouch ? " with touch" : ""}: the console, signed in, listening`);
+    await page.goto(`${relay.base}/login`, { waitUntil: "domcontentloaded" });
+    await page.fill('input[type="password"]', relay.password).catch(() => {});
+    await page.press('input[type="password"]', "Enter").catch(() => {});
+    await page.waitForLoadState("domcontentloaded");
+    await page.waitForFunction(() => window.__voice !== undefined, null, { timeout: 30_000 }).catch(() => {});
+    const button = page.locator("[data-voice-talk]");
+    check(await button.count() > 0, `the talk button is on the page at ${viewport.width}x${viewport.height}`, `${await button.count()} found`);
+    const sessionsBefore = stub.events.sessions.length;
+    await button.click();
+    await stub.waitFor((events) => events.sessions.length > sessionsBefore, { timeoutMs: 30_000, label: "the bridge's session.update" }).catch(() => {});
+    check(stub.events.sessions.length > sessionsBefore, "the relay dialled the vendor and its session was accepted",
+      `${stub.events.sessions.length} session(s) on ${MACHINE}`);
+
+    step(`${viewport.name}: the person talks, and the page is told what is being heard`);
+    // A SEQUENCE THAT CORRECTS ITSELF, which is the cumulative vendor's documented behaviour and the
+    // case a panel gets wrong: "teen" has to be REPLACED by "team", never appended to it.
+    const spoken = ["what", "what is the teen", "what is the team", "what is the team working on"];
+    stub.emitSpeechStarted({ itemId: "gate_item_1" });
+    const began = await waitForFrame(page, (f) => f.t === "hear-begin", { label: "hear-begin" });
+    check(began.hit.length === 1, "the page was told the person started talking", `hear-begin turn ${began.hit[0]?.turn}, item ${JSON.stringify(began.hit[0]?.itemId)} on ${MACHINE}`);
+    await stub.emitUserTranscript(spoken, { itemId: "gate_item_1", gapMs: 120 });
+    // WAIT FOR THE LAST STEP, not for any step. The relay-to-browser hop is its own trip, so a read
+    // taken the moment the first partial lands catches three of four and reports the last correction
+    // missing -- measured on this Mac doing exactly that before this line said which frame to wait for.
+    const partials = await waitForFrame(page, (f) => f.t === "hear" && f.final === false && f.text === spoken.at(-1), { label: "the last partial" });
+    const partialTexts = partials.frames.filter((f) => f.t === "hear" && f.final === false).map((f) => f.text);
+    check(partialTexts.length >= 3, "the words arrived as they were spoken", `${partialTexts.length} partial(s) at ${viewport.width}x${viewport.height} on ${MACHINE}`);
+    const grew = partialTexts.every((text, i) => i === 0 || text.length >= partialTexts[i - 1].length);
+    check(grew, "and each one was longer than the one before it", JSON.stringify(partialTexts));
+    check(partialTexts.at(-1) === spoken.at(-1) && !partialTexts.at(-1).includes("teen"),
+      "with the correction replacing the wrong word rather than being appended to it", JSON.stringify(partialTexts.at(-1)));
+
+    stub.emitUserTranscriptDone("What is the team working on?", { itemId: "gate_item_1" });
+    const finals = await waitForFrame(page, (f) => f.t === "hear" && f.final === true, { label: "the finished transcript" });
+    check(finals.hit.length === 1, "and one frame said the words were finished", `${finals.hit.length} final(s), ${JSON.stringify(finals.hit[0]?.text)}`);
+
+    step(`${viewport.name}: the words that actually went into the conversation`);
+    // The tool argument is the realtime model's own string and is DELIBERATELY not the transcript
+    // above: two models read the same audio. What the panel's last paint has to be is this one.
+    const asked = "What is the team working on?";
+    stub.emitToolCall({ name: "titan", args: { message: asked }, callId: `frames_${viewport.name}`, triple: false });
+    const confirmed = await waitForFrame(page, (f) => f.t === "heard-confirmed", { timeoutMs: 45_000, label: "heard-confirmed" });
+    const row = confirmed.hit[0] ?? null;
+    check(row != null && row.text === asked, "the page was told the exact bytes that went into his conversation",
+      row == null ? "no heard-confirmed frame" : `${JSON.stringify(row.text)} on ${MACHINE}`);
+    check(String(row?.nonce ?? "").startsWith("voice:"), "carrying the nonce his durable row is stamped with", String(row?.nonce ?? "(none)"));
+    check(row?.landed === true && Number(row?.turn) === Number(began.hit[0]?.turn), "and belonging to the turn on screen",
+      `landed ${row?.landed}, turn ${row?.turn} against hear-begin turn ${began.hit[0]?.turn}`);
+    const ended = await waitForFrame(page, (f) => f.t === "hear-end", { timeoutMs: 20_000, label: "hear-end" });
+    check(ended.hit[0]?.reason === "sent", "then the turn was closed, with the reason it ended", `reason ${JSON.stringify(ended.hit[0]?.reason ?? "")}`);
+    const order = ended.frames.filter((f) => f.t === "heard-confirmed" || f.t === "hear-end").map((f) => f.t);
+    check(order[0] === "heard-confirmed" && order[1] === "hear-end", "and the confirmed words came BEFORE the dissolve, so they are its last paint", order.join(" -> "));
+
+    step(`${viewport.name}: the same bytes, as a row in the transcript`);
+    // The durable row, drawn from the host's own entry off the ordinary poll, carrying the chip that
+    // rides the same `voice:` nonce. This is the claim in one line: the last words in the panel and
+    // the line in the chat are the same bytes.
+    await page.waitForFunction(() => document.querySelectorAll(".voice-spoken-chip").length > 0, null, { timeout: 45_000 }).catch(() => {});
+    const spokenRows = await page.evaluate(() => Array.from(document.querySelectorAll(".voice-spoken-chip"))
+      .map((chip) => String(chip.closest("[data-entry-id], article, li, div")?.textContent ?? "")));
+    check(spokenRows.length > 0, "the transcript shows the spoken row with its chip", `${spokenRows.length} row(s) on ${MACHINE}`);
+    check(spokenRows.some((text) => text.includes(asked)), "and its words are the words the panel last showed",
+      spokenRows.length === 0 ? "no row" : JSON.stringify(spokenRows[0].replace(/\s+/g, " ").slice(0, 140)));
+
+    step(`${viewport.name}: a turn that never becomes a row still ends`);
+    // An utterance the model made nothing of. Before this wave the relay answered the tool and said
+    // nothing to the page at all, so a panel waiting for a row would sit over the conversation.
+    const endsBefore = (await framesOf(page)).filter((f) => f.t === "hear-end").length;
+    const confirmsBefore = (await framesOf(page)).filter((f) => f.t === "heard-confirmed").length;
+    await sleep(2600); // the echo tail after the spoken reply: the mic is held shut until it passes.
+    stub.emitSpeechStarted({ itemId: "gate_item_2" });
+    stub.emitToolCall({ name: "titan", args: { message: "   " }, callId: `frames_empty_${viewport.name}`, triple: false });
+    const emptyEnd = await waitForFrame(page, (f) => f.t === "hear-end" && f.reason === "empty", { timeoutMs: 20_000, label: "hear-end empty" });
+    check(emptyEnd.hit.length > 0, "an utterance nothing came of closed the turn and said why", `reason empty, ${emptyEnd.frames.filter((f) => f.t === "hear-end").length - endsBefore} new end(s)`);
+    const confirmsAfter = (await framesOf(page)).filter((f) => f.t === "heard-confirmed").length;
+    check(confirmsAfter === confirmsBefore, "and nothing was confirmed for it, because nothing went in", `${confirmsAfter - confirmsBefore} new confirmation(s)`);
+    // A spoken yes closing a held card is the third no-row turn. It needs a real pending approval on
+    // the shared box, which cannot be manufactured inside this gate's ceiling, so it is measured at the
+    // socket against a scripted gateway in tests/voice-transcription.test.mjs instead.
+    info("the held-card yes is measured at the socket in tests/voice-transcription.test.mjs: a real pending approval cannot be made on the shared box inside 300 s");
+
+    check(pageErrors.length === 0, `${viewport.name}: the page threw nothing`, pageErrors.slice(0, 2).join(" | ") || "clean");
+    const all = await framesOf(page);
+    info(`${viewport.name} ${viewport.width}x${viewport.height}: ${all.length} frames on the page's own socket, of which ${all.filter((f) => f.t === "hear").length} hear, ${all.filter((f) => f.t === "heard").length} heard (the old strip's, still shipping), ${all.filter((f) => f.t === "heard-confirmed").length} confirmed`);
+    await page.close();
+    await context.close();
+    // The relay only allows one call per workspace, and the closed socket has to be settled before
+    // the next viewport presses the button or it reads the already-in-a-call sentence.
+    await sleep(1200);
+  }
+  return;
+}
+
 // ---- run one leg ---------------------------------------------------------------------------------
 
 try {
@@ -1281,6 +1488,7 @@ try {
   else if (leg === "origin") await legOrigin();
   else if (leg === "refused") await legRefused();
   else if (leg === "browser") await legBrowser();
+  else if (leg === "frames") await legFrames();
 } catch (error) {
   failures += 1;
   console.log(`\n  FAIL  the leg threw: ${String(error?.stack ?? error).split("\n").slice(0, 4).join(" | ")}`);
