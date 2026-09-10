@@ -1679,3 +1679,21 @@ box was put back — 0 allow, 0 block, `SAND_AUTO_REVIEW_MODE` back to null, scr
 `Copy chmod +x *.sh *.py` and a real mouse press putting that command on the clipboard whole. Without
 the one-line regex change `tests/console-approval-card.test.mjs` is 26 passed / **1 failed**, so the
 new cases are load-bearing rather than decorative.
+
+**Measured on the R750, through `https://console.titanium.bot` at 1440x1000, signed in as a throwaway
+customer account minted inside the cp container on the demo workspace and removed afterwards (0 rows
+left for that address):** 21 passed, 0 failed, 0 skipped, every assertion drawn by the `app.js` the
+R750 itself serves (540,934 characters, fetched from the page). The nine states: pending-with-rule
+512x257, pending-without 512x218, always-allowed 512x180, allowed-once 512x141, refused 512x141,
+closed-by-host 512x165, sending 512x67, subagent 512x218, **with-cwd 512x218 whose request line reads
+"Echo hello-from-the-review in shell from /workspace"** — the directory kept, the location gone, the
+grey line still "Runs on Titan's computer". Pills amber `rgb(231,162,60)`, green `rgb(166,233,185)`,
+grey `rgba(233,239,239,0.46)` for both Refused and No longer waiting, and the dead upstream's name on
+none of the nine. The chip was re-read on the live page in the same session: `chmod +x *.sh *.py` with
+no tags inside it, Chrome computing its name as `Copy chmod +x *.sh *.py`, and a real mouse press at a
+138x16 chip putting the command on the clipboard whole.
+
+**A live approval card from a real turn still cannot be measured on that tenant.** The demo box's
+classifier throws before any inference call (`AUTOREV-CLASSIFIER-1`), so no card can be raised there at
+all; the local box raises one in 24 s and that is where the end-to-end press is measured. The leg that
+is blocked is named on the row rather than quietly skipped.
