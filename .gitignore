@@ -67,3 +67,8 @@ undefined/
 # which is what every browser gate in scripts/ does. It is 0600 and it holds device tokens: a file
 # that must never reach anybody's clone, and it appears after any verify-push or verify-settings run.
 /ui/push.json
+
+# Same reason as the push store above: the relay writes this one when it is started from the repo
+# with no state dir set, which is what verify-settings and verify-voice do, and it is 0600 because it
+# carries the realtime key the operator's own workspace falls back to (KEYS-1).
+/ui/voice.json

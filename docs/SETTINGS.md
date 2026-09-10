@@ -49,9 +49,17 @@ because a product with an operator has to put the operator's half somewhere a cu
 | **Operator** | Everything technical. Only you see this section. | the operator only |
 
 Notifications and Operator carry no rows of their own: they are **mount points**. Notifications is
-drawn by `push-settings.js` into the one body carrying `.settings-list`, and Operator is drawn by
+drawn by `push-settings.js` into the one body carrying `[data-push-mount]`, and Operator is drawn by
 `app.js`'s `settingsPanel()`, unchanged in behaviour, which is how every old capability keeps working
 without being rewritten.
+
+**The two slots are different selectors on purpose.** `[data-push-mount]` is Notifications' and
+nothing else on the surface carries it. `.settings-list` is the **Operator stack's** class — it is
+what `voice.js` hunts for (`#panel-content .settings-list`, then after `[data-mail]`) — and **no
+customer body carries it**, because a customer body that did would take the Voice card and its
+technical rows onto a customer's screen. Measured on grok-bot-local-vm at 1440x900 and 390x844 as a
+customer: `.settings-list` zero on all five customer sections, `[data-push-mount]` one on
+Notifications and zero elsewhere, and the operator body `class="settings-list settings-operator-list"`.
 
 ### General
 
@@ -64,8 +72,11 @@ without being rewritten.
 - **Appearance** — Theme (Follow system / Light / Dark, and the choice is remembered, which the old
   two-state flip never did). Language, which is one disabled row reading "English for now. More are
   coming." — the reference product has the row, and a row that says plainly what it is beats an empty
-  promise. Background, a mount slot that `backgrounds.js` fills, so the eighteen tiles open as a
-  sub-view instead of a thousand pixels of inline picker.
+  promise. Background, a mount slot that `backgrounds.js` fills with its tiles **inline in the row**.
+  The design put them behind a Choose sub-view and the sub-view was not built: measured on
+  grok-bot-local-vm at 390x844, the eighteen tiles are 159x99 each inside the row's one control slot,
+  and General is 1,547 px of scroll in a 645 px window because of them. Filed as **BG-PICKER-1**,
+  which is where the sub-view is owned.
 - **System** — Microphone, drawn only when this browser can actually name one. Let me talk to Titan,
   a switch that writes whether talking is on for this workspace, disabled with the line "Your
   operator has not switched talking on yet" when no key exists for it anywhere.
@@ -89,8 +100,11 @@ fact. Both absences are decisions, written here so nobody re-adds them.
 
 ### Usage & Billing
 
-- **Usage** — Talking time today and Coding time this month, each a meter reading "N of M minutes",
-  each drawn only where that number exists. Your plan, in a customer's words rather than a routing
+- **Usage** — Talking time today, a meter reading "N of M minutes, up to K in one call" (the call
+  ceiling is on the caption because the old Voice card said it and nothing said it afterwards —
+  VOICE-8). Coding time this month, a **figure and not a bar**: nothing on this product caps coding by
+  the month, so there is no second number for a bar to be drawn against, and it becomes a bar the day
+  a monthly ceiling exists. Each drawn only where that number exists. Your plan, in a customer's words rather than a routing
   alias.
 - **Manage plan** — Billing: *"Your operator handles billing. Ask them to change your plan or send an
   invoice."*
@@ -138,8 +152,14 @@ update and reset buttons, and one line saying keys the product uses live in the 
 One thing the email plane keeps, and keeps deliberately: the **webhook signing secret**. It is not a
 vendor credential the product fetches, it is the routing discriminator that decides which workspace
 a message claiming a shared mail domain belongs to, so one global value in front of every edge would
-let the first claimant read another customer's mail. It stays on each workspace's own file and it is
-the only password field left on the whole surface.
+let the first claimant read another customer's mail. It stays on each workspace's own file.
+
+**Two password fields are left on the whole surface and both are the operator's**, measured on
+grok-bot-local-vm at 1440x900 with the Operator section painted: the webhook signing secret above,
+and the **job bus token**, which is this workspace's own credential for its own bus and is typed by
+whoever runs the bus. Neither is a vendor key the product fetches, which is the line KEYS-1 draws.
+The claim that is measured and that matters: **zero password fields anywhere a customer can reach** —
+zero on all five customer sections at both viewports.
 
 And one thing that is NOT here yet, written down rather than implied: the technical half of talking
 — **Service, Model, Voice and Who you are talking to**. The old Voice card carried those four beside
@@ -292,8 +312,9 @@ So that three builders and five gates agree on one set of names:
   mount    [data-settings-mount="<name>"]           a slot another module fills
 ```
 
-The Notifications body keeps `class="settings-list"`, which is `push-settings.js`'s whole mount
-contract and what the `verify-push` legs match on. Modules that fill a slot listen for the
+The Notifications body carries `[data-push-mount]`, which is `push-settings.js`'s whole mount
+contract and what its legs match on; `.settings-list` is the operator stack's class and appears on no
+body this module draws. Modules that fill a slot listen for the
 `titanbot:settings-section` event, whose detail carries the section id and the node to fill.
 
 The account menu at the foot of the roster: `[data-account-foot]` wrapping `[data-account-tile]`,
@@ -302,7 +323,15 @@ which opens `[data-account-menu]` holding
 each acting row carrying `[data-account-action]`.
 
 Session contract: `GET /auth/state` answers `operator` alongside what it already answered, only to an
-authenticated caller.
+authenticated caller. The surface reads **that merged with `GET /me`** — one adapter call,
+`getWorkspaceIdentity()`. The session half says who is looking; `/me`, below the gate, is the only
+thing that counts this workspace's own usage (talking minutes and their cap, the bot ceiling). Each
+half degrades on its own, and both absent means not the operator and no usage rows.
+
+The account menu's **Weekly usage row carries no percentage.** The original's reads "42%", a
+percentage of a plan's weekly allowance, and this product has no plan allowance for a number to be a
+percentage of. The row opens Usage & Billing, where the figures that exist are drawn; the percentage
+arrives with the plan (row ME-PLAN-1).
 
 ---
 

@@ -36,8 +36,11 @@
  * THE MOUNT CONTRACT, which is what stops a sibling module painting into a section nobody is
  * looking at:
  *
- *   - ONLY the Notifications body carries class "settings-list". push-settings.js mounts on that
- *     class, so it finds Notifications and nowhere else with no edit to its mount at all. Its
+ *   - ONLY the Notifications body carries [data-push-mount], and push-settings.js aims at that
+ *     attribute, so it finds Notifications and nowhere else. The class .settings-list, which that
+ *     module used to mount on, belongs to the OPERATOR stack and to no body this file draws: it is
+ *     the selector voice.js hunts for, and a customer body carrying it would take the Voice card onto
+ *     a customer's screen. Two slots, one each, and neither can land on the other's section. Its
  *     observer watches #panel-content's own children and a body swap is two levels below that, so
  *     this file calls the module's own public mount() after painting that section -- the same
  *     function, the same idempotence guard, no second card when the observer fires too.
@@ -168,7 +171,7 @@
       title: "Notifications",
       subtitle: "What wakes your phone, and the devices that get it.",
       keywords: ["notifications", "quiet hours", "quiet", "phone", "devices", "alerts", "badge"],
-      // Drawn by push-settings.js into the one body that carries .settings-list. No rows of its own.
+      // Drawn by push-settings.js into the one body that carries [data-push-mount]. No rows of its own.
       mounts: "push",
       groups: [],
     },
@@ -373,7 +376,12 @@
           id: "voice-minutes", group: "usage",
           label: "Talking time today",
           line: "Minutes of spoken conversation used today.",
-          control: { kind: "meter", used: f.voiceMinutes.used, cap: f.voiceMinutes.cap, text: `${f.voiceMinutes.used} of ${f.voiceMinutes.cap} minutes`, machine: true },
+          // The call ceiling travels with the day pair, because the old card said both on one line
+          // and a person reading "4 of 30 minutes" has no way to know a single call also ends (VOICE-8).
+          control: {
+            kind: "meter", used: f.voiceMinutes.used, cap: f.voiceMinutes.cap, machine: true,
+            text: `${f.voiceMinutes.used} of ${f.voiceMinutes.cap} minutes${Number.isFinite(f.voiceMinutes.perCall) ? `, up to ${f.voiceMinutes.perCall} in one call` : ""}`,
+          },
         });
       }
       if (f.codingMinutes != null) {
@@ -381,7 +389,11 @@
           id: "coding-minutes", group: "usage",
           label: "Coding time this month",
           line: "Minutes of cloud coding used this month.",
-          control: { kind: "meter", used: f.codingMinutes.used, cap: f.codingMinutes.cap, text: `${f.codingMinutes.used} of ${f.codingMinutes.cap} minutes`, machine: true },
+          // A bar needs two numbers. With no monthly ceiling on this product the honest control is the
+          // figure itself; the bar appears the day a ceiling does.
+          control: Number.isFinite(f.codingMinutes.cap)
+            ? { kind: "meter", used: f.codingMinutes.used, cap: f.codingMinutes.cap, text: `${f.codingMinutes.used} of ${f.codingMinutes.cap} minutes`, machine: true }
+            : pill(`${f.codingMinutes.used} minutes`),
         });
       }
       if (f.plan) {
@@ -419,10 +431,17 @@
       // window repair patches that copy, so the swap is safe exactly when a newer bundle is what is
       // being swapped to. No customer Reset row -- a rebuild is BOX-6's own hazard, and the operator
       // keeps both of his on the Operator section.
+      // THE SECOND PRESS NAMES WHAT IT DOES AND WHOSE IT IS. The armed state is not a quieter copy of
+      // the same row: this control replaces the running computer for THIS workspace, nobody has ever
+      // pressed it on a live tenant, and "Click Again to Confirm" on its own does not say which
+      // computer is about to restart. So while it is armed the explanation line is the consequence,
+      // with the workspace in it.
       add({
         id: "update-box", group: "box",
         label: "Update Titan's computer",
-        line: "Updates the computer your assistants share. Your files and logins stay, but installed apps and packages are removed. All assistants update together.",
+        line: f.updateArmed === true
+          ? `Press again and the computer ${f.workspaceName ? `for ${f.workspaceName}` : "for this workspace"} is replaced with a fresh one and restarts. Your files and logins stay. Installed apps and packages are removed, and every assistant goes with it.`
+          : "Updates the computer your assistants share. Your files and logins stay, but installed apps and packages are removed. All assistants update together.",
         control: press(f.updateArmed === true ? "Click Again to Confirm" : "Update", {
           variant: f.updateArmed === true ? "armed" : "ghost",
           disabled: f.updateAvailable !== true || f.canUpdateBox !== true,
@@ -441,7 +460,12 @@
     const f = facts ?? {};
     const rows = [];
     if (f.updateAvailable === true) rows.push({ id: "update-banner", kind: "banner", label: "New update available", button: "Install", action: "install-update" });
-    rows.push({ id: "usage", kind: "link", label: f.weeklyUsage != null ? `Weekly usage ${f.weeklyUsage}%` : "Weekly usage", chevron: true, action: "open-usage" });
+    // NO PERCENTAGE. The original's row reads "Weekly usage 42%", a percentage OF A PLAN'S WEEKLY
+    // ALLOWANCE, and this product has no plan allowance for anything to be a percentage of: no route
+    // answers one and no ledger counts a week. The label carried a conditional for a field nothing
+    // ever wrote, which is a promise with nothing behind it; the row opens Usage & Billing, where the
+    // numbers that DO exist are drawn. The percentage comes back with the plan (row ME-PLAN-1).
+    rows.push({ id: "usage", kind: "link", label: "Weekly usage", chevron: true, action: "open-usage" });
     rows.push({ id: "mobile", kind: "link", label: "Get the app for mobile", action: "get-the-app" });
     rows.push({ id: "support", kind: "submenu", label: "Support", chevron: true, items: [
       { id: "feedback", label: "Send feedback", action: "send-feedback" },
@@ -650,6 +674,10 @@
     // deploy away from the operator's rows. GET /auth/state answers it server-side -- the relay is
     // the only thing that can tell an operator from a customer -- and an answer with no operator
     // field, or none at all, draws no Operator section whatsoever. ABSENT MEANS FALSE.
+    // WHAT THIS ONE READ IS. getWorkspaceIdentity is GET /auth/state merged with GET /me: the session
+    // half says who is looking, the below-the-gate half counts what this workspace has used. Reading
+    // only the session half is what left the usage rows undrawable, so a field arriving here is a
+    // field one of those two routes actually answers, and nothing else is read off it.
     if (typeof api?.getWorkspaceIdentity === "function") {
       reads.push(Promise.resolve(api.getWorkspaceIdentity()).then((me) => {
         if (me == null) return;
@@ -663,11 +691,24 @@
         // carries no workspace rather than being given one this page made up.
         if (me.workspace?.slug || me.workspace?.name) next.boxName = me.workspace.slug ?? me.workspace.name;
         if (me.person?.email) next.email = me.person.email;
+        // No route on this relay names a plan, so this row is drawn on a field nothing answers yet and
+        // is the one thing here waiting on plumbing rather than on a read (row ME-PLAN-1).
         if (me.plan) next.plan = me.plan;
         if (Number.isFinite(me.botCap) && me.botCap > 0) next.botCap = me.botCap;
-        if (Number.isFinite(me.voiceMinutesToday) && Number.isFinite(me.voiceMinutesCap)) next.voiceMinutes = { used: me.voiceMinutesToday, cap: me.voiceMinutesCap };
-        if (Number.isFinite(me.codingMinutesThisMonth) && Number.isFinite(me.codingMinutesCap)) next.codingMinutes = { used: me.codingMinutesThisMonth, cap: me.codingMinutesCap };
-        if (Number.isFinite(me.weeklyUsagePercent)) next.weeklyUsage = me.weeklyUsagePercent;
+        // MERGED, not replaced: the voice module's own read arrives on the same Promise.all and is the
+        // only one carrying the per-call ceiling, and whichever of the two lands second must not wipe
+        // what the other knew.
+        if (Number.isFinite(me.voiceMinutesToday) && Number.isFinite(me.voiceMinutesCap)) {
+          next.voiceMinutes = { ...(next.voiceMinutes ?? {}), used: me.voiceMinutesToday, cap: me.voiceMinutesCap };
+        }
+        // A MONTH'S CODING MINUTES WITH NO CEILING, and that is not an omission. Nothing on this
+        // product caps coding by the month -- cp/code.mjs caps one TASK's wall clock and nothing else
+        // -- so the row is a figure rather than a bar, and it becomes a bar the day a monthly ceiling
+        // exists. Requiring a cap here is what kept the row off the screen while the minutes were
+        // being counted.
+        if (Number.isFinite(me.codingMinutesThisMonth)) {
+          next.codingMinutes = { used: me.codingMinutesThisMonth, cap: Number.isFinite(me.codingMinutesCap) ? me.codingMinutesCap : null };
+        }
       }).catch(() => {}));
     }
     if (typeof api?.getHostStatus === "function") {
@@ -710,7 +751,13 @@
         if (answer == null) return;
         next.voice = { enabled: answer.enabled === true, available: answer.available === true };
         if (Number.isFinite(answer.minutesUsedToday) && Number.isFinite(answer.minutesCapToday)) {
-          next.voiceMinutes = { used: answer.minutesUsedToday, cap: answer.minutesCapToday };
+          next.voiceMinutes = {
+            used: answer.minutesUsedToday,
+            cap: answer.minutesCapToday,
+            // How long ONE call may run, which the old card said beside the day pair and nothing said
+            // after it was replaced (VOICE-8). Absent where this workspace has no per-call ceiling.
+            perCall: Number.isFinite(answer.minutesCapPerCall) ? answer.minutesCapPerCall : null,
+          };
         }
       }).catch(() => {}));
     }
@@ -965,7 +1012,7 @@
         armedUpdate = global.setTimeout(() => { armedUpdate = null; facts.updateArmed = false; paint(current, null); }, 6000);
         facts.updateArmed = true;
         paint(current, null);
-        toast("Press it again to update the computer your assistants share.");
+        toast(`Press it again to replace the computer ${typeof h.workspaceName === "function" && h.workspaceName() ? `for ${h.workspaceName()}` : "for this workspace"} with a fresh one.`);
         return;
       }
       global.clearTimeout(armedUpdate);

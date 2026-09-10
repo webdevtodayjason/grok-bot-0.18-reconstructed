@@ -1125,12 +1125,21 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
    * always listening that needs no pointer, and a test has to be able to ask this one question.
    */
   function escapeStops() {
-    if (!state.on && state.notes.length === 0) return false;
+    // ENGAGED IS MORE THAN `on`. Between the press and the relay's answer the session is DIALLING:
+    // `on` is still false and no note has been raised yet, and an Escape in that window used to do
+    // nothing at all -- and then the refusal landed a moment later and the person was back in the mode
+    // they had just left. MEASURED on grok-bot-local-vm in real Chrome at 1440x900: pressing Escape
+    // while the dial was in flight left `{"on":false,"notes":["no-key"]}` a breath later with the line
+    // up, which is the "you can't exit out of this talk mode" shape all over again. `talking` is set by
+    // the press itself and `socket` as soon as the line is accepted, so between them they cover it.
+    const engaged = state.on || state.talking || state.socket != null;
+    if (!engaged && state.notes.length === 0) return false;
     const document_ = global.document;
     if (document_?.querySelector?.("dialog[open]") != null) return false;
     if (document_?.body?.dataset?.drawer) return false;
-    // stop() clears a standing note when it has nothing new to say, so both branches really leave.
-    if (state.on) stop(); else clearNotes();
+    // stop() clears a standing note when it has nothing new to say, so both branches really leave, and
+    // it leaves `on` false, which is what makes onClose ignore the close that follows our own.
+    if (engaged) stop(); else clearNotes();
     return true;
   }
 
@@ -1352,6 +1361,14 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
         minutesUsedToday: Math.round(((Number(value.dayUsedSeconds) || 0) / 60) * 10) / 10,
         minutesCapToday: Math.round((capSeconds / 60) * 10) / 10,
       } : {}),
+      // AND THE LENGTH OF ONE CALL, which the old card said on the same line as the day pair --
+      // "4 of 30 today, up to 10 in one call" -- and which nothing said after the card was replaced.
+      // A call ending at its ceiling is the thing a person most needs told in advance, so the cap
+      // travels with the answer and the Usage row prints it in the meter's own caption (VOICE-8).
+      // Omitted, not zeroed, where this workspace has no per-call ceiling.
+      ...(Number(value.sessionCapSeconds) > 0
+        ? { minutesCapPerCall: Math.round((Number(value.sessionCapSeconds) / 60) * 10) / 10 }
+        : {}),
     };
   }
 

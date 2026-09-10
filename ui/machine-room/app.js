@@ -4383,13 +4383,25 @@
     // seam. It reads the operator body and its fill out of __mrUi.settingsHost below, so this file
     // still owns every control on that section.
     if (window.__mrSettings?.open?.(section) === true) return;
-    // ABSENT-MODULE BEHAVIOUR. With settings.js not served -- a deploy fault, and a gate leg -- the
-    // panel is the one that shipped before this wave rather than nothing at all. It is the operator
-    // body, so it is deliberately NOT what a customer should be looking at; that is why the absent
-    // case is measured rather than assumed.
-    openPanel("Your workspace", "Settings", settingsPanel());
-    settingsSection = "operator";
-    fillOperatorSettings();
+    // ABSENT-MODULE BEHAVIOUR, AND IT IS GATED ON WHO IS LOOKING. With settings.js not served -- a
+    // deploy fault, and a gate leg -- the old panel is the operator body: two password fields, the
+    // endpoint picker, the job bus, the mail plane and the red Reset. Painting that for a customer
+    // because one file failed to load hands them every row this wave exists to hide, so the fallback
+    // asks the relay who this is first and a customer gets one plain line instead.
+    //
+    // FAIL CLOSED, the same rule settings.js's own nav follows: the answer is the operator field of
+    // GET /auth/state and nothing else. Absent, unreadable, or no such field means not the operator.
+    openPanel("Your workspace", "Settings", `<div class="panel-intro"><p>Settings could not load. Reload the page.</p></div>`);
+    settingsSection = null;
+    if (typeof adapter.getWorkspaceIdentity !== "function") return;
+    Promise.resolve(adapter.getWorkspaceIdentity()).then((me) => {
+      // The person may have moved on while that was in flight; repainting the panel under them would
+      // be the same bug as a heartbeat filling a section nobody is looking at.
+      if (me?.operator !== true || openPluginSurface !== "settings") return;
+      openPanel("Your workspace", "Settings", settingsPanel());
+      settingsSection = "operator";
+      fillOperatorSettings();
+    }).catch(() => {});
   }
 
   // The Updates rows fill from getHostStatus after the panel opens, like the endpoint rows do.

@@ -3482,10 +3482,30 @@
       // tenant claim, or one minted by the instance password. The console never infers it from what
       // the adapter happens to be able to do. The operator field on that answer is item B's; until it
       // merges this read gets a body with no such field, which reads as false. Absent means false.
+      //
+      // AND GET /me, MERGED ONTO IT, because the two answers are halves of one identity and this
+      // surface reads both. /auth/state is the SESSION -- required, authenticated, the person, and the
+      // operator fact -- and it is all a caller who is not through the gate can have. /me sits BELOW
+      // the gate and is the only thing that counts this workspace's own usage: talking minutes and
+      // their cap, and the bot ceiling. Reading /auth/state alone is what left the usage rows on this
+      // surface undrawable while the route that computes them was called by nobody.
+      //
+      // Each half degrades on its own. /me refusing -- no session yet, or an older relay with no such
+      // route -- leaves the session half standing; both failing answers null, which the surface reads
+      // as "not the operator" and draws no usage row at all.
+      //
+      // THE SESSION HALF IS SPREAD LAST, so where the two name the same fact -- operator, workspace --
+      // the pre-login band's own answer is the one that stands. Both derive the operator the same way
+      // from the same request (`tenantOf(req) === OPERATOR_SLUG`), so they cannot disagree about a real
+      // session; naming one authority is what stops the merge from being a coin toss, and /auth/state
+      // is the authority every other piece of this surface documents.
       getWorkspaceIdentity() {
-        return relayFetch("/auth/state", { headers: { accept: "application/json" } })
+        const read = (pathname) => relayFetch(pathname, { headers: { accept: "application/json" } })
           .then(async (response) => (response.ok ? response.json().catch(() => null) : null))
           .catch(() => null);
+        return Promise.all([read("/auth/state"), read("/me")]).then(([session, me]) => (
+          session == null && me == null ? null : { ...(me ?? {}), ...(session ?? {}) }
+        ));
       },
 
       // The three choices source/shared/local-tool-permission.ts exports, with the operator's

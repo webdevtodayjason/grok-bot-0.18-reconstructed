@@ -74,7 +74,12 @@ VOICE-1:
 
 - Every session claims a ledger row **before** the provider hears a byte, against that workspace's
   slug. Section 9 is that ledger.
-- The day cap and the session cap are read per workspace, and only the operator can change one.
+- The day cap and the session cap are read per workspace, and only the operator can change one. Both
+  are now **said on screen**: the Usage row in Settings reads *"4 of 30 minutes, up to 10 in one
+  call"*, because the old Voice card carried the call ceiling on its usage line and the surface that
+  replaced it said only the day pair, so nothing told a person a call has a maximum length at all
+  (VOICE-8). `GET /voice/settings` already answered `sessionCapSeconds`; the module passes it on as
+  `minutesCapPerCall`, and the caption omits it where a workspace has no per-call ceiling.
 - A workspace that has spent its day is refused whichever key would have dialled.
 
 So what is shared by this change is **the vendor's bill**, which the operator was always paying

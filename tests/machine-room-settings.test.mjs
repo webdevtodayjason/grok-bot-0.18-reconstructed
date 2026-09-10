@@ -66,13 +66,12 @@ const FULL_FACTS = {
   askBefore: "sending email",
   planChoices: [{ id: "sub:zai", name: "GLM 4.6" }],
   planCurrent: "sub:zai",
-  voiceMinutes: { used: 4, cap: 30 },
-  codingMinutes: { used: 12, cap: 600 },
+  voiceMinutes: { used: 4, cap: 30, perCall: 10 },
+  codingMinutes: { used: 12, cap: null },
   plan: "Included",
   version: "0.47.0",
   updateAvailable: true,
   canUpdateBox: true,
-  weeklyUsage: 42,
 };
 
 // ---- the sections -------------------------------------------------------------------------------
@@ -130,6 +129,30 @@ test("a fact the machine could not answer omits its row rather than drawing a ze
   assert.ok(mr.rowsFor("general", { passwordConfigured: true }).some((row) => row.id === "sign-out"));
 });
 
+test("the Usage rows draw the numbers that exist and nothing else", () => {
+  const mr = pure();
+  const rows = mr.rowsFor("usage", FULL_FACTS);
+  const talking = rows.find((row) => row.id === "voice-minutes");
+  // VOICE-8's fifth control. The old card said the day pair and the call ceiling on one line; the
+  // replacement said only the day pair, so nothing told a person a single call ends at all.
+  assert.equal(talking.control.text, "4 of 30 minutes, up to 10 in one call");
+  const noCeiling = mr.rowsFor("usage", { ...FULL_FACTS, voiceMinutes: { used: 4, cap: 30 } })
+    .find((row) => row.id === "voice-minutes");
+  assert.equal(noCeiling.control.text, "4 of 30 minutes", "a workspace with no per-call ceiling is told nothing about one");
+  // Coding minutes are counted and never capped by the month on this product, so the honest control
+  // is the figure. A bar needs two numbers and inventing the second is the PROXY-1 failure.
+  const coding = rows.find((row) => row.id === "coding-minutes");
+  assert.equal(coding.control.kind, "pill");
+  assert.equal(coding.control.text, "12 minutes");
+  const capped = mr.rowsFor("usage", { ...FULL_FACTS, codingMinutes: { used: 12, cap: 600 } })
+    .find((row) => row.id === "coding-minutes");
+  assert.equal(capped.control.kind, "meter", "and it becomes a bar the day a monthly ceiling exists");
+  assert.equal(capped.control.text, "12 of 600 minutes");
+  // Neither row is drawn on a fact nobody answered.
+  assert.deepEqual(mr.rowsFor("usage", { ...FULL_FACTS, voiceMinutes: null, codingMinutes: null, plan: null })
+    .map((row) => row.id), ["billing"]);
+});
+
 test("the three rows the reference has that this product must not pretend about", () => {
   const mr = pure();
   const general = mr.rowsFor("general", FULL_FACTS);
@@ -156,6 +179,14 @@ test("no customer section offers to reset the computer, and the Update row arms 
   assert.equal(at(FULL_FACTS).text, "Update", "at rest it reads Update");
   assert.equal(at({ ...FULL_FACTS, updateArmed: true }).text, "Click Again to Confirm", "armed it reads the confirm");
   assert.equal(at({ ...FULL_FACTS, updateArmed: true }).variant, "armed", "and it is drawn as a different button");
+  // THE SECOND PRESS NAMES THE CONSEQUENCE AND THE WORKSPACE. This control replaces the running
+  // computer; "Click Again to Confirm" beside the resting row's copy does not say whose computer.
+  const armedRow = (facts) => mr.rowsFor("updates", facts).find((row) => row.id === "update-box");
+  assert.match(armedRow({ ...FULL_FACTS, updateArmed: true }).line, /replaced with a fresh one and restarts/);
+  assert.match(armedRow({ ...FULL_FACTS, updateArmed: true }).line, /for Acme Plumbing/,
+    "and it names the workspace whose computer is about to restart");
+  assert.match(armedRow({ ...FULL_FACTS, updateArmed: true, workspaceName: null }).line, /for this workspace/);
+  assert.match(armedRow(FULL_FACTS).line, /^Updates the computer your assistants share/);
   assert.equal(at({ ...FULL_FACTS, updateArmed: false }).variant, "ghost", "and disarms back to the same button it was");
   // Enabled only where a newer bundle is published, which is what keeps it inert on a patched host.
   assert.equal(at({ ...FULL_FACTS, updateAvailable: false }).disabled, true);
@@ -220,9 +251,14 @@ test("the account menu is the reference's rows, in the reference's order", () =>
     "Send feedback, Run a self-test, About. No Help Center: there is no page behind it");
   assert.ok(!mr.accountMenuRows(FULL_FACTS).some((row) => /help center/i.test(row.label ?? "")));
   assert.ok(!mr.accountMenuRows(FULL_FACTS).some((row) => /add account/i.test(row.label ?? "")));
-  // The percentage is drawn only where a cap exists.
+  // NO PERCENTAGE, ever, on either. The reference's "Weekly usage 42%" is a percentage of a plan's
+  // weekly allowance and this product has no allowance for a number to be a percentage of, so the row
+  // says what it opens and nothing else. It comes back with the plan (row ME-PLAN-1).
   assert.equal(mr.accountMenuRows({}).find((row) => row.id === "usage").label, "Weekly usage");
-  assert.equal(mr.accountMenuRows(FULL_FACTS).find((row) => row.id === "usage").label, "Weekly usage 42%");
+  assert.equal(mr.accountMenuRows(FULL_FACTS).find((row) => row.id === "usage").label, "Weekly usage");
+  for (const row of mr.accountMenuRows({ ...FULL_FACTS, weeklyUsage: 42 })) {
+    assert.ok(!/%/.test(row.label ?? ""), "no row on the menu prints a percentage off a fact nothing answers");
+  }
 });
 
 // ---- the mount contract -------------------------------------------------------------------------
@@ -364,7 +400,18 @@ test("app.js falls back to the panel that shipped when settings.js is not served
   const source = await read("ui/machine-room/app.js");
   assert.match(source, /window\.__mrSettings\?\.open\?\.\(section\) === true\) return;/,
     "the surface is asked first and the fallback runs only when it is not there");
+  // THE FALLBACK IS THE OPERATOR BODY, so it is gated on the operator fact rather than painted at
+  // whoever pressed the button. A customer gets one plain line; the old panel, with its two password
+  // fields and its Reset, is drawn only after GET /auth/state says operator. Fail closed: the check
+  // is `me?.operator !== true`, so null, an absent field and a thrown read all draw nothing.
+  assert.match(source, /Settings could not load\. Reload the page\./,
+    "a customer whose settings.js did not load reads one plain line");
+  assert.match(source, /if \(me\?\.operator !== true \|\| openPluginSurface !== "settings"\) return;/,
+    "the old panel is painted only for the operator, and only while Settings is still open");
   assert.match(source, /openPanel\("Your workspace", "Settings", settingsPanel\(\)\);/);
+  const fallback = source.slice(source.indexOf("function openSettingsPanel("), source.indexOf("function fillHostStatus("));
+  assert.ok(fallback.indexOf("Settings could not load") < fallback.indexOf("settingsPanel()"),
+    "the plain line is painted first and the operator body replaces it, never the other way round");
   // openSettingsPanel keeps its name and its openPluginSurface contract, which renderPluginsPanel
   // depends on.
   assert.match(source, /function openSettingsPanel\(section = "general"\)/);

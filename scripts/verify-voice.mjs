@@ -736,6 +736,14 @@ async function noKeyInABrowser(relay) {
 
   const NAMED = ["shelf", "composer", "utilities", "aside", "transcript"];
 
+  /** The line with WORDS in it, which is what a press is waiting for and what Escape has to leave. */
+  const sentenceUp = (page) => page.waitForFunction(() => {
+    const line = document.getElementById("voice-line");
+    if (line == null || line.hidden) return false;
+    const shown = [...line.children].find((one) => !one.hidden);
+    return shown != null && shown.textContent.trim().length > 0;
+  }, null, { timeout: 30_000 }).catch(() => {});
+
   // ---- 1440x900 -------------------------------------------------------------------------------
   step("one press of Talk moves nothing in the footer but the message box (1440x900)");
   const desktop = await open({ width: 1440, height: 900 });
@@ -778,15 +786,34 @@ async function noKeyInABrowser(relay) {
     check(afterSecond.box[0] === atRest.box[0], "the message box included", `${atRest.box[0]} -> ${afterSecond.box[0]}`);
 
     await press(desktop.page, false);
-    await desktop.page.waitForFunction(() => document.getElementById("voice-line")?.hidden === false, null, { timeout: 30_000 })
-      .catch(() => {});
+    // THE SENTENCE, not a visible line. The line goes up as soon as the dial starts and the words land
+    // when the relay answers; waiting on `hidden === false` pressed Escape in that gap, which made this
+    // leg read as a product that ignores Escape about one run in two. Both waits below are the words.
+    await sentenceUp(desktop.page);
+    // WHERE THE KEYBOARD IS WHEN ESCAPE IS PRESSED, and it is not always the console. MEASURED on
+    // grok-bot-local-vm: once the agent's screen connects, noVNC focuses its own canvas, and the seat is
+    // a CROSS-ORIGIN iframe, so from that moment every document-level key lands inside it and never
+    // reaches this page -- `document.activeElement` is the IFRAME and its src is the seat's vnc.html.
+    // That made this leg fail about one run in three with identical state on both sides of the press.
+    // It is a real condition, filed as SEAT-FOCUS-1 (it swallows the space bar too), and it is NOT what
+    // this leg is about: a person who has just pressed Talk has the focus this line restores.
+    await desktop.page.focus("[data-voice-talk]").catch(() => {});
+    // And what else is on the page, because voice.js refuses Escape while a native <dialog> or a drawer
+    // is open -- stealing the key from a modal would read as a broken one -- so a leg that fails here
+    // has to say which of the four it was.
+    info(`at Escape: ${JSON.stringify(await desktop.page.evaluate(() => ({
+      dialogs: [...document.querySelectorAll("dialog[open]")].map((node) => node.id || node.className || "dialog"),
+      drawer: document.body.dataset.drawer ?? "",
+      on: window.__voice?._state?.on ?? null,
+      notes: (window.__voice?._state?.notes ?? []).map((one) => one.condition),
+      active: document.activeElement?.id || document.activeElement?.tagName || "",
+    }))) }`);
     await desktop.page.keyboard.press("Escape");
     await desktop.page.waitForTimeout(300);
     check((await readRects(desktop.page)).lineUp === false, "Escape leaves talk mode");
 
     await press(desktop.page, false);
-    await desktop.page.waitForFunction(() => document.getElementById("voice-line")?.hidden === false, null, { timeout: 30_000 })
-      .catch(() => {});
+    await sentenceUp(desktop.page);
     const armed = Date.now();
     await desktop.page.waitForFunction(() => document.getElementById("voice-line")?.hidden === true, null, { timeout: 20_000 })
       .catch(() => {});
@@ -798,8 +825,13 @@ async function noKeyInABrowser(relay) {
     // Fixing only the note would have left the identical break for everyone who can actually talk:
     // MEASURED before the fix, a caption alone with no note took the shelf 1392x106 -> 1392x168 and
     // the composer 600 -> 407.98 with the utilities wrapped.
+    // WHICH FRAME A CAPTION IS, since VOICE-7 split the two directions: the person's OWN words go to
+    // the speech panel over the conversation, and the line in the footer is the AGENT's reply -- `said`.
+    // This leg injected `heard`, which after VOICE-7 paints the panel and leaves the footer line empty,
+    // so it was measuring a caption that no longer exists in the footer. The claim is unchanged: a
+    // caption is the same one line and moves the footer as little as a note does.
     await desktop.page.evaluate(() => window.__voice._onMessage({
-      data: JSON.stringify({ t: "heard", text: "what is the team working on this afternoon" }),
+      data: JSON.stringify({ t: "said", text: "the team is working on the settings surface this afternoon" }),
     }));
     await desktop.page.waitForTimeout(120);
     const captioned = await readRects(desktop.page);

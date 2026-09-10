@@ -1504,18 +1504,22 @@ function handleDeviceRevoke(req, res, t, sub, id) {
 // the contract with the console: a row whose fact is absent is not drawn, and a zero that means "we
 // could not measure it" is worse than a missing row, because a person acts on a zero.
 //
-// TWO FIELDS ARE ABSENT ON PURPOSE TODAY, and both are honest absences rather than oversights:
+// WHAT THIS ROUTE DOES NOT ANSWER, and why each is an honest absence rather than an oversight:
 //
-//   person.email  The signed-in person's address is verified by the control plane at sign-in and is
-//                 in the token this relay exchanges for its own cookie -- and mintAccountSession
-//                 keeps only `tenant` and `sub` from it. Carrying the address would mean a new claim
-//                 in ui/auth.mjs's session cookie, which sits in the pre-login band another item is
-//                 finishing this week. So the Account block draws a name and no address until that
-//                 claim lands. Filed as ME-EMAIL-1.
+//   person.email  NOT absent any more, and not answered here: the `email` claim landed in
+//                 ui/auth.mjs's session cookie with this wave, and GET /auth/state is what carries
+//                 the address to the Account block. The console reads the two answers merged, so
+//                 repeating it here would be a second copy of one fact that can disagree with
+//                 itself. Nothing is owed.
 //   plan          Nothing on this relay names a plan. The registry carries the MODELS a plan
 //                 includes (PROXY-1) and no name for the plan itself, and the control plane, which
 //                 knows, has no route that hands one over. A made-up name on a billing screen is
-//                 the worst possible place for one. Filed as ME-PLAN-1.
+//                 the worst possible place for one. ME-PLAN-1 in docs/GAP-ANALYSIS.md owns it, with
+//                 the control-plane route as its next action; the account menu's weekly percentage
+//                 waits on the same plumbing, because a percentage needs an allowance to be of.
+//   a coding cap  Counted minutes, no monthly ceiling: nothing on this product caps coding by the
+//                 month (cp/code.mjs caps one task's wall clock), so the Usage row draws the figure
+//                 rather than a bar and becomes a bar the day a ceiling exists.
 async function handleMe(req, res, t) {
   const answer = {
     workspace: { slug: t.slug, name: t.name || t.slug },

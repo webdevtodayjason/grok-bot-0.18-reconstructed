@@ -547,7 +547,12 @@ test("VOICE-2 seam: what item A's rows read is two booleans, so no vendor can re
   // from. NOT A STRING AMONG THEM, which is the claim this test exists to make: there is nothing on
   // this seam a vendor name, a model id or a voice name could ride in on, so no customer row can
   // render one by accident.
-  assert.deepEqual(Object.keys(settings).sort(), ["available", "enabled", "minutesCapToday", "minutesUsedToday"]);
+  // VOICE-8 adds the third number: how long ONE call may run, which the old card said beside the day
+  // pair and which nothing said after the card was replaced. It is a number like the other two, so
+  // the claim this test makes is unchanged.
+  assert.deepEqual(Object.keys(settings).sort(),
+    ["available", "enabled", "minutesCapPerCall", "minutesCapToday", "minutesUsedToday"]);
+  assert.equal(settings.minutesCapPerCall, 30, "1800 seconds, in the minutes the caption shows");
   for (const [name, value] of Object.entries(settings)) {
     assert.ok(typeof value === "boolean" || typeof value === "number", `${name} is ${typeof value}, and a string is how a vendor name travels`);
   }

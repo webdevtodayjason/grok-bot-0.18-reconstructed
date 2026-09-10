@@ -242,7 +242,7 @@ try {
    * operator field this stand-in is overwriting a real value rather than inventing one -- at which
    * point the forcing can go and the leg reads live truth with no other edit here.
    */
-  async function open({ w, h, phone = false, operator = false }) {
+  async function open({ w, h, phone = false, operator = false, noSettingsModule = false }) {
     const context = await browser.newContext({
       viewport: { width: w, height: h },
       ...(phone ? { deviceScaleFactor: 3, isMobile: true, hasTouch: true } : {}),
@@ -268,6 +268,14 @@ try {
         }),
       });
     });
+    // THE DEPLOY FAULT, ON PURPOSE. With settings.js not served, app.js falls back to the panel that
+    // shipped before this wave -- which is the OPERATOR body. The leg below proves the fallback is
+    // gated on who is looking rather than painted at whoever pressed the button.
+    // A PREDICATE, not a glob: "**/settings.js" can be read loosely enough to take push-settings.js
+    // with it, and aborting that one would be measuring a different fault.
+    if (noSettingsModule) {
+      await context.route((url) => /(^|\/)settings\.js$/.test(new URL(url).pathname), (route) => route.abort());
+    }
     const page = await context.newPage();
     page.on("pageerror", (error) => pageErrors.push(String(error?.message ?? error)));
     await page.goto(`${ORIGIN}/`, { waitUntil: "domcontentloaded", timeout: within(45_000) });
@@ -536,6 +544,55 @@ try {
   check(asCustomer.passwords === 0, `and there is no password field on a customer's Settings (${BASELINE.passwordFields} before this ship)`,
     `${asCustomer.passwords} field(s)`);
   for (const id of EXPECTED_NAV) { await gotoSection(page, id); await shoot(page, `settings-${id}-1440x900`); }
+  await page.context().close();
+
+  // ---- the deploy fault: settings.js missing, and a customer pressing the gear ----------------------
+  //
+  // ONE MISSING ASSET USED TO HAND A CUSTOMER THE WHOLE OPERATOR PANEL. app.js's absent-module
+  // fallback paints the pre-wave body -- two password fields, the endpoint picker, the job bus, the
+  // mail plane and the red Reset -- and it was painted at whoever pressed the button. It now reads the
+  // same operator fact the surface's nav reads and a customer gets one plain line instead. Measured
+  // here by aborting every request ending /settings.js, which is exactly the fault shape.
+  step("with settings.js not served, a customer gets a plain line and none of the operator's rows");
+  page = await open({ w: DESKTOP.w, h: DESKTOP.h, operator: false, noSettingsModule: true });
+  const moduleGone = await page.evaluate(() => window.__mrSettings == null);
+  check(moduleGone, "the module really is absent for this leg", moduleGone ? "window.__mrSettings is absent" : "it loaded anyway");
+  await page.click("#settings-button");
+  await page.waitForTimeout(2500);
+  const broken = await page.evaluate(() => ({
+    open: document.getElementById("panel-dialog")?.open === true,
+    words: (document.getElementById("panel-content")?.textContent ?? "").trim().slice(0, 80),
+    surface: document.querySelector("[data-settings-surface]") != null,
+    passwords: document.querySelectorAll("#panel-content input[type=password]").length,
+    reset: document.querySelectorAll("[data-reset-box]").length,
+    update: document.querySelectorAll("[data-update-box]").length,
+    jobBus: document.querySelectorAll("[data-job-bus]").length,
+    mail: document.querySelectorAll("[data-mail]").length,
+    endpoint: document.getElementById("endpoint-select") != null,
+  }));
+  check(broken.open && /Settings could not load/.test(broken.words),
+    "the panel opens on one plain line a person can act on", broken.words || "nothing painted");
+  check(broken.passwords === 0 && broken.reset === 0 && broken.update === 0,
+    "no password field, no Update and no Reset reach a customer when the module is missing",
+    `${broken.passwords} password(s), ${broken.update} update, ${broken.reset} reset`);
+  check(!broken.jobBus && !broken.mail && !broken.endpoint,
+    "and neither does the job bus, the mail plane or the endpoint picker",
+    JSON.stringify({ jobBus: broken.jobBus, mail: broken.mail, endpoint: broken.endpoint }));
+  await shoot(page, "settings-module-absent-customer-1440x900");
+  await page.context().close();
+
+  // The same fault as the OPERATOR: the old panel is what he should get, because it is his panel and
+  // a deploy fault must not take his endpoint picker away.
+  page = await open({ w: DESKTOP.w, h: DESKTOP.h, operator: true, noSettingsModule: true });
+  await page.click("#settings-button");
+  await page.waitForTimeout(3000);
+  const operatorFallback = await page.evaluate(() => ({
+    endpoint: document.getElementById("endpoint-select") != null,
+    jobBus: document.querySelector("[data-job-bus]") != null,
+    reset: document.querySelector("[data-reset-box]") != null,
+  }));
+  check(operatorFallback.endpoint && operatorFallback.jobBus && operatorFallback.reset,
+    "the operator still gets his own panel when the module is missing", JSON.stringify(operatorFallback));
   await page.context().close();
 
   // =================================================================================================
