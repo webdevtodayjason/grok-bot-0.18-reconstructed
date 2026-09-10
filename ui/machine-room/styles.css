@@ -4848,7 +4848,45 @@ body[data-composer-drop="1"] .composer {
   display: grid;
   gap: 0.4rem;
   margin: 0 0 0.5rem;
+  /* VOICE-6 (filed as VOICE-2 in the brief; the row was renamed because that id was taken), and this
+     is the THIRD time this exact bug has been fixed in this file: .control-shelf
+     is a three-column grid, and a child auto-placed into it takes a COLUMN. The strip mounts after
+     the shelf's own three children, so it landed in column 2 and shoved the composer into column 3.
+     Measured on grok-bot-local-vm at 1440x900, real Chrome, 2026-09-10: one press of Talk took
+     #composer from x459 w600 to x991.02 w407.98, #message-input from 370.05 px to 178.03 px, the
+     shelf from 106 px to 196.02 px, and the utilities from x1083 down to x41 on a second row. That
+     is the footer Jason photographed. Spanning the row puts every one of those numbers back.
+
+     THIS RULE ALONE IS NOT THE WHOLE FIX, so nobody reads a green shelf here as done: measured, a
+     full-row item placed AFTER #workspace-list still forces a third row and moved the composer to
+     x41 w557.97. The strip must ALSO be mounted at the shelf's band position, before
+     #workspace-list, which is voice.js's half (item C). Both siblings carry the same pair for the
+     same reason: .composer-status:3178 and .attachment-tray:3832.
+
+     Deliberately NOT copied from .composer-status: its pointer-events: none. The strip holds the orb
+     and, while a note is showing, something to press. */
+  grid-column: 1 / -1;
+  justify-self: center;
+  max-width: min(72ch, 100%);
 }
+/* The refusal line, in the .composer-status idiom rather than a transcript bubble: ONE short centred
+   line that clears itself. Measured on grok-bot-local-vm at 1440x900: 27.39 px tall against the
+   74.02 px of the is-system bubble it replaces, so the shelf grows 43.39 px instead of 74.08 px and
+   the composer's own row is identical to rest. */
+.voice-note-line {
+  margin: 0;
+  justify-self: center;
+  max-width: min(60ch, 100%);
+  padding: 4px 14px;
+  border-radius: 999px;
+  background: rgba(15, 23, 27, 0.72);
+  border: 1px solid var(--glass-edge);
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-tertiary);
+  text-align: center;
+}
+.voice-note-line:empty { display: none; }
 .voice-caption {
   margin: 0;
   min-height: 1.1em;

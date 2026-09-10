@@ -246,12 +246,31 @@ let restored = "not attempted";
 
 try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  // SETTINGS-2: the Operator section is drawn only when GET /auth/state answers operator:true. That
+  // field is item B's; this forces it on and keeps every other field the live route returned, so the
+  // day the relay answers it for real this overwrites a true value rather than inventing one.
+  await page.route((url) => url.pathname === "/auth/state", async (route) => {
+    const live = await route.fetch().catch(() => null);
+    let body = {};
+    if (live != null && live.status() === 200) body = await live.json().catch(() => ({}));
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "cache-control": "no-store" },
+      body: JSON.stringify({ ...body, required: body.required ?? false, authenticated: body.authenticated ?? true, operator: true }),
+    });
+  });
   const closePanel = () => page.evaluate(() => document.getElementById("panel-dialog")?.close());
   const openSettings = async () => {
     // The panel is a modal <dialog>, so a second click on the gear lands on the backdrop rather
     // than on the button. Close first, every time.
     await closePanel();
     await page.click("#shelf-settings");
+    // SETTINGS-2: the plan and provider cards are in the surface's OPERATOR section now, so this
+    // presses that entry before waiting for them. One more press; the same cards.
+    await page.waitForSelector("[data-settings-surface]", { timeout: 20000 }).catch(() => {});
+    const operator = await page.waitForSelector('[data-settings-nav="operator"]', { timeout: 20000 }).catch(() => null);
+    if (operator != null) await operator.click();
     await page.waitForSelector('[data-plugin-group="Plan"]', { timeout: 20000 });
   };
 

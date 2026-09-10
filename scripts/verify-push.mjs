@@ -252,6 +252,19 @@ function standUpFront({ stateDir, nowRef, subRef }) {
     ["/index.html", { file: "ui/machine-room/index.html", type: "text/html; charset=utf-8" }],
     ["/push-settings.js", { file: "ui/machine-room/push-settings.js", type: "text/javascript; charset=utf-8" }],
     ["/push-settings.css", { file: "ui/machine-room/push-settings.css", type: "text/css; charset=utf-8" }],
+    // SETTINGS-2, and the reason this list has to grow with the index.html above it: the front serves
+    // THIS worktree's index.html and proxies every other asset to the live relay, which is the shared
+    // working copy. So a <script> line added here and not added to this map is a tag pointing at a
+    // 404 -- silently, because a script that does not load throws nothing. Measured on
+    // grok-bot-local-vm 2026-09-10, before these three lines: the tags for settings.js and
+    // account-menu.js were in the page, __mrSettings and __accountMenu were both undefined, and the
+    // Notifications leg failed reading a console that had no settings surface at all.
+    ["/settings.js", { file: "ui/machine-room/settings.js", type: "text/javascript; charset=utf-8" }],
+    ["/settings.css", { file: "ui/machine-room/settings.css", type: "text/css; charset=utf-8" }],
+    ["/account-menu.js", { file: "ui/machine-room/account-menu.js", type: "text/javascript; charset=utf-8" }],
+    // app.js is this worktree's too, because openSettingsPanel and the settingsHost seam the surface
+    // reads out of __mrUi are both in it. The live relay's copy has neither.
+    ["/app.js", { file: "ui/machine-room/app.js", type: "text/javascript; charset=utf-8" }],
   ]);
   const here = new URL("..", import.meta.url).pathname;
 
@@ -1047,31 +1060,48 @@ try {
       // shape. So it is filed as MOBILE-2c against the phone pane with this measurement, and REPORTED
       // here rather than asserted: a FAIL on somebody else's stylesheet in this gate would read as a
       // defect in the card, which is the opposite of what was measured.
+      // SETTINGS-2 corrects the claim this leg used to make. MOBILE-2c's row said there is NO phone
+      // route into Settings, and that is measured wrong: #shelf-settings is 0x0 because
+      // .shelf-utilities is display:none at 390px, but the TOP-BAR gear #settings-button is 44x44 at
+      // (336,42) on the same page and opens the panel. So both are read, and the leg is about whether
+      // a thumb has ANY way in rather than about one of the two controls.
       const route = await page.evaluate(() => {
         const gear = document.getElementById("shelf-settings");
+        const top = document.getElementById("settings-button");
         const shelf = document.querySelector(".shelf-utilities");
         const box = gear?.getBoundingClientRect();
+        const topBox = top?.getBoundingClientRect();
+        const laid = (rect) => rect != null && rect.width > 0 && rect.height > 0;
         return {
           gear: gear != null,
           shelfDisplay: shelf ? getComputedStyle(shelf).display : "absent",
-          reachable: box != null && box.width > 0 && box.height > 0,
+          shelfGear: laid(box),
+          topGear: laid(topBox) ? `${Math.round(topBox.width)}x${Math.round(topBox.height)} at (${Math.round(topBox.x)},${Math.round(topBox.y)})` : null,
+          reachable: laid(box) || laid(topBox),
           others: [...document.querySelectorAll("button, a")].filter((node) => /settings/i.test(node.getAttribute("aria-label") ?? node.textContent ?? "")).length,
         };
       });
-      info(`at ${PHONE.width}x${PHONE.height} the gear is ${route.gear ? "in the DOM" : "absent"}, .shelf-utilities computes display:${route.shelfDisplay}, and the gear's own box is ${route.reachable ? "laid out" : "0x0"}; ${route.others} control(s) on the page mention settings at all`);
+      info(`at ${PHONE.width}x${PHONE.height} .shelf-utilities computes display:${route.shelfDisplay} so #shelf-settings is ${route.shelfGear ? "laid out" : "0x0"}, and the top-bar gear #settings-button is ${route.topGear ?? "not laid out"}; ${route.others} control(s) on the page mention settings at all`);
       if (!route.reachable) {
         skip("the Notifications card can be opened by a thumb at this width",
-          `Settings has NO phone entry point in today's console: .shelf-utilities is display:${route.shelfDisplay} at ${PHONE.width}px and the gear is the only control bound to openSettings. Pre-existing, in two files this item does not own, filed as MOBILE-2c with the phone pane as owner. The card itself is measured at a phone viewport below`);
+          `neither gear is laid out at ${PHONE.width}px: .shelf-utilities is display:${route.shelfDisplay} and #settings-button has no box either`);
       } else {
-        check(true, "the Notifications card can be opened by a thumb at this width", "the gear is laid out and hit-testable");
+        check(true, "the Notifications card can be opened by a thumb at this width",
+          route.topGear ? `the top-bar gear is ${route.topGear} and hit-testable` : "the shelf gear is laid out and hit-testable");
       }
 
-      console.log("\n== the Notifications card, opened where the gear exists and measured at a phone viewport");
-      // Opened at a desktop width because that is the only width the gear exists at, then the viewport is
-      // taken down to the phone and the card is measured there. The card is the thing under test; the
-      // route to it is MOBILE-2c.
-      await page.setViewportSize({ width: 1440, height: 900 });
-      await page.click("#shelf-settings");
+      console.log("\n== the Notifications card, opened at a phone viewport and measured there");
+      // SETTINGS-2: opened THROUGH THE PHONE ROUTE, at the phone viewport, because there is one. This
+      // used to widen the window to 1440 first and press the shelf gear, on the belief that no phone
+      // route existed; the top-bar gear is 44x44 at this width and the sheet it opens is what a person
+      // actually sees, so measuring the card inside a desktop-width panel that was then shrunk was
+      // measuring a layout nobody gets.
+      await page.click("#settings-button");
+      // SETTINGS-2: Settings opens on General and paints ONE body at a time, and this card is the
+      // Notifications body. Pressing that entry is what a person does; the card mounts into that
+      // body's own [data-push-mount] slot, which is still structure and still not a string of copy.
+      await page.waitForSelector("[data-settings-surface]", { timeout: within(20_000) }).catch(() => {});
+      await page.click('[data-settings-nav="notifications"]').catch(() => {});
       const card = await page.waitForSelector("[data-push-settings]", { timeout: within(20_000) }).catch(() => null);
       check(card != null, "the Notifications card appears inside Settings", card == null ? "no [data-push-settings] section after pressing the gear" : "appended to the panel's own settings list");
 
@@ -1083,7 +1113,8 @@ try {
           "and the device list shows the registered phone");
       } else {
         await page.waitForFunction(() => document.querySelectorAll("[data-push-kind]").length > 0, { timeout: within(15_000) }).catch(() => {});
-        await page.setViewportSize({ width: PHONE.width, height: PHONE.height });
+        // The viewport was never widened, so there is nothing to take back down: the card was opened
+        // and is measured at the same phone size a person holds.
         await page.waitForTimeout(300);
 
         // EVERY switch hit-tested at its own centre, which is the lesson verify-mobile's drawers leg paid
@@ -1116,8 +1147,20 @@ try {
           fonts.length === 0 ? "the card has no controls to measure" : small.length > 0 ? small.map((row) => `${row.tag} at ${row.px}px`).join(", ") : `${fonts.length} control(s), smallest ${Math.min(...fonts.map((row) => row.px))}px`);
 
         console.log("\n== saving it");
-        await page.click('[data-push-kind="widget"]');
-        await page.click("[data-push-quiet]");
+        // SET the two switches rather than PRESS them. This gate shares one push state directory with
+        // every earlier run of itself, so "click it once and it will be off" is only true on a state
+        // nobody has touched -- and measured on grok-bot-local-vm 2026-09-10, widget was already off
+        // from a previous run, so the single press turned it ON and the assertion below read true and
+        // called the surface broken. A switch is set to the value the leg is about, from whatever it
+        // was found on, and the press is skipped when it is already there.
+        const setSwitch = async (selector, want) => {
+          const now = await page.$eval(selector, (node) => node.getAttribute("aria-pressed") === "true").catch(() => null);
+          if (now === null) { info(`${selector} is not on the card, so it was not set`); return; }
+          if (now !== want) await page.click(selector);
+          info(`${selector} was ${now}, wanted ${want}`);
+        };
+        await setSwitch('[data-push-kind="widget"]', false);
+        await setSwitch("[data-push-quiet]", true);
         await page.click("[data-push-save]");
         const note = await page.waitForFunction(() => document.querySelector("[data-push-note]")?.textContent?.trim().length > 0, { timeout: within(15_000) }).then(async () => await page.$eval("[data-push-note]", (node) => node.textContent.trim())).catch(() => "");
         check(note === "Saved.", "and saving it answers in one word", note || "nothing was written into the note");
@@ -1183,14 +1226,49 @@ try {
     const bareLive = await bare.waitForFunction(() => window.__machineRoomAdapter != null, { timeout: within(45_000) }).then(() => true).catch(() => false);
     check(bareLive, "the console still boots with push-settings.js absent", bareLive ? "the adapter is up without it" : "the console did not come up");
     if (bareLive) {
-      // Desktop width for this one press, for the same reason the card legs above needed it: the gear
-      // is display:none at 390px (MOBILE-2c), so a phone viewport would time out on a finding that has
-      // nothing to do with the module being absent.
-      await bare.setViewportSize({ width: 1440, height: 900 });
-      await bare.click("#shelf-settings");
-      const settings = await bare.waitForSelector(".settings-list", { timeout: within(20_000) }).catch(() => null);
-      const has = await bare.evaluate(() => document.querySelector("[data-push-settings]") != null);
-      check(settings != null && !has, "and Settings simply has one fewer card", settings == null ? "the panel did not open" : "no [data-push-settings] section, and the panel is otherwise whole");
+      // The TOP-BAR gear, not the shelf one. MOBILE-2c's row says there is no phone route into
+      // Settings; measured on grok-bot-local-vm at 390x844 in real Chrome, #settings-button is 44x44
+      // at (336,42) and opens the panel, while #shelf-settings is 0x0 because .shelf-utilities is
+      // display:none. So this leg needs no viewport change at all, and a resize plus a press on a
+      // control that was hidden a frame ago is exactly how it failed to open.
+      await bare.click("#settings-button");
+      const bareSurface = await bare.waitForSelector("[data-settings-surface]", { timeout: within(20_000) }).catch(() => null);
+      if (bareSurface == null) {
+        info(`the panel did not open in the bare context: ${JSON.stringify(await bare.evaluate(() => ({
+          dialog: document.getElementById("panel-dialog")?.open ?? null,
+          gear: Boolean(document.getElementById("settings-button")),
+          settingsModule: typeof window.__mrSettings,
+          pushModule: typeof window.__pushSettings,
+          accountModule: typeof window.__accountMenu,
+          scripts: [...document.querySelectorAll("script[src]")].map((s) => s.getAttribute("src")),
+        })))}`);
+      }
+      // SETTINGS-2 retarget, and a better leg than the one it replaces. `.settings-list` belongs to
+      // the operator's card stack now, which a customer never sees, so waiting for it here would be
+      // waiting for something this leg is not about. What is asserted instead is what a person would
+      // see: the nav still lists Notifications, that body is still drawn, no card is mounted into it
+      // because the module that mounts one was blocked, and nothing threw.
+      const surface = bareSurface;
+      // A LOCATOR, not an element handle. The nav is rebuilt the moment the session answer lands, so
+      // a handle taken the instant an entry appears is detached a frame later and clicking it throws
+      // "Element is not attached to the DOM" straight through the run's own catch, ending the gate on
+      // a line that has nothing to do with what it was measuring. Measured here on 2026-09-10.
+      const notifications = bare.locator('[data-settings-nav="notifications"]');
+      await notifications.waitFor({ state: "visible", timeout: within(10_000) }).catch(() => {});
+      const listed = (await notifications.count()) > 0 ? notifications : null;
+      if (listed != null) { await listed.click({ timeout: within(15_000) }).catch(() => {}); await bare.waitForTimeout(1200); }
+      const bareState = await bare.evaluate(() => ({
+        body: document.querySelector('[data-settings-section="notifications"]') != null,
+        card: document.querySelector("[data-push-settings]") != null,
+        rows: document.querySelectorAll("[data-setting-row]").length,
+      }));
+      check(surface != null && listed != null && bareState.body && !bareState.card,
+        "and Settings simply has one fewer card",
+        surface == null ? "the panel did not open" : `nav lists Notifications ${listed != null}, body drawn ${bareState.body}, card ${bareState.card}`);
+      await bare.click('[data-settings-nav="general"]').catch(() => {});
+      await bare.waitForTimeout(800);
+      const stillWhole = await bare.evaluate(() => document.querySelectorAll('[data-settings-section="general"] [data-setting-row]').length);
+      check(stillWhole > 0, "and every other section is whole without it", `${stillWhole} row(s) on General`);
       check(bareErrors.length === 0, "and nothing threw on the way", bareErrors.length === 0 ? "no page errors" : bareErrors.slice(0, 2).join(" · "));
     }
     check(consoleErrors.length === 0, "and nothing threw with the module loaded either", consoleErrors.length === 0 ? "no page errors" : consoleErrors.slice(0, 2).join(" · "));

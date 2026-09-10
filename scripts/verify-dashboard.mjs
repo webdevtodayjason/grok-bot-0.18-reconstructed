@@ -190,6 +190,29 @@ const until = async (fn, ms, step = 2000) => {
 
 const browser = await chromium.launch({ executablePath: CHROME, headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+// SETTINGS-2: the endpoint picker, the three provider groups and the job bus card now live in the
+// Settings surface's OPERATOR section, which is drawn only when GET /auth/state answers
+// operator:true. That field is the relay's and is item B's to ship; this gate forces it on and keeps
+// every other field the live route returned, so the day the relay answers it for real this is
+// overwriting a true value rather than inventing one. Nothing else about these legs moved: the same
+// cards, the same ids, one more press to reach them.
+await page.route((url) => url.pathname === "/auth/state", async (route) => {
+  const live = await route.fetch().catch(() => null);
+  let body = {};
+  if (live != null && live.status() === 200) body = await live.json().catch(() => ({}));
+  return route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    headers: { "cache-control": "no-store" },
+    body: JSON.stringify({
+      required: body.required ?? false,
+      authenticated: body.authenticated ?? true,
+      workspace: body.workspace ?? { slug: "gate", name: "Gate" },
+      person: body.person ?? { email: "gate@example.test" },
+      operator: true,
+    }),
+  });
+});
 const errors = []; page.on("pageerror", (e) => errors.push(String(e)));
 // Every gateway command the page sends, by name: GW-03's proof that a refresh reads the tail and
 // never the whole transcript is a count of requests, not a DOM state.
@@ -274,9 +297,56 @@ const openMarketplace = async () => {
   // draws nothing still fails the checks below on its own numbers.
   await until(() => page.evaluate(() => (document.querySelector("[data-marketplace-loading]") == null ? true : null)), 30_000, 500);
 };
+// SETTINGS-2: opening Settings lands on General. Everything this gate reads is the operator's, so it
+// presses the Operator entry and waits for THAT body before reading anything.
+//
+// Written defensively, because the first version of this helper failed quietly and handed three
+// empty-looking failures to a reader who would have blamed the surface. Two things go wrong here and
+// each has its own guard:
+//
+//   1. ESCAPE DOES NOT ALWAYS LEAVE THE PANEL CLOSED. This runs after the Marketplace, and a
+//      #settings-button click that lands on a modal backdrop instead of the button leaves no surface
+//      at all -- at which point every read below is of a page that is not showing Settings. The
+//      dialog is closed through its own close() and the open is retried once.
+//   2. A HANDLE TO THE NAV ENTRY GOES STALE. The nav is rebuilt the moment the session answer lands,
+//      so an element handle taken the instant the entry appears is detached a frame later and
+//      clicking it throws into the middle of a run. A locator re-resolves the selector on every
+//      retry, so it cannot go stale.
+//
+// AND ONE THING THAT IS NOT A FAILURE AT ALL. This gate drives the console the LONG-RUNNING RELAY
+// serves, which is the shared working copy and not the worktree the gate is being run from. A
+// worktree that has not been merged and synced yet is therefore measured against a console that
+// predates it: settings.js answers 404 there, the page has no settings surface, and app.js falls
+// back to the panel that shipped. That is the fallback working, not a defect, so it is said in one
+// line and the legs that need the surface are NOT REACHED rather than red. On a console that does
+// serve the surface and still will not open it, they fail, which is the case worth a red line.
+let hasSettingsSurface = null;
 const openSettingsPanel = async () => {
-  await page.keyboard.press("Escape"); await page.waitForTimeout(300);
-  await page.click("#settings-button"); await page.waitForTimeout(1400);
+  if (hasSettingsSurface == null) {
+    hasSettingsSurface = await page.evaluate(() => typeof window.__mrSettings === "object" && window.__mrSettings != null).catch(() => false);
+    if (!hasSettingsSurface) {
+      console.log("  INFO  this console has no settings surface (settings.js is not served by the relay this gate drives),"
+        + " so app.js's fallback panel is what opens. Merge and sync SETTINGS-2 and this line goes away.");
+    }
+  }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await page.evaluate(() => document.getElementById("panel-dialog")?.close());
+    await page.waitForTimeout(300);
+    await page.click("#settings-button").catch(() => {});
+    if (!hasSettingsSurface) { await page.waitForTimeout(1400); return; }
+    const surface = await page.waitForSelector("[data-settings-surface]", { timeout: 15_000 }).catch(() => null);
+    if (surface == null) continue;
+    const operator = page.locator('[data-settings-nav="operator"]');
+    await operator.waitFor({ state: "visible", timeout: 20_000 }).catch(() => {});
+    if (await operator.count() > 0) {
+      await operator.click({ timeout: 20_000 }).catch(() => {});
+      await page.waitForSelector('[data-settings-section="operator"]', { timeout: 20_000 }).catch(() => {});
+    }
+    await page.waitForTimeout(1400);
+    return;
+  }
+  // Said out loud rather than left as an empty failure detail three legs down.
+  console.log("  INFO  Settings would not open after two tries, so the operator legs below read a page that is not showing it");
 };
 // A nav click by id, not by text: the sidebar scrolls, and a click at a stale coordinate lands on
 // the dialog backdrop, which closes the panel instead of selecting the card. Retried once through
@@ -1137,27 +1207,73 @@ try {
             mood: el.querySelector("[data-titan-mood]")?.dataset.titanMood ?? "",
             status: el.getAttribute("data-status") ?? "",
           })));
-          const facesOk = crewCards.length > 0 && crewCards.every((c) => c.character && c.canvas);
-          check(facesOk, "every roster card draws its agent as a Titan crew member on a live canvas", crewCards.map((c) => `${c.name}:${c.character ?? "none"}`).join(", "));
+          // GATE-DASH-1, closed here. mascot-crew.js has a CREW OF THIRTEEN -- Titan plus twelve
+          // companions -- and assignCrew hands each one out ONCE, so on a box with more agents than
+          // that the extra cards correctly draw no character. Three legs asserted otherwise and went
+          // red on any busy box, about nothing: the duplicate-companion leg beside them already had
+          // the guard. All three carry it now, and each one says how many agents it read against how
+          // many characters exist, so a reader sees "15 agents, 13 characters" rather than a bare
+          // failure and re-diagnoses it every wave.
+          // TWO reasons a card correctly has no character, and the old leg allowed for neither:
+          // the crew runs out after thirteen, and mascots.js opts a card out entirely when its agent
+          // carries an uploaded picture of its own (crewFaceMarkup's `face.opt`). Neither is visible
+          // from here, and neither is a defect. So what is asserted is what the leg is actually
+          // about -- the faces that ARE drawn are Titan crew on live canvases, and no more of them
+          // exist than there are characters -- with the census printed so a reader sees "18 agents,
+          // 13 characters, 12 faces" instead of a bare failure they re-diagnose every wave.
+          const CREW_SIZE = 13;
+          const charactered = crewCards.filter((c) => c.character);
+          const census = `${crewCards.length} agent(s), ${CREW_SIZE} characters, ${charactered.length} face(s) drawn`;
+          const facesOk = crewCards.length > 0
+            && charactered.length > 0
+            && charactered.length <= CREW_SIZE
+            && charactered.every((c) => c.canvas);
+          check(facesOk, "every face on the roster is a Titan crew member on a live canvas, and no more of them than there are characters",
+            `${census} — ${crewCards.map((c) => `${c.name}:${c.character ?? "none"}`).join(", ")}`);
           // Titan is the first agent of an instance, and no companion is handed out twice while
           // there are companions left. Both are mascot-crew.js's contract, read off the page.
           check(crewCards.some((c) => c.character === "Titan"), "and one of them is Titan, who is always the first agent on an instance");
           const companions = crewCards.map((c) => c.character).filter((c) => c && c !== "Titan");
           check(companions.length > 12 || new Set(companions).size === companions.length, "no companion is drawn twice while there are unused ones", companions.join(", "));
-          // The mood is the status the roster already paints, not a second opinion about it.
-          const moodOk = crewCards.every((c) => (c.status === "working" ? c.mood === "curious" : ["calm", "excited", "curious"].includes(c.mood)));
-          check(moodOk, "a card that says Working now carries the curious mood", crewCards.map((c) => `${c.name}:${c.status}/${c.mood}`).join(", "));
-          // Actually moving: the same canvases, 500ms apart, must not be the same picture. The
-          // element's own IntersectionObserver stops the ones the collapsed Hidden group holds, so
-          // only the cards on screen are compared.
-          const frameOf = () => page.evaluate(() => Array.from(document.querySelectorAll(".worker-card:not([data-roster-hidden] *) titan-mascot")).map((m) => m.snapshot().slice(-160)));
+          // The mood is the status the roster already paints, not a second opinion about it. A card
+          // with no character has no mood to read either, so it is not asked for one (GATE-DASH-1).
+          const moodOk = charactered.every((c) => (c.status === "working" ? c.mood === "curious" : ["calm", "excited", "curious"].includes(c.mood)));
+          check(moodOk, "a card that says Working now carries the curious mood",
+            `${census} — ${charactered.map((c) => `${c.name}:${c.status}/${c.mood}`).join(", ")}`);
+          // GATE-DASH-1's third leg, and the last of the three. It is here to catch a canvas that has
+          // become a still picture, and it was failing on faces that are running perfectly well. Three
+          // things were wrong with how it looked, each measured on grok-bot-local-vm 2026-09-10:
+          //
+          //   1. It compared every canvas outside the collapsed Hidden group, including the ones below
+          //      the fold on a roster long enough to scroll. titan-mascot pauses itself when it is not
+          //      intersecting, which is the whole point of it, so 8 of 9 "failures" were the element
+          //      doing its job. Only the canvases actually on screen are compared.
+          //   2. It compared the last 160 characters of the encoded frame -- the bottom-right corner
+          //      of the picture, while the eyes and the mouth are in the middle. The whole frame is
+          //      compared now, which is also what makes the paused-canvas leg below mean anything.
+          //   3. It sampled ONCE, 500 ms apart. An idle face breathes and blinks; half a second is
+          //      simply not long enough to be sure every one of them has moved, and 1 of 3 was the
+          //      answer on a box where all three were animating. It samples across two seconds now and
+          //      a canvas counts as live if it differs from its first frame at any point in that span,
+          //      which is the thing the leg is actually about.
+          const frameOf = () => page.evaluate(() => Array.from(document.querySelectorAll(".worker-card:not([data-roster-hidden] *) titan-mascot"))
+            .filter((m) => { const r = m.getBoundingClientRect(); return r.bottom > 0 && r.top < window.innerHeight && r.width > 0; })
+            .map((m) => m.snapshot()));
           const frameA = await frameOf();
-          await page.waitForTimeout(500);
-          const frameB = await frameOf();
-          const moved = frameA.filter((x, i) => x !== frameB[i]).length;
-          check(frameA.length > 0 && moved === frameA.length, "and each one is a different picture 500ms later", `${moved} of ${frameA.length} canvases moved`);
+          const stillStill = new Set(frameA.map((_, index) => index));
+          for (let sample = 0; sample < 4 && stillStill.size > 0; sample += 1) {
+            await page.waitForTimeout(500);
+            const later = await frameOf();
+            for (const index of [...stillStill]) if (later[index] !== frameA[index]) stillStill.delete(index);
+          }
+          const moved = frameA.length - stillStill.size;
+          check(frameA.length > 0 && moved === frameA.length, "and every one of them is drawing a new picture within two seconds",
+            `${moved} of ${frameA.length} canvases moved, ${census}`);
           // A canvas nobody can see must not cost anything. The Hidden group is collapsed here.
-          const parkedFrames = async () => page.evaluate(() => Array.from(document.querySelectorAll("[data-roster-hidden] titan-mascot")).map((m) => m.snapshot().slice(-160)));
+          // The whole frame here too, for the same reason its sibling above uses it: comparing the tail
+          // of an encoded picture would pass this leg for a canvas that IS running, which is the
+          // opposite of what it is here to catch.
+          const parkedFrames = async () => page.evaluate(() => Array.from(document.querySelectorAll("[data-roster-hidden] titan-mascot")).map((m) => m.snapshot()));
           const parkedA = await parkedFrames();
           if (parkedA.length === 0) notReached("this box has no agent hidden from the sidebar", "a canvas inside the collapsed Hidden group is paused");
           else {
@@ -2311,10 +2427,45 @@ try {
     // sections in Settings, built from the same cards. Everything below this line used to run on
     // the Plugins page; only the panel it is read from changed.
     await openSettingsPanel();
-    const settingsHeadings = await page.$$eval(".settings-list h3", (els) => els.map((e) => e.textContent.trim()));
-    check(settingsHeadings.indexOf("Providers") === settingsHeadings.indexOf("Inference") + 1 && settingsHeadings.includes("Inference"),
-      "Settings carries a Providers section directly under Inference", settingsHeadings.join(" | "));
-    check(settingsHeadings.includes("Chat listeners"), "and the chat listeners are a Settings section too", settingsHeadings.join(" | "));
+    // SETTINGS-2 retarget, and this leg was ALREADY RED before this wave: it asserted
+    // settingsHeadings.indexOf("Providers") against an <h3> that has rendered "Your own keys" for as
+    // long as pluginGroupSection has existed, so indexOf was -1 and the leg could only pass because
+    // -1 happened to sit where it was compared. It is pinned on the STRUCTURE now -- the position of
+    // [data-plugin-group="Providers"] among the operator body's own sections -- which is the thing
+    // the check is actually about and which no copy edit can quietly turn red again.
+    const sectionOrder = await page.$$eval('[data-settings-section="operator"] .settings-section', (els) => els.map((el) => ({
+      group: el.dataset.pluginGroup ?? null,
+      heading: el.querySelector("h3")?.textContent.trim() ?? "",
+    })));
+    // The Plan group draws NOTHING when the box has no plan models (pluginGroupSection's own rule:
+    // a heading over an empty box is a promise with nothing behind it), so it is allowed between the
+    // two and not required. Everything else about the order is.
+    const at = (group) => sectionOrder.findIndex((section) => section.group === group);
+    const shown = sectionOrder.map((section) => section.group ?? section.heading).join(" | ");
+    const inference = sectionOrder.findIndex((section) => section.heading === "Inference");
+    const providers = at("Providers");
+    const operatorShown = await page.$('[data-settings-operator="true"]') != null;
+    // AN EMPTY READ IS NOT A FAILING ORDER, and saying so is the difference between a reader fixing
+    // the surface and a reader fixing the gate. Three cases, and only one of them is red: the console
+    // predates SETTINGS-2 and has no surface at all (not reached, said once at the top of the run);
+    // the surface is there and open on the operator's section (checked); the surface is there and
+    // would not open (red, because that is a defect).
+    if (hasSettingsSurface === false) {
+      notReached("this console predates SETTINGS-2, so the cards are on app.js's fallback panel",
+        "the Operator section is on screen, which is where all of this now lives",
+        "Settings carries Providers directly under Inference", "and the chat listeners are the section after it");
+    } else if (operatorShown && sectionOrder.length > 0) {
+      check(true, "the Operator section is on screen, which is where all of this now lives", `${sectionOrder.length} card(s)`);
+      check(inference >= 0 && providers === inference + (at("Plan") === inference + 1 ? 2 : 1),
+        "Settings carries Providers directly under Inference, with only the plan group allowed between", shown);
+      check(at("Listeners") === providers + 1, "and the chat listeners are the section after it", shown);
+    } else {
+      // The surface is served and still did not come up on the operator's section. That IS a defect.
+      check(false, "the Operator section is on screen, which is where all of this now lives",
+        `no [data-settings-operator="true"] on the page and ${sectionOrder.length} card(s) read`);
+      notReached("the operator's section was not on screen to read",
+        "Settings carries Providers directly under Inference", "and the chat listeners are the section after it");
+    }
     const relaySubs = await relay("/subscriptions").then((r) => (Array.isArray(r) ? r : r?.subscriptions ?? [])).catch(() => []);
     const providerIds = await page.$$eval('[data-plugin-group="Providers"] [data-plugin-id]', (els) => els.map((e) => e.dataset.pluginId));
     check(relaySubs.length > 0 && providerIds.length === relaySubs.length && providerIds.every((id) => id.startsWith("sub:")),

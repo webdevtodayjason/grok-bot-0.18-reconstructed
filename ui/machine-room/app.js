@@ -3480,7 +3480,9 @@
 
   // The Marketplace, or Settings, or neither: a card control re-renders the panel it is drawn in.
   function renderPluginsPanel() {
-    if (openPluginSurface === "settings") { openSettingsPanel(); return; }
+    // SETTINGS-2: the provider and listener cards live in the Operator section, so a control on one
+    // of them reopens THAT section rather than dropping the operator back on General.
+    if (openPluginSurface === "settings") { openSettingsPanel("operator"); return; }
     renderMarketplacePanel();
   }
 
@@ -4106,6 +4108,23 @@
     return `<section class="settings-section" data-plugin-group="${escapeHtml(group)}">${head}<div class="plugin-browser"><aside class="plugin-sidebar">${members.map((plugin) => pluginNavButton(plugin, selected?.id ?? null)).join("")}</aside>${detail}</div></section>`;
   }
 
+  /**
+   * SETTINGS-2: this function is now the OPERATOR section's body and nothing else.
+   *
+   * Everything it draws is what it drew before -- the endpoint picker, the three provider groups,
+   * the review policy, the job bus card, the mail card, the host's version with Update and Reset --
+   * because none of it has changed in behaviour. What changed is who sees it: a customer's Settings
+   * is six plain sections built by ui/machine-room/settings.js, and this is the one section only the
+   * operator is given, gated server-side on the operator field of GET /auth/state.
+   * docs/SETTINGS.md section 2 is the row-by-row map of where every old card went.
+   *
+   * ONE structural change: the wrapper carries .settings-operator-list beside the .settings-list it
+   * always had. It KEEPS .settings-list on purpose. That selector is how voice.js finds where to put
+   * its own card -- "#panel-content .settings-list", then after [data-mail] -- and the operator's
+   * stack is exactly where the voice service, model and voice rows belong. push-settings.js no longer
+   * shares that class: it aims at [data-push-mount], the Notifications body's own slot, so the two
+   * cards can never land on each other's section.
+   */
   function settingsPanel() {
     // Per-agent routing does not exist on this host: updateAgent takes only name, description and
     // title, and the model is resolved globally from box-secrets.json on every request. A picker
@@ -4117,18 +4136,43 @@
     // box runs a locally patched bundle that such a swap would overwrite.
     const boxAgent = contextLead();
     const updates = typeof adapter.getHostStatus === "function"
-      ? `<section class="settings-section" data-updates-panel><h3>Updates</h3><p>The host bundle this box runs, as getHostStatus reports it. The host itself is not updated from this page: updateHostNow would fetch a bundle from S3 over the locally patched one this box runs, so that command is left unwired here on purpose.</p><div class="setting-row"><div><strong>Host version</strong><small data-host-version>Reading from the host…</small></div><span class="status-pill" data-host-update>…</span></div>${boxAgent ? `<div class="setting-row"><div><strong>Update ${escapeHtml(boxAgent.name)}'s computer</strong><small>Moves the box to a fresh instance and keeps files and logins. Two clicks.</small></div><button class="ghost-button" type="button" data-update-box="${escapeHtml(boxAgent.id)}"${typeof adapter.updateBox === "function" ? "" : " disabled"}>Update</button></div><div class="setting-row"><div><strong>Reset ${escapeHtml(boxAgent.name)}'s computer</strong><small>Restores the box from its last snapshot. Recent unsynced work can be lost — prefer Update. Two clicks.</small></div><button class="danger-button" type="button" data-reset-box="${escapeHtml(boxAgent.id)}"${typeof adapter.resetBox === "function" ? "" : " disabled"}>Reset</button></div>` : ""}</section>`
+      ? `<section class="settings-section" data-updates-panel><h3>Updates</h3><p>The host bundle this box runs, as getHostStatus reports it. Moving a box onto a newer bundle is the Update button below, and it is enabled only while a newer bundle is actually published: since cc2de54 a swap installs the bundle&#39;s own box-scripts and the window repair patches that copy too, so a box carrying a local patch is not offered one and nothing hand-applied is silently thrown away.</p><div class="setting-row"><div><strong>Host version</strong><small data-host-version>Reading from the host…</small></div><span class="status-pill" data-host-update>…</span></div>${boxAgent ? `<div class="setting-row"><div><strong>Update ${escapeHtml(boxAgent.name)}'s computer</strong><small>Moves the box to a fresh instance and keeps files and logins. Two clicks.</small></div><button class="ghost-button" type="button" data-update-box="${escapeHtml(boxAgent.id)}"${typeof adapter.updateBox === "function" ? "" : " disabled"}>Update</button></div><div class="setting-row"><div><strong>Reset ${escapeHtml(boxAgent.name)}'s computer</strong><small>Restores the box from its last snapshot. Recent unsynced work can be lost — prefer Update. Two clicks.</small></div><button class="danger-button" type="button" data-reset-box="${escapeHtml(boxAgent.id)}"${typeof adapter.resetBox === "function" ? "" : " disabled"}>Reset</button></div>` : ""}</section>`
       : "";
-    return `<div class="panel-intro"><p>Inference and review policy are global on this host. Routines stay attached to individual agents and rooms.</p><span class="status-pill${state.settings.reachable ? " success" : ""}">${state.settings.reachable ? "Host settings loaded" : "Host settings unreachable"}</span></div><div class="settings-list"><section class="settings-section"><h3>Inference</h3><p>This host routes every agent through a single endpoint. Per-agent models are not something it can do.</p>${rows}</section>${pluginGroupSection("Plan", "Included with your plan", "Models your plan already pays for. There is no key to paste and nothing to connect \u2014 pick one and every agent on this box answers through it from the next message.", "")}${pluginGroupSection("Providers", "Your own keys", "A provider you bring yourself. Adopting one stores its credential in the relay's 0600 store; switching one is the endpoint row above. Your own key always wins over what your plan includes.", "The relay reports no providers for this box.")}${pluginGroupSection("Listeners", "Chat listeners", "The chat platforms the host binds to. A listener binds to one agent at a time — the agent whose conversation is on screen.", "This host reports no chat listeners.")}<section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>${state.settings.autoReview.enabled ? "Armed. The host checks each action against the instructions below." : "Off. Every tool an agent holds runs without review."}</small></div><button class="switch" type="button" id="auto-review-toggle" aria-pressed="${state.settings.autoReview.enabled}"></button></div><div class="field"><label for="auto-review-rule">Ask me before…</label><textarea id="auto-review-rule" rows="3" placeholder="e.g. sending email, deleting anything, spending money">${escapeHtml((state.settings.autoReview.block ?? []).join("\n"))}</textarea></div>${(state.settings.autoReview.allow ?? []).length ? `<div class="setting-row"><div><strong>Always allowed</strong><small>${escapeHtml((state.settings.autoReview.allow ?? []).join("; "))}</small></div></div>` : ""}${state.settings.localToolPermission ? `<div class="setting-row"><div><strong>Local tool permission</strong><small>The host is set to "${escapeHtml(state.settings.localToolPermission)}" for tools that run on this machine.</small></div><span class="status-pill">${escapeHtml(state.settings.localToolPermission)}</span></div>` : ""}<div class="form-actions"><button class="primary-button" type="button" data-save-review>Save policy</button></div></section>${jobBusSection()}${mailSection()}${updates}</div>`;
+    // SETTINGS-2: where the keys went, said once at the top of the operator's own section so nobody
+    // goes looking for the two fields that used to be on the cards below.
+    const keysLine = `<section class="settings-section" data-operator-session><h3>This session</h3><p>You are signed in as the operator, which is why you can see this section at all. A customer's Settings has the five plain sections above it and nothing here.</p><div class="setting-row"><div><strong>Keys the product uses</strong><small>The key the product talks with and the key it sends mail with are pasted once in the admin console, not per workspace.</small></div><a class="ghost-button" href="https://api.titanium.bot/admin" target="_blank" rel="noopener">Open the admin console</a></div></section>`;
+    return `<div class="panel-intro"><p>Inference and review policy are global on this host. Routines stay attached to individual agents and rooms.</p><span class="status-pill${state.settings.reachable ? " success" : ""}">${state.settings.reachable ? "Host settings loaded" : "Host settings unreachable"}</span></div><div class="settings-list settings-operator-list"><section class="settings-section"><h3>Inference</h3><p>This host routes every agent through a single endpoint. Per-agent models are not something it can do.</p>${rows}</section>${pluginGroupSection("Plan", "Included with your plan", "Models your plan already pays for. There is no key to paste and nothing to connect \u2014 pick one and every agent on this box answers through it from the next message.", "")}${pluginGroupSection("Providers", "Your own keys", "A provider you bring yourself. Adopting one stores its credential in the relay's 0600 store; switching one is the endpoint row above. Your own key always wins over what your plan includes.", "The relay reports no providers for this box.")}${pluginGroupSection("Listeners", "Chat listeners", "The chat platforms the host binds to. A listener binds to one agent at a time — the agent whose conversation is on screen.", "This host reports no chat listeners.")}<section class="settings-section"><div class="setting-row"><div><strong>Natural-language auto-review</strong><small>${state.settings.autoReview.enabled ? "Armed. The host checks each action against the instructions below." : "Off. Every tool an agent holds runs without review."}</small></div><button class="switch" type="button" id="auto-review-toggle" aria-pressed="${state.settings.autoReview.enabled}"></button></div><div class="field"><label for="auto-review-rule">Ask me before…</label><textarea id="auto-review-rule" rows="3" placeholder="e.g. sending email, deleting anything, spending money">${escapeHtml((state.settings.autoReview.block ?? []).join("\n"))}</textarea></div>${(state.settings.autoReview.allow ?? []).length ? `<div class="setting-row"><div><strong>Always allowed</strong><small>${escapeHtml((state.settings.autoReview.allow ?? []).join("; "))}</small></div></div>` : ""}${state.settings.localToolPermission ? `<div class="setting-row"><div><strong>Local tool permission</strong><small>The host is set to "${escapeHtml(state.settings.localToolPermission)}" for tools that run on this machine.</small></div><span class="status-pill">${escapeHtml(state.settings.localToolPermission)}</span></div>` : ""}<div class="form-actions"><button class="primary-button" type="button" data-save-review>Save policy</button></div></section>${jobBusSection()}${mailSection()}${updates}${keysLine}</div>`;
   }
 
-  function openSettingsPanel() {
-    openPluginSurface = "settings";
-    openPanel("Global router & policy", "Operator settings", settingsPanel());
+  // Which settings section is on screen right now, in the openPluginSurface mould. The two live
+  // refills below read it: with one body painted at a time, a heartbeat that refilled the job bus or
+  // the endpoint rows while General was showing would paint into a section that is not drawn.
+  // settings.js is the only writer -- it dispatches the event on every paint -- so this stays true
+  // however the person got there.
+  let settingsSection = null;
+  document.addEventListener("titanbot:settings-section", (event) => { settingsSection = event.detail?.id ?? null; });
+
+  /** Fills every live value on the operator section, which is where all four of these cards live. */
+  function fillOperatorSettings() {
     fillEndpoints();
     fillHostStatus();
     fillJobBus();
     fillMail();
+  }
+
+  function openSettingsPanel(section = "general") {
+    openPluginSurface = "settings";
+    // SETTINGS-2: the surface is ui/machine-room/settings.js, a sibling module on the CONSOLE-4
+    // seam. It reads the operator body and its fill out of __mrUi.settingsHost below, so this file
+    // still owns every control on that section.
+    if (window.__mrSettings?.open?.(section) === true) return;
+    // ABSENT-MODULE BEHAVIOUR. With settings.js not served -- a deploy fault, and a gate leg -- the
+    // panel is the one that shipped before this wave rather than nothing at all. It is the operator
+    // body, so it is deliberately NOT what a customer should be looking at; that is why the absent
+    // case is measured rather than assumed.
+    openPanel("Your workspace", "Settings", settingsPanel());
+    settingsSection = "operator";
+    fillOperatorSettings();
   }
 
   // The Updates rows fill from getHostStatus after the panel opens, like the endpoint rows do.
@@ -4399,6 +4443,12 @@
   const MAIL_OUTCOME = {
     delivered: "delivered", no_route: "nobody was named for it",
     fetch_failed: "could not be read back from Resend", send_failed: "did not reach the agent",
+    // KEYS-1. The key the product sends and reads mail with moved to the admin console, so the relay
+    // now has an outcome it never had: it HAS somewhere to ask and could not reach it. That is not
+    // "you have no key" -- the difference matters, because one is a thing to go and fix and the other
+    // is a thing to wait out -- and a row that said the first about the second would send an
+    // operator to paste a key that is already there.
+    key_unreachable: "could not be read back, the key could not be fetched",
   };
   // MAIL-3, the other direction. `sending` is the row the relay opens BEFORE it calls Resend and
   // closes after, so a row still reading `sending` is a send nobody can say went or did not: it
@@ -4407,7 +4457,11 @@
   const MAIL_SEND_OUTCOME = {
     sent: "sent", sending: "not confirmed",
     rate_limited: "held back, too many in the hour", no_key: "not sent, the mail key is missing",
-    refused: "Resend would not take it", failed: "did not send",
+    // KEYS-1 again, the outbound half. `refused` stops naming a vendor: the key is the install's now,
+    // so the thing that refused a send is not the thing this operator configured, and a vendor's name
+    // here sent the last reader off to check a dashboard that was fine.
+    refused: "not accepted by the mail service", failed: "did not send",
+    key_unreachable: "not sent, the key could not be fetched",
   };
   const mailWhen = (at) => {
     const ms = Date.parse(String(at ?? ""));
@@ -4428,13 +4482,23 @@
 
   function mailSection() {
     if (typeof adapter.getMailSettings !== "function") return "";
-    return `<section class="settings-section" data-mail><h3>Email</h3><p>Give every agent an email address at your own domain. Mail sent to one of them arrives in that agent's conversation, and the agent can write back from the same address. You set this up once in Resend and paste two values here. Receiving only works once the domain is verified in Resend and its MX record is added at your DNS provider; the runbook lists the steps.</p>`
+    return `<section class="settings-section" data-mail><h3>Email</h3><p>Give every agent an email address at your own domain. Mail sent to one of them arrives in that agent's conversation, and the agent can write back from the same address. You set this up once in Resend; the sending key is in the admin console and the signing secret is below. Receiving only works once the domain is verified in Resend and its MX record is added at your DNS provider; the runbook lists the steps.</p>`
       + `<div class="setting-row"><div><strong>Receiving</strong><small data-mail-enabled-note>Reading from the relay…</small></div><button class="switch" type="button" data-mail-enabled aria-pressed="false"></button></div>`
       + `<div class="mail-grid"><label>Your domain<input type="text" placeholder="titanium.bot" data-mail-domain /></label><label>Sender name<input type="text" placeholder="Titanium Bot" data-mail-from-name /></label></div>`
       + `<div class="field"><label for="mail-catch-all">Who gets mail nobody else is named for</label><select id="mail-catch-all" data-mail-catch-all></select><small class="field-hint">An address that matches an agent's name always goes to that agent. Everything else comes here.</small></div>`
       + `<div class="mail-block"><strong>The address to paste into Resend</strong><small class="field-hint">In Resend, make a webhook for the event email.received and give it this address. It is the only address Resend needs.</small><div class="mail-copy-row"><input type="text" readonly data-mail-webhook-url /><button class="ghost-button" type="button" data-mail-copy>Copy</button></div></div>`
-      + `<div class="mail-block"><strong>Resend API key</strong><small class="field-hint" data-mail-key-note>Reading from the relay…</small><div class="mail-secret-row"><input type="password" autocomplete="off" placeholder="re_…" data-mail-key /><button class="ghost-button" type="button" data-mail-key-set>Save key</button><button class="danger-button" type="button" data-mail-key-clear>Clear</button></div><small class="field-hint">This is what reads the mail back out of Resend. It is stored on the relay and this page can never show it again.</small></div>`
-      + `<div class="mail-block"><strong>Webhook signing secret</strong><small class="field-hint" data-mail-secret-note>Reading from the relay…</small><div class="mail-secret-row"><input type="password" autocomplete="off" placeholder="whsec_…" data-mail-secret /><button class="ghost-button" type="button" data-mail-secret-set>Save secret</button><button class="danger-button" type="button" data-mail-secret-clear>Clear</button></div><small class="field-hint">Resend shows this when you create the webhook. Without it nothing is accepted, because it is the only proof a message really came from Resend.</small></div>`
+      // KEYS-1: the sending key's field is GONE from here. The key the product sends and reads mail
+      // with belongs to the operator of the whole install, not to one workspace, and it is pasted
+      // once at api.titanium.bot/admin under "Keys the product uses". The relay prefers the control
+      // plane's value and falls back to its own file until one is pasted, so mail keeps working
+      // through the move and nothing here has to push a secret anywhere. Whether one is set at all
+      // is still read back, because that is what decides whether receiving can be on.
+      + `<div class="mail-block"><strong>The key the product sends mail with</strong><small class="field-hint" data-mail-key-note>Reading from the relay…</small><small class="field-hint">It lives in the admin console at <a href="https://api.titanium.bot/admin" target="_blank" rel="noopener">api.titanium.bot/admin</a>, under “Keys the product uses”. No workspace holds one of its own.</small></div>`
+      // This one STAYS on files and stays here, deliberately. It is not a vendor credential the
+      // relay fetches; it is how one inbound message is matched to the workspace that owns the
+      // domain it arrived on, so a single global value in front of every edge would let the first
+      // claimant read another customer's mail. MAIL-WEBHOOK-1 carries the reasoning.
+      + `<div class="mail-block"><strong>Webhook signing secret</strong><small class="field-hint" data-mail-secret-note>Reading from the relay…</small><div class="mail-secret-row"><input type="password" autocomplete="off" placeholder="whsec_…" data-mail-secret /><button class="ghost-button" type="button" data-mail-secret-set>Save secret</button><button class="danger-button" type="button" data-mail-secret-clear>Clear</button></div><small class="field-hint">Resend shows this when you create the webhook. Without it nothing is accepted, because it is the only proof a message really came from Resend. It belongs to this workspace and is not shared with any other.</small></div>`
       + `<div class="form-actions"><button class="primary-button" type="button" data-mail-save>Save email settings</button></div>`
       + `<div class="mail-block"><strong>Addresses</strong><small class="field-hint">One per agent, made from its name. Renaming an agent changes its address.</small><div data-mail-addresses><p class="field-hint">Reading from the relay…</p></div></div>`
       + `<div class="mail-block"><strong>Mail that arrived</strong><div class="mail-table-wrap"><table class="mail-table"><thead><tr><th>When</th><th>From</th><th>Subject</th><th>Went to</th></tr></thead><tbody data-mail-rows><tr><td colspan="4">Reading from the relay…</td></tr></tbody></table></div></div>`
@@ -4474,12 +4538,12 @@
           ? "On. Mail sent to an agent's address arrives in its conversation."
           : "On, but not finished. Fill in your domain and save both values below before mail can arrive.";
     }
+    // KEYS-1: read, never written, from here. The relay answers whether it HAS one, wherever it got
+    // it from -- the control plane first, its own file while the admin console is still empty.
     const keyNote = root.querySelector("[data-mail-key-note]");
-    if (keyNote) keyNote.textContent = settings.apiKeySet ? "Saved." : "Not saved yet.";
+    if (keyNote) keyNote.textContent = settings.apiKeySet ? "Set. Mail can be sent and read back." : "Not set yet, so nothing can be sent or read back.";
     const secretNote = root.querySelector("[data-mail-secret-note]");
     if (secretNote) secretNote.textContent = settings.webhookSecretSet ? "Saved." : "Not saved yet.";
-    const keyClear = root.querySelector("[data-mail-key-clear]");
-    if (keyClear) keyClear.disabled = settings.apiKeySet !== true;
     const secretClear = root.querySelector("[data-mail-secret-clear]");
     if (secretClear) secretClear.disabled = settings.webhookSecretSet !== true;
 
@@ -4552,8 +4616,8 @@
   // Every control on the card, in one place, so the click chain carries two lines and the card's
   // own behaviour can be driven in a test rather than only in a browser.
   const MAIL_CONTROLS = [
-    "data-mail-enabled", "data-mail-save", "data-mail-key-set", "data-mail-secret-set",
-    "data-mail-key-clear", "data-mail-secret-clear", "data-mail-copy",
+    "data-mail-enabled", "data-mail-save", "data-mail-secret-set",
+    "data-mail-secret-clear", "data-mail-copy",
   ];
   const isMailControl = (target) => MAIL_CONTROLS.some((name) => target.hasAttribute(name));
 
@@ -4568,23 +4632,21 @@
     if (target.hasAttribute("data-mail-save")) {
       return saveMail(target, mailSettingsFromCard(root), "Email settings saved.");
     }
-    if (target.hasAttribute("data-mail-key-set") || target.hasAttribute("data-mail-secret-set")) {
-      const isKey = target.hasAttribute("data-mail-key-set");
-      const input = root.querySelector(isKey ? "[data-mail-key]" : "[data-mail-secret]");
+    // KEYS-1: the sending key's Save and Clear are gone with its field. What is left is the inbound
+    // signing secret, which is this workspace's own routing value and stays here.
+    if (target.hasAttribute("data-mail-secret-set")) {
+      const input = root.querySelector("[data-mail-secret]");
       const value = input.value.trim();
-      // Nothing typed is not a save. Writing an empty string here would clear a working key, which
+      // Nothing typed is not a save. Writing an empty string here would clear a working value, which
       // is what the Clear button is for and is never what an empty field meant.
-      if (value.length === 0) return showToast(isKey ? "Type the key first." : "Type the signing secret first.");
+      if (value.length === 0) return showToast("Type the signing secret first.");
       // Emptied before the write, not after it: the value is on its way to the relay and this page
       // is not the place it lives.
       input.value = "";
-      return saveMail(target, isKey ? { apiKey: value } : { webhookSecret: value },
-        isKey ? "The Resend key is saved on the relay." : "The signing secret is saved on the relay.");
+      return saveMail(target, { webhookSecret: value }, "The signing secret is saved on the relay.");
     }
-    if (target.hasAttribute("data-mail-key-clear") || target.hasAttribute("data-mail-secret-clear")) {
-      const isKey = target.hasAttribute("data-mail-key-clear");
-      return saveMail(target, isKey ? { apiKey: null } : { webhookSecret: null },
-        isKey ? "The Resend key is cleared." : "The signing secret is cleared, so nothing will be accepted.");
+    if (target.hasAttribute("data-mail-secret-clear")) {
+      return saveMail(target, { webhookSecret: null }, "The signing secret is cleared, so nothing will be accepted.");
     }
     const field = root.querySelector("[data-mail-webhook-url]");
     return Promise.resolve(navigator.clipboard?.writeText?.(field.value)).then(() => showToast("Address copied."))
@@ -6485,7 +6547,9 @@
     // page for it would throw away whatever the operator is typing into the token or worker
     // fields on the very card the event is about.
     if (event.type === "job-bus:changed") {
-      if (elements.panelDialog.open && openPluginSurface === "settings") fillJobBusRows();
+      // SETTINGS-2: and only when the Operator section is the one on screen. One body is painted
+      // at a time now, so a refill aimed at a card that is not drawn writes into nothing.
+      if (elements.panelDialog.open && openPluginSurface === "settings" && settingsSection === "operator") fillJobBusRows();
       return;
     }
     renderAll(event.type === "worker:status" || event.type.startsWith("plugin:") || event.type.startsWith("settings:"));
@@ -6497,7 +6561,7 @@
     // and then emits. The endpoint row is not redrawn by renderAll, so without this it kept saying
     // what the box was on before the click: true a second ago, wrong now, on the one row whose
     // whole job is to say what is actually answering.
-    if ((event.type.startsWith("plugin:") || event.type === "settings:model") && elements.panelDialog.open && openPluginSurface === "settings") fillEndpoints();
+    if ((event.type.startsWith("plugin:") || event.type === "settings:model") && elements.panelDialog.open && openPluginSurface === "settings" && settingsSection === "operator") fillEndpoints();
     if (event.type === "desktop:pause") renderDesktop();
     // Not renderDesktop: that remounts the VNC frame. Only the hand-off banner follows state.
     else if (elements.desktopDialog.open) renderHandBack();
@@ -6758,7 +6822,9 @@
   });
   elements.panelContent.addEventListener("submit", handlePanelSubmit);
 
-  const openSettings = openSettingsPanel;
+  // A click event is not a section id, so the two gears go through a wrapper rather than being
+  // handed straight to a function whose first argument names a section.
+  const openSettings = () => openSettingsPanel("general");
   document.getElementById("settings-button").addEventListener("click", openSettings);
   document.getElementById("shelf-settings").addEventListener("click", openSettings);
   document.getElementById("people-button").addEventListener("click", () => {
@@ -7521,7 +7587,46 @@
   // already uses, the redaction already applied to attachment text, the escaper, and a way to ask
   // for a repaint. Publishing them here keeps those modules out of this file's internals entirely,
   // exactly as window.__marketplaceBots and window.__titanMascots already do.
-  window.__mrUi = { openPanel, paragraphMarkup, maskSecrets, escapeHtml, renderAll };
+  window.__mrUi = {
+    openPanel, paragraphMarkup, maskSecrets, escapeHtml, renderAll, showToast,
+    // THE ONE WAY INTO SETTINGS from another module, and the reason it exists: voice.js used to
+    // synthesise a click on #shelf-settings, which computes display:none at 390x844 -- so "Open
+    // voice settings" was dead on every phone, silently, because a click on a hidden element is not
+    // an error. openSettings(sectionId) takes a section rather than an event and works at every
+    // width. It is the wrapper below, so a module calling it gets General unless it names a section.
+    openSettings: (sectionId) => openSettingsPanel(typeof sectionId === "string" ? sectionId : "general"),
+    // ===== SETTINGS-2: the seam settings.js and account-menu.js build against =====
+    // Six facts this file already holds and two bodies it still owns. Publishing them here keeps the
+    // settings surface out of this file's internals entirely, the same way __marketplaceBots and the
+    // three CONSOLE-4 modules already work. settings.js reads the adapter itself for everything the
+    // adapter can answer; this object is only what lives in app.js's own closure.
+    settingsHost: {
+      operatorMarkup: settingsPanel,
+      operatorFill: fillOperatorSettings,
+      markOpen: () => { openPluginSurface = "settings"; },
+      // This console has never held a workspace name of its own: the control plane mints it and the
+      // relay answers it on GET /auth/state, which is where settings.js reads it. Left here as an
+      // explicit null rather than omitted, so the next reader can see it was looked for, not missed.
+      workspaceName: () => null,
+      leadId: () => contextLead()?.id ?? null,
+      leadName: () => contextLead()?.name ?? null,
+      botCount: () => botCount(),
+      botCap: () => agentCap(),
+      askBefore: () => (state.settings.autoReview.block ?? []).join("\n"),
+      localToolPermission: () => state.settings.localToolPermission ?? null,
+      // The Plan group, which is what "How Titan answers" is drawn from. Empty on a console with no
+      // plan, and pluginGroupSection's rule applies: no members, no row.
+      planChoices: () => state.plugins.filter((plugin) => (plugin.group ?? "Connectors") === "Plan")
+        .map((plugin) => ({ id: plugin.endpointId ?? plugin.id, name: plugin.name })),
+      planCurrent: () => state.plugins.find((plugin) => (plugin.group ?? "Connectors") === "Plan" && plugin.status === "connected")?.endpointId ?? "",
+      usePlanChoice: (endpointId) => Promise.resolve(adapter.setModel(null, endpointId)),
+      openReport: () => openProblemReportCard(),
+      runSelfTest: () => runSelfTest(),
+      // The toast the reference raises at the top of the transcript while a computer updates.
+      raiseUpdateToast: () => showToast("Updating Titan's computer. Transferring your data."),
+      clearUpdateToast: () => {},
+    },
+  };
 
   // The badge's own control. Delegated at the document because the transcript is rebuilt wholesale
   // on every render, so a listener bound to a row would be thrown away with it.

@@ -2,8 +2,15 @@
  * Background picker for the Machine Room.
  * ---------------------------------------
  * Lives beside app.js rather than inside it: app.js stays byte-identical to the handoff, and this
- * file hangs its own listeners on the same two settings buttons. Because it loads last, its
- * listener runs after the panel has been filled, so it appends its section to the open dialog.
+ * file finds its own place on the Settings surface.
+ *
+ * SETTINGS-2: it used to hang listeners on the two gear buttons and then guard on the panel's TITLE
+ * matching /Global router|Operator settings/. Both are gone. The title guard was the dangerous
+ * half: the settings surface renames that panel to "Settings", and with the guard in place this
+ * picker would simply have stopped appearing -- no error, no page error, and nothing in the suite
+ * pinning it. It now listens for the surface's own document event, titanbot:settings-section, and
+ * mounts into General -> Appearance and nowhere else. tests/machine-room-settings.test.mjs pins
+ * that, because nothing pinned the old guard.
  *
  * Uploads stay in this browser. There is no upload endpoint, and inventing one would mean writing
  * operator files into the served directory -- so the picture is downscaled in a canvas and kept in
@@ -13,6 +20,19 @@
   "use strict";
 
   const doc = global.document;
+
+  // SETTINGS-2: the one place on the surface this picker belongs, found by structure rather than by
+  // a string of copy. Its control slot is the Background row's; falling back to the Appearance card
+  // keeps the tiles on screen if that row is ever renamed.
+  function appearanceSlot() {
+    if (!doc) return null;
+    const general = doc.querySelector('[data-settings-section="general"]');
+    if (!general) return null;
+    return general.querySelector('[data-settings-mount="background"]')
+      ?? general.querySelector('[data-settings-group="appearance"] .settings-card')
+      ?? null;
+  }
+
   // CONSOLE-4: the default, the built-in list, the id-to-file rule and apply() all live in
   // bg-boot.js, which runs in <head> before the first stylesheet so the chosen plate is on <html>
   // before anything paints. This file owns the PICKER and the uploads and reads the rest from
@@ -23,7 +43,7 @@
   // this file should ever see -- but without this guard the destructure below threw at module top
   // level and took the WHOLE picker with it. Measured on console.titanium.bot 2026-09-08 with only
   // bg-boot.js blocked in the browser: pageerror "Cannot destructure property 'CHOICE_KEY' of
-  // 'boot' as it is undefined", no .bg-grid in Operator settings at all, no way to choose a plate,
+  // 'boot' as it is undefined", no .bg-grid on the settings surface at all, no way to choose a plate,
   // and nothing on screen saying why -- the module's own __machineRoomBackgrounds publication is
   // three hundred lines below the throw and never ran either.
   //
@@ -34,15 +54,15 @@
   if (!boot) {
     global.__machineRoomBackgrounds = { DEFAULT_CHOICE: "", BUILT_IN: [] };
     if (doc) {
-      const saySo = () => global.setTimeout(() => {
-        const panel = doc.getElementById("panel-content");
-        if (!panel || doc.getElementById("bg-section")) return;
-        if (!/Global router|Operator settings/i.test(doc.getElementById("panel-title")?.textContent ?? "")) return;
-        panel.insertAdjacentHTML("beforeend", '<section class="settings-section" id="bg-section"><h3>Background</h3><p>The plate list did not load with this page, so there is nothing to pick from here. A reload usually fixes it.</p></section>');
-      }, 0);
-      const bindNote = () => ["settings-button", "shelf-settings"].forEach((id) => doc.getElementById(id)?.addEventListener("click", saySo));
-      if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", bindNote);
-      else bindNote();
+      // SETTINGS-2: the same mount the working path uses. It listens for the surface's own section
+      // event rather than for a press on a gear, so the note lands in Appearance and nowhere else.
+      const saySo = (event) => {
+        if (event?.detail?.id !== "general") return;
+        const slot = appearanceSlot();
+        if (!slot || doc.getElementById("bg-section")) return;
+        slot.insertAdjacentHTML("beforeend", '<section class="settings-section" id="bg-section"><p>The plate list did not load with this page, so there is nothing to pick from here. A reload usually fixes it.</p></section>');
+      };
+      doc.addEventListener("titanbot:settings-section", saySo);
     }
     return;
   }
@@ -126,10 +146,10 @@
     // The span now lives in backgrounds.css, where the grid is.
     const swatches = plain.map(swatch).join("")
       + [...bySeries].map(([name, tiles]) => `<p class="field-hint bg-series">${esc(name)}</p>${tiles.map(swatch).join("")}`).join("");
+    // The heading and the blurb are the Background ROW's now -- a label and one explanation line,
+    // like every other row on the surface -- so this section carries the tiles and the upload only.
     return `
       <section class="settings-section" id="bg-section">
-        <h3>Background</h3>
-        <p>The plate behind the Machine Room. The dusk and mist atmospheres still apply on top.</p>
         <div class="bg-grid">${swatches}</div>
         <label class="ghost-button" style="display:inline-flex;margin-top:14px;cursor:pointer">
           Upload a background<input type="file" accept="image/*" id="bg-upload" hidden />
@@ -139,11 +159,10 @@
   }
 
   function inject() {
+    const slot = appearanceSlot();
+    if (!slot || doc.getElementById("bg-section")) return;
+    slot.insertAdjacentHTML("beforeend", sectionMarkup());
     const panel = doc.getElementById("panel-content");
-    if (!panel || doc.getElementById("bg-section")) return;
-    // Only the settings panel; the same dialog is reused for every capability.
-    if (!/Global router|Operator settings/i.test(doc.getElementById("panel-title")?.textContent ?? "")) return;
-    panel.insertAdjacentHTML("beforeend", sectionMarkup());
 
     const redraw = () => { doc.getElementById("bg-section")?.remove(); inject(); };
 
@@ -180,13 +199,11 @@
   // URLs bg-boot only reads when the stored id is one of them.
   apply(read(CHOICE_KEY, DEFAULT_CHOICE));
 
-  // This file is appended after boot, so DOMContentLoaded has already fired and waiting for it
-  // would mean waiting forever. Bind now if the document is ready, otherwise wait once.
-  function bind() {
-    ["settings-button", "shelf-settings"].forEach((id) => {
-      doc.getElementById(id)?.addEventListener("click", () => global.setTimeout(inject, 0));
-    });
-  }
-  if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", bind);
-  else bind();
+  // SETTINGS-2: one listener on the surface's own event, and no listener on any gear. The event
+  // carries the section that was just painted, so the tiles are put back every time General is
+  // opened -- including after a repaint the surface does for itself -- and never anywhere else.
+  doc.addEventListener("titanbot:settings-section", (event) => {
+    if (event?.detail?.id !== "general") return;
+    inject();
+  });
 })(window);

@@ -58,3 +58,8 @@ undefined/
 /control-plane.sqlite
 /control-plane.sqlite-shm
 /control-plane.sqlite-wal
+
+# The relay writes its own push store here when it is started from the repo with no state dir set,
+# which is what every browser gate in scripts/ does. It is 0600 and it holds device tokens: a file
+# that must never reach anybody's clone, and it appears after any verify-push or verify-settings run.
+/ui/push.json

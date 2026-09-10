@@ -592,9 +592,11 @@ async function legPicker(page) {
     `DEFAULT_CHOICE=${JSON.stringify(opened.defaultChoice)} across ${opened.count} plates`);
 
   // The picker is injected into the settings panel the first time it is opened, so a leg that reads
-  // the page without opening it measures nothing.
+  // the page without opening it measures nothing. SETTINGS-2: it mounts into General -> Appearance
+  // on the surface's own section event, and General is the section Settings opens on, so this press
+  // is unchanged -- what changed is that it no longer depends on the panel being titled anything.
   await page.evaluate(() => (document.getElementById("settings-button") ?? document.getElementById("shelf-settings"))?.click());
-  const injected = await until(() => page.$(".bg-grid"), within(15_000), 400);
+  const injected = await until(() => page.$('[data-settings-mount="background"] .bg-grid, .bg-grid'), within(15_000), 400);
   if (!injected) { skip("the background picker has no blank tiles", "Settings would not open, or it carries no .bg-grid"); return; }
 
   // The blank spots: a series heading drawn as a grid item reads as a tile-shaped hole. A heading

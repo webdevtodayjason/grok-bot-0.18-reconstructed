@@ -133,24 +133,34 @@ test("backgrounds.js still publishes the list the console knows it by", () => {
 // bg-boot.js is a blocking <head> script, so it not loading is a deploy fault -- but before the
 // guard, the destructure at the top of backgrounds.js threw and took the WHOLE picker with it.
 // Measured on console.titanium.bot 2026-09-08 with only bg-boot.js blocked in the browser: pageerror
-// "Cannot destructure property 'CHOICE_KEY' of 'boot' as it is undefined", and Operator settings
+// "Cannot destructure property 'CHOICE_KEY' of 'boot' as it is undefined", and the settings panel
 // opened with no .bg-grid at all and nothing saying why.
+//
+// SETTINGS-2 moved the mount off the two gear buttons and onto the surface's own document event,
+// so what is pinned here is that the no-boot path still mounts the SAME way the working path does.
+// A note that arrived by a different road from the tiles is a note that lands somewhere else.
 test("backgrounds.js survives bg-boot.js not loading, and says so where the tiles would be", () => {
   const stub = { document: undefined, localStorage: fakeStorage({}) };
   assert.doesNotThrow(() => loadBrowserScript("ui/machine-room/backgrounds.js", stub), "a missing bg-boot.js must cost the pre-paint plate and nothing else");
   assert.deepEqual(stub.__machineRoomBackgrounds, { DEFAULT_CHOICE: "", BUILT_IN: [] }, "published under the name the console reads, and deliberately not a second copy of the list");
 
-  const clicks = [];
-  const button = () => ({ addEventListener: (type, fn) => clicks.push(fn) });
-  const buttons = { "settings-button": button(), "shelf-settings": button() };
+  const listeners = [];
   const withPage = {
     localStorage: fakeStorage({}),
     setTimeout: (fn) => fn(),
-    document: { readyState: "complete", getElementById: (id) => buttons[id] ?? null, addEventListener() {} },
+    document: {
+      readyState: "complete",
+      getElementById: () => null,
+      querySelector: () => null,
+      addEventListener: (type, fn) => listeners.push({ type, fn }),
+    },
   };
   loadBrowserScript("ui/machine-room/backgrounds.js", withPage);
-  assert.equal(clicks.length, 2, "both settings buttons still open something that explains itself");
-  assert.doesNotThrow(() => clicks[0](), "and a click with no panel on screen is not an error either");
+  assert.deepEqual(listeners.map((one) => one.type), ["titanbot:settings-section"],
+    "the note goes on the surface's own event, the same road the tiles take");
+  assert.doesNotThrow(() => listeners[0].fn({ detail: { id: "general" } }),
+    "and the event arriving with no surface on screen is not an error either");
+  assert.doesNotThrow(() => listeners[0].fn({ detail: { id: "updates" } }), "nor is any other section");
 });
 
 test("bg-boot.js loads before the first stylesheet, and the modules load with the page", async () => {
@@ -379,7 +389,9 @@ test("the pin is set at the three moments a person expects to be taken to the ne
 
 test("every seam is optional, so item A can merge before B, C and D exist", async () => {
   const app = await read("ui/machine-room/app.js");
-  assert.match(app, /window\.__mrUi = \{ openPanel, paragraphMarkup, maskSecrets, escapeHtml, renderAll \}/);
+  // SETTINGS-2 added showToast and the settingsHost seam to this object; the five the CONSOLE-4
+  // modules read are still the first five, and they are still published in one place.
+  assert.match(app, /window\.__mrUi = \{\s*\n?\s*openPanel, paragraphMarkup, maskSecrets, escapeHtml, renderAll, showToast,/);
   // Each of the four reads through an optional call or a truth test, never a bare invocation.
   assert.match(app, /const gaps = window\.__gapBadge;[\s\S]{0,400}gaps && typeof gaps\.render === "function"/);
   assert.match(app, /rows\.map\(messageMarkup\)\.join\(""\)/, "with no badge module the transcript is today's rows");

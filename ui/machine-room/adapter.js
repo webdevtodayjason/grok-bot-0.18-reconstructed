@@ -447,6 +447,34 @@
         return emit("settings:auto-review", clone(state.settings.autoReview));
       },
 
+      // ---- SETTINGS-2 ---------------------------------------------------------------------------
+      // Declared here so the demo adapter answers the same three shapes the gateway one does and the
+      // settings surface degrades identically with no gateway behind it.
+      //
+      // WHO IS LOOKING IS NOT THE GATEWAY'S FACT. This adapter runs when the GATEWAY is unreachable,
+      // but the page itself was still served by the relay, and the relay is the only thing that knows
+      // whether this session is the operator's. So the read is the same same-origin GET /auth/state
+      // the gateway adapter makes, and a console whose box is down still shows its operator the
+      // technical section -- which is exactly when they need it. Unreachable or carrying no operator
+      // field, it answers null and no Operator section is drawn: fail closed, same as live.
+      getWorkspaceIdentity() {
+        if (typeof fetch !== "function") return Promise.resolve(null);
+        return fetch("/auth/state", { headers: { accept: "application/json" } })
+          .then((response) => (response.ok ? response.json() : null))
+          .catch(() => null);
+      },
+
+      getLocalToolPermission() {
+        return Promise.resolve({ value: state.settings.localToolPermission ?? "ask", capped: false });
+      },
+
+      setLocalToolPermission(value) {
+        const wanted = String(value ?? "");
+        if (!["always", "ask", "never"].includes(wanted)) return Promise.reject(new Error("that is not one of the three choices"));
+        state.settings.localToolPermission = wanted;
+        return Promise.resolve({ value: wanted, capped: false });
+      },
+
       // Both resolve the same shape the gateway adapter answers with, because the view waits on
       // the host before it opens or closes the recording dialog. Nothing records offline; this
       // path exists so the dialog can still be looked at with no gateway.
