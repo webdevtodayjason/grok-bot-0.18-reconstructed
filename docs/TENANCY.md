@@ -681,14 +681,24 @@ since SIGNIN-2. Two things to know before adding one:
   table, so a cookie already issued keeps working until it expires, which is at most 12 hours. The
   control plane says so itself in the answer to `DELETE /v1/accounts/<email>`.
 
-HISTORY, and it is why the two paragraphs above are new. MEASURED on the R750 2026-09-10, BEFORE
-SIGNIN-2: a throwaway account on `titanium` posting the real sign-in form read **503 "That workspace
-is not available right now"** while the byte-identical throwaway on `demo` was signed in at once.
-The cause was the session key, not the account and not adoption: the control plane's registry row
-for that slug carried no `sessionKey`, so `verdictForToken` in `ui/tenant-login.mjs` had no key to
-check the token with and answered `unknown`. MEASURED on the R750 AFTER SIGNIN-2: a throwaway
-account on `titanium` signs in, lands on the operator's own workspace, and sees the same agents the
-instance-password session sees.
+HISTORY, and it is why the two paragraphs above are new. Both halves were measured on
+jason-PowerEdge-R750 on 2026-09-10 with the same throwaway account, either side of the ship.
+
+**BEFORE, 08:16:11Z.** That account posted the real sign-in form at `console.titanium.bot` and read
+**503 `{"error":"that workspace is not available right now"}`** in 0.41 s, while the byte-identical
+throwaway on `demo` was signed in at once. The cause was the session key, not the account and not
+adoption: the control plane's registry row for that slug carried `included` and `slug` and nothing
+else, so `sessionKeyOf("titanium")` answered `""`, `verdictForToken` in `ui/tenant-login.mjs` had no
+key to check the token with and answered `unknown`, and `ui/server.mjs` turned that into the
+availability sentence.
+
+**AFTER, 08:17:46Z**, one minute and thirty-five seconds later, the same account and the same
+password: **302 to `/` with one `gb_session` cookie**. In real Chromium it reached the login page in
+185 ms, was on the console 614 ms after the submit, and painted the operator's own Machine Room --
+`6 / 40 BOTS`, Titan, Scribe, Instagram Marketer, X Marketer, Facebook Marketer, and Titan's screen
+panel. The account was removed in the same pass and the control plane went back to its three real
+accounts. Jason's own account was never signed in to, no box was swapped or written, and all three
+boxes still read `Up 2 days` afterwards.
 
 Adding one is the account command with the operator's slug:
 
@@ -917,9 +927,12 @@ process and not on the wire fails here rather than on the day a customer signs i
 Four suites, and `--only <suite>` runs one:
 
 - **registry** the four cases of section 4: no bearer is 401, the **admin** token is 401, the relay
-  token is 200, every row carries a box and a gateway and a token and a session key, a skipped list
-  exists, the operator is not one of the rows, each row's key is that tenant's own derived key, and
-  the master's own bytes are nowhere in the body.
+  token is 200, every CUSTOMER row carries a box and a gateway and a token and a session key, a
+  skipped list exists, each row's key is that tenant's own derived key, and the master's own bytes
+  are nowhere in the body. The operator's own row is a different shape and is measured as its own
+  leg: it carries that slug's derived key, `included` when a plan is on, and **nothing else** -- no
+  box, no gateway, no token, no directories. That leg replaces one that asserted the operator was
+  absent from the rows, which had been FAILing against the live control plane since PROXY-1.
 - **rosters** two customers sign in at the **same** address in two cookie jars; each one's
   `POST /api/listAgents` answers with their own agents; neither roster carries one name from the
   other; each customer's own box was the container asked; each was asked with that customer's own
@@ -929,10 +942,17 @@ Four suites, and `--only <suite>` runs one:
 - **unknown** a session naming a tenant the registry does not know gets the sentence, no roster, and
   no sign-out.
 - **operator** the instance password still works and reaches the operator's own box with no
-  customer's agent on it; and a copy with **no** control plane at all comes up with the login page it
+  customer's agent on it; an ACCOUNT on the operator's own workspace signs in and lands on that same
+  workspace (SIGNIN-2); and a copy with **no** control plane at all comes up with the login page it
   always had, signs in on the password and serves its roster. Plus: the relay called the control
-  plane for the registry and for sign-in and nothing else, and no gateway token, relay credential,
-  master or password is anywhere in its log.
+  plane on its own relay routes and the sign-in and nothing a relay has no business on, and no
+  gateway token, relay credential, master, derived key or password is anywhere in its log.
+
+  Live, the account leg mints a THROWAWAY through the control plane, signs it in, proves the
+  workspace by comparing its roster against the operator's own -- read with the box's gateway
+  bearer, which asks for no password of Jason's, or with the instance password when that is what was
+  given -- and removes the account in a `finally`. A removal that did not happen is a FAIL, because
+  what is left behind is a working operator-level sign-in.
 
 Against the live console the legs that need a credential run only when one is given, in the
 environment rather than on the command line: `ONE_CONSOLE_RELAY_TOKEN`, `ONE_CONSOLE_ADMIN_TOKEN`,

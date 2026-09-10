@@ -159,13 +159,17 @@ cat <<'NEXT'
 
        node cp/cli.mjs tenant adopt titanium p927bfqm83ioloibamlvyd7g console.titanium.bot
 
-     You sign in to your own console with the INSTANCE PASSWORD, not with an account. An account on
-     the `titanium` workspace cannot sign in today and reads "That workspace is not available right
-     now": that slug has no derived session key on the relay on purpose, which is SIGNIN-2 in
-     docs/GAP-ANALYSIS.md. `account add` is for a customer workspace, and it asks for the password
-     on the terminal so nobody else ever sees it:
+     Your own console has TWO doors. The INSTANCE PASSWORD is the one that needs nothing else to
+     be working, and it is the door to fix a stopped box from. Since SIGNIN-2 an ACCOUNT on the
+     `titanium` workspace signs in as well: that slug's derived session key travels on the registry
+     row and the relay merges it, so the account door works there the way it works for a customer.
+     Read docs/TENANCY.md "Your own account" before adding one -- there is no lesser role on that
+     workspace, so an account on it is an operator-level user with your box, your agents and your
+     connectors. `account add` asks for the password on the terminal so nobody else ever sees it,
+     and it takes the operator's slug the same way it takes a customer's:
 
        node cp/cli.mjs account add them@example.com <their-workspace> --name "Their Name"
+       node cp/cli.mjs account add you@example.com titanium --name "Your Name"
 
   docs/TENANCY.md section 9 is the same list with the reasoning.
 NEXT
