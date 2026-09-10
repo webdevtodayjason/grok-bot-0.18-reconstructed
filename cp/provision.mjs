@@ -518,10 +518,90 @@ export function createCoolifyClient({ config, fetchImpl = globalThis.fetch }) {
     restartService: (uuid) => call("POST", `/services/${uuid}/restart`),
     // delete_volumes stays false on purpose and the docs say so out loud: a customer's agents,
     // transcripts and workspace are in the tenant directories, and no route on this service deletes
-    // those. Removing a tenant removes the Coolify service and leaves the data on the disk.
+    // those. Removing a tenant removes the Coolify service; deleting the data is a separate, opt-in
+    // act that the relay performs, because the control plane cannot (cp/decommission.mjs step 7).
+    //
+    // docker_cleanup=FALSE, and this one is not a detail. ONBOARD-2, 2026-09-10: Coolify's
+    // docker_cleanup dispatches its CleanupDocker job, which runs container prune, image prune, a
+    // broader image prune and builder prune -af across the WHOLE SERVER. The R750 also runs
+    // ampcortex, anvil, Coolify's own stack, every other customer's box and about twenty more
+    // services, plus Jason's own images. Removing one customer must never prune Jason's server, and
+    // it used to. A box's own container and its anonymous volumes go with the service delete either
+    // way; the prune only reaches things that have nothing to do with this tenant.
+    //
+    // delete_connected_networks stays TRUE and is safe: Coolify's Service::deleteConnectedNetworks
+    // only disconnects and removes the per-service network named by the service uuid. titanbot-net
+    // is declared external in the box template and is never Coolify's to remove.
     deleteService: (uuid) => call("DELETE", `/services/${uuid}`, {
-      query: { delete_configurations: "true", delete_volumes: "false", docker_cleanup: "true", delete_connected_networks: "true" },
+      query: { delete_configurations: "true", delete_volumes: "false", docker_cleanup: "false", delete_connected_networks: "true" },
     }),
+  };
+}
+
+// ---- asking the relay ---------------------------------------------------------------------------
+//
+// ONBOARD-2. Two things the control plane cannot do for itself and the relay can, so it asks:
+// whether a container name is still present on the host, and deleting a tenant's data directory.
+//
+// MEASURED from inside titanbot-cp on the R750 2026-09-10: the control plane runs as uid 1001, a
+// box's volumes/{data,workspace,chrome} are 0700 owned by uid 1000, and both `ls` and `touch`
+// answer Permission denied. The relay is root, mounts /data/titanbot read-write and holds
+// /var/run/docker.sock. That is the whole reason these two questions go over HTTP instead of being
+// answered in this process.
+//
+// The credential is CP_RELAY_TOKEN, which the two services already share and which is not the admin
+// token. An install with no relay configured gets a refusal in words rather than an exception, so a
+// removal on a single-box install still runs and simply cannot prove the container is gone.
+export function createRelayAsk({ config, fetchImpl = globalThis.fetch, timeoutMs = 20_000 } = {}) {
+  const base = String(config?.relayUrl ?? "").replace(/\/+$/, "");
+  const token = String(config?.relayToken ?? "");
+  return async function askRelayPost(pathname, body = undefined) {
+    if (base.length === 0 || token.length === 0) {
+      return { ok: false, status: 0, body: null, why: "this control plane has no relay configured (CP_RELAY_URL and CP_RELAY_TOKEN)" };
+    }
+    const init = {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, accept: "application/json", "user-agent": "titanbot-cp/relay-ask" },
+      signal: AbortSignal.timeout(Math.max(1_000, timeoutMs)),
+    };
+    if (body !== undefined) { init.headers["content-type"] = "application/json"; init.body = JSON.stringify(body); }
+    let response;
+    try { response = await fetchImpl(`${base}${pathname}`, init); }
+    catch (cause) { return { ok: false, status: 0, body: null, why: `could not reach the relay at ${base}: ${String(cause?.message ?? cause)}` }; }
+    const raw = await response.text();
+    let parsed = null;
+    if (raw.length > 0) { try { parsed = JSON.parse(raw); } catch { parsed = { message: raw.slice(0, 400) }; } }
+    return {
+      ok: response.ok,
+      status: response.status,
+      body: parsed,
+      why: response.ok ? "" : String(parsed?.message ?? parsed?.error ?? `the relay answered ${response.status}`),
+    };
+  };
+}
+
+/**
+ * Is this workspace's container still there?
+ *
+ * Answers {asked, present, why}. `present` is a boolean when the relay said so and NULL when it
+ * could not tell, and null is never a proof of absence: cp/decommission.mjs treats "could not tell"
+ * as "keep waiting", because the one failure this whole path exists for -- Coolify forgetting the
+ * service while the box keeps running with the customer's gateway token -- looks like silence from
+ * every angle except the docker socket.
+ */
+export async function containerProbe({ askRelayPost, slug }) {
+  const answer = await askRelayPost("/tenant/purge", { slug: String(slug ?? ""), probeOnly: true });
+  if (!answer.ok) return { asked: true, present: null, why: answer.why || `the relay answered ${answer.status}` };
+  const body = answer.body;
+  const present = typeof body?.containerPresent === "boolean" ? body.containerPresent
+    : typeof body?.container?.present === "boolean" ? body.container.present
+      : Array.isArray(body?.containers) ? body.containers.length > 0
+        : null;
+  return {
+    asked: true,
+    present,
+    container: body?.container?.name ?? body?.containerName ?? "",
+    why: present == null ? "the relay answered without saying whether the container is there" : "",
   };
 }
 
@@ -935,8 +1015,16 @@ export async function waitForBox(options = {}) {
   for (;;) {
     if (gateway && typeof probeImpl === "function") {
       try {
+        // /health, which is the path the host actually serves. It used to ask /api/health, a path
+        // the bundle does not have: measured 404, and the relay's own per-tenant health proxy asks
+        // ${gateway}/health (ui/server.mjs:4444), which is the same question put the right way.
+        // ANY answer still counts, 401 and 404 included, because source/host/main.ts awaits
+        // host.start() before it binds 1340: anything answering on that port means the host booted
+        // and Titan exists. The status is recorded so a reader can tell a real 200 from an answer
+        // that only proved the socket was open.
+        //
         // A short abort of its own, so one hung connection cannot eat the whole wait.
-        const answer = await probeImpl(`${gateway.replace(/\/+$/, "")}/api/health`, {
+        const answer = await probeImpl(`${gateway.replace(/\/+$/, "")}/health`, {
           headers: token ? { authorization: `Bearer ${token}` } : {},
           signal: AbortSignal.timeout(Math.min(5_000, Math.max(1_000, intervalMs))),
         });
@@ -1186,7 +1274,15 @@ export async function provisionTenant(options) {
         slug,
         step: "ready",
         status: ready.ready ? "ok" : "waiting",
-        detail: JSON.stringify({ how: ready.how, waitedMs: ready.waitedMs, ...(ready.reason ? { reason: ready.reason } : {}) }),
+        // `status` is the http status /health answered, recorded because "the box spoke" and "the box
+        // is well" are different facts and only one of them is what a 401 proves. ONBOARD-2's
+        // sequencer accepts how=gateway and nothing else, and it reads this number beside it.
+        detail: JSON.stringify({
+          how: ready.how,
+          waitedMs: ready.waitedMs,
+          ...(ready.status === undefined ? {} : { status: ready.status }),
+          ...(ready.reason ? { reason: ready.reason } : {}),
+        }),
       });
       if (ready.ready) ran.push("ready");
     } else {

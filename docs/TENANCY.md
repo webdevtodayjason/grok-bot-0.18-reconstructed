@@ -741,9 +741,10 @@ same page Jason signs in on. Their agents are not.
 While a box is still coming up, signing in works and the console says the machine is starting. That
 is the honest answer and it is better than a login that hangs.
 
-One thing to know before showing it to anybody: **the agent on a brand new box is called "New
-Bot"**, not Titan. That is `SAND_DEFAULT_AGENT_NAME` in `source/shared/agents/agents.ts` and it is
-upstream's name for an agent nobody has named yet. Titan is the name Jason gave his own.
+One thing to know before showing it to anybody: **the agent on a brand new box is called Titan**.
+That was not always true. `SAND_DEFAULT_AGENT_NAME` in `source/shared/agents/agents.ts` used to be
+upstream's "New Bot", the name for an agent nobody has named yet, and ONBOARD-1 made it Titan so the
+first thing a customer meets has the name the product talks about.
 
 ---
 
@@ -786,16 +787,27 @@ or to rebuild, so `DELETE /v1/tenants/{slug}` and `POST /v1/tenants/{slug}/provi
 
 Coolify's own delete takes four query flags, `delete_configurations`, `delete_volumes`,
 `docker_cleanup` and `delete_connected_networks`, and **every one of them defaults to true**. This
-route sends all four explicitly, with `delete_volumes=false`, rather than letting the defaults stand,
-because a tenant's data directories are bind mounts and Coolify keeps a storage record for each one.
-`delete_connected_networks=false` matters more under TENANT-5 than it did: `titanbot-net` is shared
-by the whole fleet, and a delete that took it would take every customer's box off the relay at once.
+route sends all four explicitly rather than letting the defaults stand, as
+`delete_configurations=true`, `delete_volumes=false`, **`docker_cleanup=false`** and
+`delete_connected_networks=true`.
 
-**It does not delete the customer's data, and no route in this api ever will.**
-`/data/titanbot/acme` stays exactly where it is: the workspace, the agents, the transcripts, the
-store. Deleting a customer's files is a decision a person makes on the server, on purpose, with
-`rm -rf` and their own eyes on the path, with a backup taken first. It is not a thing an api call
-can do by accident at two in the morning.
+Two of those want a sentence each, and the doc used to get both wrong. `docker_cleanup=false` because
+`true` dispatches Coolify's `CleanupDocker` job across the **whole server** (container prune, image
+prune, a broader image prune, `builder prune -af`), and the R750 also runs ampcortex, anvil,
+Coolify's own stack, every other customer's box and about twenty more services, plus Jason's images.
+Removing one customer must never prune Jason's server, and until ONBOARD-2 it did. And
+`delete_connected_networks=true` is safe, which is the opposite of what this page claimed: Coolify's
+`Service::deleteConnectedNetworks` only disconnects and removes the per-service network named by the
+service uuid. `titanbot-net` is declared external in the box template and is never Coolify's to
+remove, so the flag cannot reach it.
+
+**This route does not delete the customer's data.** `/data/titanbot/acme` stays exactly where it is:
+the workspace, the agents, the transcripts, the store. Since ONBOARD-2 there **is** one door that
+deletes it, and it is opt-in, separate, and not this one: the Clients panel's Remove with **delete
+their data** on, or `node cp/cli.mjs tenant remove <slug> --delete-data`, which asks the relay to do
+it because the control plane runs as uid 1001 and physically cannot. Nothing deletes a removed
+customer's tree on a timer, because there is no reaper in this product (ONBOARD-4), so with the switch off
+the files sit there until a person decides otherwise. See docs/ONBOARDING.md §4.
 
 ---
 
@@ -1502,10 +1514,11 @@ Two browser contexts side by side, because two sessions in one cookie jar prove 
 3. Neither roster carries one agent from the other's box.
 
 `scripts/verify-one-console-browser.mjs` is that run, and it compares agent **ids**, not names. This
-matters more than it looks: every fresh box calls its first agent `New Bot`, so two properly
+matters more than it looks: every fresh box calls its first agent the same thing, so two properly
 isolated customers have rosters that read identically. A cross-check on names would pass whether the
-isolation worked or not. On the run above both customers showed one card reading `New Bot`, and the
-ids were `c63fdce4-4fc0-4ea7-8a1b-93657df2c6c5` and `d7df78a5-3c3d-471d-9d13-ef3d9535f9e8`.
+isolation worked or not. On the run above both customers showed one card reading `New Bot`, which is
+what that name was before ONBOARD-1 renamed it Titan, and the ids were
+`c63fdce4-4fc0-4ea7-8a1b-93657df2c6c5` and `d7df78a5-3c3d-471d-9d13-ef3d9535f9e8`.
 
     ONE_CONSOLE_EMAIL_A=demo@titanium.bot ONE_CONSOLE_PASSWORD_A=... \
     ONE_CONSOLE_EMAIL_B=... ONE_CONSOLE_PASSWORD_B=... \
