@@ -69,6 +69,11 @@ import {
   createMailEdge, createMailSendRoute, domainOf, mailLedgerRow, readMailSettings, svixHeaders,
   toAddressList, verifySvixSignature,
 } from "./mail-edge.mjs";
+// VOICE-1. The relay's half of talking to Titan out loud: the settings door and the browser's
+// audio socket. Everything else that would have had to live in this file -- the per-tenant edge
+// cache, the gateway caller, the caps, the ledger, the RFC 6455 codec -- is in there, because three
+// waves share this file and every line here is a surgical stage after a rebase.
+import { VOICE_SOCKET_PATH, originAllowed, voiceEdgeFor } from "./voice-edge.mjs";
 import { stateDir, stateFile } from "./state-dir.mjs";
 import { createLoginLedger, filterAttempts } from "./login-ledger.mjs";
 import { readBoxHealth } from "./box-health.mjs";
@@ -620,6 +625,16 @@ function buildContext(entry) {
     // volume, so a customer's Mail card reads both out of their own state directory and nobody
     // else's.
     mailSentLedgerFile: entry.operator ? MAIL_SENT_LEDGER_FILE : file("mail-sent.jsonl"),
+    // VOICE-1. The realtime key is a PER-WORKSPACE secret and it lives here, in the tenant's own
+    // state directory, beside the mail pair and for the same reason: it is written through the
+    // ordinary console session, it is never read back out of any route, and it belongs to one
+    // customer rather than to the deployment. The super-admin Providers panel could not hold it --
+    // that panel is global, its keys live at LiteLLM and read back masked, and there is no
+    // per-workspace provider row on it at all.
+    voiceSettingsFile: entry.operator ? stateFile("voice.json", HERE) : file("voice.json"),
+    // And what the minutes were spent on, on the same volume, so a workspace's caps are read from
+    // its own ledger and nobody else's.
+    voiceLedgerFile: entry.operator ? stateFile("voice-minutes.jsonl", HERE) : file("voice-minutes.jsonl"),
     jobTokenFile,
     // TITAN_JOB_TOKEN is a fact about this DEPLOYMENT, so it can only ever mean the operator. Read
     // for every tenant it would arm one environment value across every customer's box.
@@ -2169,6 +2184,19 @@ async function handleJobBusConsole(t, req, res, url) {
   return fail(res, 404, `not found: ${url.pathname}`);
 }
 
+// ---- voice (VOICE-1, docs/VOICE.md) -----------------------------------------------------------
+// What every voice edge on this relay shares. The caps come from the control plane behind the
+// credential this relay already holds: per-workspace overrides are deliberately NOT writable from a
+// console, because a customer raising their own cap is the bypass. With no control plane, which is
+// every developer box, the relay's own constants answer instead. Everything else voice needs is in
+// ui/voice-edge.mjs, so this file gains one import, two context fields, one route and one branch.
+const voiceDeps = {
+  ownLikeParent,
+  log: (line) => console.log(line),
+  relayBase: RELAY?.cpUrl ?? "",
+  relayToken: RELAY?.relayToken ?? "",
+};
+
 // ---- agent email (MAIL-1, docs/MAIL.md) -------------------------------------------------------
 // The receive side lives beside the job bus edge and is wired the same way: one module holds every
 // rule, this file holds the mount and hands it the helpers it needs. jobBusCall is the upstream
@@ -3577,6 +3605,10 @@ const server = createServer(async (req, res) => {
     // write-only secrets. Behind the session like every other console route, and it never reads a
     // secret back out. MAIL-1.
     if (url.pathname === "/mail/settings") return await mailEdgeFor(t).handleSettings(req, res);
+    // VOICE-1. The Voice card's own door: the vendor, which bot the voice talks to, the caps it is
+    // under, what it has spent today, and the key as a write-only field. Behind the session like
+    // every other console route, and it reports the key as a boolean and never as a value.
+    if (url.pathname === "/voice/settings") return await voiceEdgeFor(t, voiceDeps).handleSettings(req, res);
     if (req.method === "GET" && url.pathname === "/health") {
       const upstream = await fetch(`${t.gateway}/health`, { headers: t.headers() });
       const text = await upstream.text();
@@ -3604,6 +3636,22 @@ const server = createServer(async (req, res) => {
 // that carries the box's screen and keyboard would be the one route with no password on it.
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", `http://127.0.0.1:${PORT}`);
+  // VOICE-1, before the destroy below, because an upgrade that reaches that line answers ZERO
+  // BYTES -- measured: real Chrome then reports only onerror at 16 ms with no close code, which is
+  // indistinguishable from this relay being down, and that void answer is a failure this console
+  // has already been burned by. So voice gets its own branch, and every refusal inside it is an
+  // ACCEPTED socket carrying one plain sentence.
+  if (url.pathname === VOICE_SOCKET_PATH) {
+    const voiceSlug = tenantOf(req);
+    if (voiceSlug == null) return socket.end("HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n");
+    const voiceContext = contextOf(voiceSlug);
+    if (voiceContext == null) return socket.end("HTTP/1.1 503 Service Unavailable\r\nconnection: close\r\n\r\n");
+    // An upgrade carries cookies and is exempt from CORS, and the request handler above checks no
+    // Origin at all, so this is the one place it can be checked for the route that opens a mic.
+    return void voiceEdgeFor(voiceContext, voiceDeps)
+      .handleUpgrade(req, socket, head, { origin: originAllowed(req) })
+      .catch((error) => { console.log(`voice upgrade failed: ${error?.message ?? error}`); try { socket.destroy(); } catch { /* gone */ } });
+  }
   const match = VNC_ROUTE.exec(url.pathname);
   if (match == null || match[2] !== "websockify") return socket.destroy();
   // A refusal a browser can read, rather than a reset socket: noVNC reports "failed to connect"
