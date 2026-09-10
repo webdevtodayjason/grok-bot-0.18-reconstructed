@@ -107,10 +107,13 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
     "  ONE_CONSOLE_PASSWORD_A",
     "  ONE_CONSOLE_EMAIL_B         a DIFFERENT customer's account, and its password",
     "  ONE_CONSOLE_PASSWORD_B",
-    "  ONE_CONSOLE_INSTANCE_PASSWORD   the operator's own console password. Live, it also turns on",
-    "                              the cross-check that the throwaway account on the operator's",
-    "                              workspace sees the same agents the password session sees",
-    "  ONE_CONSOLE_GATEWAY_TOKEN   the operator's box gateway bearer. With customer A and no",
+    "  ONE_CONSOLE_INSTANCE_PASSWORD   the operator's own console password. Live, it is the SECOND",
+    "                              way to read the operator's own roster for SIGNIN-2's cross-check,",
+    "                              used only when ONE_CONSOLE_GATEWAY_TOKEN was not given",
+    "  ONE_CONSOLE_GATEWAY_TOKEN   the operator's box gateway bearer. It is also how SIGNIN-2's leg",
+    "                              reads the operator's own roster to prove the throwaway account",
+    "                              landed on that workspace, which asks for no password of his.",
+    "                              With customer A and no",
     "                              customer B, this makes the OPERATOR the second party in the",
     "                              cross-check, which is a server with one customer on it and is",
     "                              the proof the contract actually asks for. Read it off the box:",
@@ -629,14 +632,19 @@ const CONSOLE = LIVE ? URL_FLAG : relay.base;
 // Credentials, live only. Local mode has its own.
 const liveRelayToken = process.env.ONE_CONSOLE_RELAY_TOKEN?.trim() || null;
 const liveAdminToken = process.env.ONE_CONSOLE_ADMIN_TOKEN?.trim() || null;
+// A password is taken EXACTLY as given, spaces and all, because a console password may legitimately
+// have them -- but an EMPTY one means "not given" rather than "measure with an empty password". An
+// exported-but-blank variable used to read as a credential, and the leg then reported FAIL at 401
+// for a console whose door was perfectly fine, which is a gate lying about the product.
+const given = (value) => (value === undefined || value.length === 0 ? null : value);
 const CRED = {
   relayToken: LIVE ? liveRelayToken : RELAY_TOKEN,
   adminToken: LIVE ? liveAdminToken : ADMIN_TOKEN,
   emailA: LIVE ? (process.env.ONE_CONSOLE_EMAIL_A?.trim() || null) : A.email,
-  passwordA: LIVE ? (process.env.ONE_CONSOLE_PASSWORD_A ?? null) : A.password,
+  passwordA: LIVE ? given(process.env.ONE_CONSOLE_PASSWORD_A) : A.password,
   emailB: LIVE ? (process.env.ONE_CONSOLE_EMAIL_B?.trim() || null) : B.email,
-  passwordB: LIVE ? (process.env.ONE_CONSOLE_PASSWORD_B ?? null) : B.password,
-  instance: LIVE ? (process.env.ONE_CONSOLE_INSTANCE_PASSWORD ?? null) : INSTANCE_PASSWORD,
+  passwordB: LIVE ? given(process.env.ONE_CONSOLE_PASSWORD_B) : B.password,
+  instance: LIVE ? given(process.env.ONE_CONSOLE_INSTANCE_PASSWORD) : INSTANCE_PASSWORD,
   // The operator's OTHER door, live only. The bearer resolves to the same workspace the instance
   // password does, and unlike the password it is readable off the box by anyone who can already
   // reach the box, so it is the credential a gate can be given. It exists here because Jason's
@@ -981,20 +989,41 @@ if (RUN("operator")) {
         if (cookie.length > 0) {
           const roster = await apiCall(CONSOLE, "listAgents", cookie);
           check(roster.status === 200, "and the console answers its roster", `status ${roster.status}`);
-          // The leg that proves WHICH workspace it landed on. The instance password resolves to the
-          // operator's own workspace by definition, so the same set of agent ids from both sessions
-          // is the evidence; a different set would mean the account landed somewhere else.
-          if (CRED.instance == null) {
-            skip("and lands on the operator's own workspace", "no ONE_CONSOLE_INSTANCE_PASSWORD to compare against");
-          } else {
+          // The leg that proves WHICH workspace it landed on, and there are TWO ways to read the
+          // operator's own roster for comparison. Either is sufficient; the bearer is preferred
+          // because it asks nothing of Jason.
+          //
+          //   the gateway bearer     posted to /api/listAgents it IS the operator's own box
+          //                          answering, read off that box over ssh at gate time, and it
+          //                          needs no password of his at all.
+          //   the instance password  the other door to the same workspace, so the same roster.
+          //
+          // A different set of ids from either would mean the account landed somewhere else, which
+          // is the failure this leg exists to catch.
+          const mine = agentIds(roster.json);
+          if (CRED.gatewayToken != null) {
+            const asOperator = await fetch(`${CONSOLE}/api/listAgents`, {
+              method: "POST", redirect: "manual",
+              headers: { "user-agent": GATE_AGENT, "content-type": "application/json", authorization: `Bearer ${CRED.gatewayToken}` },
+              body: "{}",
+            });
+            let asOperatorJson = null;
+            try { asOperatorJson = JSON.parse(await asOperator.text()); } catch { /* not json */ }
+            const theirs = agentIds(asOperatorJson);
+            check(theirs.length > 0 && mine.length === theirs.length && mine.every((id, at) => id === theirs[at]),
+              "and lands on the operator's own workspace",
+              `${mine.length} agent id(s) from the account, ${theirs.length} from the operator's own bearer`);
+          } else if (CRED.instance != null) {
             const byPassword = await postForm(CONSOLE, "/login", { password: CRED.instance });
             const operatorCookie = sessionCookie(byPassword);
             const operatorRoster = operatorCookie.length > 0 ? await apiCall(CONSOLE, "listAgents", operatorCookie) : null;
-            const mine = agentIds(roster.json);
             const theirs = operatorRoster == null ? [] : agentIds(operatorRoster.json);
             check(theirs.length > 0 && mine.length === theirs.length && mine.every((id, at) => id === theirs[at]),
               "and lands on the operator's own workspace",
               `${mine.length} agent id(s) from the account, ${theirs.length} from the instance password`);
+          } else {
+            skip("and lands on the operator's own workspace",
+              "no ONE_CONSOLE_GATEWAY_TOKEN and no ONE_CONSOLE_INSTANCE_PASSWORD to read the operator's own roster with");
           }
         }
       }
