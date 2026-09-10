@@ -251,3 +251,8 @@ import "./code-edge-sweep.test.mjs";
 // ledger, the caps, the two relay routes and the operator's read that sit over them.
 import "./cp-code-key.test.mjs";
 import "./cp-code.test.mjs";
+// COST-1: the data diet. The relay's two shaping modules and the console's half of the same
+// contract -- the outline projection pinned against the real 1,578-item payload, the unchanged-answer
+// protocol, the private-never-public asset policy, and the case where both modules are absent.
+import "./api-diet.test.mjs";
+import "./asset-cache.test.mjs";

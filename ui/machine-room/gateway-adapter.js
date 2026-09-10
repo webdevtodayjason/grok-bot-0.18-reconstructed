@@ -45,14 +45,122 @@
     return response;
   }
 
-  async function call(method, args = {}) {
-    const r = await relayFetch(`/api/${method}`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(args),
-    });
+  // ---- COST-1: the data diet ---------------------------------------------------------------------
+  //
+  // MEASURED on grok-bot-local-vm at 390x844 on 2026-09-09, real Chrome, CDP capture, against a
+  // relay spawned from this worktree: boot is 268 requests and 4,029.7 KiB, of which /api is 47
+  // calls and 548.7 KiB with the 93-message conversation the console lands on, and 1,683.7 KiB more
+  // the moment the 1,578-item agent is selected. Sixty seconds untouched costs 4 ticks, 40 /api
+  // calls and 646.7 KiB, of which getAgentWorkflows alone is 452.2 KiB -- the same 86-skill
+  // catalogue, whole, four times, for a panel that is not open.
+  //
+  // THE CEILINGS, written down so a regression fails rather than accumulates: 250 KiB of decoded
+  // /api on first paint, 100 KiB per idle minute, 600 KiB per WORKING minute. scripts/verify-cost.mjs
+  // measures all three. The third exists because the worst traffic in the product is invisible to an
+  // idle gate: with the open agent working, OUTLINE_WORKING_MAX_AGE_MS re-reads the whole outline
+  // every five seconds.
+  //
+  // THREE MECHANISMS, IN THE ORDER THEY PAY OFF.
+  //
+  //   1. THE UNCHANGED-ANSWER PROTOCOL, which is what actually holds the idle ceiling at any
+  //      cadence. The relay hands back `x-titan-digest` on every /api answer it shaped; this side
+  //      keeps the last answer per method-and-arguments key and sends that digest as
+  //      `x-titan-if-digest` on the next read. Identical bytes and the relay answers
+  //      {"__unchanged":true} -- 20 bytes -- and the held copy is reparsed and returned. The relay
+  //      ALWAYS asks the box, so this can never answer something the box no longer says, and there
+  //      is no invalidation to get wrong. A relay without ui/api-diet.mjs sends no digest header, so
+  //      nothing is ever remembered and nothing changes: the absent-module case is the no-op case.
+  //
+  //   2. A PROJECTION REQUEST on the two answers the console mostly throws away.
+  //      getConversationOutline is 1,239,452 bytes of which the renderer uses 40,707, and
+  //      getAgentWorkflows is 114,012 bytes of which 70,826 is skill markdown nothing on the
+  //      conversation screen draws. `x-titan-projection: lean` asks for the smaller shape; the
+  //      skills panel's own read asks for `full`, because that is the one place a body is shown.
+  //
+  //   3. SINGLE FLIGHT, and single flight ONLY: two callers asking the same question while the
+  //      answer is still on its way share the one round trip. This was a 1.5-second freshness window
+  //      in the first draft and the unit suite caught it immediately -- "the hand-back control
+  //      follows the host's status" and "a transcript read that fails does not swallow the roster's
+  //      own answer" both drive two refreshes back to back against a host whose answer changed in
+  //      between, which is exactly what a 900 ms debounce does on a live box after a stream frame
+  //      says something moved. A memo that outlives the call is a memo that can be wrong; an
+  //      unsettled promise is the freshest answer there is. So the bytes are saved by the digest,
+  //      which asks the box every time, and the round trips by single flight, which never guesses.
+  const IDEMPOTENT_READS = new Set([
+    "listAgents", "countAgents", "getTrays", "getHostStatus", "getAgentAvatar", "getAgentTranscriptTail",
+    "getAgentAutomations", "getAgentWorkflows", "getAgentChannels", "getForeverBoxStatus",
+    "getConversationOutline", "listProblemReports", "listConnectorSecretFields", "listMcpServerTools",
+  ]);
+  // The two answers ui/api-diet.mjs knows how to shrink. Asked lean by default and full only where a
+  // body is actually drawn, so there is one place to look for "why is this field empty".
+  const PROJECTED_READS = new Set(["getConversationOutline", "getAgentWorkflows"]);
+  const UNCHANGED_ANSWER = '{"__unchanged":true}';
+  // 64 entries and 8 MiB, whichever comes first, oldest out. The bytes bound matters because an
+  // unprojected outline is 1.2 MB: sixty-four of those is not a memo, it is a leak.
+  const MEMO_MAX_ENTRIES = 64;
+  const MEMO_MAX_BYTES = 8 * 1024 * 1024;
+  // One key for both maps. The separator is spelled as an escape, never typed as a literal
+  // control byte: a raw NUL in a source file makes git call the whole file binary and every diff
+  // on it unreadable, which is a worse bug than the one it would be solving.
+  const memoKey = (method, args, projection) => `${method}\u0000${JSON.stringify(args ?? {})}\u0000${projection ?? ""}`;
+  const answers = new Map();
+  let answerBytes = 0;
+  const inFlight = new Map();
+
+  function rememberAnswer(key, text, digest) {
+    const held = answers.get(key);
+    if (held != null) { answerBytes -= held.text.length; answers.delete(key); }
+    answers.set(key, { text, digest });
+    answerBytes += text.length;
+    while (answers.size > MEMO_MAX_ENTRIES || (answerBytes > MEMO_MAX_BYTES && answers.size > 1)) {
+      const oldest = answers.keys().next().value;
+      answerBytes -= answers.get(oldest).text.length;
+      answers.delete(oldest);
+    }
+  }
+
+  // The raw text of one answer. Held copies are kept as TEXT and reparsed per caller rather than
+  // handed out as one shared object: a caller that mutates what it was given must not be able to
+  // edit what the next tick compares against.
+  async function callText(method, args, projection, allowReplay = true) {
+    const key = memoKey(method, args, projection);
+    const held = allowReplay ? answers.get(key) : null;
+    const headers = { "content-type": "application/json" };
+    if (projection != null) headers["x-titan-projection"] = projection;
+    if (held?.digest != null) headers["x-titan-if-digest"] = held.digest;
+    const r = await relayFetch(`/api/${method}`, { method: "POST", headers, body: JSON.stringify(args) });
     const text = await r.text();
-    let body; try { body = JSON.parse(text); } catch { body = text; }
-    if (!r.ok) throw new Error(body?.error ?? `${method} failed (${r.status})`);
-    return body;
+    if (!r.ok) {
+      let body; try { body = JSON.parse(text); } catch { body = text; }
+      throw new Error(body?.error ?? `${method} failed (${r.status})`);
+    }
+    if (text === UNCHANGED_ANSWER) {
+      if (held != null) return held.text;
+      // Nothing held and the relay still said unchanged. That cannot happen -- the header it answers
+      // to was never sent -- so it is a bug somewhere, not a state to guess at: ask again plainly
+      // rather than hand the page a sentinel it would render.
+      return await callText(method, args, projection, false);
+    }
+    const digest = r.headers?.get?.("x-titan-digest") ?? null;
+    if (digest != null && IDEMPOTENT_READS.has(method)) rememberAnswer(key, text, digest);
+    return text;
+  }
+
+  async function call(method, args = {}, options = {}) {
+    const projection = options.projection === undefined
+      ? (PROJECTED_READS.has(method) ? "lean" : null)
+      : options.projection;
+    const parse = (text) => { try { return JSON.parse(text); } catch { return text; } };
+    if (!IDEMPOTENT_READS.has(method)) return parse(await callText(method, args, projection));
+    const key = memoKey(method, args, projection);
+    const joined = inFlight.get(key);
+    // Joined, not remembered. The entry goes the moment the promise settles, so the next caller always
+    // talks to the host and nothing here can hand back an answer the host has already replaced.
+    if (joined != null) return parse(await joined);
+    const text = callText(method, args, projection);
+    inFlight.set(key, text);
+    try { return parse(await text); }
+    finally { inFlight.delete(key); }
   }
 
   // Wave D1 lands its host half separately, so every command below may or may not exist on the
@@ -404,10 +512,38 @@
     if (e.kind === "message" && e.role === "user") return `u:${userText(e).trim()}`;
     return null;
   }
+  // COST-1. A projected outline (ui/api-diet.mjs, asked for with `x-titan-projection: lean`) has
+  // already done this and hands the answer over as `k`. The key it carries is HASHED, because an
+  // outline key IS the message text and carrying keys verbatim carries the whole conversation back a
+  // second time -- measured on the 1,578-item agent, 1,239,452 bytes become 416,598 with verbatim
+  // keys and 40,707 with hashed ones. So this prefers the key it is handed and falls back to
+  // computing its own, which is what lets a projected and an unprojected answer draw the same page.
   function outlineKey(item) {
+    // A projected anchor is exactly { k } and carries no kind, which is what makes this unambiguous:
+    // if the host ever grows a `k` field of its own on a real outline item, that item still has a kind
+    // and the key is still computed here.
+    if (typeof item?.k === "string" && item.kind === undefined) return item.k;
     if (item.kind === "send-message") return messageKey(item.message);
     if (item.kind === "user") return `u:${String(item.text ?? "").trim()}`;
     return null;
+  }
+  // cyrb64, byte for byte ui/api-diet.mjs's hashOutlineKey. Math.imul over UTF-16 code units, so
+  // node and every browser agree with no encoding step to disagree about and no crypto.subtle
+  // (which is absent on a plain-http LAN origin). The cost of this function is that one hash has two
+  // implementations; tests/api-diet.test.mjs weaves the real captured payload both ways and compares
+  // the rows, so drift fails a test rather than moving a tool row in front of a customer.
+  function hashOutlineKey(value) {
+    const s = String(value);
+    let h1 = 0xdeadbeef ^ s.length;
+    let h2 = 0x41c6ce57 ^ s.length;
+    for (let i = 0; i < s.length; i += 1) {
+      const c = s.charCodeAt(i);
+      h1 = Math.imul(h1 ^ c, 2654435761);
+      h2 = Math.imul(h2 ^ c, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (h2 >>> 0).toString(16).padStart(8, "0") + (h1 >>> 0).toString(16).padStart(8, "0");
   }
   // Rows are receipts of work. Progress updates, state edits and agent-to-agent sends are not
   // work, and their arguments are internal JSON nobody should read in a conversation.
@@ -420,6 +556,13 @@
     const entries = [...(transcript ?? [])];
     const items = (Array.isArray(outline) ? outline : []).filter((i) => !(i?.kind === "tool-call" && NOT_A_RECEIPT.test(String(i.name ?? ""))));
     if (!items.some((item) => item?.kind === "tool-call")) return entries;
+    // COST-1. When the outline arrived projected, its anchors carry hashed keys, so this side hashes
+    // the transcript's keys too and the comparison happens in the same space. An unprojected answer
+    // compares verbatim exactly as it always did.
+    const projected = items.some((item) => typeof item?.k === "string" && item.kind === undefined);
+    const keyOfEntry = projected
+      ? (e) => { const k = entryKey(e); return k == null ? null : hashOutlineKey(k); }
+      : entryKey;
     const inserts = new Map();
     let cursor = 0;
     let pending = [];
@@ -431,7 +574,7 @@
       const key = item ? outlineKey(item) : null;
       if (key == null) continue;
       let at = -1;
-      for (let j = cursor; j < entries.length; j += 1) if (entryKey(entries[j]) === key) { at = j; break; }
+      for (let j = cursor; j < entries.length; j += 1) if (keyOfEntry(entries[j]) === key) { at = j; break; }
       if (at < 0) { if (partial && cursor === 0) pending = []; continue; }
       if (pending.length) { inserts.set(at, [...(inserts.get(at) ?? []), ...pending]); pending = []; }
       cursor = at + 1;
@@ -2178,13 +2321,24 @@
     };
   }
 
+  // COST-1. loadContext asks for workflows LEAN, so the list it hands over carries no skill bodies.
+  // Nothing on the conversation screen draws one, but the skills panel's <pre> and its editor do,
+  // and getSkills has already put them on the record. So a tick carries a held body forward rather
+  // than blanking it: without this, the next repaint of an open panel -- a skill enabled, a learning
+  // turn finishing -- would draw empty instructions under every skill name.
+  function carrySkillBodies(held, fresh) {
+    const bodies = new Map((held ?? []).filter((s) => s?.id != null && s.body).map((s) => [s.id, s.body]));
+    if (bodies.size === 0) return fresh;
+    return (fresh ?? []).map((skill) => (skill?.body ? skill : { ...skill, body: bodies.get(skill?.id) ?? skill?.body ?? "" }));
+  }
+
   // What loadContext read, onto the roster record it was read for. The transcript window and its
   // outline are the adapter's; the record carries what the views draw.
   function applyLoaded(r, loaded) {
     r.messages = loaded.messages;
     r.files = loaded.files;
     r.hasOlder = loaded.hasOlder;
-    r.skills = loaded.skills;
+    r.skills = carrySkillBodies(r.skills, loaded.skills);
     if (loaded.channels != null) r.channels = loaded.channels;
     r.handoff = loaded.handoff;
     r.boxState = loaded.boxState;
@@ -2241,6 +2395,85 @@
   const avatarUrl = (id, version) => `/avatars/${encodeURIComponent(id)}?v=${encodeURIComponent(String(version))}`;
   const avatarOf = (a, version) => (version != null ? avatarUrl(a.id, version) : pick(AVATARS, a.id));
   const avatarVersionOf = (id) => call("getAgentAvatar", { id }).then((answer) => answer?.version ?? null).catch(() => null);
+
+  // COST-1. getAgentAvatar answers { version, dataUrl }: the WHOLE avatar, to learn a 16-character
+  // string. MEASURED on grok-bot-local-vm at 390x844, 2026-09-09, with CDP capture: ten agents, ten
+  // calls, 91.9 KiB of /api -- 37% of the whole first-paint budget -- and then the roster's own <img>
+  // downloads the same five faces again off /avatars/<id>?v=<version>. Nothing was remembered across
+  // reloads either, because listAgents answers avatarVersion null for every agent on this box
+  // (buildSummary is called without readAvatar), so every boot paid it again.
+  //
+  // TWO CHANGES, AND NEITHER OF THEM MOVES A BYTE INTO ANOTHER BUCKET.
+  //
+  //   A version once learned is remembered, per browser, in localStorage. A remembered NULL is an
+  //   answer too: five of the ten agents have no avatar, and "asked, there is none" is worth keeping.
+  //
+  //   A version NOT yet known is not learned before first paint. The roster draws the placeholder
+  //   face -- the designed state for an agent with no version, not a broken image -- and the versions
+  //   are learned a beat later, off the critical path, after which the real faces appear and are
+  //   remembered for every later boot. A person waiting to read a conversation is not waiting on ten
+  //   base64 avatars.
+  //
+  // AND A REMEMBERED VERSION IS CHECKED, because a stale one is a 404 and a 404 IS a broken face in
+  // the roster. The check costs NOTHING: it reads the picture the page has already drawn. An <img>
+  // whose src is that avatar URL and which has finished loading with naturalWidth 0 is the browser
+  // itself reporting that the version is gone -- which is better evidence than a second request, and
+  // the second request was the first draft of this. That draft downloaded every remembered face a
+  // second time on every warm boot (relayAvatar answers no-store today, so nothing was shared with
+  // the picture at all), which is 70 KiB spent to protect against a version that only moves when
+  // somebody uploads a new avatar on another surface. No image on the page means no broken image to
+  // fix, so nothing is checked and nothing is spent. Measured against the gateway: ?v=<right> answers
+  // 200 immutable and ?v=<wrong> answers 404.
+  const AVATAR_MEMO_KEY = "titanbot.avatarVersions";
+  const avatarMemo = (() => {
+    try {
+      const held = JSON.parse(global.localStorage?.getItem?.(AVATAR_MEMO_KEY) ?? "null");
+      return held != null && typeof held === "object" && !Array.isArray(held) ? held : {};
+    } catch { return {}; }
+  })();
+  const writeAvatarMemo = () => {
+    try { global.localStorage?.setItem?.(AVATAR_MEMO_KEY, JSON.stringify(avatarMemo)); } catch { /* a private window, or storage off */ }
+  };
+  // Ids whose version came out of the memo (check it) and ids whose version nobody knows yet (learn
+  // it). Both are settled after first paint, in one pass, by settleAvatars.
+  const avatarsTrusted = new Set();
+  const avatarsUnknown = new Set();
+  function rememberAvatarVersion(id, version) {
+    avatarMemo[id] = version ?? null;
+    writeAvatarMemo();
+  }
+  // The page's own picture for that avatar URL: true when the browser finished loading it and got
+  // nothing, which is a 404 behind the version. Anything else -- still loading, loaded fine, no such
+  // image drawn -- is not evidence of a stale version and is left alone.
+  function pictureIsBroken(url) {
+    try {
+      const images = [...(global.document?.querySelectorAll?.("img") ?? [])].filter((img) => String(img.getAttribute?.("src") ?? "") === url);
+      return images.length > 0 && images.every((img) => img.complete === true && Number(img.naturalWidth) === 0);
+    } catch { return false; }
+  }
+  async function settleAvatars(onSettled) {
+    const trusted = [...avatarsTrusted];
+    const unknown = [...avatarsUnknown];
+    avatarsTrusted.clear();
+    avatarsUnknown.clear();
+    for (const id of trusted) {
+      const version = avatarMemo[id];
+      if (version == null) continue;
+      if (!pictureIsBroken(avatarUrl(id, version))) continue;
+      delete avatarMemo[id];
+      writeAvatarMemo();
+      const corrected = await avatarVersionOf(id);
+      rememberAvatarVersion(id, corrected);
+      onSettled(id, corrected);
+    }
+    for (const id of unknown) {
+      const learned = await avatarVersionOf(id);
+      rememberAvatarVersion(id, learned);
+      // null is worth reporting too: it replaces "not asked yet" with "asked, there is none", which
+      // is what stops the next boot asking again.
+      if (learned != null) onSettled(id, learned);
+    }
+  }
   // The identity fields a roster record carries from listAgents, refreshed on every tick so a
   // rename, an avatar or a hide made from any surface shows here (GW-01). `known` is the version
   // already held for this agent, kept when the row carries none.
@@ -2264,6 +2497,46 @@
       notify: a.notifyOnUpdatesEnabled !== false,
       hidden: a.isHiddenFromSidebar === true,
     };
+  }
+
+  // ---- PUSH-1's deep link ------------------------------------------------------------------------
+  //
+  // The shells open titaniumbot://card?tenant=&agent=&entry=&kind= with the https fallback
+  // /?agent=<id>&entry=<id>, and this is the https half: the query names a conversation and, often, an
+  // entry inside it. docs/APPS.md is the contract; openPaletteHit in app.js is the working precedent
+  // for the select-then-reveal pair.
+  //
+  // The parse is deliberately forgiving and the landing is deliberately quiet. An id for an agent
+  // this workspace does not have is ignored rather than reported: a push for a deleted agent, or a
+  // link opened against the wrong workspace, must land on the console and not on an error. Two card
+  // kinds expire in ten minutes, so an entry the host has already stamped expired lands as a plain
+  // "this one timed out" rather than a dead Approve button -- which is the transcript's own doing, not
+  // something to special-case here.
+  function deepLinkQuery() {
+    try {
+      const params = new URLSearchParams(String(global.location?.search ?? ""));
+      const agent = String(params.get("agent") ?? "").trim();
+      const entry = String(params.get("entry") ?? "").trim();
+      return { agent: agent.length > 0 ? agent : null, entry: entry.length > 0 ? entry : null };
+    } catch { return { agent: null, entry: null }; }
+  }
+  function deepLinkContext(workers, rooms) {
+    const { agent } = deepLinkQuery();
+    if (agent == null) return null;
+    if ((workers ?? []).some((w) => w.id === agent)) return { kind: "worker", id: agent };
+    if ((rooms ?? []).some((r) => r.id === agent)) return { kind: "room", id: agent };
+    return null;
+  }
+  // The query is cleared once it has been acted on, so a reload (or a pull-to-refresh on a phone) does
+  // not re-navigate away from wherever the person has since gone.
+  function clearDeepLinkQuery() {
+    try {
+      const url = new global.URL(global.location.href);
+      if (!url.searchParams.has("agent") && !url.searchParams.has("entry")) return;
+      url.searchParams.delete("agent");
+      url.searchParams.delete("entry");
+      global.history?.replaceState?.(null, "", `${url.pathname}${url.search}${url.hash}`);
+    } catch { /* no history API: the query simply stays in the bar */ }
   }
 
   async function hydrate(seed) {
@@ -2296,8 +2569,32 @@
     // the 2 MB this UI accepts, so it is asked once per agent, not once per hydrate: listAgents on
     // this box answers avatarVersion null for every agent (buildSummary is called without
     // readAvatar), so without the carry-over every hydrate moved every avatar to learn a string.
+    // A boot is a hydrate with no roster to carry: DEFAULTS holds empty arrays and a rebuild does not.
+    // That is the whole difference between "somebody is staring at an empty screen" and "the console is
+    // already up", and it is what decides whether an unknown avatar version waits.
+    const coldBoot = (seed.workers ?? []).length === 0 && (seed.rooms ?? []).length === 0;
     const knownVersions = new Map([...(seed.workers ?? []), ...(seed.rooms ?? [])].filter((r) => r?.avatarVersion != null).map((r) => [r.id, r.avatarVersion]));
-    const versions = new Map(await Promise.all(agents.map(async (a) => [a.id, a.avatarVersion ?? knownVersions.get(a.id) ?? await avatarVersionOf(a.id)])));
+    const versions = new Map(await Promise.all(agents.map(async (a) => {
+      if (a.avatarVersion != null) return [a.id, a.avatarVersion];
+      const held = knownVersions.get(a.id);
+      if (held != null) return [a.id, held];
+      // COST-1: what a previous page load already learned, verified after first paint rather than
+      // before it. `null` in the memo is an answer ("this agent has no avatar"), not a miss, so the
+      // `in` check is the one that has to be made here.
+      if (a.id in avatarMemo) { avatarsTrusted.add(a.id); return [a.id, avatarMemo[a.id]]; }
+      // Nobody knows this one yet. On a COLD boot it is not learned here: ten getAgentAvatar answers
+      // are 91.9 KiB of base64 on the one path a person is waiting on with nothing on screen. The
+      // placeholder draws, settleAvatars learns the version once the page is up, and every later boot
+      // reads it out of localStorage.
+      //
+      // On a REBUILD -- a duplicate, a delete, an agent minted on another surface, all of which arrive
+      // as a hydrate carrying the roster that is already drawn -- it IS learned inline. Nobody is
+      // waiting on a blank screen then, and a duplicated agent wearing the placeholder until the next
+      // reload is a worse answer than one more read.
+      if (!coldBoot) return [a.id, await avatarVersionOf(a.id).then((learned) => { rememberAvatarVersion(a.id, learned); return learned; })];
+      avatarsUnknown.add(a.id);
+      return [a.id, null];
+    })));
     const shape = (a) => ({
       id: a.id,
       // AVATAR-1: who was here first. The crew is handed out in creation order, so the roster
@@ -2344,7 +2641,13 @@
     // first boot, lands on the most recent worker.
     const exists = (c) => c && (c.kind === "worker" ? workers : rooms).some((r) => r.id === c.id);
     const kept = exists(seed.activeContext) ? { kind: seed.activeContext.kind, id: seed.activeContext.id } : null;
-    const active = kept ?? { kind: workers[0] ? "worker" : "room", id: first.id };
+    // PUSH-1's deep link, honoured HERE and not after the fact. A tap on a notification opens
+    // /?agent=<id>&entry=<id>; selecting afterwards would load a conversation the person never asked
+    // for and then load theirs -- measured on the 1,578-item agent, a second context load is another
+    // 120 KiB of /api on the one screen that is meant to be cheap. `asked` wins over the kept
+    // context because the person has just said which conversation they want.
+    const asked = deepLinkContext(workers, rooms);
+    const active = asked ?? kept ?? { kind: workers[0] ? "worker" : "room", id: first.id };
     const activeRecord = (active.kind === "worker" ? workers : rooms).find((r) => r.id === active.id);
     const openContexts = (seed.openContexts ?? []).filter(exists).map((c) => ({ kind: c.kind, id: c.id }));
     if (!openContexts.some((c) => c.kind === active.kind && c.id === active.id)) openContexts.push(active);
@@ -2743,37 +3046,98 @@
     // The gateway pushes; this adapter pulls what changed. Re-reading the active transcript on
     // every event is cheap next to a turn, and it means a reply from any surface shows up here.
     let pending = null;
-    try {
-      // A 401 on this stream is invisible: EventSource exposes no status, only onerror. That is
-      // fine here because the heartbeat below calls the gateway every 15 seconds and relayFetch
-      // bounces to /login the first time one of those comes back unauthenticated.
-      const events = new global.EventSource("/events");
-      events.onmessage = (message) => {
-        // JOBBUS-3: a job transition is not a conversation change, so it does not pay for a
-        // transcript re-read. It refreshes the Job bus card and nothing else. docs/JOB-BUS.md §5
-        // names the event `{type:"job-bus", jobId, status}`; every other envelope on this stream
-        // carries its name on `channel` with the body under `payload`, so both are read rather
-        // than betting the console on which one the host settled on.
-        let envelope = null;
-        try { envelope = JSON.parse(message?.data ?? "null"); } catch { /* a heartbeat or a partial frame */ }
-        if (envelope != null && (envelope.type === "job-bus" || envelope.channel === "job-bus")) {
-          const body = envelope.payload ?? envelope;
-          emit("job-bus:changed", { jobId: body.jobId ?? null, status: body.status ?? null });
-          return;
-        }
-        if (pending) return;
-        pending = global.setTimeout(() => { pending = null; reloadActive().catch(() => {}); }, 900);
-      };
-    } catch { /* no stream: the UI still works, it just will not update on its own */ }
+    let events = null;
+
+    // COST-1, the boot quiet window. MEASURED on grok-bot-local-vm at 390x844: hydrate resolves
+    // around 1,200 ms, the first /events frame lands at about 1,560 ms, and the 900 ms debounce then
+    // fires reloadActive at about 2,750 ms -- which re-runs the whole of loadContext 1.5 s after
+    // hydrate already did it. That is the twelve duplicate /api pairs a boot capture shows. The
+    // frames that arrive while the page is still painting are collapsed into one read after it has
+    // settled; the read is DEFERRED, never dropped, because a dropped frame is a card the person
+    // never sees. The digest protocol above is what makes the deferred read nearly free.
+    const BOOT_QUIET_MS = 2000;
+    const bootAt = Date.now();
+    const debounceDelay = () => Math.max(900, BOOT_QUIET_MS - (Date.now() - bootAt));
+
+    function openStream() {
+      if (events != null) return;
+      try {
+        // A 401 on this stream is invisible: EventSource exposes no status, only onerror. That is
+        // fine here because the heartbeat below calls the gateway every 15 seconds and relayFetch
+        // bounces to /login the first time one of those comes back unauthenticated.
+        events = new global.EventSource("/events");
+        events.onmessage = (message) => {
+          // JOBBUS-3: a job transition is not a conversation change, so it does not pay for a
+          // transcript re-read. It refreshes the Job bus card and nothing else. docs/JOB-BUS.md §5
+          // names the event `{type:"job-bus", jobId, status}`; every other envelope on this stream
+          // carries its name on `channel` with the body under `payload`, so both are read rather
+          // than betting the console on which one the host settled on.
+          let envelope = null;
+          try { envelope = JSON.parse(message?.data ?? "null"); } catch { /* a heartbeat or a partial frame */ }
+          if (envelope != null && (envelope.type === "job-bus" || envelope.channel === "job-bus")) {
+            const body = envelope.payload ?? envelope;
+            emit("job-bus:changed", { jobId: body.jobId ?? null, status: body.status ?? null });
+            return;
+          }
+          if (pending) return;
+          pending = global.setTimeout(() => { pending = null; reloadActive().catch(() => {}); }, debounceDelay());
+        };
+      } catch { /* no stream: the UI still works, it just will not update on its own */ }
+    }
+    openStream();
 
     // Heartbeat. The stream is the fast path; this is what keeps status honest when nothing is
     // being said -- the same 15s cadence the old operator UI settled on.
-    const heartbeat = global.setInterval(() => { void reloadActive().catch(() => {}); }, 15_000);
+    let heartbeat = global.setInterval(() => { void reloadActive().catch(() => {}); }, 15_000);
 
-    return {
+    // ---- COST-1: what a backgrounded page costs ---------------------------------------------------
+    //
+    // MEASURED on grok-bot-local-vm at 390x844: the console has exactly one visibilitychange handler
+    // anywhere (screen-tile.js:425), and hiding the document changed NOTHING -- 44 requests and
+    // 654.8 KiB in the next sixty seconds, the same as a visible page. On iOS the webview is suspended
+    // the moment the app leaves the foreground, so every one of those is work nobody can see.
+    //
+    // Hidden or going away: the heartbeat stops, the debounce is cancelled, and the stream is closed.
+    // Visible again: ONE catch-up read and a fresh stream, because an EventSource closed here will not
+    // reconnect itself. No card is lost by any of this -- PUSH-1's trigger is a sweep on the RELAY, not
+    // a timer in this page, which is the whole reason the relay owns it.
+    // `suspended` and not "is the heartbeat null": a visibilitychange on a page that was never hidden
+    // is a thing other code dispatches, and answering it with a catch-up read would make coming back
+    // cost two reads every time instead of one.
+    let suspended = false;
+    const suspend = () => {
+      suspended = true;
+      if (heartbeat != null) { global.clearInterval(heartbeat); heartbeat = null; }
+      if (pending != null) { global.clearTimeout(pending); pending = null; }
+      if (events != null) { try { events.close?.(); } catch { /* already gone */ } events = null; }
+    };
+    const resume = () => {
+      if (!suspended) return;
+      suspended = false;
+      if (heartbeat == null) heartbeat = global.setInterval(() => { void reloadActive().catch(() => {}); }, 15_000);
+      openStream();
+      void reloadActive().catch(() => {});
+    };
+    const onVisibility = () => {
+      if (global.document?.visibilityState === "hidden") suspend();
+      else resume();
+    };
+    global.document?.addEventListener?.("visibilitychange", onVisibility);
+    global.addEventListener?.("pagehide", suspend);
+
+    // PUSH-1's deep link, landed. hydrate has already made the asked-for conversation the active one,
+    // so this only has to reveal the entry and clear the query. Deferred by a tick because app.js
+    // subscribes AFTER it constructs this adapter, and an emit with no listeners is a reveal nobody
+    // scrolls to.
+    const api = {
       getSnapshot: () => clone(state),
       subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-      destroy() { listeners.clear(); global.clearInterval(heartbeat); },
+      destroy() {
+        listeners.clear();
+        suspend();
+        global.document?.removeEventListener?.("visibilitychange", onVisibility);
+        global.removeEventListener?.("pagehide", suspend);
+      },
       // The heartbeat's own body, callable: a test with a stub gateway drives a refresh through
       // it, and a view that just wrote something can ask for the read-back without waiting 15s.
       refresh: () => reloadActive(),
@@ -2897,8 +3261,10 @@
       // -- Skills (GW-05): the nine workflow commands. Every write is read back through
       // getAgentWorkflows before it resolves, for the same reason the routine writes are: the
       // gateway answers 200 to a write the store then declines, and the list is the only proof.
+      // COST-1: `full`, not lean. This is the one read whose answer's bodies are actually drawn --
+      // the panel's <pre> and its editor -- and it happens when the panel opens, not on a tick.
       getSkills(agentId) {
-        return call("getAgentWorkflows", { id: agentId }).then((list) => {
+        return call("getAgentWorkflows", { id: agentId }, { projection: "full" }).then((list) => {
           const skills = skillsOf(list);
           const target = state.workers.find((w) => w.id === agentId) ?? state.rooms.find((x) => x.id === agentId);
           if (target) target.skills = skills;
@@ -3591,6 +3957,10 @@
             if (!fresh) throw new Error("the host answered but that agent is gone");
             const version = fresh.avatarVersion ?? avatar?.version ?? null;
             if (version == null || version === before) throw new Error("the host answered and reports no new avatar version");
+            // COST-1: the memo a later boot reads instead of re-downloading every face. It is written
+            // here rather than only in hydrate so the next reload starts from the version this write
+            // just proved, not the one before it.
+            rememberAvatarVersion(agentId, version);
             Object.assign(target, identityOf(fresh, version));
             emit("settings:avatar", { agentId });
             return { avatar: target.avatar, version: target.avatarVersion };
@@ -4780,6 +5150,35 @@
         return emit("worker:status", { workerId, status });
       },
     };
+
+    // COST-1: the avatar versions, settled once the page is up -- the remembered ones checked (a stale
+    // one is a 404 and a 404 is a broken face, so the check is not optional, just not on the critical
+    // path) and the unknown ones learned. Either way the roster repaints with the real face and the
+    // answer is remembered, so no later boot pays for it at all.
+    void settleAvatars((id, version) => {
+      const r = state.workers.find((x) => x.id === id) ?? state.rooms.find((x) => x.id === id);
+      if (!r) return;
+      r.avatarVersion = version;
+      r.avatar = version != null ? avatarUrl(id, version) : pick(AVATARS, id);
+      emit("worker:status", { workerId: id, status: r.status });
+    }).catch(() => { /* a check that cannot be made leaves the remembered version alone */ });
+
+    // PUSH-1's deep link, the second half. hydrate already made ?agent= the active context, so the
+    // only thing left is ?entry=, and then clearing the query. The timeout is what lets app.js
+    // subscribe first: it constructs this adapter and then adds its listener, and a reveal emitted
+    // before that is a scroll nobody performs.
+    const { agent: askedAgent, entry: askedEntry } = deepLinkQuery();
+    if (askedAgent != null || askedEntry != null) {
+      global.setTimeout(() => {
+        const context = state.activeContext;
+        const onAsked = askedAgent == null || context?.id === askedAgent;
+        const done = () => clearDeepLinkQuery();
+        if (!onAsked || askedEntry == null) { done(); return; }
+        Promise.resolve(api.revealEntry(context, askedEntry)).catch(() => {}).then(done);
+      }, 0);
+    }
+
+    return api;
   }
 
   // The Log out control. It is drawn only where signing out means something: /auth/state says
