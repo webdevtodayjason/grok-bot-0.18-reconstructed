@@ -61,6 +61,10 @@ const GATES = [
   // phone user agent it drives Chrome with carries the name on the end, so the ledger row a minted
   // bearer writes is labelled too.
   "verify-door.mjs",
+  // VOICE-7: the only gate in the family that signs in at the REAL front door on the live server,
+  // as a throwaway customer, rather than at one it started itself. Exactly the caller SIGNIN-1 was
+  // written for, so it says its own name there.
+  "verify-voice-r750.mjs",
 ];
 
 test("the name is built from the calling file, not typed into it", () => {
