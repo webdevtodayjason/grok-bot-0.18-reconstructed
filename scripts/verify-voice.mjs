@@ -821,25 +821,22 @@ async function noKeyInABrowser(relay) {
     check((await readRects(desktop.page)).lineUp === false, "and left alone it takes itself away", `${waited} ms on ${MACHINE}`);
     check(waited >= 4000, "after long enough to read it", `${waited} ms`);
 
-    step("a live caption is the same line, and moves the footer just as little (1440x900)");
-    // Fixing only the note would have left the identical break for everyone who can actually talk:
-    // MEASURED before the fix, a caption alone with no note took the shelf 1392x106 -> 1392x168 and
-    // the composer 600 -> 407.98 with the utilities wrapped.
-    // WHICH FRAME A CAPTION IS, since VOICE-7 split the two directions: the person's OWN words go to
-    // the speech panel over the conversation, and the line in the footer is the AGENT's reply -- `said`.
-    // This leg injected `heard`, which after VOICE-7 paints the panel and leaves the footer line empty,
-    // so it was measuring a caption that no longer exists in the footer. The claim is unchanged: a
-    // caption is the same one line and moves the footer as little as a note does.
+    step("the agent's reply puts nothing in the footer at all (1440x900)");
+    // THE HALF THAT HAPPENS ON EVERY TURN. A refusal is rare; the agent answering is every single turn,
+    // and his reply used to be written into this same line -- MEASURED on this Mac, #message-input
+    // 370.05 -> 215.31 px, and it stood there for the rest of the call because only a start or a stop
+    // ever cleared it. It is already a durable row in the transcript and it is already spoken out loud,
+    // so it now paints nothing and the footer cannot move on an ordinary turn at all. The message box
+    // is in this comparison deliberately: it is the one rect a refusal IS allowed to take from.
     await desktop.page.evaluate(() => window.__voice._onMessage({
       data: JSON.stringify({ t: "said", text: "the team is working on the settings surface this afternoon" }),
     }));
     await desktop.page.waitForTimeout(120);
-    const captioned = await readRects(desktop.page);
-    check(captioned.lineUp, "a caption puts words on the same line", JSON.stringify(captioned.lineText));
-    check(captioned.leadsSomewhere === false, "and it is a status, not a control");
-    for (const named of NAMED) {
-      check(JSON.stringify(captioned[named]) === JSON.stringify(atRest[named]),
-        `${named} is unchanged to the pixel with a caption up`, `${JSON.stringify(atRest[named])} -> ${JSON.stringify(captioned[named])}`);
+    const replied = await readRects(desktop.page);
+    check(replied.lineUp === false, "his reply leaves the footer's line away", JSON.stringify(replied.lineText));
+    for (const named of [...NAMED, "box"]) {
+      check(JSON.stringify(replied[named]) === JSON.stringify(atRest[named]),
+        `${named} is unchanged to the pixel when the agent answers`, `${JSON.stringify(atRest[named])} -> ${JSON.stringify(replied[named])}`);
     }
   } finally {
     await desktop.context.close().catch(() => {});
@@ -864,20 +861,27 @@ async function noKeyInABrowser(relay) {
     check(up.box[0] === atRest.box[0], "and neither does the message box", `${atRest.box[0]} -> ${up.box[0]}`);
     check(up.sideways === false, "and the page does not scroll sideways");
     const grew = Math.round((up.shelf[1] - atRest.shelf[1]) * 100) / 100;
-    // THE BUDGET IS A ROW, AND WHICH ROW DEPENDS ON WHAT IS ON IT. A sentence that leads somewhere is
-    // a control, and the 44 px floor beside it is what sets its height; a caption is text and costs a
-    // quarter of that. Both are printed, and the number to beat is the 94.02 px the strip cost here.
+    // THE BUDGET IS A ROW, AND ONLY A REFUSAL EVER SPENDS IT. A sentence that leads somewhere is a
+    // control, and the 44 px floor beside it is what sets its height; nothing else reaches this line any
+    // more, and the number to beat is the 94.02 px the strip cost here.
     check(grew <= 60, "the shelf grows by a row, not by a layout", `${grew} px (94.02 px before VOICE-2), ${atRest.shelf[1]} -> ${up.shelf[1]}`);
     check(up.leadsSomewhere, "and the sentence is a full-width tap target on a phone");
     await phone.page.evaluate(() => window.__voice.toggle());
+    await phone.page.waitForFunction(() => document.getElementById("voice-line")?.hidden === true, null, { timeout: 10_000 })
+      .catch(() => {});
+    // AND HIS REPLY COSTS NOTHING, which is the number that matters on a phone: a refusal takes a row
+    // of this shelf, but that happens once and the agent answering happens every turn. MEASURED before
+    // the fix, with the reply in the footer's line: 390x133 at y711 -> 390x158 at y686, 25 px taller and
+    // 25 px higher, for the rest of the call.
     await phone.page.evaluate(() => window.__voice._onMessage({
-      data: JSON.stringify({ t: "heard", text: "what is the team working on this afternoon" }),
+      data: JSON.stringify({ t: "said", text: "the team is working on the settings surface this afternoon" }),
     }));
     await phone.page.waitForTimeout(120);
-    const captioned = await readRects(phone.page);
-    const captionGrew = Math.round((captioned.shelf[1] - atRest.shelf[1]) * 100) / 100;
-    check(captionGrew <= 40, "and a live caption costs a quarter of that", `${captionGrew} px`);
-    check(captioned.composer[0] === atRest.composer[0], "with the composer still untouched", `${captioned.composer[0]} px`);
+    const replied = await readRects(phone.page);
+    const replyGrew = Math.round((replied.shelf[1] - atRest.shelf[1]) * 100) / 100;
+    check(replyGrew === 0, "and the agent's reply costs this shelf nothing at all", `${replyGrew} px, ${JSON.stringify(replied.shelf)}`);
+    check(replied.composer[0] === atRest.composer[0], "with the composer still untouched", `${replied.composer[0]} px`);
+    check(replied.box[0] === atRest.box[0], "and the message box still the width it was", `${replied.box[0]} px`);
   } finally {
     await phone.context.close().catch(() => {});
   }
@@ -1155,6 +1159,18 @@ async function legBrowser() {
   check(await button.getAttribute("type") === "button", "carrying type=button, or it would submit the composer's form");
 
   step("press it, and watch the orb");
+  // ALWAYS LISTENING FOR THIS LEG, SET THROUGH THE PAGE'S OWN DOOR, and it is not an optional detail:
+  // VOICE-7 made press-and-hold the default and this leg presses ONCE. A click in that mode is a hold
+  // and an instant release, so the microphone opens for about a millisecond and shuts, the orb is dark
+  // between holds BY DESIGN (an orb reading "listening" while the mic is shut is a lie), and this leg's
+  // four claims -- the orb's four states, the frames reaching the vendor, the held window, and real
+  // energy in the audio -- all measured nothing. MEASURED here before this line: 0 frames, 0 bytes,
+  // rms 0, and an orb that read `off` 38 times running. The mode this leg needs is the one where a
+  // press opens the microphone and leaves it open; the hold itself is measured by --leg overlay, in
+  // both modes and at both viewports, with a real touch hold on the phone.
+  await page.evaluate(() => window.__voice.setTalkMode("always"));
+  const mode = await page.evaluate(() => window.__voice.talkMode());
+  check(mode === "always", "the talk mode for this leg is press-once-to-start", `the page says ${mode}`);
   const seen = await page.evaluate(() => {
     window.__voiceGateStates = [];
     const orb = document.querySelector("[data-voice-orb]");
@@ -1581,6 +1597,9 @@ async function legOverlay() {
     const stats = window.__voice?.stats?.() ?? null;
     return {
       shelf: r(".control-shelf"), composer: r("#composer"), talk: r("[data-voice-talk]"),
+      box: r("#message-input"),
+      line: (() => { const n = document.getElementById("voice-line"); return n == null ? null : {
+        hidden: n.hidden === true, text: (n.textContent ?? "").replace(/\s+/g, " ").trim() }; })(),
       overlay: ov == null ? null : {
         hidden: ov.hidden === true,
         panel: r("[data-voice-overlay-panel]"),
@@ -1738,9 +1757,11 @@ async function legOverlay() {
       check(seen.at(-1) === words.at(-1), "and the last partial is the whole sentence so far, replaced rather than appended", JSON.stringify(seen.at(-1)));
 
       const during = await page.evaluate(RECTS);
-      check(sameRect(during.shelf, before.shelf) && sameRect(during.composer, before.composer) && sameRect(during.talk, before.talk),
+      check(sameRect(during.shelf, before.shelf) && sameRect(during.composer, before.composer)
+        && sameRect(during.talk, before.talk) && sameRect(during.box, before.box),
         "THE FOOTER DID NOT MOVE while the words were being built",
-        `shelf ${JSON.stringify(during.shelf)} composer ${JSON.stringify(during.composer)} talk ${JSON.stringify(during.talk)} on ${MACHINE}`);
+        `shelf ${JSON.stringify(during.shelf)} composer ${JSON.stringify(during.composer)} talk ${JSON.stringify(during.talk)} `
+        + `message box ${JSON.stringify(during.box)} on ${MACHINE}`);
       check(during.sideways === false, "and the page does not scroll sideways with the panel up", String(during.sideways));
 
       // The settled transcript races the tool call, so it is another partial and must NOT dissolve.
@@ -1794,6 +1815,30 @@ async function legOverlay() {
         `${JSON.stringify(before.composer)} before, ${JSON.stringify(after.composer)} after`);
       check(sameRect(after.talk, before.talk), "and the talk button never moved",
         `${JSON.stringify(before.talk)} before, ${JSON.stringify(after.talk)} after`);
+      check(sameRect(after.box, before.box), "and neither did the message box a person types into",
+        `${JSON.stringify(before.box)} before, ${JSON.stringify(after.box)} after`);
+
+      // -- AND THE AGENT'S REPLY, which is the half this leg could not see before -------------------
+      //
+      // It took its `after` rects within milliseconds of the tool call and the reply lands 5 to 25 s
+      // later, so the one thing that happens on EVERY turn was measured on no turn at all. The reply
+      // used to be written into the footer's own line: MEASURED on this Mac, #message-input 370.05 ->
+      // 215.31 px at 1440x900 and .control-shelf 25 px taller and 25 px higher at 390x844, standing
+      // there for the rest of the call because only a start or a stop ever cleared it. It now paints
+      // nothing, and this is where that is proved rather than asserted in a doc.
+      await page.evaluate((text) => window.__voice._onMessage({ data: JSON.stringify({ t: "said", text }) }),
+        "The team is on the settings surface this afternoon, and the deploy gate is green.");
+      await page.waitForTimeout(150);
+      const replied = await page.evaluate(RECTS);
+      check(sameRect(replied.shelf, before.shelf) && sameRect(replied.composer, before.composer)
+        && sameRect(replied.talk, before.talk) && sameRect(replied.box, before.box),
+        "THE FOOTER DID NOT MOVE when the agent answered either, which is every turn rather than only a refused one",
+        `shelf ${JSON.stringify(replied.shelf)} composer ${JSON.stringify(replied.composer)} talk ${JSON.stringify(replied.talk)} `
+        + `message box ${JSON.stringify(replied.box)} on ${MACHINE}`);
+      check(replied.line?.hidden !== false, "and his reply put no words in the footer: it is a row in the transcript and a voice",
+        JSON.stringify(replied.line));
+      check(replied.overlay?.hidden === true, "and no panel while he speaks, where the orb on the button is the only sign",
+        String(replied.overlay?.hidden));
 
       // -- a person could still press it ------------------------------------------------------------
       // A passing page.click() is not evidence a human can click: elementFromPoint at the control's
@@ -1808,6 +1853,37 @@ async function legOverlay() {
         return { ok: node.contains(hit) || hit === node, landedOn: hit?.className ?? hit?.tagName ?? "nothing" };
       });
       check(reachable.ok, "and a finger or a mouse still lands on the talk button after a scroll", JSON.stringify(reachable));
+
+      // -- ONE THUMB IS ONE PRESS, with a refusal standing (390x844, press and hold) ----------------
+      //
+      // A phone fires pointerdown AND touchstart for one press and both reach the hold. MEASURED here
+      // before the fix: the first of the two cleared the standing refusal and the second found no note
+      // and dialled straight back into it, which is the loop Jason was stuck in reappearing through the
+      // second event of the same gesture. The mouse path, which fires only pointerdown, was correct --
+      // which is why this is measured through the browser's own touch pipeline and at this width.
+      if (mode === "push" && view.hasTouch && touch != null) {
+        await page.evaluate(() => window.__voice.stop("no-key"));
+        await page.waitForFunction(() => (window.__voice?.stats?.()?.notes ?? []).length > 0, null, { timeout: 5000 }).catch(() => {});
+        const standing = await page.evaluate(() => window.__voice.stats().notes);
+        check(standing.length === 1, "a refusal is standing, the way it is on a workspace with talking switched off", JSON.stringify(standing));
+        const dialsBefore = stub.events.sessions.length;
+        await touch.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: box.x, y: box.y }] });
+        await page.waitForTimeout(400);
+        const onePress = await page.evaluate(() => ({ on: window.__voice._state.on, held: window.__voice.stats().held, notes: window.__voice.stats().notes }));
+        check(onePress.on === false && onePress.held === false,
+          "one real press clears the refusal and does NOT dial back into it", JSON.stringify(onePress));
+        check(onePress.notes.length === 0, "and the sentence is gone, which is what the press is for", JSON.stringify(onePress.notes));
+        check(stub.events.sessions.length === dialsBefore, "no line was opened by the press that cleared it",
+          `${stub.events.sessions.length - dialsBefore} new line(s)`);
+        await touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+        // AND THE NEXT PRESS STILL WORKS. The gesture is spent by its own release, not for good.
+        await touch.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: box.x, y: box.y }] });
+        await page.waitForFunction(() => window.__voice.stats().held === true, null, { timeout: 10_000 }).catch(() => {});
+        const nextPress = await page.evaluate(() => ({ held: window.__voice.stats().held, talking: window.__voice.stats().talking }));
+        check(nextPress.held === true, "and a fresh press after the release holds the microphone normally", JSON.stringify(nextPress));
+        await touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+        await page.evaluate(() => window.__voice.stop());
+      }
 
       // -- the way out --------------------------------------------------------------------------------
       if (mode === "always") {

@@ -64,6 +64,22 @@ function fakeGateway({ agents = [{ id: "a1", name: "Chief of Staff", isRunning: 
   };
 }
 
+/**
+ * The same gateway, with `sendPrompt` held open until the test lets it go. That is the only way to
+ * reproduce what always-listening does every single call: Titan takes 5.5 to 25 s to answer, and the
+ * next utterance begins inside that window.
+ */
+function gatewayHoldingSend(options = {}) {
+  const gw = fakeGateway(options);
+  let release = null;
+  const held = new Promise((resolve) => { release = resolve; });
+  const call = async (command, args = {}) => {
+    if (command === "sendPrompt") { const answer = await gw.call(command, args); await held; return answer; }
+    return gw.call(command, args);
+  };
+  return { ...gw, call, of: gw.of, release: () => release() };
+}
+
 const reply = (id, content, { attemptId = "att1", at = 1_700_000_000_500 } = {}) => ({
   id, kind: "send-message", timestampMs: at, evidence: { attemptId },
   message: { type: "text", content },
@@ -786,6 +802,106 @@ test("VOICE-7: an empty utterance is a turn that ends, not a panel left open", a
     assert.equal(final.reason, "empty");
     assert.equal(session.of("heard-confirmed").length, 0);
     assert.equal(gateway.of("sendPrompt").length, 0);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ============================================ VOICE-7 ADVERSARIAL: two utterances in flight at once
+//
+// `hear-end` used to close "whatever turn is open" rather than the turn it was about. In always
+// listening the next utterance begins during the 5.5 to 25 s Titan takes to answer the last one, and
+// in push to talk a second hold does the same -- so utterance 1's confirmation dissolved utterance 2's
+// panel mid-sentence, and every later transcript for utterance 2 was then dropped as belonging to a
+// closed turn. The person watched their words vanish and the row that landed was never the words they
+// had read.
+
+test("VOICE-7: a second utterance while the first is still with Titan keeps its own panel", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  const gateway = gatewayHoldingSend({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    tail: (n) => (n >= 2 ? [reply("e1", "We are on the deploy gate.")] : []),
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0012" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+
+    // ---- utterance 1, all the way to the send, which is then held open.
+    stub.emitSpeechStarted({ itemId: "item_1" });
+    await session.settle(() => session.of("hear-begin").length > 0, "the panel for the first utterance");
+    stub.emitUserTranscript("what is the team working on", { itemId: "item_1" });
+    stub.emitUserTranscriptDone("what is the team working on", { itemId: "item_1" });
+    stub.emitSpeechStop();
+    stub.emitToolCall({ name: "titan", args: { message: "what is the team working on" }, callId: "c1", triple: false });
+    await session.settle(() => gateway.of("sendPrompt").length > 0, "the first utterance reaching Titan");
+
+    // ---- utterance 2 begins while Titan still has the first.
+    stub.emitSpeechStarted({ itemId: "item_2" });
+    await session.settle(() => session.of("hear-begin").length >= 2, "the panel for the second utterance");
+    assert.equal(session.of("hear-begin").at(-1).turn, 2);
+    stub.emitUserTranscript("and what about the deploy", { itemId: "item_2" });
+    await session.settle(() => session.of("hear").some((f) => f.turn === 2), "the second utterance's words");
+
+    // ---- and now Titan takes the first one's words.
+    gateway.release();
+    await session.settle(() => session.of("heard-confirmed").length > 0, "the first utterance's confirmation");
+    assert.equal(session.of("heard-confirmed").at(-1).turn, 1, "the confirmation belongs to the utterance it confirms");
+    const ends = session.of("hear-end");
+    assert.ok(!ends.some((f) => f.turn === 2),
+      `closing the first utterance closed the second one's panel mid-sentence: ${JSON.stringify(ends)}`);
+
+    // And the second utterance's words keep flowing, which the closed-turn guard used to stop.
+    const before = session.of("hear").filter((f) => f.turn === 2).length;
+    stub.emitUserTranscript("and what about the deploy gate", { itemId: "item_2" });
+    await session.settle(() => session.of("hear").filter((f) => f.turn === 2).length > before,
+      "the second utterance still being heard");
+
+    // It closes on its own terms, with its own turn on it.
+    stub.emitSpeechStop();
+    stub.emitToolCall({ name: "titan", args: { message: "and what about the deploy gate" }, callId: "c2", triple: false });
+    await session.settle(() => session.of("hear-end").some((f) => f.turn === 2), "the second utterance's own closing frame");
+    assert.equal(session.of("hear-end").filter((f) => f.turn === 2).length, 1);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-7: a transcript for the utterance before this one never paints into this one", async () => {
+  // Neither service orders `.completed` transcription events between items -- OpenAI says so in its
+  // own documentation -- so utterance 1's settled sentence can arrive after utterance 2 has opened.
+  // Stamping it with whatever turn is current painted the old sentence into the new panel as settled
+  // words. The event names its own item, which is the only thing that can tell them apart.
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  const gateway = fakeGateway({ agents: [{ id: "a1", name: "Titan", isRunning: true }], tail: () => [] });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0013" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+
+    stub.emitSpeechStarted({ itemId: "item_1" });
+    stub.emitUserTranscript("open the box", { itemId: "item_1" });
+    await session.settle(() => session.of("hear").length > 0, "the first utterance's words");
+    stub.emitSpeechStarted({ itemId: "item_2" });
+    await session.settle(() => session.of("hear-begin").length >= 2, "the second utterance opening");
+    stub.emitUserTranscript("what time is it", { itemId: "item_2" });
+    await session.settle(() => session.of("hear").some((f) => f.turn === 2), "the second utterance's words");
+
+    // The late settled transcript of the FIRST item, which is the documented race.
+    stub.emitUserTranscriptDone("open the box", { itemId: "item_1" });
+    await new Promise((resolve) => { const timer = setTimeout(resolve, 200); timer.unref(); });
+    const late = session.of("hear").filter((f) => f.itemId === "item_1" && f.turn === 2);
+    assert.deepEqual(late, [], `the previous utterance's sentence was sent as this one's: ${JSON.stringify(late)}`);
+    assert.equal(session.of("hear").filter((f) => f.turn === 2).at(-1).text, "what time is it",
+      "the open panel's last words are still its own");
   } finally {
     await session?.close();
     await stub.close();

@@ -148,7 +148,7 @@ test("VOICE-2 notes: a note is ONE capped line, never a row beside the composer"
   frame(voice, { t: "note", text: "Your agent is still reading. One moment." });
   assert.equal(voice._state.notes.length, 1);
   assert.equal(voice._state.orb, "listening", "a note is not a state; it may never move the orb");
-  const line = voice._lineFor(voice._state.notes, "");
+  const line = voice._lineFor(voice._state.notes);
   assert.equal(line.text, "Your agent is still reading. One moment.");
   assert.equal(line.action, null, "this one leads nowhere, so it is a status and not a control");
   const markup = voice._lineMarkup();
@@ -168,16 +168,25 @@ test("VOICE-2 notes: a note is ONE capped line, never a row beside the composer"
   assert.equal(voice._state.notes.length, 0);
 });
 
-test("VOICE-2 line: a caption and a note share the one line, and the note wins", async () => {
+test("VOICE-7: the line is refusals and NOTHING ELSE, so no ordinary turn can move the footer", async () => {
   const { voice } = await loadVoice();
-  assert.deepEqual(voice._lineFor([], "what you just said"), { text: "what you just said", action: null });
-  assert.deepEqual(voice._lineFor([], ""), { text: "", action: null }, "nothing to say draws nothing");
-  // Fixing only the note would have left the identical break for everyone who actually talks:
-  // MEASURED at 1440x900, a live caption alone with no note took the shelf 1392x106 -> 1392x168 and
-  // the composer 600 -> 407.98. The caption and the note are the same node for that reason.
-  const both = voice._lineFor([{ condition: "no-key" }], "a caption that was still on screen");
-  assert.equal(both.text, voice._NOTES["no-key"], "the note is the newer fact and the only one shown");
-  assert.equal(both.action, "Open settings");
+  // It used to take a live caption too, and the agent's reply was written into it on every spoken
+  // turn. MEASURED on this Mac in real Chrome, a reply in that line took #message-input 370.05 to
+  // 215.31 px at 1440x900 and .control-shelf 390x133 at y711 to 390x158 at y686 at 390x844, and it
+  // stood there for the rest of the call because only a start or a stop ever cleared it.
+  assert.deepEqual(voice._lineFor([]), { text: "", action: null }, "nothing is wrong, so the footer says nothing");
+  assert.equal(voice._lineFor.length, 1, "the line takes notes and nothing else now");
+  const note = voice._lineFor([{ condition: "no-key" }]);
+  assert.equal(note.text, voice._NOTES["no-key"], "a refusal is the one thing that reaches the footer");
+  assert.equal(note.action, "Open settings");
+
+  // And the reply frame paints nothing at all: it is already a row in the transcript and already
+  // spoken out loud, and while the agent talks the orb on the button is the only sign.
+  frame(voice, { t: "said", text: "I have asked him and he is on it." });
+  assert.equal(voice._lineFor(voice._state.notes).text, "", "the agent's reply reached the footer");
+  assert.equal(voice.stats().lastSaid, "I have asked him and he is on it.", "the gate can still read what he said");
+  const source = await read("ui/machine-room/voice.js");
+  assert.doesNotMatch(source, /case "said":\s*\n\s*caption\(/, "the reply is being painted into the footer again");
 });
 
 test("VOICE-1 notes: each of the six conditions produces its own plain sentence", async () => {
@@ -192,7 +201,7 @@ test("VOICE-1 notes: each of the six conditions produces its own plain sentence"
     const sentence = voice._sentenceFor(condition);
     assert.ok(sentence.length > 20, `${condition}: "${sentence}" is not a sentence`);
     assert.match(sentence, /[.!]$/, `${condition}: a sentence ends`);
-    assert.equal(voice._lineFor([{ condition }], "").text, sentence, `${condition}: the line says it`);
+    assert.equal(voice._lineFor([{ condition }]).text, sentence, `${condition}: the line says it`);
     // No vendor, no tool name, no machine's noun. These are the words a business owner reads.
     for (const leak of ["xai", "x\\.ai", "openai", "grok", "realtime", "websocket", "socket", "titan\\(", "sendPrompt",
       "function_call", "session\\.update", "pcm", "api", "token", "4001", "upgrade"]) {
@@ -202,8 +211,8 @@ test("VOICE-1 notes: each of the six conditions produces its own plain sentence"
   // And exactly one of them leads somewhere, because "nothing is set up yet" is the one condition a
   // person can fix from this page.
   assert.deepEqual(Object.keys(voice._NOTE_ACTIONS), ["no-key"]);
-  assert.equal(voice._lineFor([{ condition: "no-key" }], "").action, "Open settings");
-  assert.equal(voice._lineFor([{ condition: "line-dropped" }], "").action, null);
+  assert.equal(voice._lineFor([{ condition: "no-key" }]).action, "Open settings");
+  assert.equal(voice._lineFor([{ condition: "line-dropped" }]).action, null);
   assert.match(voice._lineMarkup(), /data-voice-open-settings/, "and the control that leads there exists");
 
   // VOICE-2, AND THIS IS THE SENTENCE JASON READ. The shipped one ended "Add one on the Voice card in
@@ -227,7 +236,7 @@ test("VOICE-1 notes: the relay's own sentence wins, and the close only names the
   assert.equal(voice._state.notes.length, 1, "one row, not the relay's sentence and then ours");
   assert.equal(voice._state.notes[0].text, "Talking is not set up for this workspace yet.");
   assert.equal(voice._state.notes[0].condition, "no-key", "so the line still leads where it fixes it");
-  assert.equal(voice._lineFor(voice._state.notes, "").action, "Open settings");
+  assert.equal(voice._lineFor(voice._state.notes).action, "Open settings");
 });
 
 test("VOICE-1 notes: the relay's reason outranks the page's, so the way forward is not taken away", async () => {
@@ -245,7 +254,7 @@ test("VOICE-1 notes: the relay's reason outranks the page's, so the way forward 
   assert.equal(voice._state.notes.length, 1, "still one row");
   assert.equal(voice._state.notes[0].condition, "no-key", "and it still names what the relay said");
   assert.equal(voice._state.notes[0].text, "This workspace has no realtime voice key yet.");
-  assert.equal(voice._lineFor(voice._state.notes, "").action, "Open settings",
+  assert.equal(voice._lineFor(voice._state.notes).action, "Open settings",
     "so the way into the row that fixes it is still there");
 
   // The other way round is NOT blocked: with nothing from the relay, the page's own microphone
@@ -289,7 +298,7 @@ test("VOICE-1 notes: a 4003 close paints its own reason, not a generic failure",
   voice._onClose({ code: 4003, reason: "That call reached thirty minutes. Press Talk to start another." });
   assert.equal(voice._state.notes[0].condition, "session-cap");
   assert.equal(voice._state.notes[0].text, "That call reached thirty minutes. Press Talk to start another.");
-  assert.match(voice._lineFor(voice._state.notes, "").text, /thirty minutes/,
+  assert.match(voice._lineFor(voice._state.notes).text, /thirty minutes/,
     "the relay's words are what the person reads");
   // The private range is a table, so a code this page does not know still says something true.
   assert.deepEqual(voice._CLOSE_CONDITIONS, { 4001: "no-key", 4002: "day-cap", 4003: "session-cap", 4004: "box-not-running" });
@@ -370,7 +379,7 @@ test("VOICE-1: a socket that errors with no close code still says something a pe
   // the void answer this console has already been burned by (handoff-screen-and-void-rpc.md).
   assert.equal(voice._state.notes[0].condition, "no-key");
   assert.match(voice._sentenceFor("no-key"), /not switched on/i);
-  assert.equal(voice._lineFor(voice._state.notes, "").action, "Open settings", "and it leads somewhere");
+  assert.equal(voice._lineFor(voice._state.notes).action, "Open settings", "and it leads somewhere");
 });
 
 // ------------------------------------------------------------------ VOICE-2: the way out
@@ -1000,20 +1009,6 @@ test("VOICE-1 in a real browser: the button is on screen, a mouse can press it, 
     console.log(`    VOICE-2 at 1440x900: the line costs the message box ${Math.round((atRest.box[0] - withLine.box[0]) * 100) / 100} px `
       + `(${atRest.box[0]} -> ${withLine.box[0]}), nothing else in the footer moves, and the sentence is whole`);
 
-    // A LIVE CAPTION IS THE SAME NODE, which is the other half of the same bug: fixing only the note
-    // would have left the identical break for everyone who actually talks. MEASURED before the fix, a
-    // caption alone with no note took the shelf 1392x106 -> 1392x168 and the composer 600 -> 407.98.
-    await page.evaluate(() => window.__voice._onMessage({
-      data: JSON.stringify({ t: "heard", text: "what is the team working on this afternoon" }),
-    }));
-    await page.waitForTimeout(60);
-    const captioned = await rects();
-    for (const named of ["shelf", "composer", "utilities", "aside", "transcript"]) {
-      assert.deepEqual(captioned[named], atRest[named],
-        `${named} moved when a live caption came up: ${JSON.stringify(atRest[named])} -> ${JSON.stringify(captioned[named])}`);
-    }
-    await page.evaluate(() => window.__voice._onMessage({ data: JSON.stringify({ t: "heard", text: "" }) }));
-
     // A SECOND PRESS LEAVES. It used to call start() again, because toggle() read a flag the relay had
     // already cleared, and the geometry afterwards was byte-identical to the break.
     const before = upgrades.length;
@@ -1025,6 +1020,22 @@ test("VOICE-1 in a real browser: the button is on screen, a mouse can press it, 
     assert.equal(upgrades.length, before, "and it did not redial into the same refusal");
     const afterLeaving = await rects();
     assert.deepEqual(afterLeaving, atRest, "and the footer is exactly what it was before the first press");
+
+    // AND THE AGENT'S REPLY TOUCHES NOTHING. This is the other half of the same bug and the half that
+    // happens on EVERY turn rather than only on a refusal: the reply used to be written into this same
+    // line, which took #message-input 370.05 to 215.31 px here and 25 px of shelf height on a phone,
+    // and it stood for the rest of the call. All six rects now, including the message box, because the
+    // box is the one thing the line is allowed to take from when something IS wrong.
+    await page.evaluate(() => window.__voice._onMessage({
+      data: JSON.stringify({ t: "said", text: "The team is on the settings surface this afternoon." }),
+    }));
+    await page.waitForTimeout(60);
+    const replied = await rects();
+    for (const named of ["shelf", "composer", "box", "utilities", "aside", "transcript"]) {
+      assert.deepEqual(replied[named], atRest[named],
+        `${named} moved when the agent answered: ${JSON.stringify(atRest[named])} -> ${JSON.stringify(replied[named])}`);
+    }
+    assert.equal(replied.tracks, atRest.tracks, "the composer grew a track for the reply");
 
     // ESCAPE LEAVES TOO. Measured before the fix: Escape changed nothing at all.
     await page.mouse.click(box.x, box.y);
@@ -1095,19 +1106,22 @@ test("VOICE-1 in a real browser: the button is on screen, a mouse can press it, 
       assert.ok(grew <= 60, `the shelf grew ${grew} px on a phone, which is a footer that moved rather than a line that appeared`);
       assert.equal(onPhone.composerWidth, 358, "and the composer is untouched, which is what the strip could never manage");
 
-      // The caption's own cost, measured separately, because it is the common case for anyone who can
-      // actually talk and it carries no control.
-      // toggle(), not stop(): an ordinary stop leaves a note standing on purpose (the relay's diagnosis
-      // outranks anything that happens after it), and a note outranks a caption on the one line.
+      // AND AN ORDINARY TURN COSTS NOTHING AT ALL, which is the number that matters to anyone who can
+      // actually talk: a refusal is rare, and the agent answering is every single turn. The reply used
+      // to be written into this same line and took this shelf from 390x133 at y711 to 390x158 at y686 --
+      // 25 px taller and 25 px higher, standing for the rest of the call. Now it paints nothing.
+      // toggle(), not stop(): an ordinary stop leaves a note standing on purpose, because the relay's
+      // diagnosis outranks anything that happens after it.
       await small.evaluate(() => window.__voice.toggle());
+      await small.waitForFunction(() => document.getElementById("voice-line")?.hidden === true, null, { timeout: 10_000 });
       await small.evaluate(() => window.__voice._onMessage({
-        data: JSON.stringify({ t: "heard", text: "what is the team working on this afternoon" }),
+        data: JSON.stringify({ t: "said", text: "The team is on the settings surface this afternoon." }),
       }));
       await small.waitForTimeout(60);
-      const captionCost = await small.evaluate(() => Math.round(document.querySelector(".control-shelf").getBoundingClientRect().height * 100) / 100);
-      console.log(`    VOICE-2 at 390x844: a live caption costs the shelf ${Math.round((captionCost - shelfBefore) * 100) / 100} px`);
-      assert.ok(captionCost - shelfBefore <= 40,
-        `a caption grew the shelf ${captionCost - shelfBefore} px, which is a row and a half of words`);
+      const replyCost = await small.evaluate(() => Math.round(document.querySelector(".control-shelf").getBoundingClientRect().height * 100) / 100);
+      console.log(`    VOICE-7 at 390x844: the agent's reply costs the shelf ${Math.round((replyCost - shelfBefore) * 100) / 100} px`);
+      assert.equal(replyCost, shelfBefore,
+        `the agent's reply grew the shelf ${replyCost - shelfBefore} px on a phone, and it does that on every turn`);
     } finally {
       await phone.close();
     }
@@ -1327,7 +1341,8 @@ test("VOICE-7 panel: nothing the agent says ever opens it, and his speaking clos
   // painted over her sentence mid-turn.
   frame(voice, { t: "said", text: "I have asked him and he is on it." });
   assert.equal(voice._state.heard.open, false, "the agent's words opened a panel that is meant to be the person's");
-  assert.equal(voice._state.caption, "I have asked him and he is on it.");
+  assert.equal(voice._state.lastSaid, "I have asked him and he is on it.", "kept for the gate to read");
+  assert.equal(voice._lineFor(voice._state.notes).text, "", "and drawn nowhere: not in the panel and not in the footer");
 
   // And if the echo gate ever slipped, words arriving while he speaks would be his own coming back
   // through the speakers. A panel is not where anybody should find that out.
@@ -1345,14 +1360,78 @@ test("VOICE-7 panel: a turn that simply stops has something that takes the panel
   // Three no-row turns send their own final frame, but a service that stops mid-turn sends nothing at
   // all. A panel with somebody's words in it may not sit over their conversation forever.
   const { voice } = await loadVoice();
-  assert.equal(voice._HEARD_STALE_MS, 8000);
+  // NOT EIGHT SECONDS. It was, and eight seconds was armed from the START of the utterance and put
+  // back only by a word arriving -- so on a service that streams no live words at all (which is what
+  // docs/VOICE.md 3 marks as unobserved for xAI) the panel dissolved eight seconds into the sentence
+  // and the confirmed words could never paint. The ceiling is the relay's own bound for a turn.
+  assert.equal(voice._HEARD_STALE_MS, 120_000);
+  const { TURN_WAIT_CAP_S } = await import("../ui/voice-edge.mjs");
+  assert.equal(voice._HEARD_STALE_MS, TURN_WAIT_CAP_S * 1000,
+    "the panel's patience and the relay's own wait for a turn are the same number");
   const source = await read("ui/machine-room/voice.js");
   const machine = source.slice(source.indexOf("function armStale"), source.indexOf("function paintOverlay"));
   assert.match(machine, /function overlayOpen[\s\S]*armStale\(\)/, "opening the panel arms the timer");
   assert.match(machine, /function overlayPartial[\s\S]*armStale\(\)/, "and every word puts it back");
-  assert.match(machine, /function overlayConfirmed[\s\S]*disarmStale\(\)/, "and the bytes being known takes it away");
+  assert.match(machine, /function overlayConfirmed[\s\S]*armStale\(HEARD_CONFIRMED_STALE_MS\)/,
+    "and the confirmed words leave a short window, so a lost hear-end cannot leave the panel up for the call");
   assert.match(machine, /function overlayEnd[\s\S]*disarmStale\(\)/, "and so does the turn ending");
   assert.match(machine, /function closeOverlay[\s\S]*disarmStale\(\)/);
+});
+
+test("VOICE-7 panel: a turn with NO live words still ends with the words it produced", async () => {
+  // THE DOCUMENTED FALLBACK PATH, and the one the stale window used to break. A service that streams
+  // no input transcription sends hear-begin and then nothing until the turn is over, so nothing put
+  // the stale window back: the panel dissolved mid-sentence and `heard-confirmed` then returned at
+  // the closed-panel guard, leaving the words the turn produced on screen nowhere at all.
+  //
+  // Driven on an injected clock rather than by waiting two minutes.
+  const timers = [];
+  const { voice } = await loadVoice({
+    window: {
+      setTimeout: (fn, ms) => { timers.push({ fn, ms }); return { unref() {} }; },
+      clearTimeout: () => {},
+    },
+  });
+  frame(voice, { t: "hear-begin", turn: 1, itemId: "item_user" });
+  assert.equal(voice._state.heard.open, true);
+  assert.equal(voice._state.heard.text, "", "no words, which is all this service ever gives while somebody talks");
+  const armed = timers.filter((one) => one.ms === voice._HEARD_STALE_MS);
+  assert.equal(armed.length, 1, `one stale window, armed once: ${JSON.stringify(timers.map((t) => t.ms))}`);
+
+  // The window fires anyway -- a long turn, or a service that stopped -- and the confirmed words
+  // still arrive afterwards. They are the last thing the person read, so they are painted.
+  armed[0].fn();
+  assert.equal(voice._state.heard.open, false, "the stale window took it away");
+  frame(voice, { t: "heard-confirmed", turn: 1, text: "what is the team working on", nonce: "voice:s1:1", landed: true });
+  assert.equal(voice._state.heard.text, "what is the team working on",
+    "the words the turn produced never reached the panel");
+  assert.equal(voice._state.heard.open, true, "and they are on screen to be read");
+  frame(voice, { t: "hear-end", turn: 1, reason: "sent" });
+
+  // ONLY STALENESS RE-OPENS IT. A person who pressed stop, or an agent who started speaking, must
+  // never have a panel come back at them.
+  const other = await loadVoice();
+  frame(other.voice, { t: "hear-begin", turn: 1, itemId: "item_user" });
+  frame(other.voice, { t: "state", value: "speaking" });
+  assert.equal(other.voice._state.heard.open, false);
+  frame(other.voice, { t: "heard-confirmed", turn: 1, text: "open the box", nonce: "voice:s1:1", landed: true });
+  assert.equal(other.voice._state.heard.open, false, "a panel came back while the agent was speaking");
+});
+
+test("VOICE-7 panel: the previous utterance's settled words never paint into this one", async () => {
+  // The relay drops a transcript belonging to the item it has moved on from, and this is the same
+  // guard on the page: the services do not order `.completed` events between items, so utterance 1's
+  // sentence can arrive after utterance 2's panel is up.
+  const { voice } = await loadVoice();
+  frame(voice, { t: "hear-begin", turn: 1, itemId: "item_1" });
+  frame(voice, { t: "hear", turn: 1, text: "open the box", final: false, itemId: "item_1" });
+  frame(voice, { t: "hear-end", turn: 1, reason: "sent" });
+  frame(voice, { t: "hear-begin", turn: 2, itemId: "item_2" });
+  frame(voice, { t: "hear", turn: 2, text: "what time is it", final: false, itemId: "item_2" });
+  // Utterance 1's settled transcript, late, and stamped with the current turn by an older relay.
+  frame(voice, { t: "hear", turn: 2, text: "open the box", final: true, itemId: "item_1" });
+  assert.equal(voice._state.heard.text, "what time is it",
+    "the sentence before last was painted over this one as settled words");
 });
 
 test("VOICE-7 panel: an older relay that sends only the three-in-one frame still shows the words", async () => {
@@ -1475,6 +1554,44 @@ test("VOICE-7 modes: push to talk holds while the button is down and shuts the m
   assert.equal(voice._state.on, true);
   voice.stop();
   assert.equal(voice._state.held, false, "hanging up releases the hold as well");
+});
+
+test("VOICE-7 modes: one real press is ONE press, even though a phone sends two events for it", async () => {
+  // A phone fires pointerdown AND touchstart for one thumb and both reach talkDown. MEASURED in real
+  // Chrome at 390x844 with a real CDP touch hold and a refusal standing: the first of the two cleared
+  // the note and the second found no note and dialled straight back into the same refusal -- the loop
+  // Jason was stuck in ("you can't exit out of this talk mode"), reappearing through the second event
+  // of the same gesture. The mouse, which fires only pointerdown, was correct.
+  const { voice, sent, listeners } = await loadTalking();
+  const button = { disabled: false };
+  const event = { target: { closest: (selector) => (selector.includes("data-voice-talk") ? button : null) }, preventDefault() {} };
+  const pointerdown = listeners.get("pointerdown");
+  const touchstart = listeners.get("touchstart");
+  const pointerup = listeners.get("pointerup");
+  assert.equal(typeof pointerdown, "function");
+  assert.equal(typeof touchstart, "function");
+
+  // A refusal is standing, the way it is on a workspace with talking switched off.
+  voice.stop("no-key");
+  assert.deepEqual(voice.stats().notes, ["no-key"]);
+  const dialsBefore = sent.json.length;
+
+  // ONE press, two events.
+  await pointerdown(event);
+  await touchstart(event);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(voice._state.on, false, "the second event of one gesture redialled into the refusal it had just cleared");
+  assert.equal(voice._state.held, false, "and it left the button drawn as held");
+  assert.deepEqual(voice.stats().notes, [], "the press cleared the standing refusal, which is what it is for");
+  assert.equal(sent.json.length, dialsBefore, "nothing was sent on a line that should never have opened");
+
+  // AND THE NEXT PRESS WORKS. The gesture is spent by its own release, not for the life of the page.
+  pointerup(event);
+  await pointerdown(event);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(voice._state.on, true, "a fresh press after the release opens a line normally");
+  assert.equal(voice._state.held, true);
+  voice.stop();
 });
 
 test("VOICE-7 modes: push to talk captures BEFORE the line is up, and always listening does not", async () => {

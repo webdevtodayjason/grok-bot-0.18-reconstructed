@@ -84,8 +84,10 @@ const rects = (page) => page.evaluate(() => {
  * is compared the way VOICE-6 measured it -- the composer and the button must not move -- and a footer
  * read with no sentence up must be identical to the pixel.
  */
+/** Two rects, byte for byte. Hoisted because the reply leg below reads it too. */
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
 const footerHeld = (before, now, what) => {
-  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   if (!now.note) {
     check(same(now.shelf, before.shelf) && same(now.composer, before.composer) && same(now.talk, before.talk),
       `THE FOOTER DID NOT MOVE ${what}`,
@@ -278,6 +280,37 @@ try {
       const afterToggle = await rects(page);
       footerHeld(before, afterToggle, "after a press in always listening");
       await page.evaluate(() => window.__voice.stop());
+
+      // ---- THE AGENT'S REPLY, which is the half the first run of this gate never saw -------------
+      //
+      // The panel was never the only thing that could move this footer. Until the adversarial pass on
+      // VOICE-7 the agent's reply was written into VOICE-6's own one-line node in the composer, so the
+      // footer moved on EVERY turn rather than only on a refused one, and it stayed moved for the rest
+      // of the call because only a start or a stop cleared it. Measured on this Mac before the fix:
+      // #message-input 370.05 -> 215.31 px at 1440x900, and this shelf 25 px taller and 25 px higher at
+      // 390x844. A workspace with talking switched off can never produce a real reply, so the frame is
+      // handed to the page the way the relay would hand it over, and the footer is read with it up.
+      await page.evaluate(() => window.__voice.stop());
+      await sleep(400);
+      const quiet = await rects(page);
+      await page.evaluate((text) => window.__voice._onMessage({ data: JSON.stringify({ t: "said", text }) }),
+        "The team is on the settings surface this afternoon, and the deploy gate is green.");
+      await sleep(200);
+      const withReply = await rects(page);
+      const lineNow = await page.evaluate(() => {
+        const line = document.getElementById("voice-line");
+        return { hidden: line == null ? null : line.hidden === true, text: (line?.textContent ?? "").replace(/\s+/g, " ").trim(),
+          box: (() => { const n = document.querySelector("#message-input"); if (n == null) return null; const b = n.getBoundingClientRect();
+            return { w: Math.round(b.width * 100) / 100, h: Math.round(b.height) }; })() };
+      });
+      check(same(withReply.shelf, quiet.shelf) && same(withReply.composer, quiet.composer) && same(withReply.talk, quiet.talk),
+        "the agent's reply moves nothing in the footer, which is every turn rather than only a refused one",
+        `shelf ${JSON.stringify(quiet.shelf)} -> ${JSON.stringify(withReply.shelf)}, composer ${JSON.stringify(quiet.composer)} -> ${JSON.stringify(withReply.composer)}, button ${JSON.stringify(withReply.talk)}`);
+      check(lineNow.hidden !== false, "and it puts no words in the footer's line: his answer is a transcript row and a voice",
+        JSON.stringify(lineNow));
+      check(withReply.panelUp === false, "and no panel while he speaks, where the orb on the button is the only sign",
+        String(withReply.panelUp));
+      info(`the message box with his reply up: ${JSON.stringify(lineNow.box)}`);
     }
 
     // ---- is a real spoken turn possible at all on this workspace -------------------------------

@@ -248,6 +248,17 @@ waiting for a line that is not coming stays on screen forever:
 | `no-answer` | the model answered without asking your team lead, which the instructions forbid but cannot prevent |
 | `line-closed` | the call ended with words still on screen |
 
+**A turn is closed by name, and so is a late transcript.** Two utterances are in flight at once on
+every ordinary call in always-listening: your team lead takes 5.5 to 25 seconds to answer the last
+one, and you start the next one inside that window. Each `hear-end` therefore names the turn it
+closes, and a close aimed at a turn that is no longer the open one is dropped — before that, utterance
+one's confirmation dissolved utterance two's panel mid-sentence and every later word of it was thrown
+away as belonging to a closed turn. The same goes for the words themselves: neither service orders its
+"transcription completed" events between items (OpenAI says so in its own documentation), so the
+sentence before last can arrive after this one's panel is up. Each of those events names its item, and
+one naming the item the relay has moved on from is dropped rather than painted as this turn's settled
+words. The page keeps the same guard on its own side.
+
 Two more rules the panel depends on. **Nothing is painted while your team lead is speaking**: the
 words the microphone picks up then are his own coming back through the speaker (section 8 has the
 measured case), so the relay drops them for as long as the microphone is held shut, and the orb on
@@ -720,11 +731,22 @@ something to read while you talk, not something to dismiss, and the conversation
 clickable the whole time. That is deliberate: a machine-looking sheet over somebody's chat gets read
 as something going wrong.
 
-**Nothing in the footer changes size, at any point.** That is not a fight this code has to win every
-time somebody edits a style: the panel is a child of the conversation area, not of the row the
-message box lives in, so there is no arrangement of it that could make the footer grow. The caption
+**Nothing in the footer changes size on an ordinary turn — yours or his.** Two separate reasons, and
+both are measured rather than argued. The panel is a child of the conversation area, not of the row the
+message box lives in, so there is no arrangement of it that could make the footer grow; the caption
 strip it replaces was inserted next to the message box and therefore became part of that row's grid,
-which is exactly why the footer used to get taller (VOICE-6).
+which is exactly why the footer used to get taller (VOICE-6). And **his reply is not written into the
+footer at all.** It was, until the adversarial pass on this wave: the same one-line node carried it,
+which meant the footer moved on *every* turn rather than only on a refused one — measured on this Mac
+in real Chrome, `#message-input` 370.05 to 215.31 px at 1440x900 and `.control-shelf` 390x133 at y711
+to 390x158 at y686 on a phone, standing there for the rest of the call because only starting or ending
+a call ever cleared it. His reply is already a row in the conversation and is already read out loud, so
+a third copy of it in the footer bought nothing and cost the one measurement this surface makes.
+
+The one thing that still reaches that line is a **refusal** — talking not switched on, no key, a cap
+spent, a microphone you did not allow. That is rare, it is the whole point of the line, and what it
+costs is measured in VOICE-6: a slice of the message box's own spare width at 1440x900, one row of the
+shelf on a phone, and it takes itself away after six seconds.
 
 **The last words you read are the words that become the line.** Those two are not the same thing by
 accident. What you watch being built comes from a transcription model; what actually reaches your
@@ -736,7 +758,13 @@ compares it, character for character, against the row that lands.
 through that approval and never becomes prose; an utterance nothing was heard in produces nothing;
 and a transcription that gives up produces nothing. Each of those now says on the wire that no line
 is coming, so the panel ends the turn instead of waiting for a row that will never arrive. A turn
-that simply stops mid-way takes the panel away after eight seconds.
+that simply stops mid-way — a service that goes quiet without ever closing the turn — takes the panel
+away after two minutes, which is the same ceiling the relay itself puts on waiting for one turn. It
+used to be eight seconds, armed from the moment you started talking and put back only by a word
+arriving: on a service that streams no live words at all (section 3), nothing put it back, so the panel
+vanished eight seconds into a sentence and the words that turn produced could then never be shown.
+They are now, even on a turn the ceiling took away: the confirmed words re-open the panel for that one
+last paint, so the last thing you read is still the line you are about to see.
 
 ### The two ways to talk
 
@@ -788,9 +816,17 @@ there is meant for the machine on the other side), and not while there is a half
 message box. A held key repeats, so the first press latches and every repeat until the release is
 ignored. A window that loses focus never delivers the release, so losing focus is treated as one.
 
-On a phone the button is a 38 px circle, and a press and hold on one of those is a long-press menu, a
-text selection and a drag unless all three are turned off on that one control. They are, and the gate
-holds a real touch on it rather than tapping.
+On a phone the button is a 44 px circle — the floor this console holds every control beside it to, and
+what the gate enforces — and a press and hold on one of those is a long-press menu, a text selection
+and a drag unless all three are turned off on that one control. They are, and the gate holds a real
+touch on it rather than tapping.
+
+**One thumb is one press.** A phone sends both a pointer event and a touch event for a single press and
+both reach the button, which is fine for an ordinary hold and was not fine with a refusal standing: the
+first of the two cleared the sentence and the second, finding none, dialled straight back into the same
+refusal — the loop VOICE-6 was filed for, reappearing through the second event of one gesture. Measured
+at 390x844 with a real touch hold. A press that clears a sentence is now spent for the rest of that
+gesture, and the release ends it, so the next press opens a line normally.
 
 **Escape has the same rule, and one thing it cannot do anything about.** A drawer or a dialog that is
 open takes Escape first, which is right, and the call is still there afterwards. But when the box's
@@ -811,8 +847,9 @@ when there is nothing stored, in a private window, and in a browser set to refus
 
 **Per browser is not per person, and that is the unfinished part.** A person who sets always-listening
 on their laptop gets holding again on their phone. The only per-person door on this product today is
-the one Notifications uses; moving this row onto it is a later wave's, and it is written here rather
-than left to be discovered on a second device.
+the one Notifications uses; moving this row onto it is **filed as VOICE-10 in docs/GAP-ANALYSIS.md**,
+with an owner, the cost and the proof step, rather than explained here and left to be discovered on a
+second device.
 
 The page keeps its own copy whatever happens to that, because the button is live the moment the
 console paints, before any route has answered, and it has to know which of the two things it is before
@@ -843,16 +880,26 @@ Inference, not to anything else on that surface. The legs open it by naming the 
 each one reports which route a person really had at that width. Filed as CONSOLE-PHONE-SETTINGS-1 with
 its owner and its proof; every settings card has been unreachable that way since voice first shipped.
 
+**The rects below are read before the press, while the words are being built, after the turn ends, and
+with the agent's reply up** — that last one is the state the first run of this leg never saw, because it
+took its "after" reading within milliseconds of the tool call and the reply lands 5 to 25 seconds later.
+
 | | 1440x900 | 390x844 |
 |---|---|---|
-| the footer, before / during / after a turn | 1392x106 at y776, unchanged | 390x133 at y711, unchanged |
-| the message box | 600x54, never narrowed | 358x56, never narrowed |
-| the talk button | 74x38, never moved | 38x38, never moved |
-| the panel | 544 px wide, centred over the conversation | 350 px wide |
+| the footer, before / during / after a turn, and with his reply up | 1392x106 at y776, unchanged | 390x133 at y711, unchanged |
+| the composer | 600x54 at 459,802, never moved | 358x56 at 16,778, never moved |
+| the message box | 370.05 px wide, never narrowed | 177 px wide, never narrowed |
+| the talk button | 74x38 at 881,810, never moved | 44x44 at 245,784, never moved |
+| the panel | 544x64, centred over the conversation | 350x57 |
+| the footer's own line, with his reply up | away, empty | away, empty |
+
+`--leg overlay` **136 of 136** and `--leg nokey` **51 of 51** on that machine, each run on its own.
 
 The numbers this replaces, measured the same way on the same machine: with the caption strip up, the
 footer went to 1392x160 and then 1392x178 at 1440x900 while the message box narrowed to 568 px, and
-to 390x199 and then 390x255 at 390x844.
+to 390x199 and then 390x255 at 390x844. And with his reply in the footer's one line, which is where
+this wave first shipped it: `#message-input` 370.05 to 215.31 px at 1440x900, and the shelf 390x133 at
+y711 to 390x158 at y686 on a phone, for the rest of the call.
 
 **On the production server, through console.titanium.bot, 2026-09-10**, as a throwaway customer on
 the demo tenant, minted inside the control plane's own container and removed afterwards.

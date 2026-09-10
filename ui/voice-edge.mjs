@@ -1506,6 +1506,20 @@ export function makeVoiceSession({
   let sendSeq = 0;
   /** The last turn a `hear-end` closed, so a transcript arriving after it cannot re-open the panel. */
   let hearClosedTurn = 0;
+  /**
+   * The conversation item the OPEN turn belongs to, and the one before it.
+   *
+   * OpenAI says in its own docs that `.completed` transcription events are not ordered between items,
+   * and MEASURED against the stub: utterance 1's settled transcript can arrive after utterance 2 has
+   * opened, and stamping it with whatever turn is current paints the old sentence into the new panel
+   * as settled words. The event already names its item; this is what lets a late one be recognised as
+   * the previous item's and dropped. Only the previous item is remembered, because that is the race:
+   * two items' transcripts in flight at once.
+   */
+  let hearItem = "";
+  let hearItemBefore = "";
+  /** The turn the response in flight belongs to, so `response.done` closes that one and not a newer. */
+  let responseTurn = 0;
 
   const secondsNow = () => Math.max(0, Math.round((now() - startedMs) / 1000));
   const bytesToSeconds = (bytes) => Math.round(bytes / (AUDIO_RATE * 2));
@@ -1559,13 +1573,23 @@ export function makeVoiceSession({
   const hearBegin = (itemId = "") => {
     if (machineTalking()) return undefined;
     hearTurn = Math.max(session.userTurn, 1);
-    browser?.sendJson({ t: "hear-begin", turn: hearTurn, itemId: String(itemId ?? "") });
+    const item = String(itemId ?? "");
+    if (item.length > 0 && item !== hearItem) { hearItemBefore = hearItem; hearItem = item; }
+    browser?.sendJson({ t: "hear-begin", turn: hearTurn, itemId: item });
     return undefined;
   };
   const hear = (text, { final = false, itemId = "" } = {}) => {
     // Never while the machine is the one talking. If the echo gate ever slips, the panel would
     // otherwise render Titan's own sentence as though the person had said it.
     if (machineTalking()) return undefined;
+    // AND NEVER THE PREVIOUS UTTERANCE'S WORDS IN THIS ONE'S PANEL. A `.completed` for the item
+    // before this one can land after this one opened -- OpenAI's own docs say those events are not
+    // ordered between items -- and stamping it with the current turn paints the old sentence over the
+    // new one as settled text. MEASURED against the stub on this Mac: item_1's sentence arriving as
+    // turn 2. The id is the only thing that can tell them apart, so a frame naming the item we have
+    // already moved on from is dropped rather than relabelled.
+    const item = String(itemId ?? "");
+    if (item.length > 0 && hearItemBefore.length > 0 && item === hearItemBefore) return undefined;
     if (hearTurn === 0) {
       // A vendor that sends a transcript without a speech_started still gets a panel. A transcript
       // arriving AFTER this turn was closed does not: the `.completed` and the tool call race, and
@@ -1574,13 +1598,24 @@ export function makeVoiceSession({
       if (turn <= hearClosedTurn) return undefined;
       hearTurn = turn;
     }
-    browser?.sendJson({ t: "hear", turn: hearTurn, itemId: String(itemId ?? ""), text: String(text ?? ""), final: final === true });
+    browser?.sendJson({ t: "hear", turn: hearTurn, itemId: item, text: String(text ?? ""), final: final === true });
     return undefined;
   };
-  /** Closes an open turn once. A second call for the same turn is dropped, so no panel flickers back. */
-  const hearEnd = (reason) => {
-    if (hearTurn === 0) return undefined;
-    const turn = hearTurn;
+  /**
+   * Closes ONE NAMED TURN, once. A second call for the same turn is dropped, so no panel flickers
+   * back, and a call about a turn that is no longer the open one is dropped too.
+   *
+   * WHY IT HAS TO NAME ITS TURN. This used to close "whatever is open", and in always-listening the
+   * next utterance begins during the 5.5 to 25 s Titan takes to answer the last one. MEASURED against
+   * the real bridge and the stub on this Mac: utterance 1's confirmation sent `hear-end turn 2` while
+   * the person was mid-sentence on utterance 2, the panel dissolved under them, and every later
+   * transcript for utterance 2 was then dropped by the closed-turn guard in hear() above -- so the
+   * words they watched being built were never the words that landed. A caller that knows which turn
+   * it is talking about passes it; the ones that mean "whatever is open right now" (the line going
+   * down, a transcription that gave up) still do.
+   */
+  const hearEnd = (reason, turn = hearTurn) => {
+    if (turn === 0 || turn !== hearTurn) return undefined;
     hearClosedTurn = turn;
     hearTurn = 0;
     browser?.sendJson({ t: "hear-end", turn, reason: String(reason ?? "") });
@@ -1619,14 +1654,18 @@ export function makeVoiceSession({
   const dispatch = async (toolCall) => {
     if (toolCall.name !== "titan") return answerTool(toolCall.callId, { error: "there is no such tool here" });
     meter.toolCalls += 1;
-    // The turn this call belongs to, taken here rather than read later: in always-listening the next
-    // utterance can start while this one is still with Titan, and the panel's frames have to stay
-    // with the words the person watched being built.
-    const turn = hearTurn || session.userTurn;
+    // THE TURN THIS CALL BELONGS TO, taken here rather than read later: in always-listening the next
+    // utterance can start while this one is still with Titan, and the panel's frames have to stay with
+    // the words the person watched being built. Zero where no turn is open, and that matters: the old
+    // `|| session.userTurn` fallback meant a tool call arriving after its own turn had already been
+    // closed (a failed transcription, say) was stamped with whatever utterance is open NOW, and then
+    // closed or painted THAT one. Zero closes nothing and paints nothing, which is the truth about a
+    // turn the panel has already let go of; `lastHeard` records the words for the gate either way.
+    const turn = hearTurn;
     let message = "";
     try { message = String(JSON.parse(toolCall.argumentsJson || "{}").message ?? "").trim(); } catch { message = ""; }
     if (message.length === 0) {
-      hearEnd("empty");
+      hearEnd("empty", turn);
       return answerTool(toolCall.callId, { reply: "I did not catch that. Say it again." });
     }
     browser?.sendJson({ t: "heard", text: message });
@@ -1640,7 +1679,7 @@ export function makeVoiceSession({
       if (card.offeredTurn === session.userTurn) {
         // The model talked itself into a confirmation inside one user turn. Nothing goes to Titan and
         // no row appears, so the panel is closed rather than left over the conversation.
-        hearEnd("not-accepted");
+        hearEnd("not-accepted", turn);
         return answerTool(toolCall.callId, { reply: "Say that again and I will take it as your answer." });
       }
       session.heldCard = null;
@@ -1650,7 +1689,7 @@ export function makeVoiceSession({
       const said = outcome.ok && String(outcome.requestId ?? "").length > 0 ? `${outcome.said} That was ${outcome.requestId}.` : outcome.said;
       // A yes that closes a card never becomes a row in the conversation, so the panel is told the
       // turn is over on its own terms rather than waiting for a row that is not coming.
-      hearEnd("answered-card");
+      hearEnd("answered-card", turn);
       browser?.sendJson({ t: "said", text: said });
       return answerTool(toolCall.callId, { reply: said });
     }
@@ -1671,12 +1710,12 @@ export function makeVoiceSession({
       // the row, and the nonce that row carries.
       onSent: () => {
         browser?.sendJson({ t: "heard-confirmed", turn, text: message, nonce, landed: true });
-        hearEnd("sent");
+        hearEnd("sent", turn);
       },
     });
     // Nothing reached his box: a refused send, or a third round inside one user turn. Either way no
     // durable row will ever appear, so the panel is closed here instead of hanging over the chat.
-    if (result.accepted !== true) hearEnd("not-accepted");
+    if (result.accepted !== true) hearEnd("not-accepted", turn);
     const pieces = result.pieces.length > 0 ? result.pieces : (result.text.length > 0 ? [result.text] : []);
     let reply = pieces.join(" ");
     if (result.card != null) {
@@ -1756,7 +1795,10 @@ export function makeVoiceSession({
       hearEnd("no-words");
       return undefined;
     }
-    if (type === "response.created") { responseInFlight = true; return undefined; }
+    // THE TURN THIS RESPONSE IS ABOUT, taken when it starts. The no-answer close below used to mean
+    // "close whatever is open", and in always-listening the next utterance has often already opened
+    // by the time a response finishes, so it took that one's panel away instead.
+    if (type === "response.created") { responseInFlight = true; responseTurn = hearTurn || session.userTurn; return undefined; }
     if (type === "response.output_audio.delta") {
       const audio = Buffer.from(String(event.delta ?? ""), "base64");
       if (audio.byteLength === 0) return undefined;
@@ -1800,7 +1842,7 @@ export function makeVoiceSession({
     // A finished response that asked Titan nothing means the model answered out of its own head,
     // which the instructions forbid but cannot prevent. No tool call, no row, so the turn is closed
     // here rather than leaving the person's words sitting over the conversation forever.
-    if (type === "response.done" && !calls.some((toolCall) => toolCall.name === "titan")) hearEnd("no-answer");
+    if (type === "response.done" && !calls.some((toolCall) => toolCall.name === "titan")) hearEnd("no-answer", responseTurn);
     return undefined;
   };
 

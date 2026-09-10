@@ -142,7 +142,19 @@
   // the ones that produce no row at all, but a provider that simply stops mid-turn sends nothing --
   // and somebody's half sentence sitting over their conversation forever is worse than losing the
   // last few words of it.
-  const HEARD_STALE_MS = 8000;
+  //
+  // EIGHT SECONDS WAS WRONG, and it was wrong in exactly the case the panel was built for. It was armed
+  // from the start of the utterance and re-armed only by a word arriving, so on a service that streams
+  // NO live transcript -- which is what docs/VOICE.md 3 marks as unobserved for xAI -- nothing re-armed
+  // it: the panel dissolved eight seconds into the sentence, mid-speech, and the confirmed words could
+  // then never paint because the panel was shut. MEASURED on this Mac against an injected clock: one
+  // timer, 8000 ms from hear-begin, and `heard-confirmed` afterwards left the panel's text empty. So
+  // the ceiling is the relay's own honest bound for a turn (TURN_WAIT_CAP_S, 120 s) rather than a guess
+  // about how long a person talks, and a turn closed by it can still be re-opened for one final paint.
+  const HEARD_STALE_MS = 120_000;
+  // And once the confirmed words are up, the dissolve is milliseconds away: if its frame never comes,
+  // the panel still goes, with the words that landed as its last paint.
+  const HEARD_CONFIRMED_STALE_MS = 2500;
   // The one word the panel shows before the first word arrives, and for the whole of a turn on a
   // provider that sends no live transcript. Plain English; never a condition name.
   const LISTENING_WORD = "Listening";
@@ -431,9 +443,18 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
 
   // What the line says and whether it leads anywhere, with no DOM in sight, so a test can pin the
   // words and item A can read the same two facts.
-  function lineFor(notes, caption) {
+  //
+  // NOTES ONLY, since VOICE-7 ADVERSARIAL. It used to take a live caption as well, and the agent's
+  // reply was written into it on every spoken turn -- which put words in the footer for the whole of
+  // that turn and therefore moved the footer, in the one place VOICE-6 had just finished measuring:
+  // MEASURED on this Mac in real Chrome, a reply caption at 1440x900 took #message-input 370.05 to
+  // 215.31 px, and at 390x844 took .control-shelf 390x133 at y711 to 390x158 at y686. His reply is
+  // already a durable row in the transcript and is spoken out loud; a second copy of it in the footer
+  // bought nothing and cost the only measurement this wave makes. So the line is refusals and nothing
+  // else, and it only comes up when something is actually wrong.
+  function lineFor(notes) {
     const first = Array.isArray(notes) ? notes[0] : null;
-    if (first == null) return { text: String(caption ?? ""), action: null };
+    if (first == null) return { text: "", action: null };
     const text = first.text != null && String(first.text).trim().length > 0
       ? String(first.text).trim()
       : sentenceFor(first.condition);
@@ -468,7 +489,6 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     ready: null,
     heldReported: 0,
     notes: [],
-    caption: "",
     settings: null,
     byeReason: "",
     available: null,
@@ -481,9 +501,11 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
      * above is shared by both directions, and a reply painting over a half-finished sentence is
      * exactly what that sharing used to do mid-turn.
      */
-    heard: { open: false, text: "", turn: 0, phase: "", lands: false, nonce: "" },
+    heard: { open: false, text: "", turn: 0, phase: "", lands: false, nonce: "", itemId: "" },
     /** The last confirmed words and the id of the row they became. Kept for the gate to compare. */
     lastHeard: "",
+    /** The agent's last reply, as it came off the wire. Read by the gate; drawn nowhere. */
+    lastSaid: "",
     lastNonce: "",
     /**
      * Whether this relay has sent a LABELLED frame on this line. A relay older than VOICE-7 sends only
@@ -567,11 +589,6 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     dismissTimer?.unref?.();
   }
 
-  function caption(text) {
-    state.caption = String(text ?? "");
-    paint();
-  }
-
   function paint() {
     const document_ = global.document;
     if (document_ == null) return;
@@ -594,7 +611,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     }
     const line = mountLine();
     if (line == null) return;
-    const { text, action } = lineFor(state.notes, state.caption);
+    const { text, action } = lineFor(state.notes);
     const say = line.querySelector("[data-voice-line-say]");
     const does = line.querySelector("[data-voice-line-do]");
     const shown = action == null ? say : does;
@@ -710,9 +727,14 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     catch { return false; }
   };
 
-  function armStale() {
+  // Which turn the stale window took away, so the words that turn produced can still be painted once
+  // if they arrive after it. Never any other closing: a person who pressed stop, or an agent who
+  // started speaking, must not have a panel come back at them.
+  let staleClosedTurn = 0;
+  function armStale(ms = HEARD_STALE_MS) {
     if (staleTimer != null) global.clearTimeout(staleTimer);
-    staleTimer = global.setTimeout(() => { staleTimer = null; closeOverlay(); }, HEARD_STALE_MS);
+    const turn = state.heard.turn;
+    staleTimer = global.setTimeout(() => { staleTimer = null; staleClosedTurn = turn; closeOverlay(); }, ms);
   }
   function disarmStale() {
     if (staleTimer != null) { global.clearTimeout(staleTimer); staleTimer = null; }
@@ -723,19 +745,24 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
    * no live transcript ever gives us -- so the panel opens here rather than on the first word, and a
    * person pressing Talk always gets something honest on screen.
    */
-  function overlayOpen(turn) {
+  function overlayOpen(turn, itemId = "") {
     if (state.orb === "speaking") return;
     if (dissolveTimer != null) { global.clearTimeout(dissolveTimer); dissolveTimer = null; }
-    state.heard = { open: true, text: "", turn: Number(turn) || 0, phase: "open", lands: false, nonce: "" };
+    state.heard = { open: true, text: "", turn: Number(turn) || 0, phase: "open", lands: false, nonce: "", itemId: String(itemId ?? "") };
     armStale();
     paintOverlay();
   }
 
   /** More of the sentence. Replace, never append. */
-  function overlayPartial(text, turn) {
+  function overlayPartial(text, turn, itemId = "") {
     const at = Number(turn) || 0;
     if (state.heard.open && at < state.heard.turn) return;
-    if (!state.heard.open) overlayOpen(at);
+    // AND NEVER ANOTHER UTTERANCE'S WORDS. The relay drops a transcript belonging to the item it has
+    // moved on from, and this is the same guard on this side of the wire: the settled transcript of the
+    // sentence before can arrive after this one opened, and it names its own item.
+    const item = String(itemId ?? "");
+    if (state.heard.open && item.length > 0 && state.heard.itemId.length > 0 && item !== state.heard.itemId) return;
+    if (!state.heard.open) overlayOpen(at, item);
     if (!state.heard.open) return;
     state.heard.turn = at;
     state.heard.text = String(text ?? "");
@@ -758,6 +785,13 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // Kept after the panel has gone, because this is the claim the gate proves.
     state.lastHeard = words;
     state.lastNonce = String(frame?.nonce ?? "");
+    // THE ONE PANEL THAT MAY COME BACK. A turn the stale window took away still produced words, and
+    // this item promises those words are what the person last read. So the panel re-opens for this
+    // single final paint -- for that turn only, and only where staleness is what shut it.
+    if (!state.heard.open && at > 0 && at === staleClosedTurn && words.length > 0) {
+      state.heard = { open: true, text: "", turn: at, phase: "open", lands: false, nonce: "", itemId: state.heard.itemId };
+      staleClosedTurn = 0;
+    }
     if (!state.heard.open) return;
     if (words.length === 0) return;
     state.heard.turn = at;
@@ -765,7 +799,9 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     state.heard.phase = "final";
     state.heard.lands = frame?.landed === true;
     state.heard.nonce = state.lastNonce;
-    disarmStale();
+    // NOT disarmed. hear-end arrives milliseconds after this and dissolves the panel, but if it never
+    // arrives the panel would otherwise stand over the conversation for the rest of the call.
+    armStale(HEARD_CONFIRMED_STALE_MS);
     paintOverlay();
   }
 
@@ -800,7 +836,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   function closeOverlay() {
     disarmStale();
     if (dissolveTimer != null) { global.clearTimeout(dissolveTimer); dissolveTimer = null; }
-    state.heard = { open: false, text: "", turn: state.heard.turn, phase: "", lands: false, nonce: "" };
+    state.heard = { open: false, text: "", turn: state.heard.turn, phase: "", lands: false, nonce: "", itemId: state.heard.itemId };
     paintOverlay();
   }
 
@@ -839,7 +875,6 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // relay that answered the last.
     state.labelled = false;
     clearNotes();
-    caption("");
     // The relay owns the orb once the line is up; until `ready` arrives there is no frame to obey,
     // and "thinking" is the honest one of the four for a line that is being dialled.
     // PUSH TO TALK CAPTURES BEFORE THE LINE IS UP, and only push to talk does.
@@ -963,7 +998,6 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     clearIdleClose();
     state.held = false;
     state.talking = false;
-    caption("");
     const reason = condition || state.byeReason;
     // stop() is also called with no argument at all, for an ordinary press of the button.
     const relaySaidIt = String(condition ?? "").length === 0 && state.byeReason.length > 0;
@@ -1011,15 +1045,25 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     return holdEnd();
   }
 
+  // ONE REAL PRESS IS ONE PRESS, whatever the browser sends for it. A phone fires pointerdown AND
+  // touchstart for one thumb, and both reach talkDown: MEASURED in real Chrome at 390x844 with a real
+  // CDP touch hold, with a refusal standing, the first of the two cleared the note and the second then
+  // found no note and dialled straight back into the same refusal -- the loop the line below exists to
+  // prevent, reappearing through the second event of the same gesture. The desktop mouse path, which
+  // fires only pointerdown, was correct. So the gesture remembers that it has already been spent, and
+  // the next release clears it.
+  let pressSpent = false;
+  function pressDone() { pressSpent = false; }
+
   // Push to talk. The first hold opens the line; later holds are instant because it is still up.
   async function holdStart() {
-    if (state.held) return;
+    if (state.held || pressSpent) return;
     // A NOTE ON SCREEN IS THE MODE, which is the same rule the toggle keeps and for the same reason.
     // While a refusal is standing the first press CLEARS it rather than dialling into the refusal
     // again; without this, holding the button on a workspace with talking switched off redials every
     // time and there is no way out of it. That loop is what Jason was stuck in: "you can't exit out of
     // this talk mode" (VOICE-6). The press after this one opens a line normally.
-    if (!state.on && state.notes.length > 0) { clearNotes(); return; }
+    if (!state.on && state.notes.length > 0) { pressSpent = true; clearNotes(); return; }
     state.held = true;
     state.talking = true;
     clearIdleClose();
@@ -1145,7 +1189,11 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
 
   function onKeyUp(event) {
     if (event?.key !== " " && event?.code !== "Space") return;
-    if (state.held) void talkUp();
+    const wasHeld = state.held;
+    // The space bar is a gesture too, and one that only cleared a standing refusal has to be spent by
+    // its own release or the next press of it would do nothing at all.
+    pressDone();
+    if (wasHeld) void talkUp();
   }
 
   // ------------------------------------------------------- VOICE-7: what may hold the space bar
@@ -1250,7 +1298,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       // above for what each one means and why the panel dissolves on the last of them.
       case "hear-begin":
         state.labelled = true;
-        overlayOpen(frame.turn);
+        overlayOpen(frame.turn, frame.itemId);
         break;
       // REPLACE-WHOLE on purpose. One vendor's transcription event is cumulative with corrections and
       // the other's is incremental; appending a delta writes the sentence N times on the first. The
@@ -1258,7 +1306,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       // own tool call, and dissolving here would flash the panel back a moment later.
       case "hear":
         state.labelled = true;
-        overlayPartial(String(frame.text ?? ""), frame.turn);
+        overlayPartial(String(frame.text ?? ""), frame.turn, frame.itemId);
         break;
       // The bytes that went into the agent's conversation, and the id of the row they became. This is
       // the panel's last paint, and it is what makes the words a person watched being built the same
@@ -1280,10 +1328,15 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       case "heard":
         if (!state.labelled) overlayPartial(String(frame.text ?? ""), state.heard.open ? state.heard.turn : 1);
         break;
-      // The agent's reply, which is the line's own and never the panel's. Sharing one field between
-      // the two directions is what used to let his answer paint over her half-finished sentence.
+      // The agent's reply. IT PAINTS NOTHING. It is already a durable row in the transcript, it is
+      // already spoken out loud, and the only other sign a person needs while he is talking is the orb
+      // on the button -- which is what this item asked for in those words. Writing it into the footer
+      // line as well was the last thing in this file that could move the footer during a turn, and it
+      // moved it on EVERY turn: measured, #message-input 370.05 -> 215.31 px at 1440x900 and the shelf
+      // 25 px taller and 25 px higher at 390x844, standing for the rest of the call because only a
+      // start or a stop ever cleared it. The text is kept for the gate to read and for nothing else.
       case "said":
-        caption(String(frame.text ?? ""));
+        state.lastSaid = String(frame.text ?? "");
         break;
       case "speak-begin":
         state.gate?.begin();
@@ -1449,7 +1502,9 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // The RELEASE listens on the document rather than on the button, because a thumb that slides off a
     // 38 px circle before it lifts would otherwise never end the turn and would leave a microphone
     // open with the button drawn as though it were not.
-    const release = () => { if (state.held) void talkUp(); };
+    // The release ends the hold AND spends the gesture: a press that only cleared a standing refusal
+    // never set `held`, so without this the flag would outlive its own gesture.
+    const release = () => { const wasHeld = state.held; pressDone(); if (wasHeld) void talkUp(); };
     const isTalk = (event) => {
       const talk = event.target?.closest?.("[data-voice-talk]");
       return talk != null && talk.disabled !== true ? talk : null;
@@ -1588,7 +1643,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       playedBuffers: state.sound?.stats().buffers ?? 0,
       playerTime: state.sound?.currentTime() ?? 0,
       level: state.sound?.level() ?? 0,
-      caption: state.caption,
+      lastSaid: state.lastSaid,
       mutedFrames: state.capture?.stats.mutedFrames ?? 0,
       // VOICE-7. What the panel is showing right now, the words it last confirmed, and the id of the
       // row those words became -- which is what lets a gate prove the panel's last words and the chat
