@@ -106,7 +106,9 @@ test("the card names, in plain words, everything the operator has to fill in", a
   const markup = card.mailSection();
   for (const label of [
     "Receiving", "Your domain", "Sender name", "Who gets mail nobody else is named for",
-    "The address to paste into Resend", "Resend API key", "Webhook signing secret",
+    // KEYS-1: the sending key's FIELD is gone from every workspace's card and the card says where
+    // the one key lives instead. The signing secret is this workspace's own routing value and stays.
+    "The address to paste into Resend", "The key the product sends mail with", "Webhook signing secret",
     "Addresses", "Mail that arrived", "Sent",
   ]) assert.ok(markup.includes(label), `the card must say "${label}"`);
   // The four columns of the received table, in the words of somebody looking for their email.
@@ -136,15 +138,20 @@ test("the webhook address is read-only and has a copy button beside it", async (
   assert.match(markup, /data-mail-copy>Copy<\/button>/);
 });
 
-test("both secrets are password fields with their own Save and Clear, and neither is ever read back", async () => {
+test("the signing secret is a password field with its own Save and Clear, and is never read back", async () => {
   const markup = (await loadMailCard({ adapter: reader() })).mailSection();
-  for (const field of ["data-mail-key", "data-mail-secret"]) {
-    assert.match(markup, new RegExp(`<input type="password" autocomplete="off" [^>]*${field} \\/>`),
-      `${field} must be a password field that fills from nothing`);
-  }
-  for (const button of ["data-mail-key-set", "data-mail-secret-set", "data-mail-key-clear", "data-mail-secret-clear"]) {
+  assert.match(markup, /<input type="password" autocomplete="off" [^>]*data-mail-secret \/>/,
+    "data-mail-secret must be a password field that fills from nothing");
+  for (const button of ["data-mail-secret-set", "data-mail-secret-clear"]) {
     assert.ok(markup.includes(button), `the card must have ${button}`);
   }
+  // KEYS-1: the sending key has NO field, NO Save and NO Clear here. It belongs to the operator of
+  // the whole install and is pasted once in the super admin console; a workspace that could still
+  // write one would be a second place for it to be wrong.
+  assert.doesNotMatch(markup, /data-mail-key[^-]/, "the sending-key input is back on the card");
+  assert.ok(!markup.includes("data-mail-key-set"));
+  assert.ok(!markup.includes("data-mail-key-clear"));
+  assert.match(markup, /api\.titanium\.bot\/admin/, "and the card says where the one key lives instead");
   // The markup is built before any answer arrives, so there is no value in it to leak, and the
   // shape the relay answers has no field that could carry one.
   assert.equal(Object.keys(SETTINGS).some((key) => /^(apiKey|webhookSecret)$/.test(key)), false);
@@ -161,11 +168,11 @@ test("the paint puts the relay's answer on the card, including both secret state
   assert.equal(at("[data-mail-from-name]").value, "Titanium Bot");
   assert.equal(at("[data-mail-webhook-url]").value, "https://console.titanium.bot/hooks/resend");
   assert.equal(at("[data-mail-enabled]").getAttribute("aria-pressed"), "true");
-  // A key that is set and a signing secret that is not: the card says so in words, and Clear is
-  // only offered for the one there is something to clear.
-  assert.equal(at("[data-mail-key-note]").textContent, "Saved.");
+  // A key that is set and a signing secret that is not: the card says so in words. The key line is
+  // READ ONLY now -- the relay answers whether it has one, wherever it came from -- and there is no
+  // Clear beside it, because a workspace cannot remove a key it never held.
+  assert.equal(at("[data-mail-key-note]").textContent, "Set. Mail can be sent and read back.");
   assert.equal(at("[data-mail-secret-note]").textContent, "Not saved yet.");
-  assert.equal(at("[data-mail-key-clear]").disabled, false);
   assert.equal(at("[data-mail-secret-clear]").disabled, true);
   // On, but a signing secret is missing, so mail cannot actually arrive yet and the card says that
   // rather than claiming it is working.
@@ -341,22 +348,34 @@ test("an empty secret field is not written, and says what to do instead", async 
     adapter: { getMailSettings: () => Promise.resolve(SETTINGS), setMailSettings: (patch) => { written.push(patch); return Promise.resolve(SETTINGS); } },
     state: ROSTER, showToast: (line) => said.push(line),
   });
-  card.dom.nodes["[data-mail-key]"].value = "   ";
-  await card.mailClick(control("data-mail-key-set"));
-  // An empty field is not a clear. Writing "" here would wipe a working key nobody asked to remove.
+  card.dom.nodes["[data-mail-secret]"].value = "   ";
+  await card.mailClick(control("data-mail-secret-set"));
+  // An empty field is not a clear. Writing "" here would wipe a working value nobody asked to remove.
   assert.deepEqual(written, []);
-  assert.deepEqual(said, ["Type the key first."]);
+  assert.deepEqual(said, ["Type the signing secret first."]);
 });
 
-test("Clear sends null, which is the only thing that empties a secret", async () => {
+test("Clear sends null, which is the only thing that empties the signing secret", async () => {
   const written = [];
   const card = await loadMailCard({
-    adapter: { getMailSettings: () => Promise.resolve(SETTINGS), setMailSettings: (patch) => { written.push(patch); return Promise.resolve({ ...SETTINGS, apiKeySet: false }); } },
+    adapter: { getMailSettings: () => Promise.resolve(SETTINGS), setMailSettings: (patch) => { written.push(patch); return Promise.resolve({ ...SETTINGS, webhookSecretSet: false }); } },
     state: ROSTER,
   });
-  await card.mailClick(control("data-mail-key-clear"));
   await card.mailClick(control("data-mail-secret-clear"));
-  assert.deepEqual(written, [{ apiKey: null }, { webhookSecret: null }]);
+  assert.deepEqual(written, [{ webhookSecret: null }]);
+});
+
+test("KEYS-1: this card can no longer write a sending key at all", async () => {
+  const written = [];
+  const card = await loadMailCard({
+    adapter: { getMailSettings: () => Promise.resolve(SETTINGS), setMailSettings: (patch) => { written.push(patch); return Promise.resolve(SETTINGS); } },
+    state: ROSTER,
+  });
+  // The two controls are gone from the markup, and the click chain does not answer to them either:
+  // removing a field is not enough if the handler behind it is still reachable.
+  assert.equal(card.isMailControl(control("data-mail-key-set")), false);
+  assert.equal(card.isMailControl(control("data-mail-key-clear")), false);
+  assert.deepEqual(written, []);
 });
 
 test("the switch writes only enabled, and repaints from the relay rather than from the click", async () => {

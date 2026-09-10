@@ -190,6 +190,29 @@ const until = async (fn, ms, step = 2000) => {
 
 const browser = await chromium.launch({ executablePath: CHROME, headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+// SETTINGS-2: the endpoint picker, the three provider groups and the job bus card now live in the
+// Settings surface's OPERATOR section, which is drawn only when GET /auth/state answers
+// operator:true. That field is the relay's and is item B's to ship; this gate forces it on and keeps
+// every other field the live route returned, so the day the relay answers it for real this is
+// overwriting a true value rather than inventing one. Nothing else about these legs moved: the same
+// cards, the same ids, one more press to reach them.
+await page.route((url) => url.pathname === "/auth/state", async (route) => {
+  const live = await route.fetch().catch(() => null);
+  let body = {};
+  if (live != null && live.status() === 200) body = await live.json().catch(() => ({}));
+  return route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    headers: { "cache-control": "no-store" },
+    body: JSON.stringify({
+      required: body.required ?? false,
+      authenticated: body.authenticated ?? true,
+      workspace: body.workspace ?? { slug: "gate", name: "Gate" },
+      person: body.person ?? { email: "gate@example.test" },
+      operator: true,
+    }),
+  });
+});
 const errors = []; page.on("pageerror", (e) => errors.push(String(e)));
 // Every gateway command the page sends, by name: GW-03's proof that a refresh reads the tail and
 // never the whole transcript is a count of requests, not a DOM state.
@@ -274,9 +297,18 @@ const openMarketplace = async () => {
   // draws nothing still fails the checks below on its own numbers.
   await until(() => page.evaluate(() => (document.querySelector("[data-marketplace-loading]") == null ? true : null)), 30_000, 500);
 };
+// SETTINGS-2: opening Settings lands on General. Everything this gate reads is the operator's, so
+// it presses the Operator entry and waits for the body to be that one before reading anything.
 const openSettingsPanel = async () => {
   await page.keyboard.press("Escape"); await page.waitForTimeout(300);
-  await page.click("#settings-button"); await page.waitForTimeout(1400);
+  await page.click("#settings-button");
+  await page.waitForSelector("[data-settings-surface]", { timeout: 20_000 }).catch(() => {});
+  const operator = await page.waitForSelector('[data-settings-nav="operator"]', { timeout: 20_000 }).catch(() => null);
+  if (operator != null) {
+    await operator.click();
+    await page.waitForSelector('[data-settings-section="operator"]', { timeout: 20_000 }).catch(() => {});
+  }
+  await page.waitForTimeout(1400);
 };
 // A nav click by id, not by text: the sidebar scrolls, and a click at a stale coordinate lands on
 // the dialog backdrop, which closes the panel instead of selecting the card. Retried once through
@@ -2311,10 +2343,27 @@ try {
     // sections in Settings, built from the same cards. Everything below this line used to run on
     // the Plugins page; only the panel it is read from changed.
     await openSettingsPanel();
-    const settingsHeadings = await page.$$eval(".settings-list h3", (els) => els.map((e) => e.textContent.trim()));
-    check(settingsHeadings.indexOf("Providers") === settingsHeadings.indexOf("Inference") + 1 && settingsHeadings.includes("Inference"),
-      "Settings carries a Providers section directly under Inference", settingsHeadings.join(" | "));
-    check(settingsHeadings.includes("Chat listeners"), "and the chat listeners are a Settings section too", settingsHeadings.join(" | "));
+    // SETTINGS-2 retarget, and this leg was ALREADY RED before this wave: it asserted
+    // settingsHeadings.indexOf("Providers") against an <h3> that has rendered "Your own keys" for as
+    // long as pluginGroupSection has existed, so indexOf was -1 and the leg could only pass because
+    // -1 happened to sit where it was compared. It is pinned on the STRUCTURE now -- the position of
+    // [data-plugin-group="Providers"] among the operator body's own sections -- which is the thing
+    // the check is actually about and which no copy edit can quietly turn red again.
+    const sectionOrder = await page.$$eval('[data-settings-section="operator"] .settings-section', (els) => els.map((el) => ({
+      group: el.dataset.pluginGroup ?? null,
+      heading: el.querySelector("h3")?.textContent.trim() ?? "",
+    })));
+    // The Plan group draws NOTHING when the box has no plan models (pluginGroupSection's own rule:
+    // a heading over an empty box is a promise with nothing behind it), so it is allowed between the
+    // two and not required. Everything else about the order is.
+    const at = (group) => sectionOrder.findIndex((section) => section.group === group);
+    const shown = sectionOrder.map((section) => section.group ?? section.heading).join(" | ");
+    const inference = sectionOrder.findIndex((section) => section.heading === "Inference");
+    const providers = at("Providers");
+    check(inference >= 0 && providers === inference + (at("Plan") === inference + 1 ? 2 : 1),
+      "Settings carries Providers directly under Inference, with only the plan group allowed between", shown);
+    check(at("Listeners") === providers + 1, "and the chat listeners are the section after it", shown);
+    check(await page.$('[data-settings-nav="operator"]') != null, "and every one of them is inside the Operator section, which only the operator is given");
     const relaySubs = await relay("/subscriptions").then((r) => (Array.isArray(r) ? r : r?.subscriptions ?? [])).catch(() => []);
     const providerIds = await page.$$eval('[data-plugin-group="Providers"] [data-plugin-id]', (els) => els.map((e) => e.dataset.pluginId));
     check(relaySubs.length > 0 && providerIds.length === relaySubs.length && providerIds.every((id) => id.startsWith("sub:")),

@@ -266,3 +266,5 @@ import "./asset-cache.test.mjs";
 import "./apps-wire-shapes.test.mjs";
 import "./console-app-hooks.test.mjs";
 import "./console-needs-you-attributes.test.mjs";
+// SETTINGS-2: the settings surface, its rows, its words, and who is shown what.
+import "./machine-room-settings.test.mjs";

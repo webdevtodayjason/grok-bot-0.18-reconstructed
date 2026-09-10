@@ -53,7 +53,9 @@
     "auto-review": ["Actions waiting for your review", "An agent wants to do something your review rule holds back. These expire in ten minutes."],
     "local-tool": ["Permission to run something here", "An agent wants to run a tool on the box itself. These expire in ten minutes."],
     widget: ["Questions an agent asked you", "A multiple-choice question in a conversation."],
-    secret: ["Credentials an agent needs", "An agent asked for a key or a password before it can carry on."],
+    // SETTINGS-2, a copy edit and nothing else: this card is a customer's, and both halves of this
+    // pair carried a word a customer has no business reading ("Credentials", "a key").
+    secret: ["When your agent needs a sign-in from you", "A tool asked for a login and he cannot go on without it."],
     "box-handoff": ["The keyboard, handed to you", "An agent needs you to do a step on its computer yourself."],
     report: ["Problems an agent wants to report", "An agent wrote up something that went wrong and is waiting for you to send it."],
   };

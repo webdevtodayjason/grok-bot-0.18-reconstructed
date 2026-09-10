@@ -1072,6 +1072,11 @@ try {
       // route to it is MOBILE-2c.
       await page.setViewportSize({ width: 1440, height: 900 });
       await page.click("#shelf-settings");
+      // SETTINGS-2: Settings opens on General and paints ONE body at a time, and this card is the
+      // Notifications body. Pressing that entry is what a person does; the card mounts on the
+      // .settings-list that body carries, which is the same structural contract as before.
+      await page.waitForSelector("[data-settings-surface]", { timeout: within(20_000) }).catch(() => {});
+      await page.click('[data-settings-nav="notifications"]').catch(() => {});
       const card = await page.waitForSelector("[data-push-settings]", { timeout: within(20_000) }).catch(() => null);
       check(card != null, "the Notifications card appears inside Settings", card == null ? "no [data-push-settings] section after pressing the gear" : "appended to the panel's own settings list");
 
@@ -1188,9 +1193,26 @@ try {
       // nothing to do with the module being absent.
       await bare.setViewportSize({ width: 1440, height: 900 });
       await bare.click("#shelf-settings");
-      const settings = await bare.waitForSelector(".settings-list", { timeout: within(20_000) }).catch(() => null);
-      const has = await bare.evaluate(() => document.querySelector("[data-push-settings]") != null);
-      check(settings != null && !has, "and Settings simply has one fewer card", settings == null ? "the panel did not open" : "no [data-push-settings] section, and the panel is otherwise whole");
+      // SETTINGS-2 retarget, and a better leg than the one it replaces. `.settings-list` is now the
+      // Notifications body's own class, and that body is exactly what is blocked here -- so waiting
+      // for it would be waiting for the thing under test. What is asserted instead is what a person
+      // would see: the nav still lists Notifications, opening it says it could not load, no card is
+      // mounted, and nothing threw.
+      const surface = await bare.waitForSelector("[data-settings-surface]", { timeout: within(20_000) }).catch(() => null);
+      const listed = await bare.$('[data-settings-nav="notifications"]');
+      if (listed != null) { await listed.click(); await bare.waitForTimeout(1200); }
+      const bareState = await bare.evaluate(() => ({
+        body: document.querySelector('[data-settings-section="notifications"]') != null,
+        card: document.querySelector("[data-push-settings]") != null,
+        rows: document.querySelectorAll("[data-setting-row]").length,
+      }));
+      check(surface != null && listed != null && bareState.body && !bareState.card,
+        "and Settings simply has one fewer card",
+        surface == null ? "the panel did not open" : `nav lists Notifications ${listed != null}, body drawn ${bareState.body}, card ${bareState.card}`);
+      await bare.click('[data-settings-nav="general"]').catch(() => {});
+      await bare.waitForTimeout(800);
+      const stillWhole = await bare.evaluate(() => document.querySelectorAll('[data-settings-section="general"] [data-setting-row]').length);
+      check(stillWhole > 0, "and every other section is whole without it", `${stillWhole} row(s) on General`);
       check(bareErrors.length === 0, "and nothing threw on the way", bareErrors.length === 0 ? "no page errors" : bareErrors.slice(0, 2).join(" · "));
     }
     check(consoleErrors.length === 0, "and nothing threw with the module loaded either", consoleErrors.length === 0 ? "no page errors" : consoleErrors.slice(0, 2).join(" · "));

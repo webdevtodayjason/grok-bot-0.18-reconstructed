@@ -1,0 +1,582 @@
+/* Settings, the surface's own sheet (SETTINGS-2, docs/SETTINGS.md).
+   ================================================================
+   OWNED BY settings.js, exactly the way push-settings.css is owned by push-settings.js. styles.css
+   is NOT touched by this wave: three other waves have that file open, an append is the only hunk a
+   rebase cannot mangle, and a module that carries its own sheet can be removed without leaving a
+   rule behind. Everything here is scoped to .is-settings on the dialog or to a class this surface
+   invents, so nothing above can change under it.
+
+   THE SHAPE. A wide panel with a left nav at desktop; a full-height sheet with a horizontal nav on
+   a phone. One section is on screen at a time and IT scrolls, not the whole dialog -- which is what
+   turns 6936 px of stacked cards into a section that fits. */
+
+.panel-dialog.is-settings {
+  width: min(1100px, 92vw);
+  height: min(760px, 88vh);
+  max-width: 92vw;
+}
+
+.panel-dialog.is-settings .dialog-frame {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  max-height: 100%;
+}
+
+/* The body is the surface's frame and stops being the scroller: each half scrolls on its own. */
+.panel-dialog.is-settings .dialog-body {
+  max-height: none;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.settings-surface {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+
+/* ---- the nav ------------------------------------------------------------------------------- */
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  padding: 16px 12px 18px;
+  overflow: auto;
+  border-right: 1px solid var(--glass-edge-soft);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-search {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: var(--radius-md, 10px);
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+}
+
+.settings-nav-list {
+  display: grid;
+  gap: 2px;
+  align-content: start;
+}
+
+.settings-nav-button {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md, 10px);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-nav-button:hover { background: rgba(255, 255, 255, 0.05); }
+
+.settings-nav-button.is-active {
+  border-color: var(--glass-edge);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.settings-nav-icon {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  font-size: 13px;
+  opacity: 0.85;
+}
+
+.settings-nav-empty {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+/* ---- the body ------------------------------------------------------------------------------ */
+
+.settings-body {
+  min-height: 0;
+  padding: 20px 24px 26px;
+  overflow: auto;
+  overflow-x: hidden;
+}
+
+.settings-head { margin: 0 0 18px; }
+.settings-head h2 { margin: 0; font-size: 20px; font-weight: 560; letter-spacing: -0.02em; }
+.settings-head p { margin: 5px 0 0; color: var(--text-secondary); font-size: 12px; }
+
+.settings-rows,
+.panel-dialog.is-settings .settings-list {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+
+.settings-group { display: grid; gap: 7px; min-width: 0; }
+
+.settings-group-label {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.settings-card {
+  display: grid;
+  min-width: 0;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+/* Every row: a label block on the left, ONE control slot on the right. The slot is the row's second
+   and last child, which is what the unit test and the gate both count. */
+.settings-card .setting-row {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 13px 15px;
+  border-bottom: 1px solid var(--glass-edge-soft);
+}
+
+.settings-card .setting-row:last-child { border-bottom: 0; }
+.settings-card .setting-row > div:first-child { flex: 1 1 auto; min-width: 0; }
+.settings-card .setting-row > div:first-child strong { display: block; font-size: 12.5px; font-weight: 560; }
+.settings-card .setting-row > div:first-child small { display: block; margin-top: 3px; color: var(--text-secondary); font-size: 11px; line-height: 1.5; }
+
+.settings-card .setting-row.is-pointed { background: rgba(255, 255, 255, 0.06); }
+
+.setting-control {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  max-width: 55%;
+}
+
+.setting-control select,
+.setting-control input[type="text"] {
+  min-width: 0;
+  max-width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: var(--radius-md, 10px);
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+}
+
+.setting-control textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: var(--radius-md, 10px);
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  resize: vertical;
+}
+
+.setting-control-field { flex: 0 1 340px; }
+.setting-control-field input { flex: 1 1 auto; }
+
+/* A row whose control is a whole block -- the device list, the background tiles, a rule textarea --
+   stacks under its label instead of being squeezed into the right column. The control slot has to
+   give up its right alignment AND its 55% ceiling with it, or the block lands in a narrow column on
+   the right of the card, which is what the first run of this gate photographed. */
+.settings-card .setting-row:has(.setting-control-block),
+.settings-card .setting-row:has(.setting-control textarea) {
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.settings-card .setting-row:has(.setting-control-block) > .setting-control,
+.settings-card .setting-row:has(.setting-control textarea) > .setting-control {
+  flex: 1 1 100%;
+  max-width: 100%;
+  justify-content: flex-start;
+}
+
+.setting-control-block {
+  display: grid;
+  /* An explicit 1fr track, not the implicit `auto` one: auto sizes to the child's max-content, and
+     the background gallery's max-content is two columns of tiles -- so the picker came out 322 px
+     wide inside a 786 px slot. Measured on grok-bot-local-vm at 1440x900. */
+  grid-template-columns: minmax(0, 1fr);
+  flex: 1 1 100%;
+  gap: 6px;
+  width: 100%;
+  max-width: 100%;
+  justify-items: stretch;
+}
+
+.settings-subrow {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: var(--radius-md, 10px);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.settings-subrow strong { display: block; font-size: 12px; font-weight: 540; }
+.settings-subrow small { display: block; color: var(--text-tertiary); font-size: 10.5px; }
+.settings-note { margin: 0; color: var(--text-tertiary); font-size: 11px; }
+
+.setting-control-meter { flex: 0 1 300px; flex-direction: column; align-items: flex-end; gap: 4px; }
+.setting-control-meter small { color: var(--text-secondary); font-size: 11px; }
+
+.settings-meter {
+  display: block;
+  width: 100%;
+  min-width: 120px;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.settings-meter-fill { display: block; height: 100%; background: var(--teal-300, #0ea5e9); }
+
+.settings-identity {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 14px 15px;
+  border-bottom: 1px solid var(--glass-edge-soft);
+}
+
+.settings-identity > div { flex: 1 1 auto; min-width: 0; }
+.settings-identity strong { display: block; font-size: 13px; }
+.settings-identity small { display: block; color: var(--text-secondary); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+
+.settings-avatar {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 14px;
+  font-weight: 640;
+}
+
+/* The armed half of the two-press Update. Red-outlined, the way the reference draws it, so the
+   second press is visibly a different button from the first. */
+.ghost-button.is-armed {
+  border-color: var(--red-500, #ef4444);
+  color: var(--red-500, #ef4444);
+}
+
+/* The operator's section keeps the cards it always had, so the old rules that key on
+   .settings-section still apply to them. It only needs the stack. */
+.settings-operator { display: grid; gap: 12px; }
+.settings-operator .panel-intro { margin: 0; }
+
+/* backgrounds.js mounts its own grid into the Appearance card's control slot. */
+[data-settings-mount="background"] #bg-section { padding: 0; border: 0; background: transparent; }
+[data-settings-mount="background"] #bg-section h3,
+[data-settings-mount="background"] #bg-section > p:first-of-type { display: none; }
+
+/* The gallery scrolls inside its own box rather than making General the one long section again.
+   Measured on grok-bot-local-vm, 18 plates: General was 1939 px of scroll at 1440x900 and 2196 px at
+   390x844 -- 3.40x the window on the phone, over this wave's own ceiling -- and nine rows of tiles
+   were all of it. A picture gallery is the one control a fixed box suits: the rows below it are
+   settings, and they should not be nine tiles away. */
+[data-settings-mount="background"] .bg-grid {
+  max-height: 300px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* ---- the account menu at the foot of the roster --------------------------------------------- */
+
+.account-foot {
+  position: relative;
+  margin-top: auto;
+  padding: 8px;
+  border-top: 1px solid var(--glass-edge-soft);
+}
+
+.account-tile {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  width: 100%;
+  min-height: 44px;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md, 10px);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.account-tile:hover { border-color: var(--glass-edge-soft); background: rgba(255, 255, 255, 0.05); }
+.account-tile-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-tile-update { color: var(--teal-300, #0ea5e9); font-size: 13px; }
+
+.account-tile-avatar {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 11px;
+  font-weight: 640;
+}
+
+.account-menu {
+  position: absolute;
+  bottom: calc(100% - 4px);
+  left: 8px;
+  z-index: 40;
+  display: grid;
+  gap: 2px;
+  width: min(268px, calc(100vw - 32px));
+  padding: 6px;
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-lg);
+  background: rgba(20, 29, 33, 0.98);
+  box-shadow: var(--shadow-large);
+}
+
+.account-menu-item {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-md, 10px);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.account-menu-item:hover { background: rgba(255, 255, 255, 0.07); }
+.account-menu-rule { height: 1px; margin: 4px 2px; background: var(--glass-edge-soft); }
+
+.account-menu-submenu > summary {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 40px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md, 10px);
+  font-size: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.account-menu-submenu > summary::-webkit-details-marker { display: none; }
+.account-menu-submenu > summary:hover { background: rgba(255, 255, 255, 0.07); }
+.account-menu-submenu .account-menu-item { padding-left: 22px; }
+
+.account-menu-banner {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 10px;
+  border-radius: var(--radius-md, 10px);
+  background: rgba(14, 165, 233, 0.16);
+  font-size: 12px;
+}
+
+.account-update-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.account-update-frame {
+  display: grid;
+  gap: 10px;
+  width: min(400px, calc(100vw - 40px));
+  padding: 22px;
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-xl);
+  background: rgba(20, 29, 33, 0.98);
+  box-shadow: var(--shadow-large);
+}
+
+.account-update-frame p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.55; }
+.account-update-note { color: var(--text-tertiary); font-size: 11px; }
+.account-update-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* ---- the phone ------------------------------------------------------------------------------
+   A full-height sheet, the nav a horizontal scroller above the body, one section scrolling at a
+   time, and every control a 44 px target. The breakpoint is 900px rather than styles.css's 690px on
+   purpose: a narrow tablet has no room for a 232 px rail beside a settings row either. */
+
+@media (max-width: 900px) {
+  .panel-dialog.is-settings {
+    width: 100vw;
+    max-width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    margin: 0;
+    border-radius: 0;
+  }
+
+  .panel-dialog.is-settings .dialog-frame { max-height: 100dvh; border: 0; border-radius: 0; }
+
+  .settings-surface { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+
+  .settings-nav {
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px max(12px, env(safe-area-inset-left)) 10px max(12px, env(safe-area-inset-right));
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--glass-edge-soft);
+  }
+
+  .settings-nav-list {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .settings-nav-list::-webkit-scrollbar { display: none; }
+
+  /* `width: 100%` is the desktop rail's, and left on at this width it made every entry as wide as
+     the scroller -- one section per swipe, which photographs as a nav with a single entry on it. */
+  .settings-nav-button {
+    flex: 0 0 auto;
+    width: auto;
+    min-height: 44px;
+    white-space: nowrap;
+  }
+
+  .settings-body { padding: 16px max(14px, env(safe-area-inset-left)) calc(24px + env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-right)); }
+
+  /* A row's control has no room beside a label at this width, so it goes under it, full width. */
+  .settings-card .setting-row {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .setting-control {
+    flex: 1 1 100%;
+    max-width: 100%;
+    justify-content: flex-start;
+  }
+
+  .setting-control-field,
+  .setting-control-meter { flex: 1 1 100%; align-items: stretch; }
+  .setting-control-meter { align-items: flex-start; }
+
+  /* TAPPABLE. Swept rather than listed: every button, field and picker ANYWHERE on this surface,
+     including the ones a sibling module mounted into it. The Notifications card is push-settings.js's
+     markup and its Save measured 128x34; a list is only ever as good as whoever wrote it, which is
+     the lesson MOBILE-1b paid for. */
+  [data-settings-surface] button,
+  [data-settings-surface] select,
+  [data-settings-surface] input,
+  [data-settings-surface] textarea,
+  [data-settings-surface] a.ghost-button,
+  [data-settings-surface] a.primary-button,
+  .account-menu-item,
+  .account-menu-banner button,
+  .account-update-actions button {
+    min-height: 44px;
+  }
+
+  /* Except the tile the background gallery draws, which is a picture and reads as one. Each is
+     185x104 at this width, comfortably over the floor in both directions already. */
+  [data-settings-surface] .bg-swatch { min-height: 0; }
+
+  .setting-control button,
+  .settings-subrow button,
+  .settings-identity button { min-width: 44px; }
+
+  [data-settings-mount="background"] .bg-grid { max-height: 220px; }
+
+  /* A SWITCH IS A TARGET TOO, and every switch on this surface measured 38x22 -- including the six
+     the Notifications card draws, which is push-settings.js's markup and not this wave's to change.
+     So the BUTTON becomes a 52x44 hit box here and the pill is drawn inside it by a pseudo-element
+     at exactly the size it always was. Nothing about how it looks moves; what moves is how much of
+     it a thumb can land on. Scoped to this surface, so no switch anywhere else in the console is
+     touched by it. */
+  [data-settings-surface] .switch {
+    position: relative;
+    width: 52px;
+    height: 44px;
+    border: 0;
+    border-radius: 22px;
+    background: transparent;
+  }
+
+  [data-settings-surface] .switch::before {
+    position: absolute;
+    top: 11px;
+    left: 7px;
+    width: 38px;
+    height: 22px;
+    box-sizing: border-box;
+    border: 1px solid var(--glass-edge-soft);
+    border-radius: var(--radius-pill);
+    background: rgba(255, 255, 255, 0.06);
+    content: "";
+  }
+
+  [data-settings-surface] .switch[aria-pressed="true"] { background: transparent; }
+
+  [data-settings-surface] .switch[aria-pressed="true"]::before {
+    border-color: rgba(49, 182, 184, 0.38);
+    background: rgba(49, 182, 184, 0.26);
+  }
+
+  [data-settings-surface] .switch::after { top: 15px; left: 11px; }
+  [data-settings-surface] .switch[aria-pressed="true"]::after { left: 27px; }
+
+  /* READABLE: anything under 16px makes iOS zoom the layout viewport on focus. */
+  .settings-search,
+  .setting-control input,
+  .setting-control select,
+  .setting-control textarea { font-size: 16px; }
+}

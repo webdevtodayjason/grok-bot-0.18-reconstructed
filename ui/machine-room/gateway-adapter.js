@@ -3459,6 +3459,54 @@
           });
         });
       },
+      // ---- SETTINGS-2: who is looking, and what this computer will let an agent run ------------
+      //
+      // getWorkspaceIdentity reads GET /auth/state, the relay's own answer about the signed-in
+      // session: whether a password is configured, whether this browser is through it, whether the
+      // session is the OPERATOR's, and the workspace and person it belongs to. It degrades to null
+      // the way getHostStatus already does when a route is absent, and the settings surface draws no
+      // Operator section at all on a null -- FAIL CLOSED, because "the adapter has a job bus method"
+      // is a customer one deploy away from the operator's rows.
+      //
+      // WHY THIS ROUTE AND NOT A NEW ONE. /auth/state is already the pre-login band's answer about
+      // the session (ui/server.mjs), already same-origin and already no-store, and the relay is the
+      // only thing that can tell an operator from a customer: RELAY == null, a session carrying no
+      // tenant claim, or one minted by the instance password. The console never infers it from what
+      // the adapter happens to be able to do. The operator field on that answer is item B's; until it
+      // merges this read gets a body with no such field, which reads as false. Absent means false.
+      getWorkspaceIdentity() {
+        return relayFetch("/auth/state", { headers: { accept: "application/json" } })
+          .then(async (response) => (response.ok ? response.json().catch(() => null) : null))
+          .catch(() => null);
+      },
+
+      // The three choices source/shared/local-tool-permission.ts exports, with the operator's
+      // ceiling applied by the host. WRITTEN then RE-READ, because resolveSandLocalToolPermission
+      // can hand back something narrower than what was asked for, and a picker showing a mode the
+      // computer is not in is the exact failure the endpoint row exists to avoid.
+      setLocalToolPermission(value) {
+        const wanted = String(value ?? "");
+        if (!["always", "ask", "never"].includes(wanted)) return Promise.reject(new Error("that is not one of the three choices"));
+        return call("setHostSettings", { localToolPermission: wanted })
+          .then(() => call("getHostSettings"))
+          .then((settings) => {
+            const resolved = settings?.localToolPermission ?? null;
+            state.settings.localToolPermission = resolved;
+            return { value: resolved, capped: resolved != null && resolved !== wanted };
+          })
+          .catch((error) => { failed(`That was not saved on the computer: ${error.message}`); throw error; });
+      },
+
+      // The resolved value, read fresh. tryCall so a host without getHostSettings answers null and
+      // the row falls back to whatever hydrate already put in state.
+      getLocalToolPermission() {
+        return tryCall("getHostSettings").then((settings) => {
+          if (settings == null) return null;
+          state.settings.localToolPermission = settings.localToolPermission ?? null;
+          return { value: settings.localToolPermission ?? null, capped: false };
+        });
+      },
+
       // getHostStatus: the host bundle's version state, plus busy and capabilities.
       getHostStatus() {
         return call("getHostStatus").then((status) => ({

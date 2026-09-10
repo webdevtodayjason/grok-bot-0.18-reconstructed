@@ -447,6 +447,26 @@
         return emit("settings:auto-review", clone(state.settings.autoReview));
       },
 
+      // ---- SETTINGS-2 ---------------------------------------------------------------------------
+      // Declared here so the demo adapter answers the same three shapes the gateway one does and the
+      // settings surface degrades identically with no gateway behind it. There is no /me offline, so
+      // the identity is null and the Operator section is not drawn -- which is the fail-closed rule
+      // the live console follows too.
+      getWorkspaceIdentity() {
+        return Promise.resolve(null);
+      },
+
+      getLocalToolPermission() {
+        return Promise.resolve({ value: state.settings.localToolPermission ?? "ask", capped: false });
+      },
+
+      setLocalToolPermission(value) {
+        const wanted = String(value ?? "");
+        if (!["always", "ask", "never"].includes(wanted)) return Promise.reject(new Error("that is not one of the three choices"));
+        state.settings.localToolPermission = wanted;
+        return Promise.resolve({ value: wanted, capped: false });
+      },
+
       // Both resolve the same shape the gateway adapter answers with, because the view waits on
       // the host before it opens or closes the recording dialog. Nothing records offline; this
       // path exists so the dialog can still be looked at with no gateway.
