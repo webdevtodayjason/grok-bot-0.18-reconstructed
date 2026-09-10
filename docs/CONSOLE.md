@@ -518,6 +518,26 @@ screen" — drawn on the product's own mark rather than a bare dark box: the Ti 
 data-URI SVG at low alpha, over a faint cyan halo on Midnight. Never the broken glyph, never an
 empty `<img>`, and never "Connecting" when nothing is connecting.
 
+### Two things the integration found, and both are in the module now
+
+Folding the three items of console polish 3 together on one tree turned up two holes in the live
+tile that neither builder could see alone. Both were found by a gate leg going red, both are fixed in
+`screen-tile.js`, and both are pinned by a unit test whose title says where it came from.
+
+- **The module kept a picture nothing could take away.** A frame lives in `localStorage` *and* in an
+  in-memory `Map`, and only the storage half could be cleared from outside. So "this agent has no
+  picture yet" — the state the plate exists for — was unreachable the moment the tile had painted
+  once. `forget(agentId)` drops both halves and the agent's entry in the idle index. Nothing in the
+  app calls it; the gate and the unit tests do, to set up that state honestly.
+- **The plate never came back.** `paint()` hides the plate when it draws a picture, and nothing put
+  the words back. An agent with no picture in hand therefore kept the **last** picture on the glass
+  until `app.js` happened to re-render — and for an agent whose card never opened, never. A `sync()`
+  with nothing in hand now removes the stale `<img>` and shows the plate again. The `<img>` is
+  removed rather than hidden, because `.rail-screen-button img { display: block }` outranks `[hidden]`
+  — the same CONSOLE-4 broken-glyph trap, one file over. With no plate span to put back (`app.js`
+  emits one only when it rendered without a frame) nothing is touched: an empty tile reads worse than
+  a picture a few seconds old, and the next render rebuilds it anyway.
+
 ### What clicking it does
 
 Clicking the tile opens the desktop view. **That click is a write** — `data-handoff-action="open"`
@@ -636,6 +656,12 @@ Five rules the script is written under, each paid for by an earlier gate that li
   and therefore counts HTTP only. `--tile-live` counts `Network.webSocketFrameReceived` and prints
   the tile against the same figures `docs/APPS.md` sets, with what those figures are and are not
   spelled out in §3.
+- **Opening a conversation is two clicks, not one.** Playwright's element click on a roster card
+  silently does not take on this box, and every assertion afterwards then reads whichever
+  conversation *was* open — which is how the integration read a plate off another agent's tile three
+  runs in a row. `openConversation` now falls back to clicking in the page and confirms the card went
+  active; a leg that still cannot open the card says so and skips the claims that depend on it, by
+  name, rather than failing them.
 - **A leg that arms the box puts it back in a `finally`.** `--approval` sets
   `SAND_AUTO_REVIEW_MODE=enforce` in the box's settings file and adds one block instruction through
   `setHostSettings`. A run that died between those two writes and its restore would leave every

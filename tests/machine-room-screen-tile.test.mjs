@@ -705,6 +705,57 @@ test("capturedAt moves with every accepted frame and a refused one never touches
   assert.equal(win.__store.get(`${tile.limits.IDLE_PREFIX_AT}titan`), String(win.__clock.at), "it is persisted beside the frame, so a reload can still date it");
 });
 
+// Also found by the integration: the module hid the plate when it painted, and nothing put the words
+// back. An agent with no picture (a fresh one, or one whose frame this session forgot) therefore kept
+// the LAST picture on the glass until app.js happened to re-render -- which for an agent whose card
+// never opened is never.
+test("a sync with no picture in hand puts the plate's words back instead of leaving a stale one", () => {
+  const win = makeWindow();
+  const tile = load(win);
+  const { button } = railTile(win, "titan");
+  tile.sync({ agentId: "titan", seat: 3, status: "working" });
+  painting(clientOf(win));
+  win.__dataUrl = REAL_SAMPLE;
+  win.__imageData = CONTRAST;
+  tickOnce(win);
+  assert.ok(button.querySelector("img[data-rail-screen]"), "a picture is on the glass");
+  assert.equal(button.querySelector("[data-rail-screen-plate]").hidden, true, "and the plate is out of the way");
+
+  tile.forget("titan");
+  tile.sync({ agentId: "titan", seat: 3, status: "working" });
+  assert.equal(button.querySelector("img[data-rail-screen]"), null, "the stale picture is removed, not hidden: display:block outranks [hidden] here");
+  assert.equal(button.querySelector("[data-rail-screen-plate]").hidden, false, "the words are back in front");
+  assert.equal(button.querySelector("[data-rail-screen-age]"), null, "and nothing is dating a picture that is not there");
+});
+
+// The integration of console polish 3 found this hole: the old --tile leg wiped the storage key to
+// set up "no picture yet" and the in-memory copy went on answering, so the tile drew a stale picture
+// where the leg expected the plate's words. forget() is the only way back to that state, and it has
+// to clear BOTH halves or the leg is measuring a cache.
+test("forget() drops both halves of a remembered picture, so the no-picture state is reachable again", () => {
+  const win = makeWindow();
+  const tile = load(win);
+  railTile(win, "titan");
+  tile.sync({ agentId: "titan", seat: 3, status: "working" });
+  painting(clientOf(win));
+  win.__dataUrl = REAL_SAMPLE;
+  win.__imageData = CONTRAST;
+  tickOnce(win);
+  assert.ok(tile.frameFor("titan"), "a picture is in hand to begin with");
+  assert.ok(win.__store.get(`${tile.limits.IDLE_PREFIX}titan`), "and it is persisted");
+
+  // A storage wipe alone is what the gate used to do, and it is not enough.
+  win.__store.delete(`${tile.limits.IDLE_PREFIX}titan`);
+  assert.ok(tile.frameFor("titan"), "the in-memory copy outlives a storage wipe, which is the trap");
+
+  tile.forget("titan");
+  assert.equal(tile.frameFor("titan"), "", "forget() leaves no picture at all");
+  assert.equal(tile.capturedAtFor("titan"), null, "and no stamp to age");
+  assert.equal(win.__store.get(`${tile.limits.IDLE_PREFIX_AT}titan`), undefined, "including the stamp's own key");
+  const index = JSON.parse(win.__store.get(tile.limits.IDLE_INDEX) ?? "[]");
+  assert.ok(!index.includes("titan"), "and the id is out of the index, so eviction cannot reach for a key that is gone");
+});
+
 test("the age caption says how old the picture is, in words, and is re-added after a render", () => {
   const win = makeWindow();
   const tile = load(win);

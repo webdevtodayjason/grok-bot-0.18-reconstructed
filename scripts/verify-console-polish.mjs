@@ -272,8 +272,21 @@ const openConversation = async (page, id) => {
   await page.evaluate(() => document.querySelectorAll("dialog[open]").forEach((d) => d.close()));
   const card = await until(() => page.$(`.worker-card[data-context-id="${id}"]`), within(25_000), 700);
   if (!card) return false;
+  const active = () => until(() => page.evaluate((want) => (document.querySelector(".worker-card.is-active")?.dataset.contextId === want ? true : null), id), within(20_000), 500);
   await card.click({ timeout: 8000 }).catch(() => {});
-  return (await until(() => page.evaluate((want) => (document.querySelector(".worker-card.is-active")?.dataset.contextId === want ? true : null), id), within(20_000), 500)) === true;
+  if (await active() === true) return true;
+  // The same trap --tile-live is written around: Playwright's element click on a roster card
+  // silently does not take, and then every later assertion is measured against whichever
+  // conversation WAS open. Clicking in the page is the fallback, so one leg's flake does not become
+  // another leg's false reading of the rail.
+  const clicked = await page.evaluate((want) => {
+    const el = document.querySelector(`.worker-card[data-context-id="${want}"]`);
+    if (!el) return false;
+    el.click();
+    return true;
+  }, id);
+  if (!clicked) return false;
+  return (await active()) === true;
 };
 
 // ---- the seats on this box --------------------------------------------------------------------
@@ -441,9 +454,16 @@ async function legTile(page) {
   } else {
     const cardOpened = await openConversation(page, seated.id);
     info(`${seated.name} is on :${seated.seat}${seated.vncUrl ? ` (${seated.vncUrl.replace(/^https?:\/\/[^/]+/, "")})` : ""}${cardOpened ? "" : " — its card would not open, driving the reader directly"}`);
+    // The rail draws the conversation that is OPEN. With this agent's card unopened the tile on
+    // screen belongs to somebody else, so a plate read off it says nothing about this agent — the
+    // integration of console polish 3 spent three runs reading exactly that before naming it.
+    const tileIsThisAgent = cardOpened && await page.evaluate((id) => document.querySelector(".rail-screen-button")?.dataset.agentId === id, seated.id);
     const plateHeld = await page.evaluate((s) => {
       window.__screenTile.teardown();
-      try { window.localStorage.removeItem(`${window.__screenTile.limits.IDLE_PREFIX}${s.id}`); } catch { /* no storage */ }
+      // forget(), not a storage wipe. Since the tile became live it keeps the picture in memory as
+      // well, and a storage wipe alone left that copy answering -- so this probe measured a stale
+      // picture where it meant to measure "no picture yet" and read the plate as not held.
+      window.__screenTile.forget(s.id);
       window.__screenTile.sync({ agentId: s.id, seat: s.seat, status: "working" });
       const plate = document.querySelector("[data-rail-screen-plate]");
       return plate ? !plate.hidden : null;
@@ -456,7 +476,8 @@ async function legTile(page) {
     if (frame) {
       const tookMs = Date.now() - started;
       check(true, "a picture appears for a seated agent", `${seconds(tookMs)} to a ${frame.len}-character ${frame.kind} frame off :${seated.seat}`);
-      check(plateHeld !== false, "and the plate held until it did", plateHeld === null ? "no tile on screen to hold it" : "the words were on screen while the client warmed up");
+      if (!tileIsThisAgent) skip("and the plate held until it did", "the rail is drawing another agent's tile, because this one's card would not open");
+      else check(plateHeld !== false, "and the plate held until it did", plateHeld === null ? "no tile on screen to hold it" : "the words were on screen while the client warmed up");
       const painted = await page.evaluate(() => {
         const img = document.querySelector("#rail-screen img[data-rail-screen]");
         const plate = document.querySelector("[data-rail-screen-plate]");

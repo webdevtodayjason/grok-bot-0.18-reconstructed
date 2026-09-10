@@ -275,6 +275,27 @@
     } catch { /* the in-memory copy is still the frame this session draws */ }
   }
 
+  // Drop everything this module remembers about one agent's picture: the in-memory copy, its stamp
+  // and both storage keys. Nothing in the app calls this -- a gate and the unit tests do, to set up
+  // the state a person sees before any picture exists. Without it that state is unreachable once the
+  // tile has painted once, because the in-memory copy outlives a storage wipe and the tile then
+  // draws a stale picture where the gate wanted the plate's words.
+  function forget(agentId) {
+    if (!agentId) return;
+    frames.delete(agentId);
+    capturedAts.delete(agentId);
+    const store = storage();
+    if (!store) return;
+    try { store.removeItem(IDLE_PREFIX + agentId); } catch { /* nothing to do */ }
+    try { store.removeItem(IDLE_PREFIX_AT + agentId); } catch { /* nothing to do */ }
+    try {
+      let order = [];
+      try { order = JSON.parse(store.getItem(IDLE_INDEX) ?? "[]"); } catch { order = []; }
+      order = (Array.isArray(order) ? order : []).filter((id) => id !== agentId);
+      store.setItem(IDLE_INDEX, JSON.stringify(order));
+    } catch { /* the in-memory copy is gone either way */ }
+  }
+
   // ---- what the host said about the seat -------------------------------------------------------
 
   // A seat reaches this module in whatever shape app.js holds it: {display, shared} is what
@@ -575,6 +596,31 @@
     paintAge(at == null ? capturedAtFor(agentId) : at);
   }
 
+  // The other direction from paint(): the module has NO picture for the agent whose tile this is, so
+  // whatever is on the glass is somebody else's or a photograph of a session that is gone. paint()
+  // hides the plate when it draws, and app.js rebuilds the tile on its own renders -- but sync() can
+  // arrive first (a conversation driven straight at the module, or an agent whose card did not open),
+  // and then the tile shows a picture the module would refuse to date. The <img> is REMOVED rather
+  // than hidden: `.rail-screen-button img { display: block }` outranks [hidden] on specificity, which
+  // is the CONSOLE-4 broken-glyph trap one file over. With no plate span to put back -- app.js emits
+  // one only when it rendered without a frame -- nothing is touched, because an empty tile reads
+  // worse than a picture a few seconds old and the next render rebuilds it anyway.
+  function showPlateOnly(agentId) {
+    const d = doc();
+    if (!d || !agentId) return;
+    const tile = d.getElementById("rail-screen");
+    const button = tile?.querySelector?.(".rail-screen-button") ?? null;
+    if (!button) return;
+    if ((button.dataset?.agentId ?? "") !== agentId) return;
+    const plate = tile.querySelector?.("[data-rail-screen-plate]") ?? null;
+    if (!plate) return;
+    const img = button.querySelector("img[data-rail-screen]");
+    if (img?.remove) img.remove();
+    plate.hidden = false;
+    const note = button.querySelector("[data-rail-screen-age]");
+    if (note?.remove) note.remove();
+  }
+
   // The age caption, written onto the picture and re-written after every render. renderScreenTile
   // rebuilds #rail-screen wholesale at least once a heartbeat, so this element cannot be emitted
   // once and left alone; it is created when it is missing and its text is replaced when it is not.
@@ -656,6 +702,9 @@
     }
 
     startAgeClock();
+    // Nothing in hand for this agent: put the words back before anything else, so a tile never shows
+    // a picture the module itself would not date.
+    if (!frameFor(agentId)) showPlateOnly(agentId);
 
     if (reader && reader.agentId === agentId) {
       // A live agent holds its client at the live cadence. An agent that has just STOPPED being live
@@ -713,6 +762,7 @@
     spreadOf,
     ageWords,
     capturedAtFor,
+    forget,
     limits: { MIN_FRAME_CHARS, MIN_SPREAD, IDLE_KEEP, IDLE_PREFIX, IDLE_PREFIX_AT, IDLE_INDEX, LIVE_REFRESH_MS, IDLE_REFRESH_MS, WARMUP_POLL_MS, WARMUP_CEILING_MS, ACTIVITY_WINDOW_MS, AGE_TICK_MS, THUMB_W, THUMB_H },
     // app.js hands over its gateway caller here. Without one this module never asks the host
     // anything and simply uses the seat it is given.
