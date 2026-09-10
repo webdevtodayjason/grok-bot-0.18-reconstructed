@@ -406,13 +406,23 @@ test("no seed skill hardcodes a bot count, on disk or in the generated bundle", 
     const body = readFileSync(path.join(seedDir, id, "SKILL.md"), "utf8");
     assert.ok(!/ninety-nine|twelve|\b99\b|\b12\b/i.test(body),
       `${id}/SKILL.md names no bot count`);
-    // The generated module has to agree with the file, or a swap ships the old words. The
-    // generator writes each body as a template literal, so the comparison escapes it the same
-    // way (scripts/gen-seed-skills.mjs), backslashes first or the escapes escape each other.
+  }
+  // KB-1. The freshness half used to cover these two seeds only, which meant an edit to any other
+  // one shipped the OLD words inside the bundle with every test green -- and this wave adds five more
+  // files to forget. The generator writes each body as a template literal, so the comparison escapes
+  // it the same way (scripts/gen-seed-skills.mjs), backslashes first or the escapes escape each
+  // other.
+  const seeds = readdirSync(seedDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+  assert.ok(seeds.length >= 5, `the seed directory holds the seeds: ${seeds.join(", ")}`);
+  for (const id of seeds) {
+    const body = readFileSync(path.join(seedDir, id, "SKILL.md"), "utf8");
     const asTemplateLiteral = body
       .replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${");
     assert.ok(generated.includes(asTemplateLiteral),
       `${id}/SKILL.md is what seed-skills.gen.ts carries — re-run scripts/gen-seed-skills.mjs`);
+    assert.ok(generated.includes(`id: ${JSON.stringify(id)}`),
+      `seed-skills.gen.ts names ${id} — re-run scripts/gen-seed-skills.mjs`);
   }
 });
 

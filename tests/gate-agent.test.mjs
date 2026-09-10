@@ -65,6 +65,10 @@ const GATES = [
   // as a throwaway customer, rather than at one it started itself. Exactly the caller SIGNIN-1 was
   // written for, so it says its own name there.
   "verify-voice-r750.mjs",
+  // KB-1: the handbook gate's --console leg does the same thing, signing in at console.titanium.bot
+  // as a throwaway customer on the demo tenant and then asking a real Titan ten owner questions. Its
+  // box legs carry the name too, on the box gateway rather than at a door.
+  "verify-handbook.mjs",
 ];
 
 test("the name is built from the calling file, not typed into it", () => {
