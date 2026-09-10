@@ -260,6 +260,21 @@ export async function startStubRealtime({
   function emitUserTranscriptDone(text, { itemId = "item_user" } = {}) {
     send({ type: "conversation.item.input_audio_transcription.completed", item_id: itemId, transcript: text });
   }
+  /**
+   * The transcription giving up, which the bridge handled nowhere until VOICE-7 and which leaves the
+   * console's speech panel with a half sentence in it and nothing coming to take it away.
+   */
+  function emitUserTranscriptFailed({ itemId = "item_user", code = "transcription_failed" } = {}) {
+    send({ type: "conversation.item.input_audio_transcription.failed", item_id: itemId, error: { type: "invalid_request_error", code, message: "the audio could not be transcribed" } });
+  }
+  /**
+   * The two halves of a turn, separately. `emitSpeechStopped` above sends BOTH and is what the
+   * VOICE-1 leg drives; a leg that wants to put words between the start and the stop needs them
+   * apart, and calling the pair version twice would start a second user turn and reset the
+   * transcript the panel is in the middle of showing.
+   */
+  function emitSpeechStart() { send({ type: "input_audio_buffer.speech_started" }); }
+  function emitSpeechStop() { send({ type: "input_audio_buffer.speech_stopped" }); }
 
   /** xAI emits no rate_limits.updated at all, which is why this is a no-op there. */
   function emitRateLimits({ remaining = 38000, resetSeconds = 42 } = {}) {
@@ -316,9 +331,12 @@ export async function startStubRealtime({
     emitToolCall,
     emitUserTranscript,
     emitUserTranscriptDone,
+    emitUserTranscriptFailed,
     emitRateLimits,
     emitRateLimited,
     emitSpeechStopped,
+    emitSpeechStart,
+    emitSpeechStop,
     speak,
     waitFor,
     /** The accept value a browser would compute, exported so a frame test can share one helper. */

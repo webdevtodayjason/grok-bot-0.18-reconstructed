@@ -1061,7 +1061,7 @@ export function makeTurnRunner({
      * @returns {Promise<{ok:boolean, text:string, pieces:string[], attemptId:string, afterId:string,
      *          afterMs:number, card:object|null, hops:object}>}
      */
-    async run({ agentId, message, onNudge = () => {} }) {
+    async run({ agentId, message, nonce: given = "", onNudge = () => {} }) {
       const hops = { t1: now(), t2: 0, t3: 0, t4: 0 };
       if (rounds >= maxRounds) {
         return { ok: false, refused: true, text: "I have already asked him twice about that. Say it again and I will take it to him fresh.", pieces: [], attemptId: "", afterId: "", afterMs: 0, card: null, hops };
@@ -1070,7 +1070,13 @@ export function makeTurnRunner({
       const before = await tailOf(agentId);
       const beforeId = before == null ? "" : String(before.at(-1)?.id ?? "");
       const beforeMs = before == null ? 0 : Number(before.at(-1)?.timestampMs ?? before.at(-1)?.createdAt) || 0;
-      const nonce = `voice:${now()}`;
+      // VOICE-7: the caller may mint this, because the page has to be told the id of the row its
+      // overlay is about to become BEFORE the wait -- and the wait is 5 to 25 seconds. A bare
+      // `voice:${now()}` is also only unique inside one session; the dispatcher's own id is
+      // sessionId plus a counter, which is unique across two sessions started in the same
+      // millisecond. Both shapes keep the "voice:" prefix, which is the whole of what the host
+      // round-trips and gateway-adapter.js reads to draw the spoken chip.
+      const nonce = String(given ?? "").length > 0 ? String(given) : `voice:${now()}`;
       // MEASURED 6-14 ms and fire-and-forget: sendPrompt answers {accepted:true} unconditionally
       // (awaitTurn is gated on SAND_DISABLE_SEND_ACCEPT_RETURN, which is set nowhere), so the
       // answer is a receipt that the host took it and not that Titan replied.
@@ -1394,6 +1400,39 @@ export function makeVoiceSession({
   const dedupe = makeCallDedupe();
   const caption = makeCaption(vendor.transcription.mode);
   const runner = makeTurnRunner({ call, now, sleep, log });
+
+  /**
+   * VOICE-7 -- the frames the console's speech overlay is built out of.
+   *
+   * `heard` has been on this wire since VOICE-1 and it carried THREE different things under one
+   * shape: the partial transcript as the person speaks, the transcript the vendor finally settled
+   * on, and the string the realtime model actually handed to Titan. A one-line caption strip could
+   * paint all three the same way. A panel that has to open, follow the words and then DISSOLVE
+   * cannot, so every one of them now says which it is.
+   *
+   *   phase "open"    the person started speaking; no words yet.
+   *   phase "partial" the transcript so far, replace-whole (makeCaption hides the two vendors'
+   *                   cumulative-versus-incremental difference from the page).
+   *   phase "final"   the turn is over. `lands` says whether these bytes become a row in Titan's
+   *                   conversation, and `nonce` is the id that row will carry.
+   *
+   * THE FINAL IS THE TOOL ARGUMENT AND NOT THE TRANSCRIPT. The words the person watches being built
+   * come from the transcription model; the string that reaches Titan comes from the realtime model's
+   * own tool call, and they are two models and will differ. So the LAST thing the overlay paints is
+   * the tool argument -- which is what makes "the overlay's last words become the next line" true in
+   * bytes rather than approximately.
+   *
+   * `turn` orders them. OpenAI does not guarantee that a `.completed` for one utterance arrives
+   * before the next utterance's deltas, and tells you to reconcile on item_id; our own utterance
+   * counter is that reconciliation, and item_id rides along for a support question.
+   *
+   * The old three-in-one `heard` is still what an old page reads: it looks at `text` and ignores
+   * every field beside it, so a relay restart mid-call leaves that page drawing today's caption
+   * rather than a blank panel.
+   */
+  let sendSeq = 0;
+  const heard = (phase, text, extra = {}) =>
+    browser?.sendJson({ t: "heard", phase, text: String(text ?? ""), turn: session.userTurn, ...extra });
   const startedMs = now();
   const meter = { audioInBytes: 0, audioOutBytes: 0, billedItemEvents: 0, toolCalls: 0, browserHeld: 0 };
   const announcements = [];
@@ -1463,8 +1502,13 @@ export function makeVoiceSession({
     meter.toolCalls += 1;
     let message = "";
     try { message = String(JSON.parse(toolCall.argumentsJson || "{}").message ?? "").trim(); } catch { message = ""; }
-    if (message.length === 0) return answerTool(toolCall.callId, { reply: "I did not catch that. Say it again." });
-    browser?.sendJson({ t: "heard", text: message });
+    if (message.length === 0) {
+      // NOTHING TO SAY AND NOTHING TO SHOW. Before VOICE-7 this returned in silence, which a caption
+      // strip could live with; a panel waiting for a turn to end would have sat over the conversation
+      // with the person's half-heard words in it and nothing ever coming to take it away.
+      heard("final", "", { lands: false, why: "not-caught" });
+      return answerTool(toolCall.callId, { reply: "I did not catch that. Say it again." });
+    }
     // A whole-utterance yes or no while a card is on the table is an ANSWER to that card, and it
     // goes through the approval path the console already uses rather than into the conversation as
     // prose. A confirm arriving in the same turn as the gated action is refused: it needs a NEW
@@ -1473,9 +1517,15 @@ export function makeVoiceSession({
     if (decision != null && session.heldCard != null) {
       const card = session.heldCard;
       if (card.offeredTurn === session.userTurn) {
+        // The same turn as the question, so this is not an answer yet and no row is coming. The
+        // panel still shows what was heard and then goes.
+        heard("final", message, { lands: false, why: "same-turn" });
         return answerTool(toolCall.callId, { reply: "Say that again and I will take it as your answer." });
       }
       session.heldCard = null;
+      // A yes or a no closes the card through the approval the console already draws; it never
+      // becomes a line of prose in the conversation, so there is no row for this panel to become.
+      heard("final", message, { lands: false, why: "answered-a-card" });
       const outcome = card.kind === "many"
         ? { ok: false, said: `There are ${card.count} things waiting on you. Say which one and I will take it back to him, or answer them on screen.` }
         : await resolveHeldCard({ call, agentId: agent.agentId, card, decision: decision.decision });
@@ -1483,8 +1533,15 @@ export function makeVoiceSession({
       browser?.sendJson({ t: "said", text: said });
       return answerTool(toolCall.callId, { reply: said });
     }
+    // THE TURN IS OVER AND THESE ARE THE BYTES. Minted here rather than inside the runner because the
+    // panel has to be told the id of the row it is about to become NOW -- the runner then waits five
+    // to twenty-five seconds for Titan, and a panel that stayed open for that would be sitting over
+    // the answer it was waiting for.
+    sendSeq += 1;
+    const nonce = `voice:${sessionId}:${sendSeq}`;
+    heard("final", message, { lands: true, nonce });
     browser?.state("thinking");
-    const result = await runner.run({ agentId: agent.agentId, message, onNudge: (text) => void say(text) });
+    const result = await runner.run({ agentId: agent.agentId, message, nonce, onNudge: (text) => void say(text) });
     const pieces = result.pieces.length > 0 ? result.pieces : (result.text.length > 0 ? [result.text] : []);
     let reply = pieces.join(" ");
     if (result.card != null) {
@@ -1526,17 +1583,46 @@ export function makeVoiceSession({
       return undefined;
     }
     if (type === "session.updated") { browser?.state("listening"); return undefined; }
-    if (type === "input_audio_buffer.speech_started") { session.userTurn += 1; runner.newUserTurn(); browser?.state("listening"); return undefined; }
+    if (type === "input_audio_buffer.speech_started") {
+      session.userTurn += 1;
+      runner.newUserTurn();
+      // MEASURED on this Mac (node v22.23.1, 2026-09-10) before this line existed: on the
+      // incremental vendor the accumulator was reset ONLY by `.completed`, so an utterance whose
+      // completion never arrived bled into the next one -- "open the box" then "what time is it"
+      // read "open the boxwhat time is it". A one-line strip hid that. A panel shows it for the
+      // whole of the second utterance. The utterance boundary is this event, so this is where the
+      // accumulator starts again.
+      caption.reset();
+      browser?.state("listening");
+      // No words yet, and the panel opens here rather than on the first partial -- so a vendor that
+      // sends no live words at all still shows a listening panel instead of one that flashes on at
+      // the very end of the turn.
+      heard("open", "");
+      return undefined;
+    }
     if (type === "input_audio_buffer.speech_stopped") { session.hops.t0 = now(); browser?.state("thinking"); return undefined; }
     if (type === "conversation.item.input_audio_transcription.updated" || type === "conversation.item.input_audio_transcription.delta") {
       // REPLACE-WHOLE on both vendors. Append-the-delta writes the sentence N times on xAI.
-      browser?.sendJson({ t: "heard", text: caption.apply(event) });
+      heard("partial", caption.apply(event), { itemId: String(event?.item_id ?? "") });
       return undefined;
     }
     if (type === "conversation.item.input_audio_transcription.completed") {
       const text = caption.complete(event);
       caption.reset();
-      browser?.sendJson({ t: "heard", text });
+      // STILL A PARTIAL, deliberately. This event and the model's tool call race each other, and a
+      // panel that dissolved here would flash back open when the tool call landed a moment later.
+      // The turn is over when the bytes going to Titan are known, and that is the frame below.
+      heard("partial", text, { itemId: String(event?.item_id ?? "") });
+      return undefined;
+    }
+    if (type === "conversation.item.input_audio_transcription.failed") {
+      // Handled nowhere until VOICE-7. A transcription that gave up used to leave the caption
+      // holding the half sentence it had, which the next utterance then appended to; with a panel on
+      // screen it would leave that half sentence sitting over the conversation with nothing ever
+      // arriving to take it away. There is no row and there are no words: the panel goes.
+      log(`voice transcription failed: ${JSON.stringify(event?.error ?? {}).slice(0, 200)}`);
+      caption.reset();
+      heard("final", "", { lands: false, why: "not-caught" });
       return undefined;
     }
     if (type === "response.created") { responseInFlight = true; return undefined; }
