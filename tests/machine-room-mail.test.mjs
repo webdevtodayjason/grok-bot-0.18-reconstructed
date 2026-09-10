@@ -246,6 +246,35 @@ test("the sent rows name the bot, the recipient and what happened, in words", as
   assert.doesNotMatch(rows, />sending</, "the relay's own word for it is not what the operator reads");
 });
 
+// KEYS-1. The key moved to the admin console, so the relay gained an outcome it never had: it has
+// somewhere to ask for the key and could not reach it. That is NOT "you have no key" -- one is a
+// thing to go and fix, the other a thing to wait out -- and a row that said the first about the
+// second would send an operator to paste a key that is already there. In the same edit, `refused`
+// stops naming the vendor: the key is the install's now, so the thing that refused a send is not the
+// thing this operator configured, and a name here sent the last reader to check a fine dashboard.
+test("a key the relay could not fetch reads differently from a key that is not set", async () => {
+  const card = await loadMailCard({ adapter: reader(), state: ROSTER });
+  card.paintMail(card.dom, { ...SETTINGS, sends: [
+    { at: "2026-09-09T18:04:00.000Z", agentId: "a1", agentName: "Titan", to: "jane@client.example", subject: "One", outcome: "key_unreachable" },
+    { at: "2026-09-09T18:03:00.000Z", agentId: "a1", agentName: "Titan", to: "jane@client.example", subject: "Two", outcome: "no_key" },
+    { at: "2026-09-09T18:02:00.000Z", agentId: "a1", agentName: "Titan", to: "jane@client.example", subject: "Three", outcome: "refused" },
+  ] });
+  const rows = card.dom.nodes["[data-mail-sends]"].innerHTML;
+  assert.match(rows, /the key could not be fetched/, "an unreachable key says the key could not be fetched");
+  assert.match(rows, /the mail key is missing/, "and a key that is genuinely absent still says it is missing");
+  assert.match(rows, /not accepted by the mail service/, "a refused send names no vendor");
+  assert.doesNotMatch(rows, /Resend would not take it/);
+  assert.doesNotMatch(rows, />key_unreachable</, "the relay's own word for it is not what the operator reads");
+});
+
+test("mail that arrived carries the same two words apart", async () => {
+  const card = await loadMailCard({ adapter: reader(), state: ROSTER });
+  card.paintMail(card.dom, { ...SETTINGS, recent: [
+    { at: "2026-09-09T18:04:00.000Z", from: "jane@client.example", subject: "One", agentName: "Titan", outcome: "key_unreachable" },
+  ] });
+  assert.match(card.dom.nodes["[data-mail-rows]"].innerHTML, /the key could not be fetched/);
+});
+
 test("nothing sent says so, and a relay that answers no sent list is left alone", async () => {
   const card = await loadMailCard({ adapter: reader(), state: ROSTER });
   card.paintMail(card.dom, { ...SETTINGS, sends: [] });

@@ -468,7 +468,10 @@
 
   function shellMarkup(active, isOperator) {
     const entries = sectionsFor(isOperator);
-    return `<div class="settings-surface" data-settings-surface>`
+    // data-settings-operator is part of the DOM contract the gates read: one attribute that says
+    // which of the two surfaces this is, so a leg does not have to infer it from whether a nav entry
+    // happens to be present.
+    return `<div class="settings-surface" data-settings-surface data-settings-operator="${isOperator === true}">`
       + `<nav class="settings-nav" aria-label="Settings sections">`
       + `<label class="sr-only" for="settings-search">Search settings</label>`
       + `<input class="settings-search" id="settings-search" type="search" placeholder="Search settings" autocomplete="off" data-settings-search />`
@@ -785,9 +788,11 @@
     void readFacts().then(() => {
       const shell = surface();
       if (shell == null) return;
-      // The nav may have grown an Operator entry now that the session answer has landed.
+      // The nav may have grown an Operator entry now that the session answer has landed, so the
+      // attribute that says which surface this is moves with it.
       const list = shell.querySelector(".settings-nav-list");
       if (list != null) list.innerHTML = sectionsFor(facts.operator === true).map((section) => navButton(section, current)).join("");
+      shell.dataset.settingsOperator = String(facts.operator === true);
       paint(current, rowId);
     }).catch(() => {});
     return true;

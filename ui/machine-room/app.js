@@ -4443,6 +4443,12 @@
   const MAIL_OUTCOME = {
     delivered: "delivered", no_route: "nobody was named for it",
     fetch_failed: "could not be read back from Resend", send_failed: "did not reach the agent",
+    // KEYS-1. The key the product sends and reads mail with moved to the admin console, so the relay
+    // now has an outcome it never had: it HAS somewhere to ask and could not reach it. That is not
+    // "you have no key" -- the difference matters, because one is a thing to go and fix and the other
+    // is a thing to wait out -- and a row that said the first about the second would send an
+    // operator to paste a key that is already there.
+    key_unreachable: "could not be read back, the key could not be fetched",
   };
   // MAIL-3, the other direction. `sending` is the row the relay opens BEFORE it calls Resend and
   // closes after, so a row still reading `sending` is a send nobody can say went or did not: it
@@ -4451,7 +4457,11 @@
   const MAIL_SEND_OUTCOME = {
     sent: "sent", sending: "not confirmed",
     rate_limited: "held back, too many in the hour", no_key: "not sent, the mail key is missing",
-    refused: "Resend would not take it", failed: "did not send",
+    // KEYS-1 again, the outbound half. `refused` stops naming a vendor: the key is the install's now,
+    // so the thing that refused a send is not the thing this operator configured, and a vendor's name
+    // here sent the last reader off to check a dashboard that was fine.
+    refused: "not accepted by the mail service", failed: "did not send",
+    key_unreachable: "not sent, the key could not be fetched",
   };
   const mailWhen = (at) => {
     const ms = Date.parse(String(at ?? ""));

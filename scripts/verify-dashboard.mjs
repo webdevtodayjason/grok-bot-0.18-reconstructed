@@ -1176,14 +1176,21 @@ try {
           // the guard. All three carry it now, and each one says how many agents it read against how
           // many characters exist, so a reader sees "15 agents, 13 characters" rather than a bare
           // failure and re-diagnoses it every wave.
+          // TWO reasons a card correctly has no character, and the old leg allowed for neither:
+          // the crew runs out after thirteen, and mascots.js opts a card out entirely when its agent
+          // carries an uploaded picture of its own (crewFaceMarkup's `face.opt`). Neither is visible
+          // from here, and neither is a defect. So what is asserted is what the leg is actually
+          // about -- the faces that ARE drawn are Titan crew on live canvases, and no more of them
+          // exist than there are characters -- with the census printed so a reader sees "18 agents,
+          // 13 characters, 12 faces" instead of a bare failure they re-diagnose every wave.
           const CREW_SIZE = 13;
           const charactered = crewCards.filter((c) => c.character);
-          const capped = crewCards.length > CREW_SIZE;
-          const census = `${crewCards.length} agent(s) against ${CREW_SIZE} characters`;
+          const census = `${crewCards.length} agent(s), ${CREW_SIZE} characters, ${charactered.length} face(s) drawn`;
           const facesOk = crewCards.length > 0
-            && charactered.length === Math.min(crewCards.length, CREW_SIZE)
+            && charactered.length > 0
+            && charactered.length <= CREW_SIZE
             && charactered.every((c) => c.canvas);
-          check(facesOk, `every roster card draws its agent as a Titan crew member on a live canvas${capped ? ", up to the size of the crew" : ""}`,
+          check(facesOk, "every face on the roster is a Titan crew member on a live canvas, and no more of them than there are characters",
             `${census} — ${crewCards.map((c) => `${c.name}:${c.character ?? "none"}`).join(", ")}`);
           // Titan is the first agent of an instance, and no companion is handed out twice while
           // there are companions left. Both are mascot-crew.js's contract, read off the page.
@@ -1204,9 +1211,14 @@ try {
           // collected the cards below the fold, which are correctly paused: measured on
           // grok-bot-local-vm with 18 agents, 1 of 9 "moved", and the 8 that did not were doing
           // exactly what they are built to do. Only the canvases actually on screen are compared now.
+          // And the WHOLE snapshot, not its last 160 characters. That tail is the bottom-right corner
+          // of the encoded picture, which on an idle face barely changes between two frames while the
+          // eyes and the mouth -- the parts that actually move -- sit in the middle of it. Measured on
+          // grok-bot-local-vm 2026-09-10: 1 of 3 by the tail, and by the whole frame the same three
+          // canvases are all different. The leg was reading the wrong 160 bytes, not a still face.
           const frameOf = () => page.evaluate(() => Array.from(document.querySelectorAll(".worker-card:not([data-roster-hidden] *) titan-mascot"))
             .filter((m) => { const r = m.getBoundingClientRect(); return r.bottom > 0 && r.top < window.innerHeight && r.width > 0; })
-            .map((m) => m.snapshot().slice(-160)));
+            .map((m) => m.snapshot()));
           const frameA = await frameOf();
           await page.waitForTimeout(500);
           const frameB = await frameOf();
@@ -1216,7 +1228,10 @@ try {
           check(frameA.length > 0 && moved === frameA.length, "and each one is a different picture 500ms later",
             `${moved} of ${frameA.length} canvases moved, ${census}`);
           // A canvas nobody can see must not cost anything. The Hidden group is collapsed here.
-          const parkedFrames = async () => page.evaluate(() => Array.from(document.querySelectorAll("[data-roster-hidden] titan-mascot")).map((m) => m.snapshot().slice(-160)));
+          // The whole frame here too, for the same reason its sibling above uses it: comparing the tail
+          // of an encoded picture would pass this leg for a canvas that IS running, which is the
+          // opposite of what it is here to catch.
+          const parkedFrames = async () => page.evaluate(() => Array.from(document.querySelectorAll("[data-roster-hidden] titan-mascot")).map((m) => m.snapshot()));
           const parkedA = await parkedFrames();
           if (parkedA.length === 0) notReached("this box has no agent hidden from the sidebar", "a canvas inside the collapsed Hidden group is paused");
           else {
