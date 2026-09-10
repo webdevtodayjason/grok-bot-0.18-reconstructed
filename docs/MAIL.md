@@ -40,10 +40,17 @@ You need a Resend account and a domain you control.
    `email.received` event.
 4. **Copy the signing secret Resend shows you** (it starts with `whsec_`) and paste it into the
    card's "Webhook signing secret" field, then Save secret. Nothing is accepted without it.
-5. **Create the relay's key in Resend** with full access, and paste it into the card's "Resend API
-   key" field, then Save key. This is what reads the message back out of Resend after the webhook
-   fires, which is why it needs read access. **This key is the relay's and nobody else's.** Do not
-   put it in an agent's shell: it can read every message sent to your domain and make more keys.
+5. **Create the relay's key in Resend** with full access and paste it into the super admin console at
+   `api.titanium.bot/admin`, in the block called "Keys the product uses", under "Sending mail". This
+   is what reads the message back out of Resend after the webhook fires, which is why it needs read
+   access, and it is what every bot's outgoing mail is sent with. **This key is the product's and
+   nobody else's.** Do not put it in an agent's shell: it can read every message sent to your domain
+   and make more keys.
+
+   **This moved on 2026-09-10 (KEYS-1).** It used to be a field on the Email card in a customer's own
+   console. Jason, looking at that panel: *"A user is never going to put a resend key in. That's on
+   the backend."* Section 1a is the whole of what changed and what it means if you have not pasted
+   it yet.
 6. **Type your domain** into the card, pick who gets mail nobody else is named for, and Save.
    Turn **Receiving** on. Until you do, a signed message is answered and thrown away, which is
    what the card says on its own line.
@@ -66,6 +73,52 @@ is fixed at `https://api.resend.com` and is not a setting, because the stored ke
 request: a route that let a console session name the address would be a route that hands the key to
 whatever address it named. The one override is `GROK_BOT_MAIL_API_BASE` in the relay's own
 environment, which is how the gate and the tests point it at a stub.
+
+---
+
+## 1a. The sending key moved, and the signing secret did not (KEYS-1, 2026-09-10)
+
+Two secrets sit on the Email card and they look like the same kind of thing. They are not, and this
+wave moved exactly one of them.
+
+### The sending key is the operator's now
+
+It is a vendor credential the product uses on a customer's behalf, so it belongs to whoever pays the
+vendor. The super admin pastes it once at `api.titanium.bot/admin` under "Keys the product uses". It
+is proved with Resend before it is stored, stored write-only, and read by the one relay through
+`GET /v1/relay/keys` behind `CP_RELAY_TOKEN` — in memory, never written beside a state file, never
+pushed into a box. Every exec daemon in a customer's container runs as uid 0, so a key inside one is
+readable by that customer's own agents.
+
+**The customer's field is gone, and the door behind it is closed too.** Taking an input off a screen
+is not enough: `POST /mail/settings` used to accept `apiKey` from any signed-in session, so a customer
+with a browser console could still write one. It now answers `400 {"error":"not_yours"}` with the
+sentence *"Keys the product uses are set by your operator."* for every workspace but the operator's
+own. A 200 that silently dropped the field would be worse — the caller would believe it worked.
+
+### The migration is the fallback, and there is no migration code
+
+The relay prefers the control plane's value and falls back to **the directory owner's own file**.
+Nothing pushes a file value up: that would be a brand new write path for a secret and would undo
+write-only-from-the-console.
+
+Measured on the R750 on 2026-09-10: the operator's `/state/mail.json` is the only key-bearing file on
+the machine, no tenant has a `mail.json` at all, and the control plane's settings table holds nineteen
+rows and zero secrets. So the door starts empty, **mail keeps sending from the file it always sent
+from**, and pasting the key at the admin console is a migration with a single manual step and no
+window in which anything is broken. Do not write the push later; the fallback is the design.
+
+### The inbound signing secret STAYS on files, on purpose
+
+It looks like the third member of that set and it is not. It is not a vendor credential the relay
+fetches — it is a **routing discriminator**. When two workspaces claim one mail domain, the relay
+hands the message to the one whose signing secret verifies *this body* (section 4). One global value
+in front of every edge would make the first claimant able to read another customer's mail.
+
+So it stays on each workspace's own file, it stays an operator-only field on the operator's own Email
+card, and the claimants loop is never handed a control-plane value. `scripts/verify-keys.mjs` stands
+up two workspaces claiming one domain and proves the one holding the matching **file** secret is the
+one that gets the message.
 
 ---
 
@@ -366,6 +419,12 @@ Behind the console session (or the relay bearer), like every other console route
 Neither secret is ever in this shape. `apiKeySet` and `webhookSecretSet` are the whole answer about
 them.
 
+`apiKeySet` reports **effective** presence, not file presence: it is true when there is a key that
+would send, whether that is the operator's at the control plane or this workspace's own file. Reading
+the file alone would draw "not set" over a production workspace that has been sending mail all week,
+which is exactly what the first screenshot of a migrated instance would have shown. `webhookSecretSet`
+is file presence and stays that way, because the signing secret never moved (§1a).
+
 `sends` is MAIL-3 and it is that workspace's own sent ledger: `{at, agentId, agentName, code, to,
 subject, outcome, resendId}`, newest first, the same order `recent` is in. **Newest first matters
 to the person, not to the code**: the card paints the array as it arrives and the operator reads the
@@ -479,8 +538,22 @@ IGNORED rather than refused, and a test asserts it never appears in the body tha
    plane checks both caps and writes the row with outcome `sending`, answering its id. Over a cap →
    429 naming the number it hit and when the next one can go. **The control plane unreachable → 503
    and nothing is sent.**
-8. The Resend key is read from the **directory owner's** settings, never the caller's. An empty key
-   closes the row `no_key` and answers 503.
+8. The sending key is read from the **control plane first and the directory owner's own file second**
+   (§1a), never the caller's. Nothing at all closes the row `no_key` and answers 503 with the plain
+   sentence *"This console cannot send mail yet. Ask your operator to switch sending on."* — a bot
+   reads that aloud to a person, so it names the fact and who to ask and nothing a customer cannot
+   act on.
+
+   **Unless this relay could not see the control plane**, in which case the row closes
+   `key_unreachable` and the sentence is *"Mail is not working right now. Try again in a few minutes,
+   and tell your operator if it keeps happening."* Both conditions arrive here as the same empty
+   string and they are acted on by different people: nobody-pasted-one is a thing the operator does
+   once, and cannot-reach is broken and clears itself. A row reading `no_key` over the second sends
+   him to paste a key he already pasted. The reader only reports itself blind when there *is* a
+   control plane, a read was attempted, the last one did not get through, and nothing is cached from
+   one that did — so a relay holding a good copy of a control plane that has since gone down still
+   sends, and a control plane too old to have the route (404) is never blind, because its files are
+   the right home.
 9. `POST <apiBase>/emails` with the stored key. The address is the relay's own environment
    (`GROK_BOT_MAIL_API_BASE`, §1), never a request field, for the same reason it is fixed on the way
    in: the stored key travels on it.

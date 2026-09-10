@@ -545,6 +545,44 @@ makes it if it is not there yet, and says whether the record is being written an
 not. The failure also goes to the container log with the path in it, and it is retried on the next
 sign-in rather than remembered for the life of the process.
 
+#### Waking a phone, and Keys the product uses
+
+Two blocks at the foot of this panel, both **write-only paste forms** and both appended in script
+rather than written into `cp/admin/index.html`. The first is the two push credentials (PUSH-1). The
+second is KEYS-1, added 2026-09-10, and it is the reason no customer in this product ever sees a key
+field again. Jason, looking at a customer's settings panel that day: *"A user is never going to put a
+resend key in. That's on the backend."*
+
+| Row | What it is | Without it |
+|---|---|---|
+| Talking, xAI | the realtime key for the first voice service | pressing Talk on that service says voice is not switched on yet |
+| Talking, OpenAI | the realtime key for the second | the same, for a workspace set to that one |
+| Sending mail | the key every bot's outgoing mail is sent with | the relay keeps using the operator's own file (docs/MAIL.md §1a) |
+
+The rules, which are the same three the push forms and the repository token already live by, and are
+printed on the forms themselves:
+
+- **Proved before stored.** One cheap authenticated GET against the vendor, ten second timeout. A key
+  the vendor refuses is `409` and **nothing is written**. A vendor that cannot be reached is a refusal
+  too: storing a key that could not be checked is the same as not checking.
+- **Nothing ever comes back.** The answer, the change record row and the line on this page all carry a
+  length and eight hex characters of a sha256, which is the same string the record keeps for ever. The
+  field is cleared on the way **out**, so a failed request leaves nothing in it either. Every one of
+  the three names is in `SECRET_SETTINGS`, so `listSettings` hands back `""` with `redacted: true`.
+- **One reader, and it is not a box.** `GET /v1/relay/keys`, behind `CP_RELAY_TOKEN`, method
+  refusal first so a wrong method charges nobody. The relay holds them in memory, refreshes every five
+  minutes, keeps its last good copy through an outage, and never writes one beside a state file or
+  pushes one into a container — every exec daemon in a customer's box runs as uid 0, so a key inside
+  one is readable by that customer's own agents.
+
+**Vendor names are allowed on this block and nowhere a customer can read.** This is the operator's
+screen and he has to know which account a key came from.
+
+**The inbound mail signing secret is deliberately NOT here.** It is a routing discriminator rather
+than a vendor credential — when two workspaces claim one mail domain, the one whose secret verifies
+*this body* gets the message — so one global value would let the first claimant read another
+customer's mail. docs/MAIL.md §1a is the argument in full.
+
 ### Spend
 
 **Controls: nothing yet, and two things that should be here are still CLI lines**: revoking a

@@ -1416,7 +1416,7 @@ const USAGE = [
   "proxy mint is the only way the operator's own workspace gets a key, because an adopted row is never re-provisioned.",
   "mail list shows the address each bot answers at. A code is minted once and never reused; retire kills one for good.",
   "mail sweep goes through the relay, because the roster lives inside a box and only the relay can read one.",
-  "voice cap is the only way the minutes change. A customer's Voice card writes their realtime key and can never raise their own limit.",
+  "voice cap is the only way the minutes change. A customer chooses whether to talk and can never raise their own limit; the key the product talks with is pasted once at the admin console.",
   "voice usage reports wall clock, audio seconds and billable events separately and says which each is. One minutes column reconciles against neither provider's invoice.",
   "voice cap --vendors none switches voice off for one workspace in one word, and their talk button says so in plain words rather than failing.",
   "device list and device revoke go through the relay too: a device row lives in the tenant's state directory, not in this container.",
@@ -1838,9 +1838,11 @@ async function mailSends(args) {
 // opened the store would answer "nothing yet" over a live ledger and nothing would error.
 //
 // AND THE CAP IS HERE RATHER THAN IN A CUSTOMER'S CONSOLE, which is the whole reason these verbs
-// exist. A cap a customer can raise is not a cap. Their own Voice card writes the realtime KEY for
-// their workspace and nothing else; the minutes are admin_settings rows behind the operator bearer.
-// No route on this service lets a customer session touch one, and tests/cp-voice asserts it.
+// exist. A cap a customer can raise is not a cap. What a customer's own settings hold is whether
+// talking is on at all and which bot they talk to; the minutes are admin_settings rows behind the
+// operator bearer, and KEYS-1 put the KEY in the same place -- pasted once under "Keys the product
+// uses" at the admin console, never typed by a customer again. No route on this service lets a
+// customer session touch either, and tests/cp-voice asserts it.
 async function voicePolicy(args) {
   const slug = positional(args)[0] ?? "";
   if (slug.length === 0) die("node cp/cli.mjs voice policy <slug>");

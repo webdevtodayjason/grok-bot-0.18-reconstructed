@@ -286,7 +286,8 @@ CREATE TABLE IF NOT EXISTS mail_senders (
 -- it is, never any of the mail). The readable row with the subject on it belongs to the workspace,
 -- in its own mail-sent.jsonl on its own volume, read by its own console.
 --
--- outcome is "sending" from the moment the row is claimed, then "sent", "failed" or "no_key".
+-- outcome is "sending" from the moment the row is claimed, then "sent", "failed", "no_key" or
+-- "key_unreachable" (KEYS-1: the relay has a control plane and could not read the sending key).
 -- The claim comes BEFORE the mail goes: an unsent mail is recoverable and an unlogged send is not,
 -- so a crash in between leaves a row reading "sending", which counts toward the cap and reads as
 -- "we do not know", which is the safe direction.
@@ -425,7 +426,18 @@ export const FEEDBACK_FIELD_LIMIT = 256 * 1024;
 // pushed into a box (every exec daemon in a customer's container runs as uid 0, so a key inside one
 // is readable by that customer's own agents) -- so they go through the same door and come back out of
 // listSettings with no value at all.
-export const SECRET_SETTINGS = new Set(["github.token", "push.apns.key", "push.fcm.serviceAccount"]);
+// KEYS-1 adds the fourth, fifth and sixth, and they are the two vendor keys a CUSTOMER used to type
+// into their own console: the realtime voice key and the mail sending key. They are the operator's
+// now, held here and read only by the relay behind CP_RELAY_TOKEN, so they go in this set for the
+// same reason the three above are in it -- listSettings hands every value back wholesale and
+// cp/verification.mjs reads that list, so a name left out of here is a key in somebody's answer.
+// The names are cp/secrets.mjs's allowlist and are spelled out rather than imported: this module is
+// the store and importing a route module into it would invert the dependency. Its test asserts the
+// two lists are the same three names.
+export const SECRET_SETTINGS = new Set([
+  "github.token", "push.apns.key", "push.fcm.serviceAccount",
+  "keys.voice.xai", "keys.voice.openai", "keys.mail.send",
+]);
 
 const accountRow = (row) => (row == null ? null : {
   id: row.id,

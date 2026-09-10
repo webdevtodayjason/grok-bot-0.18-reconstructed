@@ -85,6 +85,9 @@ import "./relay-door.test.mjs";
 import "./auth-device.test.mjs";
 import "./relay-device-bearer.test.mjs";
 import "./relay-hooks-absent.test.mjs";
+// KEYS-1. The relay's copy of the keys the product uses: {} with no control plane, the last good
+// copy through an outage, and its own distinct sentence for a door that is not there.
+import "./relay-secrets-reader.test.mjs";
 import "./auto-review-enforcement.test.mjs";
 import "./relay-trusted-proxies.test.mjs";
 import "./relay-job-bus.test.mjs";
@@ -116,6 +119,9 @@ import "./cp-providers.test.mjs";
 import "./cp-provision.test.mjs";
 import "./cp-proxy.test.mjs";
 import "./cp-server.test.mjs";
+// KEYS-1. The key door: the paste is proved before it is stored, nothing reads a value back, and the
+// relay's own read refuses a wrong method before it looks at a credential.
+import "./cp-secrets-door.test.mjs";
 // ADMIN-2. Adding a client from the console, and the rule that holds it to the same refusals the
 // customer's own sign-up door gives.
 import "./cp-signup.test.mjs";

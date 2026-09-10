@@ -1193,7 +1193,7 @@ test("a provider with no key and no deployment comes off, and its catalog goes w
     // session does not go through it and its key is per workspace. tests/cp-voice.test.mjs asserts that
     // inertness; here they are just two more ids a removal must not disturb.
     assert.deepEqual(after.body.providers.map((row) => row.id).sort(),
-      ["minimax", "openai-realtime", "qwen", "xai-realtime", "zai"]);
+      ["minimax", "qwen", "zai"]);
 
     // And the change is on the record like every other change here.
     const record = store.listAdminActions({ limit: 10 }).find((row) => row.action === "provider.remove");
