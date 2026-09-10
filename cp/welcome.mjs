@@ -63,7 +63,7 @@ export const WELCOME_REPLY_TO_DEFAULT = "support@titaniumcomputing.com";
 export const PRODUCT_MAIL_ROUTE = "/mail/product";
 
 /**
- * The two shapes, and there is no third.
+ * The shapes, on two axes: does this mail carry a password, and does it promise a bot address.
  *
  * `link+password` is an invite: the button plus the console address and the temporary password on a
  * quiet second line, because there is NO customer-facing set-your-own-password door anywhere in the
@@ -71,8 +71,23 @@ export const PRODUCT_MAIL_ROUTE = "/mail/product";
  * missing door) and a link-only mail locks a customer out at hour 25 with the operator as the only
  * recovery. `link` is a Send again, where the original password is a scrypt hash nobody can ask back
  * and changing it would lock out a customer who has already signed in.
+ *
+ * The `-no-bot-mail` pair is the SAME mail with the "Your bots have their own email" section left
+ * out, for a workspace whose address sweep has not minted anything yet. It exists because of what
+ * the R750 did on 2026-09-10: the sweep answered 200 and minted nothing, so there was no address to
+ * name, and this file's refusal turned the welcome step red and sent the customer NOTHING -- no
+ * password, no link, no way in. The job's own rule is that an addresses amber stops nothing, and
+ * only a shape that can be honest without an address makes that rule true. A mail that says less is
+ * a mail; a mail that does not go is a customer locked out. The refusal below is kept for the two
+ * shapes that DO promise an address, so a caller naming one explicitly still cannot promise a thing
+ * that is not there.
  */
-export const WELCOME_SHAPES = new Set(["link+password", "link"]);
+export const WELCOME_SHAPES = new Set(["link+password", "link", "link+password-no-bot-mail", "link-no-bot-mail"]);
+
+/** Does this shape carry the temporary password. */
+export const shapeCarriesPassword = (shape) => String(shape ?? "").startsWith("link+password");
+/** Does this shape promise the customer a bot address, which is the thing that needs one to exist. */
+export const shapePromisesBotMail = (shape) => !String(shape ?? "").endsWith("-no-bot-mail");
 
 // ---- the refusals, word for word ---------------------------------------------------------------
 //
@@ -180,8 +195,12 @@ export function renderWelcome({
   const who = String(firstName ?? "").trim() || "there";
   const business = String(company ?? "").trim() || "your business";
   const consoleUrl = `https://${String(host ?? "").trim()}`;
-  const withPassword = shape === "link+password";
+  const withPassword = shapeCarriesPassword(shape);
   const password = withPassword ? String(temporaryPassword ?? "") : "";
+  // A mail that names no bot address says nothing about bot mail at all. It does not say "coming
+  // soon" and it does not leave a heading over an empty line: the customer learns about their bots'
+  // addresses on the Mail page inside the workspace, which is where they are anyway.
+  const withBotMail = shapePromisesBotMail(shape) && String(titanAddress ?? "").trim().length > 0;
 
   // ---- the plain text alternative, written by hand ---------------------------------------------
   //
@@ -210,10 +229,14 @@ export function renderWelcome({
     "Titan is the bot that leads the others. Say hello and tell him about your business. He will ask",
     "a few short questions, then show you what he can take off your hands. It takes about a minute.",
     "",
-    "Your bots have their own email",
-    `Every bot on your workspace has a real email address. Titan's is ${titanAddress}. Write to him`,
-    "from your own mail and he will answer. The rest are on the Mail page inside your workspace.",
-    "",
+    ...(withBotMail
+      ? [
+        "Your bots have their own email",
+        `Every bot on your workspace has a real email address. Titan's is ${titanAddress}. Write to him`,
+        "from your own mail and he will answer. The rest are on the Mail page inside your workspace.",
+        "",
+      ]
+      : []),
     "Need help?",
     `Write to ${supportAddress} and a person will answer.`,
     "",
@@ -234,6 +257,14 @@ export function renderWelcome({
     : `That button signs you in. It works for the next ${linkHours} hours and it is only for you, so please do not `
       + `forward this note. After that, go to <a href="${esc(consoleUrl)}" style="color:${INK};font-weight:bold;">${esc(host)}</a> `
       + "and sign in with the address this note was sent to.";
+
+  // The whole row comes out, heading included, when there is no address to name.
+  const botMail = withBotMail
+    ? `<tr><td class="pad" style="padding:20px 32px 0;">
+        <h2 class="ink" style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:22px;font-weight:bold;color:${INK};">Your bots have their own email</h2>
+        <p class="ink" style="margin:8px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:24px;color:${INK};">Every bot on your workspace has a real email address. Titan's is <a href="mailto:${esc(titanAddress)}" style="color:${INK};font-weight:bold;">${esc(titanAddress)}</a>. Write to him from your own mail and he will answer. The rest are on the Mail page inside your workspace.</p>
+      </td></tr>`
+    : "";
 
   const credentials = withPassword
     ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="panel" bgcolor="${CLOUD}" style="background:${CLOUD};border:1px solid ${LINE};border-radius:10px;margin-top:14px;">
@@ -299,10 +330,7 @@ export function renderWelcome({
         <h2 class="ink" style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:22px;font-weight:bold;color:${INK};">Meet Titan</h2>
         <p class="ink" style="margin:8px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:24px;color:${INK};">Titan is the bot that leads the others. Say hello and tell him about your business. He will ask a few short questions, then show you what he can take off your hands. It takes about a minute.</p>
       </td></tr>
-      <tr><td class="pad" style="padding:20px 32px 0;">
-        <h2 class="ink" style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:22px;font-weight:bold;color:${INK};">Your bots have their own email</h2>
-        <p class="ink" style="margin:8px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:24px;color:${INK};">Every bot on your workspace has a real email address. Titan's is <a href="mailto:${esc(titanAddress)}" style="color:${INK};font-weight:bold;">${esc(titanAddress)}</a>. Write to him from your own mail and he will answer. The rest are on the Mail page inside your workspace.</p>
-      </td></tr>
+      ${botMail}
       <tr><td class="pad" style="padding:20px 32px 0;">
         <h2 class="ink" style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:22px;font-weight:bold;color:${INK};">Need help?</h2>
         <p class="ink" style="margin:8px 0 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:24px;color:${INK};">Write to <a href="mailto:${esc(supportAddress)}" style="color:${INK};font-weight:bold;">${esc(supportAddress)}</a> and a person will answer.</p>
@@ -439,10 +467,12 @@ export function createWelcome({
     const link = String(signInUrl ?? "").trim();
     if (link.length === 0) return { ok: false, why: WELCOME_NO_LINK };
     const titan = oneAddress(titanAddress);
-    if (titan.length === 0) return { ok: false, why: WELCOME_NO_TITAN_ADDRESS };
-    // A 'link' shape carrying a password is a code path drifting, not a caller being helpful. It is
-    // refused rather than quietly dropped so the drift is found the first time it happens.
-    if (wanted === "link" && String(temporaryPassword ?? "").length > 0) {
+    // Only the shapes that PROMISE an address need one. A `-no-bot-mail` shape leaves the whole
+    // section out, so there is nothing to be wrong about, and the password still goes.
+    if (titan.length === 0 && shapePromisesBotMail(wanted)) return { ok: false, why: WELCOME_NO_TITAN_ADDRESS };
+    // A password-less shape carrying a password is a code path drifting, not a caller being helpful.
+    // It is refused rather than quietly dropped so the drift is found the first time it happens.
+    if (!shapeCarriesPassword(wanted) && String(temporaryPassword ?? "").length > 0) {
       return { ok: false, why: WELCOME_LINK_SHAPE_WITH_PASSWORD };
     }
     const mail = renderWelcome({
@@ -451,7 +481,7 @@ export function createWelcome({
       email,
       host: String(host ?? "").trim() || String(config?.consoleHost ?? "console.titanium.bot"),
       signInUrl: link,
-      temporaryPassword: wanted === "link+password" ? String(temporaryPassword ?? "") : "",
+      temporaryPassword: shapeCarriesPassword(wanted) ? String(temporaryPassword ?? "") : "",
       titanAddress: titan,
       supportAddress: String(support ?? "").trim() || supportAddress(),
       shape: wanted,
@@ -495,9 +525,14 @@ export function createWelcome({
 
     const row = tenant ?? store.getTenant(workspace);
     const person = account ?? (owner.length > 0 ? store.getAccountByEmail(owner) : null);
+    // THE SHAPE IS DERIVED FROM WHAT THERE ACTUALLY IS, unless the caller named one. The password
+    // axis comes from whether a password was handed in; the bot-mail axis from whether there is an
+    // address to name. A caller that names a shape gets exactly that shape and the refusals that go
+    // with it, which is what keeps "promise an address that exists" enforceable.
     const wanted = WELCOME_SHAPES.has(shape)
       ? shape
-      : (String(temporaryPassword ?? "").length > 0 ? "link+password" : "link");
+      : `${String(temporaryPassword ?? "").length > 0 ? "link+password" : "link"}`
+        + `${oneAddress(titanAddress).length === 0 ? "-no-bot-mail" : ""}`;
 
     const link = mintSignInLink({ account: person, tenant: row, at });
     if (!link.ok) return { ok: false, sent: false, shape: wanted, to: one, override, why: link.why };
@@ -522,10 +557,17 @@ export function createWelcome({
       html: mail.html,
       text: mail.text,
       replyTo: supportAddress(),
+      // The key is stamped BEFORE the send, on purpose: two presses inside the same window have to
+      // collide on it, so it cannot move with the provider's answer.
       idempotencyKey: welcomeIdempotencyKey({ slug: workspace, to: one, at }),
     });
 
-    const when = new Date(at).toISOString();
+    // THE ROW'S TIME IS WHEN THE PROVIDER ANSWERED and not when this function started. The R750 run
+    // on 2026-09-10 stamped 21:40:45.880Z while the relay's own line for the same send reads
+    // 21:40:46.194Z: 313 ms of render and one HTTP round trip, reported as the moment the mail left.
+    // A time on a receipt that predates the thing it is a receipt for is the kind of number nobody
+    // notices until they are matching it against a provider's log.
+    const when = new Date(now()).toISOString();
     if (!answer.ok) {
       // The PROVIDER'S OWN WORDS go in the row's detail, because an operator reading this table
       // wants them. They are a status and a sentence the relay wrote, never a body and never the
@@ -575,8 +617,11 @@ export function createWelcome({
       // Blanked rather than omitted, so the preview has the same shape, the same line count and the
       // same contrast as the real thing.
       signInUrl: "https://console.titanium.bot/login?sso=REDACTED",
-      temporaryPassword: shape === "link+password" ? "REDACTED" : "",
-      titanAddress: oneAddress(titanAddress) || "agent000000@myagents.email",
+      temporaryPassword: shapeCarriesPassword(shape) ? "REDACTED" : "",
+      // A preview of a shape that promises an address shows one, so the section is on the screen
+      // with the right line count. A `-no-bot-mail` preview shows the mail with that section out,
+      // which is the point of looking at it.
+      titanAddress: shapePromisesBotMail(shape) ? (oneAddress(titanAddress) || "agent000000@myagents.email") : "",
       supportAddress: supportAddress(),
       shape: WELCOME_SHAPES.has(shape) ? shape : "link+password",
     });

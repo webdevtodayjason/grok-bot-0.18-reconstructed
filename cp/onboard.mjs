@@ -645,11 +645,17 @@ export function createOnboarding(options = {}) {
     }
     const done = first.body?.done === true;
 
+    // THE MODEL FIELDS ARE CARRIED ONTO THIS ROW on purpose. foldSteps folds the plan-model row into
+    // this one the moment it exists, and store.deleteTenant wipes both at Remove, so without this the
+    // only record of WHICH model a box got -- and of whether the first push was refused -- is gone by
+    // the time anybody reads the run. `asked` is the alias the invite sent, `model` and `label` are
+    // what the box READ BACK, and `pushes` above one is the retry having done something.
     step(slug, LEDGER.titan, done ? "amber" : "ok", {
       agents: agents.length,
       titanId: String(titan?.id ?? ""),
       titanName: String(titan?.name ?? ""),
       onboardingDone: done,
+      asked: plan.planModel, applied: applied === true, pushes,
       model, label,
       ...(titan == null ? { why: "no bot on that box is called Titan, so the welcome cannot introduce him by name" } : {}),
       ...(done ? { why: "this box's first run is already spent, so the customer will not get the introduction", next: "Send the welcome anyway if this is a box that was already in use." } : {}),
@@ -681,6 +687,17 @@ export function createOnboarding(options = {}) {
       // and does the fleet, which is today's behaviour and is not wrong, only expensive.
       const answer = await askRelayPost("/mail/sweep", { slug });
       if (!answer.ok) why = String(answer.why ?? "the relay did not answer the sweep");
+      else {
+        // THE TWO FAILURES READ DIFFERENTLY, and the one that happened on the R750 at 19:31Z used to
+        // read as the one that had not. A relay that will not answer is a relay to go and look at; a
+        // sweep that answers 200 and mints nothing is a ROSTER with nothing to mint, which is a
+        // different morning's work. Before this, the amber said "the sweep has not run yet" after
+        // sixty successful sweeps.
+        const swept = Array.isArray(answer.body?.swept) ? answer.body.swept : [];
+        const mine = swept.find((one) => String(one?.slug ?? "") === slug) ?? swept[0] ?? null;
+        why = `the sweep ran ${tries} time(s) and this workspace's directory still holds no live address`
+          + ` (last answer: ${Number(mine?.minted ?? 0)} minted, ${Number(mine?.addresses ?? 0)} held)`;
+      }
 
       // THE 200 IS NOT THE SIGNAL. A sweep can answer cheerfully green over a workspace it never
       // named. What counts is this control plane's own directory holding a live row for this slug.
@@ -711,6 +728,20 @@ export function createOnboarding(options = {}) {
       return { ok: true, status: "amber", step: LEDGER.welcome, skipped: true };
     }
     step(slug, LEDGER.welcome, "running", { why: "the welcome is being sent" });
+
+    // THE LEDGER, NOT THE RECORD IN HAND. Every caller gets Titan's address from the row step 4 wrote,
+    // which is what makes Retry and Send again work: retry() builds a bare record with no address on
+    // it, so a welcome that failed for a transient reason -- the mail door 500s, the provider refuses
+    // once -- used to fail again on every press, with the card telling the operator to run a sweep
+    // that was already green. Seeded here and not in the three callers, because the one that was
+    // missing it is the one an operator presses when something has gone wrong.
+    const ledger = store.listSteps(slug);
+    if (String(record.titanAddress ?? "").length === 0) {
+      record.titanAddress = String(parse(lastOf(ledger, LEDGER.addresses)?.detail)?.titanAddress ?? "");
+    }
+    if (String(record.titanId ?? "").length === 0) {
+      record.titanId = String(parse(lastOf(ledger, LEDGER.titan)?.detail)?.titanId ?? "");
+    }
 
     let sender = deps.welcome ?? null;
     if (sender == null) {
@@ -833,7 +864,12 @@ export function createOnboarding(options = {}) {
   //              and the welcome must never wait on one: it carries the temporary password, and a
   //              customer whose mail was held back by a model setting has no way in at all.
   //   addresses  STOPS NOTHING. Without Titan's address the welcome says a little less and still
-  //              carries the password and the sign-in link, which is the part that cannot wait.
+  //              carries the password and the sign-in link, which is the part that cannot wait. That
+  //              is a PROPERTY OF THE SENDER and not a hope about it: cp/welcome.mjs has a
+  //              `-no-bot-mail` shape that leaves the bot-address section out, and the shape is
+  //              derived from whether there is an address, so the mail goes with nothing promised
+  //              that is not there. The first version of this rule was written without that shape and
+  //              the real sender refused the send outright; only a stub accepted it.
   //
   // The card stays honest either way. foldSteps counts ANY amber as a stop and `done` needs all five
   // green, so a titan amber with a green welcome draws an amber card with Retry on it, which is
@@ -926,15 +962,14 @@ export function createOnboarding(options = {}) {
       const key = String(slug ?? "");
       if (store.getTenant(key) == null) return null;
       const plan = storedPlan(key);
-      const rows = store.listSteps(key);
+      // Titan's address and id are NOT seeded here. sendWelcome reads them off the ledger for every
+      // caller, so this one and retry() and start() all behave the same way.
       const record = {
         jobId: plan.jobId,
         slug: key,
         plan: { ...plan, sendWelcome: true, welcomeTo: String(to ?? "").trim().toLowerCase() || plan.welcomeTo, actor: actor || plan.actor },
         startedAt: now(),
         temporaryPassword: String(temporaryPassword ?? ""),
-        titanAddress: String(parse(lastOf(rows, LEDGER.addresses)?.detail)?.titanAddress ?? ""),
-        titanId: String(parse(lastOf(rows, LEDGER.titan)?.detail)?.titanId ?? ""),
       };
       const verdict = await sendWelcome(record, { force: true });
       return { ...verdict, signIn: record.signIn ?? "", steps: state(key).steps };

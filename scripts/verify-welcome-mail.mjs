@@ -25,7 +25,7 @@ import { createRequire } from "node:module";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { WELCOME_REPLY_TO_DEFAULT, renderWelcome } from "../cp/welcome.mjs";
+import { WELCOME_REPLY_TO_DEFAULT, renderWelcome, shapeCarriesPassword, shapePromisesBotMail } from "../cp/welcome.mjs";
 
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(`--${name}`);
@@ -62,8 +62,10 @@ const check = (ok, label, detail = "") => {
 };
 const info = (line) => console.log(`  INFO  ${line}`);
 
-// The two shapes that ship, with the same values the R750 measurement will use so the pictures this
-// saves are the pictures of the real thing.
+// The shapes that ship, with the same values the R750 measurement will use so the pictures this
+// saves are the pictures of the real thing. The third is the invite for a workspace whose address
+// sweep has minted nothing yet: the same mail with the bot-address section left out, which has to
+// hold its contrast and keep its shape with a whole row missing.
 const SHAPES = [
   ["invite", {
     firstName: "Jane",
@@ -87,6 +89,17 @@ const SHAPES = [
     titanAddress: "agent247758@myagents.email",
     supportAddress: WELCOME_REPLY_TO_DEFAULT,
     shape: "link",
+  }],
+  ["invite-no-bot-mail", {
+    firstName: "Jane",
+    company: "Acme Roofing",
+    email: "jane@acmeroofing.com",
+    host: "console.titanium.bot",
+    signInUrl: "https://console.titanium.bot/login?sso=v1.eyJzdWIiOiJhY2NvdW50In0.signature",
+    temporaryPassword: "k3Rr8xQ2mD7vLpNf4sZt9bWy",
+    titanAddress: "",
+    supportAddress: WELCOME_REPLY_TO_DEFAULT,
+    shape: "link+password-no-bot-mail",
   }],
 ];
 
@@ -190,7 +203,14 @@ async function main() {
 
       // The words, held here as well as in the unit tests, because this gate is the one that runs in
       // front of a person about to press send on a real customer's mail.
-      const hasPassword = options.shape === "link+password";
+      const hasPassword = shapeCarriesPassword(options.shape);
+      const hasBotMail = shapePromisesBotMail(options.shape);
+      check(mail.html.includes("Your bots have their own email") === hasBotMail,
+        `${name}: the bot-address section is ${hasBotMail ? "present" : "absent"}`);
+      check(mail.text.includes("Your bots have their own email") === hasBotMail,
+        `${name}: and the plain text agrees`);
+      check(mail.html.includes("myagents.email") === hasBotMail,
+        `${name}: ${hasBotMail ? "an address is named" : "no address is named, because there is none"}`);
       check(mail.html.includes("Temporary password") === hasPassword,
         `${name}: the password line is ${hasPassword ? "present" : "absent"}`);
       check(mail.text.includes("Temporary password") === hasPassword,
@@ -261,7 +281,7 @@ async function main() {
   console.log("");
   console.log(`  ${saved.length} screenshot(s) in ${SHOTS}`);
   for (const file of saved) console.log(`    ${file}`);
-  check(saved.length === 4, "four pictures: two shapes in two schemes", `${saved.length} saved`);
+  check(saved.length === SHAPES.length * 2, "a picture of every shape in both schemes", `${saved.length} saved`);
   console.log("");
   console.log(`verify-welcome-mail: ${passes} passed, ${failures} failed`);
   process.exit(failures === 0 ? 0 : 1);

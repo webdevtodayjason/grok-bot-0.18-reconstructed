@@ -484,7 +484,7 @@ test("a sweep that is already running is retried, and green waits for a live row
   } finally { await box.close(); await relay.close(); }
 });
 
-test("a sweep that never mints an address leaves the step amber, and the welcome still goes", async () => {
+test("a sweep that never mints an address leaves the step amber, says what the sweep did, and the sequence carries on", async () => {
   const box = await startStubBox({ answers: freshBoxAnswers });
   const relay = await startStubRelay();
   const welcome = stubWelcome();
@@ -498,8 +498,16 @@ test("a sweep that never mints an address leaves the step amber, and the welcome
       const state = sequence.state("acme");
       assert.equal(state.steps[3].state, "amber");
       assert.equal(state.steps[3].next, ADDRESSES_NONE);
-      // Without Titan's address the welcome says a little less. It still carries the temporary
-      // password and the sign-in link, which is the part that cannot wait for a sweep.
+      // THE SENTENCE DISTINGUISHES THE TWO FAILURES. A sweep that answered and minted nothing is a
+      // roster with nothing to mint; it is not "the sweep has not run yet", which is what this said
+      // after sixty successful sweeps on the R750.
+      assert.match(String(state.steps[3].why), /the sweep ran \d+ time\(s\)/);
+      assert.match(String(state.steps[3].why), /still holds no live address/);
+      assert.equal(/has not run yet/.test(String(state.steps[3].why)), false);
+      // The welcome runs anyway, and it is asked for with no address on it. WHAT THE REAL SENDER DOES
+      // with that is not this file's business and is not provable here: a double accepts whatever it
+      // is handed. tests/onboard-seam.test.mjs drives the real cp/welcome.mjs over the same sweep and
+      // is the test that one mail actually leaves, in the reduced shape.
       assert.equal(welcome.sends.length, 1);
       assert.equal(String(welcome.sends[0].titanAddress ?? ""), "");
       assert.equal(state.steps[4].state, "ok");

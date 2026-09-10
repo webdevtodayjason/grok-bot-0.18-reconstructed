@@ -58,10 +58,12 @@ const freshBox = { listAgents: [TITAN], getOnboardingState: { done: false, maxAg
  * what matters here is that step 4's green is a DIRECTORY READ in the control plane's own process
  * and not this route's 200, exactly as the design says.
  */
-async function startSeamRelay({ store, domain = "myagents.email", containers = new Map(), onHost = null } = {}) {
+async function startSeamRelay({ store, domain = "myagents.email", containers = new Map(), onHost = null, mintsNothing = false, failMailTimes = 0 } = {}) {
   const calls = [];
   const mail = [];
-  const state = { modelLabel: "", purgeRefusal: null, sweepBusy: 0, data: new Map(), registryLag: 0 };
+  // `mintsNothing` is what the R750 did at 19:31Z on 2026-09-10: the sweep answers 200, cheerfully,
+  // over a workspace whose roster it minted nothing for. `failMail` is a provider refusing once.
+  const state = { modelLabel: "", purgeRefusal: null, sweepBusy: 0, data: new Map(), registryLag: 0, failMail: Number(failMailTimes) };
   const token = `seam-relay-${randomBytes(8).toString("hex")}`;
   // A real directory, because the purge door below is the REAL ui/purge-edge.mjs route and it
   // realpaths its tenant root before it will touch anything under it.
@@ -109,12 +111,14 @@ async function startSeamRelay({ store, domain = "myagents.email", containers = n
         if (state.sweepBusy > 0) { state.sweepBusy -= 1; return send(503, { ok: false, error: "sweep_running", message: "a sweep is already running" }); }
         const slug = String(body?.slug ?? "");
         if (slug.length === 0) return send(200, { ok: true, swept: [], scope: "fleet" });
+        if (mintsNothing) return send(200, { ok: true, asked: slug, scope: "one", swept: [{ slug, addresses: 0, minted: 0, retired: 0 }] });
         // What the real relay causes to happen, by the route named above.
         const row = store.mintMailCode({ tenant: slug, agentId: TITAN.id, agentName: TITAN.name, domain });
         return send(200, { ok: true, asked: slug, scope: "one", swept: [{ slug, addresses: row == null ? 0 : 1, minted: row == null ? 0 : 1, retired: 0 }] });
       }
 
       if (url.pathname === "/mail/product") {
+        if (state.failMail > 0) { state.failMail -= 1; return send(500, { ok: false, error: "provider_down", message: "the provider refused" }); }
         const id = `resend-${randomBytes(8).toString("hex")}`;
         mail.push({ ...body, id });
         // THE RELAY DECIDES THE FROM. A caller that could name one is a caller that will one day
@@ -344,4 +348,115 @@ test("the real removal library, driven by the real admin route, runs its effects
       "a removal must stay inside its own workspace");
     void built;
   } finally { await plane.dispose(); await relay.close(); await coolify.close(); }
+});
+
+// ---- the two cases the R750 actually produced, against the real sender ---------------------------
+//
+// WHY THESE ARE HERE AND NOT IN tests/cp-onboard.test.mjs. That file drives a stubWelcome, and a
+// double accepts whatever it is handed, so it proved the sequence ASKED for a welcome with no address
+// on it while the real cp/welcome.mjs refused that exact request and mailed nobody. Same doubles
+// failure as the join this file was written for, one layer in.
+
+test("a sweep that mints nothing still gets the customer their password, in a mail that promises no address", async () => {
+  const box = await startStubBox({ answers: freshBox });
+  const coolify = await startFakeCoolify();
+  let relay = null;
+  let plane = null;
+  try {
+    const holder = { store: null };
+    relay = await startSeamRelay({ store: { mintMailCode: (asked) => holder.store.mintMailCode(asked) }, mintsNothing: true });
+    plane = await startAdminOnly({ relay, coolify, probeImpl: probeThrough(box) });
+    holder.store = plane.store;
+
+    const added = await plane.request("POST", "/v1/admin/clients", {
+      body: {
+        name: "Jane Roofer", email: "jane@acmeroofing.com", company: "Acme Roofing",
+        planModel: "plan-zai", ceiling: 40, sendWelcome: true, welcomeTo: "operator@titaniumcomputing.com",
+      },
+    });
+    assert.equal(added.status, 202, added.text);
+    const password = String(added.body.temporaryPassword ?? "");
+    await plane.admin.onboarding.settle("acme-roofing");
+
+    const state = await plane.request("GET", "/v1/admin/clients/acme-roofing/onboarding");
+    const steps = state.body.steps;
+    // The addresses step is amber and says what the sweep did, which is the operator's one job here.
+    assert.equal(steps[3].state, "amber", JSON.stringify(steps[3]));
+    assert.match(String(steps[3].why), /still holds no live address/);
+    // AND THE WELCOME WENT. This is the assertion the wave's own rule claims and a stub cannot make.
+    assert.equal(steps[4].state, "ok", `the welcome did not go: ${JSON.stringify(steps[4])}`);
+    assert.equal(relay.mail.length, 1, `expected one product mail, got ${relay.mail.length}`);
+
+    const sent = relay.mail[0];
+    assert.equal(sent.to, "operator@titaniumcomputing.com");
+    // The password and the link are in it. Those are the parts that cannot wait for a sweep: there is
+    // no customer-facing set-a-password door, so a customer who gets neither has no way in at all.
+    assert.equal(sent.html.includes(password), true, "the temporary password ships in the mail");
+    assert.match(sent.html, /\/login\?sso=/);
+    // And nothing in it promises a bot address.
+    assert.equal(sent.html.includes("Your bots have their own email"), false, "no heading over an empty line");
+    assert.equal(sent.text.includes("Your bots have their own email"), false);
+    assert.equal(sent.html.includes("myagents.email"), false, "and no address anywhere in it");
+
+    // The row and the card both say WHICH shape went, so the panel does not read as the full mail.
+    const rows = await plane.request("GET", "/v1/admin/clients/acme-roofing/welcome");
+    assert.equal(rows.body.rows[0].shape, "link+password-no-bot-mail");
+    assert.equal(String(steps[4].detail?.shape ?? ""), "link+password-no-bot-mail");
+  } finally {
+    if (plane != null) await plane.dispose();
+    if (relay != null) await relay.close();
+    await coolify.close();
+    await box.close();
+  }
+});
+
+test("a welcome the provider refused once goes on the next press, with the address read back off the ledger", async () => {
+  const box = await startStubBox({ answers: freshBox });
+  const coolify = await startFakeCoolify();
+  let relay = null;
+  let plane = null;
+  try {
+    const holder = { store: null };
+    relay = await startSeamRelay({ store: { mintMailCode: (asked) => holder.store.mintMailCode(asked) }, failMailTimes: 1 });
+    plane = await startAdminOnly({ relay, coolify, probeImpl: probeThrough(box) });
+    holder.store = plane.store;
+
+    const added = await plane.request("POST", "/v1/admin/clients", {
+      body: {
+        name: "Jane Roofer", email: "jane@acmeroofing.com", company: "Acme Roofing",
+        planModel: "plan-zai", ceiling: 40, sendWelcome: true, welcomeTo: "operator@titaniumcomputing.com",
+      },
+    });
+    assert.equal(added.status, 202, added.text);
+    await plane.admin.onboarding.settle("acme-roofing");
+
+    let state = await plane.request("GET", "/v1/admin/clients/acme-roofing/onboarding");
+    assert.equal(state.body.steps[3].state, "ok", "the sweep minted, so step 4 is green");
+    assert.equal(state.body.steps[4].state, "failed", JSON.stringify(state.body.steps[4]));
+    assert.match(String(state.body.steps[4].why), /provider refused/);
+    assert.equal(relay.mail.length, 0);
+
+    // RETRY, which is the button on the card. It builds a record with no Titan address on it, so
+    // before this wave every press failed with "Titan has no email address yet. Run the address
+    // sweep" -- telling the operator to run a sweep that was already green, for ever.
+    const retried = await plane.request("POST", "/v1/admin/clients/acme-roofing/onboard", { body: {} });
+    assert.equal(retried.status, 202, retried.text);
+    await plane.admin.onboarding.settle("acme-roofing");
+
+    state = await plane.request("GET", "/v1/admin/clients/acme-roofing/onboarding");
+    assert.equal(state.body.steps[4].state, "ok", `the retry did not send: ${JSON.stringify(state.body.steps[4])}`);
+    assert.equal(state.body.done, true, JSON.stringify(state.body.steps));
+    assert.equal(relay.mail.length, 1, "exactly one mail left, on the second press and not the first");
+
+    // The full mail, because the directory holds the address the first attempt never got to use.
+    const titan = plane.store.listMailAddresses("acme-roofing").find((row) => row.agentId === TITAN.id);
+    assert.equal(relay.mail[0].html.includes(titan.address), true, "the retry names Titan's own address");
+    const rows = await plane.request("GET", "/v1/admin/clients/acme-roofing/welcome");
+    assert.deepEqual(rows.body.rows.map((one) => one.outcome).sort(), ["failed", "sent"]);
+  } finally {
+    if (plane != null) await plane.dispose();
+    if (relay != null) await relay.close();
+    await coolify.close();
+    await box.close();
+  }
 });

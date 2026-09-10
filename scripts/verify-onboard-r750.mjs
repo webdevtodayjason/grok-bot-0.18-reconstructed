@@ -217,6 +217,35 @@ try {
   say(`  the ledger's own timestamps: ${clock.join(" | ")}`);
   await shoot("card-done");
 
+  // ---- 3b. WHICH model the box got, off the row rather than off a green tick -------------------
+  //
+  // A green Waking Titan means the box's own settings file named SOMETHING (ui/server.mjs
+  // reportRunning reads SAND_OPENAI_COMPATIBLE_MODEL out of it), and that is worth having. It does
+  // not say which model, or whether the push that put it there was the first one. Both are on the
+  // titan row now and this is the only place they can be read: store.deleteTenant wipes the whole
+  // ledger at Remove, so a run that does not print them leaves no record of the model the box got.
+  //
+  // This gate does NOT try to make Titan answer. onboarding-state.ts marks a box done FOR EVER on
+  // the first prompted read, so a smoke turn here would spend the customer's own first-run
+  // interview. What the box runs on is a setting that can be read; an answer is not.
+  const titanStep = (state?.steps ?? []).find((row) => row.key === "titan") ?? null;
+  const titanDetail = titanStep?.detail ?? {};
+  const askedModel = String(titanDetail.asked ?? "");
+  const gotModel = String(titanDetail.model ?? "");
+  const gotLabel = String(titanDetail.label ?? "");
+  const pushes = Number(titanDetail.pushes ?? 0);
+  say(`  what the box runs on: asked ${askedModel || "nothing"} | it read back ${gotModel || "nothing"}`
+    + ` (${gotLabel || "no label"}) | applied ${String(titanDetail.applied)} | ${pushes} push(es)`);
+  check(gotModel.length > 0 && gotLabel.length > 0,
+    "the box read its own model back, so Titan has one to answer on",
+    `${gotModel || "nothing"} / ${gotLabel || "no label"}`);
+  check(askedModel.length > 0 && askedModel === chosenModel,
+    "and it is the model the invite sent and not some leftover", `asked ${askedModel}, the form sent ${chosenModel}`);
+  check(titanDetail.applied === true, "and the push the relay took is the one that set it", String(titanDetail.applied));
+  // Two pushes is the retry having earned its keep: the first was refused and a later one landed.
+  // One is a relay that took it first time, which is also right. Printed rather than asserted.
+  say(`  the plan model took ${pushes} push(es) to land${pushes > 1 ? ", so the first was refused and a later one landed" : ""}`);
+
   // ---- 4. the welcome, and the link it carried -------------------------------------------------
   step("the welcome mail");
   const sends = await api("GET", `/v1/admin/clients/${encodeURIComponent(SLUG)}/welcome`);
@@ -247,12 +276,26 @@ try {
   await theirs.goto(signInUrl, { waitUntil: "domcontentloaded", timeout: 90_000 });
   await theirs.waitForTimeout(5_000);
   const landedUrl = String(theirs.url());
-  check(!/\/login\b/.test(landedUrl) || /sso=/.test(landedUrl) === false,
+  // THE PATHNAME, not a disjunction. The old condition was true whenever the URL carried no `sso=`,
+  // which is exactly what a bare /login is, so the one case this leg exists to catch -- the customer
+  // dumped back at a password box -- passed it.
+  const landedPath = (() => { try { return new URL(landedUrl).pathname; } catch { return landedUrl; } })();
+  check(!/^\/login\/?$/.test(landedPath),
     "the link lands them signed in rather than back at a password box", redact(landedUrl).replace(/sso=[^&]*/, "sso=REDACTED"));
+  // AND A SESSION EXISTS, which is the positive half. The relay sets gb_session on the sso landing
+  // (ui/server.mjs), so its presence on this context is the link having been accepted rather than the
+  // page merely having rendered. The value is a bearer and is never read, printed or saved.
+  const theirCookies = await fresh.cookies().catch(() => []);
+  const hasSession = theirCookies.some((one) => String(one.name) === "gb_session");
+  check(hasSession, "and the relay gave them a real session rather than a page that only looks signed in",
+    hasSession ? "gb_session is set, and its value is not printed" : "no gb_session cookie");
   await shoot("customer-first-screen", theirs);
 
-  // Titan's first message, read off the screen and not out of a gateway call: a getOnboardingState
-  // answering done:false proves the box is ARMED, not that a human saw anything.
+  // WHAT IS ON THE SCREEN, and nothing more. This reads the first-run dialog's own copy, which the
+  // console draws from ui/machine-room/app.js whether or not any model exists, so it is evidence the
+  // customer's first screen is the introduction and NOT evidence that Titan answered anything. The
+  // model is proved in 3b off the box's own settings; an answer is not proved anywhere, because
+  // prompting this box would spend the customer's first-run interview for ever.
   const dialog = await theirs.locator("#onboarding-dialog").count().catch(() => 0);
   check(dialog > 0, "the first-run dialog is on their screen", `${dialog} dialog(s)`);
   let titanSaid = "";
@@ -264,8 +307,8 @@ try {
     if (titanSaid.trim().length > 40) break;
     await theirs.waitForTimeout(3_000);
   }
-  check(titanSaid.trim().length > 40, "and Titan has said something on it", titanSaid.replace(/\s+/g, " ").slice(0, 220));
-  say(`  TITAN'S FIRST MESSAGE, as a person reads it:\n    ${titanSaid.replace(/\s+/g, " ").slice(0, 600)}`);
+  check(titanSaid.trim().length > 40, "and it carries the introduction the customer reads", titanSaid.replace(/\s+/g, " ").slice(0, 220));
+  say(`  THE FIRST-RUN DIALOG, as a person reads it (the product's own copy, not an answer from a model):\n    ${titanSaid.replace(/\s+/g, " ").slice(0, 600)}`);
   await shoot("customer-titan-first-message", theirs);
   check(theirErrors.length === 0, "their first screen threw nothing", theirErrors.slice(0, 2).join(" | "));
   await fresh.close();
@@ -276,9 +319,16 @@ try {
   const addresses = directory.body?.rows ?? [];
   const titan = addresses.find((one) => String(one.agentName ?? "").toLowerCase() === "titan") ?? addresses[0] ?? null;
   check(titan != null && String(titan.state) === "active", "Titan holds a live address in the directory", String(titan?.address ?? "none"));
-  // The same address the mail named, or the customer writes to a bot that is not there.
-  check(titan != null && String(row?.detail ?? "").length >= 0 && addresses.length > 0,
-    "and the workspace has at least one bot address", `${addresses.length} address(es) on ${String(directory.body?.domain ?? "")}`);
+  check(addresses.length > 0, "and the workspace has at least one bot address", `${addresses.length} address(es) on ${String(directory.body?.domain ?? "")}`);
+  // THE SAME ADDRESS THE MAIL NAMED, or the customer writes to a bot that is not there. The mail's
+  // body is deliberately stored nowhere, so the addresses step's own row is the only honest record of
+  // what went in it -- the sender is handed that field and no other. The old version of this leg read
+  // the welcome row's detail, which holds the reply-to note and never an address, through a condition
+  // (`.length >= 0`) that is true of every string there is.
+  const addressStep = (state?.steps ?? []).find((one) => one.key === "addresses") ?? null;
+  const namedInMail = String(addressStep?.detail?.titanAddress ?? "");
+  check(namedInMail.length > 0 && namedInMail === String(titan?.address ?? ""),
+    "and it is the address the welcome named", `the mail named ${namedInMail || "nothing"}, the directory holds ${String(titan?.address ?? "none")}`);
 
   // ---- 7. Remove, with the data -----------------------------------------------------------------
   step("Remove, and the proof that it is gone");

@@ -600,6 +600,13 @@ chain, so both remaining steps read `waiting` for ever).
 | **Waking Titan** | the addresses sweep **and** the welcome | the sweep needs the box up and a roster; the welcome needs an owner row, a host and a sender. Neither needs a model, and **the welcome must never wait on one**: it carries the temporary password, and a customer whose mail was held back by a model setting has no way in at all |
 | **Giving the agents their addresses** | the welcome | without Titan's address the mail says a little less and still carries the password and the sign-in link |
 
+That last row is a property of the sender and not a hope about it. `cp/welcome.mjs` has a
+**`-no-bot-mail`** pair of shapes that leave the "Your bots have their own email" section out whole,
+heading included, and `send()` derives the shape from whether there is an address to name, so a
+workspace whose sweep minted nothing gets the mail rather than a refusal. The first version of this
+rule was written without that shape: the real sender refused the send, the welcome step went red, and
+zero mails left. Only the test double accepted it.
+
 The card stays honest either way: any amber is still a stop, `done` needs all five green, and a titan
 amber with a green welcome draws an amber card with Retry on it. Something needs a look, and the
 customer was not left in the dark while it waits.
@@ -730,7 +737,14 @@ row with **Send again** beside it.
 **Send again** mints a fresh link and leaves the password alone, because the original is a scrypt hash
 nobody can ask back and changing it would lock out a customer who has already signed in. A tick **with
 a new password** calls the existing reset-password and includes it. The row's `shape` column records
-which of `link` or `link+password` went out.
+which of the four shapes went out: `link+password` or `link` on the password axis, each with a
+`-no-bot-mail` form for a workspace with no bot address to name yet.
+
+The row's `at` is stamped **after the provider answers**, not before the send: the first measured run
+stamped 21:40:45.880Z for a mail the relay logged leaving at 21:40:46.194Z, and a receipt that predates
+the thing it is a receipt for is a number nobody notices until they are matching it against a
+provider's log. The idempotency key below keeps the pre-send instant, because two presses inside the
+window have to collide on it.
 
 **Idempotency key** `welcome:<slug>:<sha256(to) first 16>:<yyyymmddhh>`, so a double press inside the
 hour cannot mail a real human twice. `ui/mail-edge.mjs:1041` `resendSend` already carries the header and

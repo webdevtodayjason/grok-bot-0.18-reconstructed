@@ -710,3 +710,76 @@ test("no mail DIRECTORY verb opens the store, and the welcome setting verb says 
   assert.equal(section.includes("function mailWelcomeReplyTo"), false, "the welcome setting verb is not a directory verb and must not sit in that section");
   assert.ok(cli.includes("mail welcome-reply-to runs in the control plane container"), "the help text must say where this verb runs");
 });
+
+// ---- the stop effect, when Coolify's record of the state is wrong --------------------------------
+//
+// MEASURED ON THE R750 2026-09-10 at 21:41Z: Coolify answered 400 "Service is already stopped" for a
+// service it had started itself through its own POST /services/{uuid}/start, for a box that had
+// answered /health and signed the customer in sixteen seconds earlier. The removal's end state was
+// right, and the operator was shown a non-green stop on a perfectly good removal -- which teaches
+// them to ignore a non-green effect. So the host is asked instead of Coolify being argued with.
+
+/** A Coolify whose stop refuses the way the live one did, with the real status and the real words. */
+function alreadyStoppedClient(world, order) {
+  return {
+    stopService: async () => {
+      order.push("stop");
+      const error = new Error("Coolify answered 400 to POST /services/x/stop: Service is already stopped.");
+      error.status = 400;
+      throw error;
+    },
+    deleteService: async (uuid) => { order.push("delete"); return world.client.deleteService(uuid); },
+    getService: async (uuid) => { order.push("get"); return world.client.getService(uuid); },
+  };
+}
+
+test("a stop refused as already stopped is green when the host says the container is gone", async () => {
+  await withWorld(async (world) => {
+    const built = await makeCustomer(world);
+    // A container the host does not have, which is the state Coolify was claiming.
+    world.store.updateTenant(built.slug, { boxContainer: "titanbot-box-gone-already" });
+    world.relay.names.set(built.slug, "titanbot-box-gone-already");
+    const { decommission, order } = decommissionFor(world, { deps: { client: alreadyStoppedClient(world, []) } });
+    void order;
+    const answer = await decommission.remove({ slug: built.slug, confirm: built.slug, deleteData: true });
+    assert.equal(answer.ok, true, answer.message);
+    const stop = answer.effects.find((one) => one.step === "stop");
+    assert.equal(stop.status, "ok", JSON.stringify(stop));
+    const detail = JSON.parse(stop.detail);
+    assert.match(detail.message, /already stopped/);
+    assert.equal(detail.provedBy, "docker", "the host answered, so the effect is green on evidence and not on a guess");
+  });
+});
+
+test("a stop refused as already stopped stays non-green while the container is still there", async () => {
+  await withWorld(async (world) => {
+    const built = await makeCustomer(world);
+    const { decommission } = decommissionFor(world, { deps: { client: alreadyStoppedClient(world, []) } });
+    const answer = await decommission.remove({ slug: built.slug, confirm: built.slug, deleteData: true });
+    assert.equal(answer.ok, true, answer.message);
+    const stop = answer.effects.find((one) => one.step === "stop");
+    // Coolify says stopped and the host says otherwise. THAT is something an operator has to act on,
+    // so it stays non-green and the detail quotes both sides.
+    assert.equal(stop.status, "carried-on", JSON.stringify(stop));
+    const detail = JSON.parse(stop.detail);
+    assert.match(detail.message, /already stopped/);
+    assert.equal(detail.docker.includes(built.container), true, detail.docker);
+  });
+});
+
+test("any other stop failure is still carried on with Coolify's own words", async () => {
+  await withWorld(async (world) => {
+    const built = await makeCustomer(world);
+    const client = {
+      stopService: async () => { const error = new Error("Coolify answered 500 to POST /services/x/stop: nope"); error.status = 500; throw error; },
+      deleteService: async (uuid) => world.client.deleteService(uuid),
+      getService: async (uuid) => world.client.getService(uuid),
+    };
+    const { decommission } = decommissionFor(world, { deps: { client } });
+    const answer = await decommission.remove({ slug: built.slug, confirm: built.slug, deleteData: true });
+    assert.equal(answer.ok, true, answer.message);
+    const stop = answer.effects.find((one) => one.step === "stop");
+    assert.equal(stop.status, "carried-on");
+    assert.match(String(stop.detail), /nope/);
+  });
+});

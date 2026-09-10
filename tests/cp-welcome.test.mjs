@@ -65,7 +65,7 @@ const CONFIG = {
  * `posted` is every body that reached the relay, which is how a case asserts that a refusal sent
  * NOTHING: a welcome that answered the right sentence after the mail went is not a refusal.
  */
-async function withWelcome(run, { relay = null, settings = {} } = {}) {
+async function withWelcome(run, { relay = null, settings = {}, now = () => AT } = {}) {
   const root = await makeTempRoot("cp-welcome-");
   const store = openStore({ dataDir: root });
   const posted = [];
@@ -77,7 +77,7 @@ async function withWelcome(run, { relay = null, settings = {} } = {}) {
     const welcome = createWelcome({
       store,
       config: CONFIG,
-      now: () => AT,
+      now,
       askRelayPost: async (pathname, body) => {
         posted.push({ pathname, body });
         return relay == null ? { ok: true, body: { id: "re_0123456789", from: "Titanium Bot <welcome@titanium.bot>" } } : relay(pathname, body);
@@ -236,8 +236,8 @@ test("the mark is drawn rather than fetched: no image and no svg anywhere in the
 });
 
 test("no em dash anywhere a customer reads, and the copy names no vendor", () => {
-  for (const shape of ["link+password", "link"]) {
-    const mail = rendered({ shape, temporaryPassword: shape === "link" ? "" : PASSWORD });
+  for (const shape of ["link+password", "link", "link+password-no-bot-mail", "link-no-bot-mail"]) {
+    const mail = rendered({ shape, temporaryPassword: shape.startsWith("link+password") ? PASSWORD : "" });
     assert.equal(mail.html.includes("—"), false, `an em dash in the ${shape} page`);
     assert.equal(mail.text.includes("—"), false, `an em dash in the ${shape} text`);
     for (const vendor of ["Resend", "Coolify", "Docker", "docker", "xAI", "Anthropic"]) {
@@ -385,13 +385,75 @@ test("a send with no recipient, or a recipient that is not one address, sends no
   });
 });
 
-test("a send with no Titan address stops before the relay, because the mail would promise one", async () => {
+test("a send with no Titan address still goes, with the bot-mail section left out and the password in", async () => {
+  // THE CASE THE R750 ACTUALLY HIT on 2026-09-10: the sweep answered 200 and minted nothing. The old
+  // behaviour refused the send, so the customer got no password and no link at all -- the one thing
+  // the welcome exists to carry. It says less and it goes.
+  await withWelcome(async ({ welcome, posted, store }) => {
+    const answer = await welcome.send({
+      slug: "acme-roofing", email: "jane@acmeroofing.com", name: "Jane Doe",
+      temporaryPassword: PASSWORD, titanAddress: "",
+    });
+    assert.equal(answer.ok, true, answer.why);
+    assert.equal(answer.shape, "link+password-no-bot-mail");
+    assert.equal(posted.length, 1);
+    const sent = posted[0].body;
+    // The password and the link are in it, which is the part that cannot wait for a sweep.
+    assert.equal(sent.html.includes(PASSWORD), true, "the temporary password ships");
+    assert.match(sent.html, /\/login\?sso=/);
+    // And nothing promises an address.
+    assert.equal(sent.html.includes("Your bots have their own email"), false, "no heading over an empty line");
+    assert.equal(sent.text.includes("Your bots have their own email"), false);
+    assert.equal(sent.html.includes("myagents.email"), false, "and no bot address anywhere in it");
+    assert.equal(sent.html.includes("Need help?"), true, "the rest of the mail is the same mail");
+    // The row says which shape went, so an operator reading the panel knows this one said less.
+    assert.equal(store.listWelcomeSends("acme-roofing")[0].shape, "link+password-no-bot-mail");
+  });
+});
+
+test("a caller that NAMES a shape promising an address, and has none, is still refused", async () => {
+  // The guard is kept for the shapes that promise. A caller asking for the full mail without an
+  // address to put in it is a code path drifting, and it is refused before the relay.
   await withWelcome(async ({ welcome, posted }) => {
-    const answer = await welcome.send({ slug: "acme-roofing", email: "jane@acmeroofing.com", temporaryPassword: PASSWORD, titanAddress: "" });
-    assert.equal(answer.ok, false);
-    assert.equal(answer.why, WELCOME_NO_TITAN_ADDRESS);
+    for (const shape of ["link+password", "link"]) {
+      const answer = await welcome.send({
+        slug: "acme-roofing", email: "jane@acmeroofing.com", shape, titanAddress: "",
+        ...(shape === "link+password" ? { temporaryPassword: PASSWORD } : {}),
+      });
+      assert.equal(answer.ok, false, shape);
+      assert.equal(answer.why, WELCOME_NO_TITAN_ADDRESS);
+    }
     assert.equal(posted.length, 0);
   });
+});
+
+test("a second welcome with no Titan address carries no password and still goes", async () => {
+  await withWelcome(async ({ welcome, posted }) => {
+    const answer = await welcome.send({ slug: "acme-roofing", email: "jane@acmeroofing.com", titanAddress: "" });
+    assert.equal(answer.ok, true, answer.why);
+    assert.equal(answer.shape, "link-no-bot-mail");
+    assert.equal(posted.length, 1);
+    assert.equal(posted[0].body.html.includes("Temporary password"), false);
+  });
+});
+
+test("the row's time is when the provider answered, not when the send started", async () => {
+  // The R750 row read 21:40:45.880Z while the relay's own line for the same send reads 21:40:46.194Z.
+  // A receipt stamped before the thing it is a receipt for is a number nobody notices until they are
+  // matching it against a provider's log.
+  let ticks = 0;
+  const clock = () => AT + (ticks += 1) * 1000;
+  await withWelcome(async ({ welcome, store }) => {
+    const answer = await welcome.send({
+      slug: "acme-roofing", email: "jane@acmeroofing.com", temporaryPassword: PASSWORD, titanAddress: TITAN, at: AT,
+    });
+    assert.equal(answer.ok, true, answer.why);
+    assert.equal(Date.parse(answer.at) > AT, true, `the row is stamped at ${answer.at}, which is not after the send started`);
+    // The store keeps the instant as milliseconds; the row and the answer are the same moment.
+    assert.equal(Number(store.listWelcomeSends("acme-roofing")[0].at), Date.parse(answer.at));
+    // And the idempotency key is still stamped at the START, so two presses inside the window collide.
+    assert.equal(welcome.idempotencyKey({ slug: "acme-roofing", to: "jane@acmeroofing.com", at: AT }).length > 0, true);
+  }, { now: clock });
 });
 
 test("a provider refusal writes a failed row carrying the status, and never the provider's body", async () => {

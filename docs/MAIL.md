@@ -770,12 +770,18 @@ control plane writes what it is told into a row an operator reads.
 
 ### The welcome itself
 
-`cp/welcome.mjs` mints the link, renders the words and posts them here. Two shapes and no third:
+`cp/welcome.mjs` mints the link, renders the words and posts them here. The shape runs on two axes:
+does the mail carry a password, and does it promise a bot address.
 
 - `link+password`, an invite. The button, plus the console address and the temporary password on a
   quiet second line.
-- `link`, a Send again. The button and no password, and `render` **refuses** a `link` shape carrying
-  one so no code path can drift into sending a second copy of a password.
+- `link`, a Send again. The button and no password, and `render` **refuses** a password-less shape
+  carrying one so no code path can drift into sending a second copy of a password.
+- `link+password-no-bot-mail` and `link-no-bot-mail`, the same two with the "Your bots have their own
+  email" section left out whole, heading included, for a workspace whose address sweep has minted
+  nothing yet. `send()` derives the shape from what there actually is, so a missing address makes the
+  mail say less rather than not go. A caller that **names** one of the promising shapes with no address
+  in hand is still refused, which is what keeps "promise only what exists" enforceable.
 
 Both ship because there is no customer-facing set-your-own-password door in the product yet
 (`POST /v1/accounts/{id}/password` is behind `requireAdmin`; ONBOARD-3 is filed). A link-only mail

@@ -265,7 +265,29 @@ export function createDecommission({
       } catch (error) {
         // A stop that fails is not a reason to keep a customer. The delete below is what removes
         // the service, and Coolify stops a running service as part of it.
-        record("stop", "carried-on", String(error?.message ?? error));
+        //
+        // BUT "IT WAS ALREADY STOPPED" IS NOT A FAILURE, and on the R750 on 2026-09-10 it was the
+        // answer for a box that had served the customer a sign-in sixteen seconds earlier: Coolify
+        // answered 400 "Service is already stopped" for a service it had started itself through its
+        // own POST /services/{uuid}/start. Coolify's record of the state was wrong, not the box. So
+        // the host is asked instead of being argued with, through the same probe step 6 uses, and a
+        // non-green stop is kept for the one case an operator has to act on: Coolify says stopped and
+        // the container is still there.
+        const said = String(error?.message ?? error);
+        const alreadyStopped = /already\s+stopped/i.test(said);
+        if (alreadyStopped) {
+          const probe = await containerProbe({ askRelayPost, slug, container });
+          if (probe.present === false) {
+            record("stop", "ok", JSON.stringify({ message: said, provedBy: "docker", container }));
+          } else {
+            record("stop", "carried-on", JSON.stringify({
+              message: said,
+              docker: probe.present === true ? `the relay still sees ${container}` : `the relay could not say (${probe.why})`,
+            }));
+          }
+        } else {
+          record("stop", "carried-on", said);
+        }
       }
       // A bounded wait, so the delete is not racing a container that is still shutting down.
       //
