@@ -332,6 +332,23 @@ buttons do not draw at all and the R750's panel is materially longer. Re-measure
 
 Not full width, not full height, and fifteen screens of content on a phone.
 
+**The new sheet**, the same leg on the same box with the surface merged in (39 of 39 checks, none
+skipped):
+
+| | 390x844 | 430x932 |
+| --- | --- | --- |
+| the sheet | **390x844 at (0,0)** — full width, full height | **430x932 at (0,0)** |
+| content a thumb drags through | **1,413 px** in a 645 px window | **1,395 px** in a 733 px window |
+| controls in the open section | **28, none under 44x44** | **28, none under 44x44** |
+
+10,475 px to 1,413 px is **86.5% less to drag through**, and the 31 controls a thumb could miss are
+zero. Both routes in hold with a real touchscreen tap: the bar's gear in one, the roster's account
+tile (290x44, at the foot of the drawer) then Settings in two.
+
+One thing that run got right by being wrong-looking: the **Operator entry was absent**, on a box
+where every local session is the operator's. That is correct. The nav is gated on `/auth/state`'s
+`operator` field, a tree without it answers no field, and absent means false.
+
 **The talk button, before and after VOICE-2** (grok-bot-local-vm, real Chrome, one press with no
 voice switched on): before, at 1440x900, the shelf went 1392x106@24,776 to 1392x196.02@24,685.98, the
 composer 600x54@459 to 407.98x54@991, the message box 370.05 to 178.03, the utilities wrapped to a

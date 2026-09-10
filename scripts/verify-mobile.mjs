@@ -737,7 +737,7 @@ async function legSettings(page, phone) {
       return { shown, current: el.querySelector('[data-settings-nav][aria-selected="true"]')?.getAttribute("data-settings-nav") ?? null };
     });
     check(after.current === target && after.shown.length === 1 && after.shown[0] === target,
-      `${phone.name}: and tapping it shows that section and only that one`, `showing ${after.shown.join(", ") || "nothing"}, aria-current on ${after.current}`);
+      `${phone.name}: and tapping it shows that section and only that one`, `showing ${after.shown.join(", ") || "nothing"}, aria-selected on ${after.current}`);
   } else if (!opened.surface) {
     skip(`${phone.name}: a nav entry switches the section`, why);
   }
