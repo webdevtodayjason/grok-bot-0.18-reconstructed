@@ -849,7 +849,32 @@ The numbers this replaces, measured the same way on the same machine: with the c
 footer went to 1392x160 and then 1392x178 at 1440x900 while the message box narrowed to 568 px, and
 to 390x199 and then 390x255 at 390x844.
 
-**Not measured:** a real spoken turn, on any machine. There is no realtime key on this Mac or on any
-workspace of the production server, so every transcript event in every gate came from the stub that
-speaks both services' event shapes. What the two services do on a live call is read from their
-documentation above and is marked as such.
+**On the production server, through console.titanium.bot, 2026-09-10**, as a throwaway customer on
+the demo tenant, minted inside the control plane's own container and removed afterwards.
+`scripts/verify-voice-r750.mjs`, **42 of 42**, at both sizes.
+
+| | 1440x900 | 390x844 with a real touch hold |
+|---|---|---|
+| the panel | on the page, over the conversation, outside the footer | the same |
+| the Talk mode row | on screen under General, 359 px wide | on screen, 329 px wide |
+| the row's round trip | takes, and survives a reload of the console | the same |
+| the hold | holds the microphone, and the button fills | holds, through a real touch and not a tap |
+| the footer, with nothing standing | 1392x106 at y776, composer 600x54, button 74x38, unmoved | 390x133 at y711, composer 358x56, button 44x44, unmoved |
+
+**What that run could not show, and why.** The demo tenant has talking switched off and the operator
+has pasted no realtime key, so the line a hold opens is refused a few hundred milliseconds later. The
+hold itself is visible in that window — measured: held, the line opening, the orb reading as working at
+40 ms and 120 ms, then the refusal and one plain sentence by 250 ms — and the refusal is correct
+behaviour, not a defect. Whether a held line carries audio, and what the panel paints while somebody is
+speaking, is measured against the stub on the local box.
+
+One thing that run surfaced and it belongs to VOICE-6 rather than here: on a phone, one plain sentence
+takes a row of the control shelf, 133 to 189 px, with the composer and the button not moving. That is
+that wave's own shipped line and its own measured number on the same server. The panel was not on
+screen at that moment. The panel itself cannot move the footer at any width, because it is not in that
+box at all.
+
+**Not measured:** a real spoken turn, on any machine. There is no realtime key on this Mac, and the
+production server's operator keys door answers an empty set, so every transcript event in every gate
+came from the stub that speaks both services' event shapes. What the two services do on a live call is
+read from their documentation above and is marked as such.
