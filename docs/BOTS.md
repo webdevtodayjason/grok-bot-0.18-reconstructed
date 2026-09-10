@@ -466,6 +466,23 @@ carrying the pack's name and none of its members, which looks like it worked, so
 row carrying `members` in plain words and points at the page. The Bots tab already routes packs
 away from `setUpBot`, so nothing in the console reaches that refusal.
 
+### The seam between the two halves
+
+The import lives in the box and the tools live in the runner, and for most of a day neither could
+reach the other. The runner composition looked for the import on the transcript manager, which does
+not carry it and cannot: the adapter it runs against is built inside the gateway api out of
+`mintAgent`, `removeAgentCompletely`, `createAutomationFor` and the host's own `kickstartIfPending`,
+none of which the composition can reach. So the setup tool was never built on a real box. A bot
+could read the whole catalog and still only create blank agents, which is the thing this wave
+exists to stop, and nothing in either half's tests could see it — the two read-only tools still
+built, so every case stayed green.
+
+The composition takes the importer late now instead of discovering it, and the host hands it in as
+soon as it holds both objects, which is before any turn can run. Building a second adapter in the
+composition was the alternative and is refused in a comment there: it would differ in agent
+teardown, automation attribution and the introduction, which is the drift the wave exists to end.
+Three cases guard the wiring, because a broken line there fails nothing else.
+
 ### What the bot can see now
 
 A door in the box is no use to someone who never opens the Bots tab and instead just says to their
@@ -524,6 +541,29 @@ person asked for, because "everything" is the expensive answer and is almost nev
   That is the FEEDBACK-1 / MAIL-3 pattern, and a test pins both halves so a rename on either side is
   a red test rather than a proto name on a customer's screen.
 
+### Three things only running the two halves together found
+
+Each of these was measured on grok-bot-local-vm on 2026-09-10 by asking a fresh bot "create me an
+Instagram marketer" and then answering "use the template". Neither half could have found any of
+them alone: the tools half had no import to call, and the import half was never driven by a model.
+
+**A team was offered and could not be delivered.** Ranked in with everything else, `marketing-team`
+comes back FIRST for that sentence, because it is the best answer to it. The bot offered it, was
+told to use it, and the import refused it — a team is several bots with a coordinator and goes on
+from its own page with all its members at once. Teams are listed under their own heading now, which
+says where they are added, so the person still hears that one exists.
+
+**And the bot then said it had worked.** Handed that refusal back as a SUCCESSFUL tool call whose
+message happened to be bad news, it answered *"Done — Marketing team is set up and on your roster"*
+and invented a reason it was empty. Nothing had been created. The case is what a model reads first,
+so no wording inside a success fixes it: a report that created no agent is an error now.
+
+**And the question was never asked.** Told in prose, in three separate places, to ask whether they
+want one of those or one built from scratch, a bot named three rows and stopped — no question mark
+anywhere in the reply. It had found the choice and never put it to the person, which is the half of
+Jason's sentence that makes the other half worth anything. The question is QUOTED for the model to
+copy now, and it is the last thing either read tool says.
+
 ### What the gates assert, and where
 
 Two scripts, because the two halves are measured differently: `scripts/verify-titan-catalog.mjs`
@@ -554,6 +594,20 @@ asking, let no tool name reach the person, and still built one from scratch when
 asked for. **Measured 2026-09-09: 7 legs PASS, 0 FAIL.** Its final roster check fails loudly rather
 than swallowing a box that stopped answering -- an earlier draft used `.catch(() => [])` and would
 have printed that the roster was clean over bots still on it.
+
+
+**Measured on the R750 demo tenant through console.titanium.bot, 2026-09-10, bundle
+`e13cc0bf6a07`**, signed in as a throwaway customer account on the `demo` workspace that was
+removed afterwards. Asked "Create me an Instagram marketer", the demo Titan looked at the catalog
+and came back with *"Stills & Clips Desk, Clip Bot, Marketing team — which one should I go with? Or
+if you'd rather I just build an Instagram marketer from scratch, say the word"*, and put the same
+choice up as a card with a button per template. Pressing one set it up: the transcript drew the
+quiet chip **Set up Instagram Marketer from the catalog** in plain words with nothing to expand,
+the bot appeared on the roster reading "Ready for the next task" with 1 routine and 26 skills, and
+the receipt said *"It came with Slack already connected"* — the app-shape fix, live, on the door a
+customer actually uses. Read back on that box, both bots carried the row's facts and their jobs
+with `isEnabled: false`. Neither wrote a first message, which is `BOX-7` and is why that leg is not
+asserted there. Both bots and the account were removed afterwards; the roster is back at 8.
 
 ---
 
