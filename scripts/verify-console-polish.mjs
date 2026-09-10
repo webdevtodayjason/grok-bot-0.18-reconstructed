@@ -74,7 +74,7 @@ import { execFile } from "node:child_process";
 import { acquireBoxLock } from "./lib/box-lock.mjs";
 import { gateUserAgent } from "./gate-agent.mjs";
 
-const LEGS = ["boot", "scroll", "picker", "badge", "tile", "tile-live", "files"];
+const LEGS = ["boot", "scroll", "picker", "badge", "tile", "tile-live", "files", "chips"];
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(`--${name}`);
 const value = (name) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : null; };
@@ -83,7 +83,7 @@ const URL_TARGET = value("url");
 const READ_ONLY = URL_TARGET != null || flag("read-only");
 const chosen = flag("all") ? [...LEGS] : LEGS.filter((leg) => flag(leg));
 if (chosen.length === 0) {
-  console.log("usage: node scripts/verify-console-polish.mjs (--boot | --scroll | --picker | --badge | --tile | --tile-live | --files | --all)");
+  console.log("usage: node scripts/verify-console-polish.mjs (--boot | --scroll | --picker | --badge | --tile | --tile-live | --files | --chips | --all)");
   console.log("       [--url https://console.titanium.bot]   read-only pass, CONSOLE_BEARER in the environment");
   console.log("");
   console.log("  --boot    the chosen background is on the page before first paint, and the cover lifts");
@@ -93,6 +93,7 @@ if (chosen.length === 0) {
   console.log("  --tile    the rail's screen tile shows a picture or a plate, and never a broken image");
   console.log("  --tile-live  the tile follows the agent's screen on its own, and what that costs");
   console.log("  --files   a file row opens a viewer and downloads");
+  console.log("  --chips   a backticked span is a chip a mouse can press, and pressing it copies");
   process.exit(2);
 }
 
@@ -144,7 +145,12 @@ const shoot = async (page, name) => {
   return file;
 };
 
-const headers = { "user-agent": GATE_AGENT, ...(BEARER ? { authorization: `Bearer ${BEARER}` } : {}) };
+// Every gate says who it is, on the API calls and in the browser alike. This file did not, which is
+// the standing rule it was written under and the one thing in it nobody had noticed: a run against a
+// live console was indistinguishable from a person, so nothing could be excluded from a cost or
+// traffic reading afterwards.
+const authHeaders = BEARER ? { authorization: `Bearer ${BEARER}` } : {};
+const headers = { "user-agent": GATE_AGENT, ...authHeaders };
 const api = async (method, args = {}, ms = 25_000) => {
   const res = await fetch(`${ORIGIN}/api/${method}`, {
     method: "POST",
@@ -176,8 +182,10 @@ const errors = [];
 async function newPage() {
   const context = await browser.newContext({
     viewport: { width: 1440, height: 1000 },
+    // The real header, not an extra one: a page load, a websocket and every asset it pulls all carry
+    // it, so a traffic reading taken afterwards can tell a gate from a person.
     userAgent: GATE_AGENT,
-    extraHTTPHeaders: headers,
+    extraHTTPHeaders: authHeaders,
   });
   const page = await context.newPage();
   page.on("pageerror", (e) => { errors.push(String(e)); });
@@ -1164,9 +1172,202 @@ async function legFiles(page) {
   }
 }
 
+// ---- --chips (CONSOLE-5) ---------------------------------------------------------------------------
+
+// Jason, 2026-09-10, on the original's transcript: a bot writes ids, emails, channels, hostnames and
+// whole draft lines in backticks and each span is painted as a small chip -- monospace, red-pink on
+// a dark pill -- so it stands out from the prose and copies clean.
+//
+// MEASURED BEFORE, on grok-bot-local-vm in Chrome at 1440x1000 on a live agent reply and at 900x1400
+// on a static fixture, 2026-09-10 16:03-16:07 UTC: rgba(255,255,255,0.94) on rgba(255,255,255,0.10),
+// 13.8px, radius 5px, no border, overflow-wrap normal. Body white on a white wash. That is why a
+// channel name did not read as different from the sentence holding it.
+//
+// TWO SUB-LEGS, because they prove different things and one of them can honestly be unavailable:
+//
+//   THE PANEL, always. The markup is rendered by the PAGE's own paragraphMarkup (window.__mrUi) into
+//   the panel the files viewer uses, which is a real surface carrying the real delegated copy
+//   handler -- and unlike the transcript it is not wiped by the next render poll, so a hit test and a
+//   clipboard read mean something. The press is a real mouse press at the chip's own centre, not
+//   page.click(): verify-ui-in-a-real-browser.md is a lesson paid for twice.
+//
+//   THE LIVE REPLY, when the box answers. It asks an agent for the three things by name. The chips
+//   are only worth having if the model fills them, and the habit that fills them is one sentence in
+//   the standing persona -- which lives in the host bundle, so on a box that has not taken the swap
+//   this sub-leg is measuring the RENDERER against a prompted reply, not the habit. That is said out
+//   loud rather than implied, and the habit itself is proved by tests/standing-persona.test.mjs and
+//   by the R750 leg after the swap.
+const CHIP_FIXTURE = [
+  "Alerts land in `#titan-alerts`, the host is `titan-box-01`, and anything with a paper trail goes out from `titan@myagents.email`.",
+  "",
+  "The draft I would send: `Thanks for the heads up. I pulled the overnight sweep and three hosts are out of policy; the summary is with you before nine.`",
+].join("\n");
+
+// The centre of an element in viewport coordinates, after scrolling it into view, so a real mouse
+// can be sent there. hitTest already answers whether the centre is reachable; this answers where.
+const centreOf = (page, selector) => page.evaluate((sel) => {
+  const el = document.querySelector(sel);
+  if (!el) return null;
+  el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+  const r = el.getBoundingClientRect();
+  if (r.width === 0 || r.height === 0) return null;
+  return { x: r.x + r.width / 2, y: r.y + r.height / 2, text: el.textContent ?? "" };
+}, selector);
+
+// The relay serves whatever checkout it was started from, which is not necessarily the tree being
+// built. So: ask the relay for its app.js first. If the chip is already in it, this leg runs against
+// the page as shipped and says so. If it is not, these four files are served out of THIS tree
+// instead and that is said too -- "it works when I serve it" and "it works on the page" are two
+// different claims, and the file already refuses to blur them for the modules item A installed.
+const CHIP_FILES = ["app.js", "styles.css", "backgrounds.css", "files-viewer.css"];
+async function serveThisTree(page) {
+  const live = await fetch(`${ORIGIN}/app.js`, { headers, signal: AbortSignal.timeout(15_000) })
+    .then((r) => (r.ok ? r.text() : "")).catch(() => "");
+  if (live.includes("code-chip")) { info(`mode: the relay at ${ORIGIN} is already serving this build`); return "relay"; }
+  for (const file of CHIP_FILES) {
+    const body = readModule(file);
+    if (body == null) continue;
+    // A RegExp, not a glob: index.html stamps a cache-busting `?v=` on every stylesheet, and a glob
+    // ending in the filename matches none of them. Measured -- the first run of this leg served its
+    // own app.js (linked with no query) and the relay's four-day-old stylesheets, and reported the
+    // chip as body white with no border, which is the old rule and not this build at all.
+    await page.route(new RegExp(`/${file.replace(/\./g, "\\.")}(\\?|$)`), (route) => route.fulfill({
+      status: 200,
+      contentType: file.endsWith(".css") ? "text/css" : "text/javascript",
+      body,
+    }));
+  }
+  info(`mode: the relay at ${ORIGIN} is serving an older build, so ${CHIP_FILES.join(", ")} come from this worktree`);
+  return "worktree";
+}
+
+async function legChips(page) {
+  console.log("\n== --chips: a backticked span is a chip a mouse can press, and pressing it copies");
+
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: ORIGIN }).catch(() => {});
+  await serveThisTree(page);
+  const booted = await bootConsole(page);
+  check(booted === true, "the console boots and the adapter exists", booted ? "" : "window.__machineRoomAdapter never appeared");
+  if (!booted) return;
+
+  // ---- the panel: the page's own renderer, the page's own handler, a real mouse ----------------
+  const drawn = await page.evaluate((text) => {
+    const ui = window.__mrUi;
+    if (!ui?.paragraphMarkup || !ui?.openPanel) return null;
+    ui.openPanel("Gate", "Chip check", `<div class="file-viewer-markdown">${ui.paragraphMarkup(text)}</div>`);
+    return document.querySelectorAll("#panel-content code.code-chip").length;
+  }, CHIP_FIXTURE).catch(() => null);
+  check(drawn === 4, "the page's own renderer draws a chip per backticked span",
+    drawn == null ? "window.__mrUi does not publish paragraphMarkup and openPanel" : `${drawn} chips from 4 backticked spans`);
+  if (drawn !== 4) return;
+
+  const paint = await page.evaluate(() => {
+    const chips = [...document.querySelectorAll("#panel-content code.code-chip")];
+    const bubble = document.querySelector("#panel-content .file-viewer-markdown");
+    const one = (el) => {
+      const s = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      return { text: el.textContent, color: s.color, background: s.backgroundColor, border: s.borderTopWidth,
+        borderColor: s.borderTopColor, radius: s.borderTopLeftRadius, font: s.fontFamily.split(",")[0],
+        size: s.fontSize, wrap: s.overflowWrap, cursor: s.cursor, role: el.getAttribute("role"),
+        tab: el.getAttribute("tabindex"), w: Math.round(r.width), h: Math.round(r.height) };
+    };
+    return { chips: chips.map(one), inner: Math.round(bubble?.clientWidth ?? 0) };
+  });
+  const first = paint.chips[0];
+  info(`chip now: ${first.color} on ${first.background}, ${first.border} border ${first.borderColor}, radius ${first.radius}, ${first.size} ${first.font}, overflow-wrap ${first.wrap}`);
+  info("chip before (grok-bot-local-vm, Chrome 1440x1000, 2026-09-10 16:03 UTC): rgba(255, 255, 255, 0.94) on rgba(255, 255, 255, 0.1), 0px border, radius 5px, 13.8px, overflow-wrap normal");
+  check(first.color === "rgb(255, 107, 107)", "the chip is the red-pink Jason pointed at, not body white", first.color);
+  check(first.color !== "rgb(255, 111, 114)", "and never --danger-500, which reads as a failed turn", "#ff6f72 is the error colour and is not this");
+  check(first.border !== "0px", "it carries a hairline border", `${first.border} ${first.borderColor}`);
+  check(/mono/i.test(first.font) || first.font.includes("ui-monospace"), "monospace", first.font);
+  check(paint.chips.every((c) => c.wrap === "anywhere"), "a chip with nothing to break on wraps rather than overflowing", `overflow-wrap ${first.wrap}`);
+  check(paint.chips.every((c) => c.cursor === "pointer" && c.role === "button" && c.tab === "0"),
+    "every chip looks pressable and can be reached from a keyboard", `cursor ${first.cursor}, role ${first.role}, tabindex ${first.tab}`);
+  const long = paint.chips.find((c) => c.text.length > 100);
+  check(long != null && long.w <= paint.inner + 1 && long.h > first.h,
+    "a whole draft line wraps inside the panel instead of running past its edge",
+    long ? `${long.w}x${long.h} of ${paint.inner} wide, ${long.text.length} characters` : "no long chip drawn");
+  await shoot(page, `chips-panel-${Date.now()}`);
+
+  // The press. Hit-tested first, then a real mouse at the centre that hit test just cleared.
+  const hit = await hitTest(page, "#panel-content code.code-chip");
+  check(hit.found && hit.visible && hit.hit, "a mouse can reach the chip", `${hit.w}x${hit.h}, under its centre is ${hit.on}`);
+  const at = await centreOf(page, "#panel-content code.code-chip");
+  if (!at) { skip("pressing a chip copies its text", "the chip has no box to press"); return; }
+  await page.evaluate(() => navigator.clipboard.writeText("nothing-was-copied")).catch(() => {});
+  await page.mouse.click(at.x, at.y);
+  const copied = await until(() => page.evaluate(async () => {
+    const read = await navigator.clipboard.readText().catch(() => null);
+    return read && read !== "nothing-was-copied" ? { read, tick: document.querySelector("#panel-content code.code-chip[data-copied]") != null } : null;
+  }), within(6000), 250);
+  check(copied != null && copied.read === at.text, "pressing a chip copies exactly the code and nothing else",
+    copied ? `clipboard holds ${JSON.stringify(copied.read)}, the chip says ${JSON.stringify(at.text)}` : "the clipboard never changed");
+  if (copied) {
+    check(copied.tick === true, "and the chip itself shows the tick, rather than a toast over the conversation", "data-copied is on the chip");
+    // Polled, not read in the same tick as the clipboard: the first run of this leg read the region
+    // while it was still empty and reported no word at all, which was the gate racing the page.
+    const said = await until(() => page.evaluate(() => {
+      const text = document.querySelector(".chip-copy-live")?.textContent ?? "";
+      return text.length > 0 ? text : null;
+    }), within(3000), 150);
+    check(said === "Copied", "with a word for a screen reader", `the live region says ${JSON.stringify(said ?? "")}`);
+  }
+  await shoot(page, `chips-copied-${Date.now()}`);
+
+  // Keyboard: the chip carries role="button" and tabindex="0", so Enter has to do what the mouse did.
+  await page.evaluate(() => {
+    navigator.clipboard.writeText("nothing-was-copied");
+    document.querySelectorAll("#panel-content code.code-chip")[1]?.focus();
+  }).catch(() => {});
+  await page.keyboard.press("Enter");
+  const byKey = await until(() => page.evaluate(async () => {
+    const read = await navigator.clipboard.readText().catch(() => null);
+    return read && read !== "nothing-was-copied" ? read : null;
+  }), within(6000), 250);
+  check(byKey === paint.chips[1].text, "Enter on a focused chip copies it too",
+    byKey ? `clipboard holds ${JSON.stringify(byKey)}` : "Enter did nothing, which is a focusable control that lies");
+
+  await page.evaluate(() => document.querySelectorAll("dialog[open]").forEach((d) => d.close()));
+
+  // ---- the live reply -------------------------------------------------------------------------
+  if (READ_ONLY) { skip("a real agent's reply draws chips in the transcript", "read-only: prompting an agent is a write"); return; }
+  const roster = await api("listAgents").then((r) => r.value).catch(() => null);
+  const worker = (Array.isArray(roster) ? roster : []).find((a) => !a.isGroup);
+  if (!worker) { skip("a real agent's reply draws chips in the transcript", "no worker agent on this box to ask"); return; }
+  const ASK = "Reply with one short sentence and nothing else, naming the channel #titan-alerts, "
+    + "the host titan-box-01 and the address titan@myagents.email, each one wrapped in backticks.";
+  const sent = await api("sendPrompt", { agentId: worker.id, prompt: ASK, clientNonce: `chips-${Date.now()}` }, within(30_000))
+    .then(() => true).catch((e) => String(e.message));
+  if (sent !== true) { skip("a real agent's reply draws chips in the transcript", `the box would not take a turn: ${String(sent).slice(0, 120)}`); return; }
+  const opened = await openConversation(page, worker.id);
+  check(opened, `${worker.name ?? worker.id}'s conversation opens`, opened ? "" : "the roster card never went active");
+  const live = await until(() => page.evaluate(() => {
+    const chips = [...document.querySelectorAll("#transcript .message-row:not(.is-user) code.code-chip")];
+    if (chips.length < 3) return null;
+    const s = getComputedStyle(chips[0]);
+    return { count: chips.length, texts: chips.slice(0, 3).map((c) => c.textContent), color: s.color, background: s.backgroundColor };
+  }), within(Math.max(20_000, budgetLeft() - 25_000)), 1500);
+  if (!live) {
+    skip("a real agent's reply draws chips in the transcript",
+      "no reply carrying three backticked spans arrived inside the budget; the renderer is proved by the panel sub-leg above and by tests/machine-room-code-chip-pixels.test.mjs");
+    return;
+  }
+  check(live.count >= 3, "a real agent's reply draws a chip per backticked span", `${live.count} chips: ${live.texts.join(", ")}`);
+  check(live.color === "rgb(255, 107, 107)", "and they are the same red-pink in the transcript as in the panel", `${live.color} on ${live.background}`);
+  info("this sub-leg proves the RENDERER on a prompted reply. Whether the model reaches for backticks unprompted is the standing persona's sentence, which lives in the host bundle and needs the swap.");
+  // Scrolled to before the shot. The first run of this leg measured three chips in the DOM and
+  // photographed a transcript sitting twenty messages above them, which is a claim with a picture of
+  // something else next to it.
+  await page.evaluate(() => document.querySelector("#transcript .message-row:not(.is-user) code.code-chip")
+    ?.scrollIntoView({ block: "center", behavior: "instant" }));
+  await sleep(400);
+  await shoot(page, `chips-live-${Date.now()}`);
+}
+
 // ---- the run --------------------------------------------------------------------------------------
 
-const RUNNER = { boot: legBoot, scroll: legScroll, picker: legPicker, badge: legBadge, tile: legTile, "tile-live": legTileLive, files: legFiles };
+const RUNNER = { boot: legBoot, scroll: legScroll, picker: legPicker, badge: legBadge, tile: legTile, "tile-live": legTileLive, files: legFiles, chips: legChips };
 
 try {
   console.log(`console-polish: ${chosen.join(", ")} against ${ORIGIN}${READ_ONLY ? " (read-only)" : ""}`);

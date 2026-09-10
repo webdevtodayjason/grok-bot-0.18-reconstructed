@@ -594,8 +594,13 @@ node scripts/verify-console-polish.mjs --boot     the plate is on <html> before 
                                        --tile     a picture or a plate, and never a broken image
                                        --tile-live the tile follows the agent's screen, and what that costs
                                        --files    a file row opens a viewer and downloads
+                                       --chips    a backticked span is a chip a mouse can press, and pressing it copies (§8)
                                        --all      every leg in sequence, one browser
 ```
+
+Every leg sends `titanbot-gate/verify-console-polish`, on the API calls and as the browser's real
+`userAgent`. It did not until CONSOLE-5, which made a run against a live console indistinguishable
+from a person and meant nothing could be excluded from a traffic reading afterwards.
 
 Add `--url https://console.titanium.bot` with `CONSOLE_BEARER` in the environment for a read-only
 pass against a live console. In that mode nothing is created, nothing is prompted, and every leg that
@@ -657,9 +662,16 @@ Screenshots land in `$GROK_BOT_SHOT_DIR` and every one is named in the output.
 | `node --test tests/machine-room-files.test.mjs` | the viewer's five branches, the masking, and the `/files` route's fences against a real relay and a real gateway |
 | `scripts/verify-dashboard.mjs` | unchanged by this wave, and NOT green on `grok-bot-local-vm`. It leaves its own probe agents behind and they then fail its avatar and bot-cap legs (GATE-14), so the honest way to read it on this box is to diff its failure list against a run of the previous commit rather than to read its tally |
 
-The ship is **relay-only by construction**: everything in this wave is `ui/`, tests, scripts and
-docs. `git diff <pre-wave>..HEAD -- source/ deploy/` must be empty before shipping. If it is not,
-stop and re-scope — a host swap is a different ship with a different risk.
+The CONSOLE-4 ship was **relay-only by construction**: everything in that wave was `ui/`, tests,
+scripts and docs, and `git diff <pre-wave>..HEAD -- source/ deploy/` had to be empty before shipping.
+
+**That stopped being true with CONSOLE-5.** The chip is worth nothing if the model never reaches for
+backticks, and the habit that fills it is one sentence in `source/host/runner/standing-persona.ts` —
+which is the host bundle. So the console-polish 3 wave is a **host ship**: one sentence in `source/`,
+and with it the two-box swap (the demo box and Jason's box, never Richard's) and the post-swap watch.
+The assertion above becomes: `git diff <pre-wave>..HEAD -- source/ deploy/` touches
+`standing-persona.ts` **and nothing else**. If it touches anything more, stop and re-scope — the
+budget for this wave was exactly that one sentence.
 
 ---
 
@@ -1093,3 +1105,154 @@ point has to be the sliver on the far side — which is what `verify-mobile` alr
 |---|---|
 | `node --test tests/machine-room-mobile.test.mjs` | that the phone pass stayed inside its breakpoint: exactly one base rule, the shell's column track inside it and not outside, the dock really shrinkable, the composer's font and its eight-line cap moving together, the viewport meta, the scrim inside the stage, and a line-count ceiling on `app.js`'s share |
 | `node scripts/verify-mobile.mjs --all` | the browser legs at both device sizes on `grok-bot-local-vm`, then read-only on `console.titanium.bot` |
+
+---
+
+## 8. Inline code, and copying it
+
+Jason, 2026-09-10, with a screenshot of the original bot's transcript beside our own: the original
+writes ids, emails, channels, hostnames and whole draft lines in backticks, and each span is painted
+as a small rounded chip — monospace, red-pink on a dark pill — so it stands out from white prose and
+copies clean. The bot leans on it to draw the eye: *"Chief alert is in `#grok-bot-alerts`"*, and a
+whole draft reply as one long chip.
+
+Ours had the backticks and none of the chip.
+
+**Measured before, on `grok-bot-local-vm`, this Mac, in Chrome at 1440x1000 on a live agent reply and
+at 900x1400 on a static fixture, 2026-09-10 16:03–16:07 UTC:** `color rgba(255, 255, 255, 0.94)`,
+`background rgba(255, 255, 255, 0.10)`, `13.8px`, `border-radius 5px`, **no border**, `overflow-wrap
+normal`. That is body white on a white wash — a channel name that does not read as different from the
+sentence holding it, which is exactly the complaint.
+
+**Measured after, same box, same browser, 1440x1000, 2026-09-10:** `color rgb(255, 107, 107)` on
+`rgba(10, 16, 20, 0.62)`, `1px` border `rgba(255, 107, 107, 0.3)`, `border-radius 5px`, `11.96px
+ui-monospace`, `overflow-wrap anywhere`, `cursor pointer`. A 125-character draft line drew **770x36**
+inside an 810 px panel: two lines, wrapped, not clipped and not overflowing.
+
+### What changed, and what deliberately did not
+
+`inlineMarkup` in `app.js` emits `<code class="code-chip" tabindex="0" role="button" aria-label="Copy
+this">`. **That is the whole renderer change.** No linkifier, no fenced-code block handler — both are
+obvious, neither was asked for, and both are new behaviour rather than preserved behaviour. A bare URL
+and a markdown link render exactly as they did before this wave, which is to say plainly, brackets and
+all; a fenced block is still literal paragraphs. If either of those is wanted it is its own gap row,
+with its own before-and-after.
+
+Proving that is `tests/machine-room-code-chip-pixels.test.mjs`. It renders one fixture transcript
+twice in the same browser at 900x1400 over the shipped stylesheets — once through the renderer as it
+stood at `b1f9afa` and once through the working tree's — and asserts that **every** `p`, `li`, `ul`,
+`ol`, `strong`, `em` and heading lands on the same pixel, the same tag, the same text. A golden-string
+test would not catch a linkifier creeping in. This does: the paragraph holding the bare URL would grow
+an `<a>` and its children would move.
+
+Two things that test forced, and both are in the shipped CSS on purpose:
+
+- **The chip occupies the old box exactly.** `padding: 1px 5px` with no border became `padding: 0 4px`
+  with a `1px` one — the same 5 px across and 1 px down. Without that the chip's own border pushes
+  every line holding a chip 2 px taller, and "the prose did not move" stops being provable.
+- **Motion is off in the fixture.** A message row arrives on a scale-and-fade; measured mid-flight the
+  whole bubble reads about 0.995 of itself and every rect in it drifts by the same ratio. The first
+  run of that suite failed on precisely this.
+
+### The copy
+
+A click on a chip copies **that chip's text and nothing else**. It copies `textContent`, never a data
+attribute: `escapeHtml` runs before the backtick pass, so the markup holds `&amp;` and `&lt;` while
+`textContent` is the original the agent wrote. `navigator.clipboard.writeText` with a
+`document.execCommand("copy")` fallback, because a relay reached over plain http on a LAN address is
+not a secure context and the promise there never arrives; when both fail the chip says so with a `✕`
+rather than showing a tick that lied.
+
+The tick is **quiet and local** — a `✓` painted by `::after` on the chip for 1.2 s, not the global
+toast. A person who clicked the thing they wanted does not need a banner over the conversation. The
+word "Copied" goes into an off-screen `aria-live="polite"` region so a screen reader hears it; it is
+set immediately when the word changes and cleared-then-set only for a repeat, because a region that is
+empty for even a frame reads as nothing said. The gate caught that one.
+
+The chip carries `tabindex="0"` and `role="button"`, so **Enter and Space copy too** — a focusable
+control that does nothing on Enter is the bug the transcript's keydown listener was written to fix in
+the first place.
+
+### One rule, everywhere, including the files viewer
+
+`files-viewer.js` draws a markdown file through this same renderer (`paragraphMarkup`, off
+`window.__mrUi`), so chips appear inside the panel as well. **They copy there too**: `app.js` binds the
+same delegated click and keydown to `#panel-content` as to `#transcript`. The alternative was a chip
+carrying `role="button"` in one place and inert in the other, which is a control that lies to a
+keyboard.
+
+Two rules that used to paint a `<code>` are gone with this wave: `.message-bubble code` in
+`backgrounds.css` and `.file-viewer-markdown code` in `files-viewer.css`. Both are dead now — every
+`<code>` the console draws comes out of `inlineMarkup` and carries the class — and leaving them would
+have been two rules arguing over one element with the later stylesheet winning by accident.
+`backgrounds.css` loads **after** `styles.css`, which is why this is worth saying out loud.
+
+### The colour
+
+`--code-chip-fg: #ff6b6b` in ink, `#b3364a` in mist. They are defined local to the CONSOLE-5 block in
+`styles.css`, not in `tokens.css`, which is shared and would be a needless collision.
+
+They are **not** `--danger-500` (`#ff6f72`), which is one shade away and is the error colour. Every
+identifier painted in the error colour would read to Jason as a failed turn — the exact trap
+`host-notes-read-as-errors.md` is about. The gate asserts the difference rather than trusting it.
+
+Mist is a light theme on a cream card, where `#ff6b6b` washes out; `#b3364a` on mist's own ground
+measures **5.4:1**. The operator's own bubble is a cream plate in both themes, so it borrows the mist
+values.
+
+### The habit that fills the chips
+
+A chip is only worth having if the model reaches for backticks. One sentence went into the standing
+persona's general block, next to the marketplace paragraph, since both are habits rather than facts:
+
+> Identifiers, addresses, channels, hostnames, file names and any draft I am quoting back go in
+> backticks, so they stand out from what I am saying and copy clean; ordinary prose stays plain.
+
+It names no colour, no chip and no console. Naming a surface in the prompt is how a tool name ends up
+on somebody's screen, which is the PERSONA-1 failure that file exists to stop.
+
+**This sentence lives in the host bundle**, so it is the one thing in this wave that is not
+relay-only — see the note in §5. Until a box takes the swap, the chips are there and the model has to
+be asked for backticks to fill them.
+
+### The gate
+
+```
+node scripts/verify-console-polish.mjs --chips
+```
+
+Two sub-legs, because they prove different things:
+
+- **The panel, always.** The markup is rendered by the *page's own* `paragraphMarkup` into the panel
+  the files viewer uses — a real surface with the real delegated handler, and unlike the transcript it
+  is not wiped by the next render poll, so a hit test and a clipboard read mean something. The press
+  is a real mouse at the chip's own centre after a hit test, not `page.click()`.
+- **The live reply, when the box answers.** It asks an agent for a channel, a hostname and an address
+  in backticks and measures the chips in the real transcript. It prints, in the run, that it is
+  proving the *renderer* against a prompted reply — the habit is the persona sentence and belongs to
+  the swap. When no reply arrives inside the budget it **skips with that reason**, never a pass.
+
+The leg also prints which build it ran against. The local relay serves whatever checkout it was
+started from; when that is an older build the leg serves `app.js`, `styles.css`, `backgrounds.css` and
+`files-viewer.css` out of the working tree and **says so**, because "it works when I serve it" and "it
+works on the page" are two different claims. It matches those files with a RegExp rather than a glob,
+since `index.html` stamps a cache-busting `?v=` on every stylesheet — the first run of this leg served
+its own `app.js` and the relay's older CSS and reported the chip as body white with no border, which
+was the old rule and not this build at all.
+
+**Measured on `grok-bot-local-vm`, Chrome 1440x1000, 2026-09-10: 17 passed, 0 failed, 0 skipped**,
+including a real agent's reply drawing three chips at `rgb(255, 107, 107)` and a mouse press putting
+`#titan-alerts` on the clipboard.
+
+`verify-console-polish.mjs` also gained the gate user agent it never sent. It now identifies itself as
+`titanbot-gate/verify-console-polish` on every API call and as the browser's real `userAgent`, so a
+traffic or cost reading taken afterwards can tell a gate from a person. It was the only gate in the
+repo importing nothing from `scripts/gate-agent.mjs`.
+
+| Gate | What it covers |
+|---|---|
+| `node --test tests/machine-room-markdown.test.mjs` | the renderer's own shape: the chip's class and its keyboard attributes, that a chip is still escaped inside itself, that `overflow-wrap: anywhere` and `cursor: pointer` are in the shipped rule, that the chip is never `--danger-500`, and that nothing else styles a bare `code` any more |
+| `node --test tests/machine-room-code-chip-pixels.test.mjs` | before and after in one browser: every non-chip element on the same pixel, no linkifier, no fenced-code handler, the chips the only nodes whose colour moved, and the long chip wrapping inside the bubble |
+| `node --test tests/machine-room-files.test.mjs` | that the viewer still renders through the same renderer |
+| `node --test tests/standing-persona.test.mjs` | that every agent, not only the lead, is told to use backticks, and that the sentence names no surface |
+| `node scripts/verify-console-polish.mjs --chips` | the chip in a real browser: its paint against the measured before, a real mouse press, the clipboard read back, the tick, the live region, Enter on a focused chip, and a real agent's reply |

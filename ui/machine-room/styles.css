@@ -839,6 +839,90 @@ select:focus-visible {
   margin-top: 6px;
 }
 
+/* CONSOLE-5. The inline code chip, and it is the ONLY rule that paints a backticked span now: the
+   two that used to fight over it (.message-bubble code in backgrounds.css and .file-viewer-markdown
+   code in files-viewer.css) are gone, because every <code> the console draws comes out of
+   inlineMarkup and now carries this class.
+
+   MEASURED before, on grok-bot-local-vm in Chrome at 1440x1000 on a live agent reply and at
+   900x1400 on the fixture, 2026-09-10: rgba(255,255,255,0.94) on rgba(255,255,255,0.10), 13.8px,
+   radius 5px, no border, overflow-wrap normal. That is body white on a white wash, which is why a
+   channel name did not read as different from the sentence around it.
+
+   The colours are local to this block on purpose. They are NOT --danger-500 (#ff6f72, one shade
+   away and reserved for failure): every identifier in the error colour would read to the operator
+   as a failed turn, which is the trap host-notes-read-as-errors.md is about. And they are not in
+   tokens.css, which is shared and would be a needless collision. */
+:root {
+  --code-chip-fg: #ff6b6b;
+  --code-chip-bg: rgba(10, 16, 20, 0.62);
+  --code-chip-edge: rgba(255, 107, 107, 0.30);
+  --code-chip-tick: #67cf86;
+}
+
+/* Mist is a light theme on a cream card, where #ff6b6b washes out. A darkened rose instead:
+   #b3364a on mist's own ground measures 5.4:1, so an identifier stays readable. The operator's own
+   bubble is a cream plate in BOTH themes, so it borrows the same values. */
+[data-theme="mist"],
+.is-user .message-bubble {
+  --code-chip-fg: #b3364a;
+  --code-chip-bg: rgba(179, 54, 74, 0.08);
+  --code-chip-edge: rgba(179, 54, 74, 0.24);
+  --code-chip-tick: #2f7d4f;
+}
+
+/* The box is the box the old rule had, to the pixel: 1px 5px of padding with no border becomes 0 4px
+   with a 1px one, so the chip adds up to the same 5px across and 1px down. That is not fussiness --
+   it is what lets tests/machine-room-code-chip-pixels.test.mjs assert that every paragraph, list and
+   heading in a transcript lands on the same pixel as before, which is the only way to prove a
+   linkifier or a fenced-code handler did not creep into the renderer while it was open. */
+code.code-chip {
+  padding: 0 4px;
+  border: 1px solid var(--code-chip-edge);
+  border-radius: 5px;
+  color: var(--code-chip-fg);
+  background: var(--code-chip-bg);
+  font: 0.92em ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* A whole draft line is one chip, and an id or a URL has nothing to break on. Without this the
+     long ones run out past the edge of the bubble instead of wrapping inside it. */
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+code.code-chip:hover {
+  border-color: var(--code-chip-fg);
+}
+
+code.code-chip:focus-visible {
+  outline: 2px solid var(--code-chip-fg);
+  outline-offset: 2px;
+}
+
+/* The tick. Quiet and local: it belongs beside the thing that was copied, not in the global toast,
+   which is for things the person did not ask for one at a time. */
+code.code-chip[data-copied]::after {
+  content: " ✓";
+  color: var(--code-chip-tick);
+}
+
+code.code-chip[data-copy-failed]::after {
+  content: " ✕";
+  color: var(--text-secondary);
+}
+
+/* Off screen, never display:none -- a hidden region is one no screen reader reads. */
+.chip-copy-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .is-user .message-bubble {
   border-color: rgba(255, 244, 224, 0.45);
   border-radius: 18px 18px 7px;

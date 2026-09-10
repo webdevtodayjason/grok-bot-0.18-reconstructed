@@ -250,6 +250,36 @@ test("the section says in words that it outranks the profile and the memory", ()
   assert.ok(/the facts above are the live ones/.test(text), "and which one wins is stated");
 });
 
+// --------------------------------------------------------------- CONSOLE-5, the backtick habit
+
+// Jason, 2026-09-10, pointing at the original: a bot writes ids, emails, channels and hostnames in
+// backticks and the transcript paints each one as a chip that stands out and copies clean. The
+// console now draws that chip. This is the other half: a chip is only worth having if the model
+// puts something in it. Asserted against the habit rather than a golden string, the way the rest of
+// this file works, and asserted in the GENERAL block because the chip is on every agent's screen,
+// not only the lead's.
+test("every agent is told to put identifiers and addresses in backticks", () => {
+  const text = render({ root: fakeBox({}), agentId: OTHER });
+  assert.ok(/backticks/.test(text), `the habit is stated: ${text}`);
+  for (const thing of ["Identifiers", "addresses", "channels", "hostnames", "file names"]) {
+    assert.ok(text.includes(thing), `it names ${thing}`);
+  }
+  assert.ok(/ordinary prose stays plain/.test(text),
+    "and says where it stops, so a whole reply does not arrive in monospace");
+  assert.ok(!/lead of the crew/.test(text), "this agent is not the lead, and still reads it");
+});
+
+test("the backtick sentence teaches a habit and never names the surface that draws it", () => {
+  // PERSONA-1's own rule: naming a tool or a surface in the prompt is how a tool name ends up on
+  // somebody's screen. The model needs the habit; the chip, its colour and the console are ours.
+  const text = render({ root: fakeBox({}) });
+  const sentence = text.split("\n").find((line) => line.includes("backticks"));
+  assert.ok(sentence, "the sentence is findable");
+  for (const word of ["chip", "console", "Console", "colour", "color", "click", "copy button"]) {
+    assert.ok(!sentence.includes(word), `the sentence does not say ${word}: ${sentence}`);
+  }
+});
+
 // ----------------------------------------------------- the dead upstream, and the name
 
 const assembled = [
