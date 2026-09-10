@@ -263,6 +263,13 @@ export async function startFakeRelay(options = {}) {
     dockerSilent: options.dockerSilent === true,
     // Containers on the host this relay can see that no tenant row points at.
     extraContainers: options.extraContainers ?? [],
+    // HOW MANY PURGE REQUESTS DIE ON THE WIRE BEFORE ONE ARRIVES. Measured on the R750 2026-09-10:
+    // the removal's container-gone step makes a dozen keep-alive POSTs at 2 s intervals, a Node
+    // server closes an idle connection at 5 s, and undici does not retry a POST it dispatched onto a
+    // socket the other end had already closed. The next single-shot POST -- the purge -- answered
+    // nothing at all, and the operator was told the data could not be deleted while this route had
+    // never run. The socket is destroyed, which is exactly what the caller saw.
+    purgeTransportFailures: Number(options.purgeTransportFailures ?? 0),
   };
 
   // The purge door, built out of ui/purge-edge.mjs itself.
@@ -345,6 +352,11 @@ export async function startFakeRelay(options = {}) {
       }
 
       if (url.pathname === "/tenant/purge") {
+        if (Number(state.purgeTransportFailures ?? 0) > 0 && body?.probeOnly !== true) {
+          state.purgeTransportFailures -= 1;
+          request.socket.destroy();
+          return undefined;
+        }
         // THE REAL ROUTE ANSWERS THIS, not a hand-written guess at it. See tests/purge-double.mjs:
         // both ends of this contract shipped in one wave disagreeing on every field, and two fakes
         // that had copied the caller's guess are what let that through 78 green tests.

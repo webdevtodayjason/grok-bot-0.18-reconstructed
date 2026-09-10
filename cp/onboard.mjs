@@ -88,6 +88,13 @@ const PROVISION_STEPS = ["directories", "secrets", "compose", "service", "envs",
 
 export const TITAN_NO_MODEL =
   "Titan is up but has no model yet, so he would not answer. Fix the model on this row, then press Send the welcome.";
+// THE SAME STOP WITH A DIFFERENT THING TO GO AND DO, and the difference is why this constant exists.
+// On the R750 at 19:31:27Z on 2026-09-10 the model was right, the plan was right and the key was
+// minted: the relay refused the push because its own registry had read the box's container name a
+// few seconds before the container existed. TITAN_NO_MODEL sent the operator to fix a row that had
+// nothing wrong with it. When the refusal came from the relay, say so and say the wait.
+export const TITAN_MODEL_REFUSED =
+  "The model could not be pushed into that workspace yet, so Titan has nothing to answer with. Press Retry: a box that has only just come up clears this by itself within a minute.";
 export const ADDRESSES_NONE =
   "Their bots have no addresses yet, so the welcome cannot tell them where to write to Titan. Press Retry, or send the welcome anyway.";
 export const WELCOME_NOT_ASKED =
@@ -112,7 +119,12 @@ const TUNABLES = {
   healthIntervalMs: ["CP_ONBOARD_HEALTH_INTERVAL_MS", 3_000],
   healthProbeTimeoutMs: ["CP_ONBOARD_HEALTH_PROBE_MS", 5_000],
   addressBudgetMs: ["CP_ONBOARD_ADDRESS_BUDGET_MS", 180_000],
-  runningBudgetMs: ["CP_ONBOARD_RUNNING_BUDGET_MS", 60_000],
+  // 150 s and not 60 s, which is arithmetic and not padding: the relay's tenant registry refreshes
+  // on a 60 second timer (ui/tenant-registry.mjs), and the read loop below is what keeps pushing the
+  // plan model while that clock comes round. A 60 second budget loses a race with a 60 second timer
+  // about half the time, which is what it did on the R750 on 2026-09-10. This outlasts one full
+  // cycle even on a relay that never got the out-of-schedule refresh.
+  runningBudgetMs: ["CP_ONBOARD_RUNNING_BUDGET_MS", 150_000],
   boxCallTimeoutMs: ["CP_ONBOARD_BOX_CALL_MS", 20_000],
   stallMs: ["CP_ONBOARD_STALL_MS", 180_000],
 };
@@ -510,20 +522,42 @@ export function createOnboarding(options = {}) {
     const { slug, plan } = record;
     step(slug, LEDGER.plan, "running", { why: "the plan model and the bot ceiling are being pushed, then Titan is read" });
 
+    // ---- the plan model, pushed and PUSHED AGAIN ------------------------------------------------
+    //
+    // THE ONE PUSH WAS THE FAULT. This used to push once, at the instant the box first answered
+    // /health, and write a refusal down as a note. Measured on the R750 2026-09-10: the push landed
+    // 7 s after the container started, the relay's registry had read that workspace's row while the
+    // container did not exist yet, so use-included answered 404 "not available" and the box never
+    // got a model at all. The read loop below then watched an empty model for 58 s and wrote an
+    // amber naming the symptom. A push that can be a moment early has to be retried, inside the
+    // budget the read loop already holds, and the refusal has to reach the card.
+    //
+    // `pinned` is NOT retried. A container whose environment pins its model refuses every push for
+    // the same reason for ever, and asking again twenty times is twenty pointless calls into a
+    // customer's box.
     const notes = [];
     let applied = null;
-    if (plan.planModel.length > 0) {
+    let refusal = "";
+    let pushes = 0;
+    let pinned = false;
+    const pushPlanModel = async () => {
+      if (plan.planModel.length === 0 || pinned) return;
+      pushes += 1;
       const answer = await pointWorkspaceAt(slug, plan.planModel);
       if (!answer.ok) {
         applied = false;
-        notes.push(String(answer.why ?? "the relay did not answer"));
+        refusal = String(answer.why ?? "the relay did not answer");
       } else if (answer.body?.pinned === true) {
         applied = false;
-        notes.push(`this workspace's container environment pins its model (${String(answer.body?.pinnedBy ?? "SAND_OPENAI_COMPATIBLE_* is set on the container")}), so nothing pushed here takes effect there until that is gone`);
+        pinned = true;
+        refusal = `this workspace's container environment pins its model (${String(answer.body?.pinnedBy ?? "SAND_OPENAI_COMPATIBLE_* is set on the container")}), so nothing pushed here takes effect there until that is gone`;
       } else {
         applied = true;
+        refusal = "";
       }
-    }
+      if (refusal.length > 0 && !notes.includes(refusal)) notes.push(refusal);
+    };
+    await pushPlanModel();
 
     let ceiling = null;
     if (plan.ceiling != null) {
@@ -544,9 +578,10 @@ export function createOnboarding(options = {}) {
     }
 
     // THE READ-BACK, and it is doing two jobs. It says whether this workspace has a model at all,
-    // and it is the only relay call that reaches contextOf, which is the only caller of
-    // registry.miss(), so it forces the relay's out-of-schedule registry refresh instead of leaving
-    // a brand new tenant invisible for up to the 60 second timer.
+    // and it goes through the relay's contextOf, which asks the registry for an out-of-schedule
+    // refresh when the workspace it names is unknown OR known and unreachable. So a box that came up
+    // after the last refresh is seen on the call after this one rather than a minute later, and the
+    // loop below is what turns that into a model: every pass that reads an empty model pushes again.
     let model = "";
     let label = "";
     let modelWhy = "";
@@ -564,16 +599,28 @@ export function createOnboarding(options = {}) {
       }
       if (now() + ms.healthInterval >= Math.min(readStarted + ms.runningBudget, record.startedAt + ms.deadline)) break;
       await sleep(ms.healthInterval);
+      // AND ASK AGAIN. Only when the push itself was refused: a workspace whose push went through
+      // and still reads no model is a different fault, and pushing the same alias at it every three
+      // seconds would hide it.
+      if (applied === false) await pushPlanModel();
     }
 
     if (model.length === 0 && label.length === 0) {
       return stop(slug, LEDGER.plan, "amber", {
-        model: plan.planModel, applied: applied === true, ceiling, notes,
-        why: modelWhy || "nothing could be read back about what this workspace runs on",
-        next: TITAN_NO_MODEL,
+        model: plan.planModel, applied: applied === true, ceiling, notes, pushes,
+        // THE CAUSE AND NOT ONLY THE SYMPTOM. When the relay refused the push, its words are what a
+        // person needs; the symptom ("that workspace's own settings name no model") is what they
+        // would have gone and tried to fix.
+        why: refusal.length > 0
+          ? `${modelWhy || "nothing could be read back about what this workspace runs on"}, and the model push was refused: ${refusal}`
+          : (modelWhy || "nothing could be read back about what this workspace runs on"),
+        next: refusal.length > 0 ? TITAN_MODEL_REFUSED : TITAN_NO_MODEL,
       });
     }
-    step(slug, LEDGER.plan, "ok", { asked: plan.planModel, applied: applied === true, model, label, ceiling, notes });
+    // `model` and `label` are WHAT THE BOX READ BACK and never the alias that was sent, which is the
+    // one field on this row worth trusting. `pushes` above one says the first push was refused and a
+    // later one landed, which is the proof the retry is doing something.
+    step(slug, LEDGER.plan, "ok", { asked: plan.planModel, applied: applied === true, model, label, ceiling, notes, pushes });
 
     // ---- and only now, the box itself, READ ONLY -------------------------------------------------
     step(slug, LEDGER.titan, "running", { why: "the box's own roster and first-run state are being read" });
@@ -771,15 +818,39 @@ export function createOnboarding(options = {}) {
 
   // ---- the runner --------------------------------------------------------------------------------
 
+  // WHICH STOP STOPS WHAT, written down because guessing it wrong cost a customer their welcome.
+  //
+  // On the R750 at 19:31:27Z on 2026-09-10 Waking Titan went amber because the relay was a minute
+  // behind with a model. This runner was a straight chain, so the addresses sweep and the welcome
+  // never ran at all and the card left them reading "waiting" for ever. Six red lines on the gate,
+  // one line of control flow.
+  //
+  //   box        STOPS EVERYTHING after it. There is no host to read a roster from, no Titan to
+  //              introduce and no address to mint: every step after this one would fail for the same
+  //              reason and write three more rows saying so.
+  //   titan      STOPS NOTHING. The sweep needs the box up and a roster, which it reads through the
+  //              relay. The welcome needs an owner row, a host and a sender. NEITHER NEEDS A MODEL,
+  //              and the welcome must never wait on one: it carries the temporary password, and a
+  //              customer whose mail was held back by a model setting has no way in at all.
+  //   addresses  STOPS NOTHING. Without Titan's address the welcome says a little less and still
+  //              carries the password and the sign-in link, which is the part that cannot wait.
+  //
+  // The card stays honest either way. foldSteps counts ANY amber as a stop and `done` needs all five
+  // green, so a titan amber with a green welcome draws an amber card with Retry on it, which is
+  // exactly what happened: something needs a look, and the customer was not left in the dark while
+  // it waits.
   async function run(record) {
     const { slug } = record;
     const need = (key) => foldSteps(store.listSteps(slug), { at: now(), stallMs: ms.stall }).byKey[key]?.state !== "ok";
     try {
       if (need("box")) { const verdict = await buildBox(record); if (!verdict.ok) return verdict; }
-      if (need("titan")) { const verdict = await wakeTitan(record); if (!verdict.ok) return verdict; }
-      if (need("addresses")) { const verdict = await giveAddresses(record); if (!verdict.ok) return verdict; }
-      if (need("welcome")) return await sendWelcome(record);
-      return { ok: true };
+      // The first stop that was not a stop for everything, carried to the caller so `settle` and the
+      // CLI still learn what went amber, while the steps that do not depend on it run anyway.
+      let carried = null;
+      if (need("titan")) { const verdict = await wakeTitan(record); if (!verdict.ok) carried ??= verdict; }
+      if (need("addresses")) { const verdict = await giveAddresses(record); if (!verdict.ok) carried ??= verdict; }
+      if (need("welcome")) { const verdict = await sendWelcome(record); if (!verdict.ok) carried ??= verdict; }
+      return carried ?? { ok: true };
     } catch (error) {
       // A throw in here is a bug in this file and not a broken tenant. It is written down where the
       // operator will see it, with the one thing to press.

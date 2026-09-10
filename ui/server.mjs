@@ -685,7 +685,13 @@ const sessionKeyFor = (slug) => (contextOf(slug) == null ? "" : registry.session
 function contextOf(slug) {
   const entry = registry.get(slug);
   if (entry == null) { registry.miss(slug); return null; }
-  if (entry.reachable === false) return null;
+  // A KNOWN WORKSPACE THAT IS NOT REACHABLE ASKS TOO. The row can be one read old: a box built
+  // thirty seconds ago was marked unreachable because its container did not exist at the last
+  // refresh, and without this the answer stays "not available" until the 60 second timer, which is
+  // how a brand new customer's plan model came to be refused on the R750 (ONBOARD-2, 19:30:22Z
+  // 2026-09-10). miss() rate limits itself, so a stranger hammering a dead slug still cannot pump
+  // the control plane.
+  if (entry.reachable === false) { registry.miss(slug); return null; }
   const found = contexts.get(entry.slug);
   if (found != null && found.entry === entry) return found;
   const built = buildContext(entry);
@@ -3443,6 +3449,10 @@ function tenantPurgeRoute() {
       const entry = registry.get(String(slug ?? ""));
       return entry != null && entry.reachable !== false;
     },
+    // And the way to make that flag current. It is read off a cache with a 60 second timer, and the
+    // control plane asks this route seconds after it proved the container gone, so the route is
+    // allowed one refresh before it refuses on the older of its two facts.
+    refreshRegistry: () => registry.refresh().catch(() => false),
     containerFor: (slug) => registry.get(String(slug ?? ""))?.box ?? "",
     // `docker ps -a`, not `docker ps`: a stopped container still exists, still holds the customer's
     // mounts and still comes back on a reboot, so "not running" is not "gone".

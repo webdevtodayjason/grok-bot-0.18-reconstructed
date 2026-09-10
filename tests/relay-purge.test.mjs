@@ -327,6 +327,67 @@ test("a workspace this console can still reach leaves the data alone whatever do
   });
 });
 
+test("a registry that is a minute behind a docker read it just made is refreshed once, and then the tree goes", async () => {
+  // ONBOARD-2, and the arithmetic that made this necessary. registryKnows reads a CACHED reachable
+  // flag whose refresh timer is 60 seconds. `present` is read from docker in this same call, so it is
+  // milliseconds old. When the two disagree the newer one is the one to act on, and on the R750 on
+  // 2026-09-10 the control plane's removal asked, was told still_reachable, and its 30 second poll
+  // lost to the 60 second timer every time. One refresh and one re-read turns a minute into a round
+  // trip.
+  await withRoot(async ({ tenants }) => {
+    let refreshes = 0;
+    let stale = true;
+    const { seen, res } = await call(tenants, { slug: SLUG, confirm: SLUG }, {}, {
+      containerFor: () => CONTAINER,
+      dockerNames: async () => new Set(["titanbot-relay-abc"]),
+      registryKnows: () => stale,
+      refreshRegistry: async () => { refreshes += 1; stale = false; return true; },
+    });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(refreshes, 1, "exactly one refresh, not a loop");
+    assert.equal(res.body.removed, true);
+    assert.equal(res.body.refreshed, true, "and the answer says the extra round trip happened");
+    assert.ok(res.body.freedBytes >= 4096, `${res.body.freedBytes} bytes freed`);
+    assert.equal(seen.removed.length, 1);
+    assert.equal(await exists(path.join(tenants, SLUG)), false);
+  });
+});
+
+test("a registry that still reaches the workspace after a refresh refuses, and a container that is there is refused without one", async () => {
+  await withRoot(async ({ tenants }) => {
+    // The refresh happened and the answer did not change, so the refusal is the current truth.
+    let refreshes = 0;
+    const held = await call(tenants, { slug: SLUG, confirm: SLUG }, {}, {
+      containerFor: () => CONTAINER,
+      dockerNames: async () => new Set(["titanbot-relay-abc"]),
+      registryKnows: () => true,
+      refreshRegistry: async () => { refreshes += 1; return true; },
+    });
+    assert.equal(held.res.status, 409);
+    assert.equal(held.res.body.message, PURGE_STILL_REACHABLE);
+    assert.equal(held.res.body.refreshed, true);
+    assert.equal(refreshes, 1);
+    assert.equal(held.seen.removed.length, 0);
+    assert.equal(await exists(path.join(tenants, SLUG)), true);
+
+    // AND A CONTAINER THAT IS REALLY THERE IS REFUSED WITH NO REFRESH AT ALL. Nothing a registry
+    // could say would change that answer, and a refresh here would only be a call the product makes
+    // for no reason on the one path where it must do the least.
+    let second = 0;
+    const present = await call(tenants, { slug: SLUG, confirm: SLUG }, {}, {
+      containerFor: () => CONTAINER,
+      dockerNames: async () => new Set([CONTAINER]),
+      registryKnows: () => true,
+      refreshRegistry: async () => { second += 1; return true; },
+    });
+    assert.equal(present.res.status, 409);
+    assert.equal(present.res.body.message, PURGE_CONTAINER_PRESENT);
+    assert.equal(second, 0, "a container that is present asked the registry to look again");
+    assert.equal(present.seen.removed.length, 0);
+    assert.equal(await exists(path.join(tenants, SLUG)), true);
+  });
+});
+
 test("with the container gone and the name typed back, the tree goes and the answer is re-measured", async () => {
   await withRoot(async ({ tenants }) => {
     const { seen, res } = await call(tenants, { slug: SLUG, confirm: SLUG }, {}, {

@@ -26,8 +26,9 @@ import { createTenantPurgeRoute, removeTreeFs } from "../ui/purge-edge.mjs";
  *            Coolify's HOST set and never from its service records, because the failure this step
  *            exists for is the record gone and the container still up.
  * tenantRootOf  () -> where workspaces live. A real directory: the route realpaths it.
- * state.registryLag  how many more times registryKnows answers true after the container is gone,
- *            which is the real relay's registry refresh and the reason the caller has to poll.
+ * state.registryLag  how many REFRESHES the registry still needs before it lets go of the workspace
+ *            after the container is gone. registryKnows reads the flag and never changes it; the
+ *            route's own refreshRegistry is what clears one, the way the real relay's does.
  * state.purgeRefusal  set to a sentence and the door answers 409 before the route is reached, for
  *            the test that watches a removal carry on past a purge it could not have.
  */
@@ -46,12 +47,20 @@ export function makePurgeDouble({
     relayToken,
     tenantRootOf,
     // A registry that still routes to a workspace is a workspace that is still there, whatever one
-    // container name says. It clears itself one refresh after the container goes, and `registryLag`
-    // is that refresh: the caller must ask again rather than read a 409 as a failure.
+    // container name says. This is a CACHED flag and reading it never changes it; `registryLag` is how
+    // many refreshes it still needs, and refreshRegistry below is what spends one.
     registryKnows: (slug) => {
-      if (Number(state?.registryLag ?? 0) > 0) { state.registryLag -= 1; return true; }
+      if (Number(state?.registryLag ?? 0) > 0) return true;
       const name = containerFor(slug);
       return String(name ?? "").length > 0 && onHost(name) === true;
+    },
+    // A REFRESH IS WHAT CLEARS THE LAG, because the flag above is a cache and this is the re-read.
+    // The route asks for one before it refuses on a stale flag, which is what turns the real relay's
+    // 60 second timer into one extra round trip. Counted, so a test can prove it happened.
+    refreshRegistry: async () => {
+      state.refreshes = Number(state?.refreshes ?? 0) + 1;
+      if (Number(state?.registryLag ?? 0) > 0) state.registryLag -= 1;
+      return true;
     },
     containerFor,
     dockerNames: async () => {

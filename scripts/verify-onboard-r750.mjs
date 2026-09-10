@@ -140,6 +140,10 @@ try {
 
   // ---- 2. the invite ---------------------------------------------------------------------------
   step("Add a client, one press");
+  // The admin console is a left-nav dashboard (ADMIN-3): one panel on screen at a time, named by the
+  // hash, so the Clients panel has to be opened before its button is visible.
+  await page.click('a[href="#panel-clients"]');
+  await page.waitForSelector("#addClientShow", { state: "visible", timeout: 30_000 });
   await page.click("#addClientShow");
   await page.fill("#acEmail", OWNER_EMAIL);
   await page.fill("#acCompany", COMPANY);
@@ -288,7 +292,24 @@ try {
   check(removed.body?.ok === true, "the removal finished", redact(String(removed.body?.message ?? removed.status)));
   check(removed.body?.containerGone === true, "and the container is PROVED gone rather than assumed", String(removed.body?.provedBy ?? ""));
   check(removed.body?.dataDeleted === true, "and their data went with it", `${Number(removed.body?.bytesFreed ?? 0)} bytes freed`);
+  // THE PURGE'S OWN NUMBER, not the removal's summary of it. A removal can answer dataDeleted true on
+  // a relay that reported nothing freed, and a directory still on the disk is the one thing "delete
+  // their data" has to mean. This leg reads the data effect's own detail, which is what the relay's
+  // freedBytes was written into.
+  const dataEffect = (removed.body?.effects ?? []).find((one) => one.step === "data") ?? null;
+  const dataDetail = (() => { try { return JSON.parse(String(dataEffect?.detail ?? "")); } catch { return {}; } })();
+  check(dataEffect?.status === "ok" && Number(dataDetail.bytesFreed ?? 0) > 0,
+    "and the purge itself says how many bytes came back",
+    `${dataEffect?.status ?? "there was no data step"}, ${Number(dataDetail.bytesFreed ?? 0)} bytes`);
   say(`  the effects, in the order they landed: ${(removed.body?.effects ?? []).map((one) => `${one.step}=${one.status}`).join(" > ")}`);
+  // AND WHAT EVERY ONE THAT IS NOT OK ACTUALLY SAID. The line above drops the detail, and the data
+  // step's detail is wiped from the ledger one step later by design, so for one run on 2026-09-10 a
+  // refusal existed in two places and both threw it away. It is printed here, redacted like every
+  // other line.
+  for (const one of (removed.body?.effects ?? [])) {
+    if (one.status === "ok") continue;
+    say(`    ${one.step}=${one.status}: ${redact(String(one.detail ?? "")).slice(0, 400)}`);
+  }
 
   const after = await api("GET", "/v1/admin/clients");
   const afterSlugs = (after.body?.clients ?? []).map((one) => one.slug).sort();

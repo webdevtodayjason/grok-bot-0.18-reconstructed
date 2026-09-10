@@ -311,6 +311,46 @@ test("an unknown workspace triggers one refresh, and not one per request", async
   assert.equal(cp.calls.length - before, 2);
 });
 
+test("a workspace this console knows and cannot reach asks for a refresh too, which is how a box built a moment ago is seen", async () => {
+  // ONBOARD-2, measured on the R750 2026-09-10 at 19:30:22Z. A workspace whose row was read while its
+  // container was still being created is marked unreachable, and every route that goes through
+  // contextOf answers "not available" from then on. This used to get NO out-of-schedule refresh at
+  // all -- miss() returned false the moment the slug was in the map -- so the workspace stayed
+  // invisible until the 60 second timer came round. The control plane pushes a brand new customer's
+  // plan model in the seconds after their box first answers /health, so that window is exactly when
+  // it asks, and the push was refused 404 and never retried. Titan had no model.
+  const cp = fakeCp([{ body: { tenants: [row("acme"), row("beta")] } }]);
+  let clock = 2_000_000;
+  const up = new Set(["titanbot-box-jason"]);
+  const registry = createTenantRegistry({
+    operator: OPERATOR, cpUrl: "https://api.titanium.bot", relayToken: "a-relay-token", ...cp,
+    dockerNames: async () => new Set(up),
+    now: () => clock, missRefreshMs: 10_000, log: () => {},
+  });
+  await registry.refresh();
+  assert.equal(registry.get("acme").reachable, false, "no container, so not available");
+  assert.equal(registry.get("beta").reachable, false);
+  const before = cp.calls.length;
+
+  // acme's box finishes starting. Nothing on the schedule has looked yet.
+  up.add("titanbot-box-acme");
+  assert.equal(registry.miss("acme"), true, "a known workspace that cannot be reached is worth one read");
+  // RATE LIMITED exactly as a made-up slug is, which is what stops a stranger pumping the control
+  // plane: the second ask inside the same window reads nothing at all.
+  assert.equal(registry.miss("beta"), false);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(cp.calls.length - before, 1, "one out-of-schedule read, and not one per request");
+  assert.equal(registry.get("acme").reachable, true, "seen on the next call rather than on the next 60 second tick");
+
+  // And a workspace this console can serve is never a miss, so a healthy fleet makes no extra reads.
+  assert.equal(registry.miss("acme"), false);
+  clock += 10_001;
+  assert.equal(registry.miss("acme"), false);
+  assert.equal(registry.miss("beta"), true, "beta's box is still not there, so the next window asks again");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(cp.calls.length - before, 2);
+});
+
 test("an entry that did not change keeps its identity, so the per-workspace caches survive a refresh", async () => {
   const cp = fakeCp([{ body: { tenants: [row("demo")] } }, { body: { tenants: [row("demo")] } },
     { body: { tenants: [row("demo", { box: "titanbot-box-demo-2" })] } }]);

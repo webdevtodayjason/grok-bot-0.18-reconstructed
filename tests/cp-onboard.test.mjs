@@ -20,6 +20,7 @@ import {
   ADDRESSES_NONE,
   LEDGER,
   ONBOARD_LABELS,
+  TITAN_MODEL_REFUSED,
   TITAN_NO_MODEL,
   WELCOME_NOT_ASKED,
   WELCOME_NO_SENDER,
@@ -330,7 +331,7 @@ test("a provisioning failure keeps the account, and Retry resumes at the step th
   } finally { await box.close(); await relay.close(); }
 });
 
-test("a plan model nothing reads back stops the job before the welcome, with Titan amber", async () => {
+test("a plan model nothing reads back leaves Titan amber AND still mints the addresses and sends the welcome", async () => {
   const box = await startStubBox({ answers: freshBoxAnswers });
   // The push works and the read-back says the workspace names no model, which is exactly the state
   // writeBoxDefaults leaves a box in: Titan is awake and has nothing to answer with.
@@ -344,15 +345,116 @@ test("a plan model nothing reads back stops the job before the welcome, with Tit
       await sequence.settle("acme");
 
       const state = sequence.state("acme");
-      // The welcome is WAITING and not amber: it was asked for and it never ran, which is a
-      // different fact from "nobody asked for one". Amber would read as done-with-a-caveat.
-      assert.deepEqual(state.steps.map((one) => one.state), ["ok", "ok", "amber", "waiting", "waiting"]);
-      assert.equal(state.steps[2].next, TITAN_NO_MODEL);
-      assert.equal(welcome.sends.length, 0, "a mute Titan got a welcome sent about him");
-      // The box was still only READ, even on the path that stops.
+      // THE WHOLE OF THE R750'S SECOND FAULT IS THIS ONE LINE. On 2026-09-10 at 19:31:27Z this read
+      // ["ok","ok","amber","waiting","waiting"]: a titan amber stopped the chain, so the addresses
+      // sweep never ran and the customer never got their password. Neither of those steps depends on
+      // a model -- the sweep needs a roster, the welcome needs an owner, a host and a sender -- and
+      // the welcome must NEVER wait on a model setting.
+      assert.deepEqual(state.steps.map((one) => one.state), ["ok", "ok", "amber", "ok", "ok"]);
+      assert.equal(state.steps[2].next, TITAN_NO_MODEL, "the push went through, so the model row is the thing to fix");
+      assert.equal(welcome.sends.length, 1, "the welcome waited on a model it does not need");
+      assert.equal(state.steps[3].detail.titanAddress, "agent123456@myagents.email");
+      // And the card is still honest about it: amber is a stop, so this is not a green onboarding.
+      assert.equal(state.done, false);
+      assert.equal(state.stopped, "titan");
+      assert.equal(state.retryable, true);
+      // The box was still only READ, even on the path that goes amber.
       assert.deepEqual([...new Set(box.commands())], []);
     });
   } finally { await box.close(); await relay.close(); }
+});
+
+test("a relay that refuses the model push is asked again, and the card names the refusal rather than the symptom", async () => {
+  const box = await startStubBox({ answers: freshBoxAnswers });
+  // THE R750'S FIRST FAULT, reproduced. use-included went through contextOf, the registry had read
+  // that workspace's row while its container did not exist yet, and the route answered 404 "not
+  // available" seven seconds after the box came up. The push happened exactly once and the refusal
+  // went into a notes array nobody reads, so the card said "that workspace's own settings name no
+  // model" -- sending the operator to fix a row that had nothing wrong with it.
+  let pushes = 0;
+  const relay = await startStubRelay({
+    useIncluded: () => {
+      pushes += 1;
+      return pushes <= 2
+        ? { status: 404, message: "that workspace is not available on this console yet" }
+        : { ok: true, pinned: false };
+    },
+    // The box reports a model only once a push has actually landed, which is the signal that matters.
+    running: () => (pushes >= 3
+      ? { read: true, model: "plan-zai", modelLabel: "GLM-5.3", pinned: false }
+      : { read: true, model: "", modelLabel: "", pinned: false }),
+  });
+  const welcome = stubWelcome();
+  try {
+    await withPlane(async (plane) => {
+      plane.seedTenant({ slug: "acme" });
+      const sequence = sequenceOver(plane, { box, relay, welcome, mail: mailAfter("acme") });
+      sequence.start({ slug: "acme", planModel: "plan-zai", sendWelcome: true });
+      await sequence.settle("acme");
+
+      const state = sequence.state("acme");
+      assert.deepEqual(state.steps.map((one) => one.state), ["ok", "ok", "ok", "ok", "ok"]);
+      assert.equal(pushes >= 3, true, `the push was made ${pushes} time(s)`);
+      const plan = plane.store.listSteps("acme").filter((row) => row.step === LEDGER.plan).pop();
+      const detail = JSON.parse(plan.detail);
+      // WHAT THE BOX READ BACK, never the alias that was sent. `asked` is the alias; `model` is the
+      // answer, and the two are different fields on purpose.
+      assert.equal(detail.asked, "plan-zai");
+      assert.equal(detail.model, "plan-zai");
+      assert.equal(detail.label, "GLM-5.3");
+      // And the proof the retry is what got there: a push count above one.
+      assert.equal(detail.pushes >= 3, true, JSON.stringify(detail));
+    });
+  } finally { await box.close(); await relay.close(); }
+});
+
+test("a model push the relay never accepts goes amber in the relay's own words, with the wait to press", async () => {
+  const box = await startStubBox({ answers: freshBoxAnswers });
+  const relay = await startStubRelay({
+    useIncluded: { status: 404, message: "that workspace is not available on this console yet" },
+    running: { read: true, model: "", modelLabel: "", pinned: false },
+  });
+  const welcome = stubWelcome();
+  try {
+    await withPlane(async (plane) => {
+      plane.seedTenant({ slug: "acme" });
+      const sequence = sequenceOver(plane, { box, relay, welcome, mail: mailAfter("acme") });
+      sequence.start({ slug: "acme", planModel: "plan-zai", sendWelcome: true });
+      await sequence.settle("acme");
+
+      const state = sequence.state("acme");
+      assert.equal(state.steps[2].state, "amber");
+      // THE CAUSE, not only the symptom. The relay's own status is in the sentence a person reads.
+      assert.match(state.steps[2].why, /the model push was refused/);
+      assert.match(state.steps[2].why, /404/);
+      assert.equal(state.steps[2].next, TITAN_MODEL_REFUSED, "a relay refusal is not a row to go and edit");
+      // And the two steps that do not depend on a model still ran.
+      assert.equal(state.steps[3].state, "ok");
+      assert.equal(state.steps[4].state, "ok");
+      assert.equal(welcome.sends.length, 1);
+    });
+  } finally { await box.close(); await relay.close(); }
+});
+
+test("a box that never answers its health stops before Titan and sends nothing at all", async () => {
+  // THE ONE AMBER THAT STOPS EVERYTHING. There is no host to read a roster from, no Titan to
+  // introduce and no address to mint, so running the rest would write three more rows saying the
+  // same thing.
+  const relay = await startStubRelay();
+  const welcome = stubWelcome();
+  try {
+    await withPlane(async (plane) => {
+      plane.seedTenant({ slug: "acme" });
+      const sequence = sequenceOver(plane, { box: null, relay, welcome, mail: mailAfter("acme") });
+      sequence.start({ slug: "acme", planModel: "plan-zai", sendWelcome: true });
+      await sequence.settle("acme");
+
+      const state = sequence.state("acme");
+      assert.deepEqual(state.steps.map((one) => one.state), ["ok", "amber", "waiting", "waiting", "waiting"]);
+      assert.equal(welcome.sends.length, 0, "a customer with no computer was written to");
+      assert.equal(relay.callsTo("POST /mail/sweep").length, 0, "a box that is not there had its roster swept");
+    });
+  } finally { await relay.close(); }
 });
 
 test("a sweep that is already running is retried, and green waits for a live row in the directory", async () => {
@@ -382,7 +484,7 @@ test("a sweep that is already running is retried, and green waits for a live row
   } finally { await box.close(); await relay.close(); }
 });
 
-test("a sweep that never mints an address leaves the step amber with a second press offered", async () => {
+test("a sweep that never mints an address leaves the step amber, and the welcome still goes", async () => {
   const box = await startStubBox({ answers: freshBoxAnswers });
   const relay = await startStubRelay();
   const welcome = stubWelcome();
@@ -396,7 +498,13 @@ test("a sweep that never mints an address leaves the step amber with a second pr
       const state = sequence.state("acme");
       assert.equal(state.steps[3].state, "amber");
       assert.equal(state.steps[3].next, ADDRESSES_NONE);
-      assert.equal(welcome.sends.length, 0);
+      // Without Titan's address the welcome says a little less. It still carries the temporary
+      // password and the sign-in link, which is the part that cannot wait for a sweep.
+      assert.equal(welcome.sends.length, 1);
+      assert.equal(String(welcome.sends[0].titanAddress ?? ""), "");
+      assert.equal(state.steps[4].state, "ok");
+      assert.equal(state.done, false, "an amber is still a stop on the card");
+      assert.equal(state.stopped, "addresses");
     });
   } finally { await box.close(); await relay.close(); }
 });

@@ -200,6 +200,12 @@ export function createTenantPurgeRoute({
   // (slug) -> true while this console can still reach that workspace. A registry that still routes to
   // a box is a box that is still there whatever docker says.
   registryKnows = () => false,
+  // () -> read the tenant rows again, now. The registry's reachable flag is a CACHE with a 60 second
+  // timer on it, and by the time this route is asked the docker read below is seconds old and the
+  // flag can be a minute old. Refusing on the older of the two facts made the caller wait out a full
+  // registry cycle for a workspace whose container it had just proved absent. One refresh, one
+  // re-read, and the refusal stands only if it is still true.
+  refreshRegistry = async () => false,
   // (slug) -> the container name this relay knows for that workspace, or "".
   containerFor = () => "",
   // () -> a Set of every container name on this host, running or not, or null when docker is not
@@ -280,7 +286,17 @@ export function createTenantPurgeRoute({
     if (containerName.length === 0) return answer(409, PURGE_CONTAINER_UNKNOWN, { error: "container_unknown" });
     if (!dockerAnswered) return answer(409, PURGE_CONTAINER_UNKNOWN, { error: "container_unknown" });
     if (present === true) return answer(409, PURGE_CONTAINER_PRESENT, { error: "container_present" });
-    if (registryKnows(slug) === true) return answer(409, PURGE_STILL_REACHABLE, { error: "still_reachable" });
+    // THE CACHED FLAG IS OLDER THAN THE DOCKER READ THIS CALL JUST MADE, and that order is the whole
+    // point: `present` is false as of milliseconds ago, so a registry still saying "reachable" is a
+    // registry that has not looked since the container went. Ask it to look, then believe it. Only
+    // when it is the one thing left standing in the way -- a container that IS present is refused
+    // above and no refresh is attempted, because nothing a registry says could change that answer.
+    let refreshed = false;
+    if (registryKnows(slug) === true) {
+      refreshed = true;
+      try { await refreshRegistry(); } catch { /* a registry that would not refresh is still a refusal */ }
+      if (registryKnows(slug) === true) return answer(409, PURGE_STILL_REACHABLE, { error: "still_reachable", refreshed });
+    }
 
     if (!measured.exists) {
       return sendJson(res, 200, {
@@ -290,6 +306,7 @@ export function createTenantPurgeRoute({
         container: { name: containerName, present, known: true, dockerAnswered },
         dir: { path: dirPath, exists: false, bytes: 0, complete: true },
         freedBytes: 0,
+        refreshed,
       });
     }
 
@@ -312,6 +329,7 @@ export function createTenantPurgeRoute({
       container: { name: containerName, present, known: true, dockerAnswered },
       dir: { path: dirPath, exists: after.exists === true, bytes: Number(after.bytes ?? 0), complete: after.complete !== false },
       freedBytes: before,
+      refreshed,
     });
   }
 

@@ -22,10 +22,24 @@ import { createMailDirectory, normalizeAgents } from "../cp/mail.mjs";
 import { startControlPlane } from "./cp-support.mjs";
 
 const DOMAIN = "myagents.email";
-const memory = () => openStore({ file: ":memory:" });
+
+/**
+ * A workspace row for every slug a test mints for.
+ *
+ * ONBOARD-2: mint refuses a slug with no tenant row, because the five minute sweep minted an address
+ * 28.7 s into a removal on the R750 on 2026-09-10 and nothing would ever have retired it. Every one
+ * of these tests was minting for a workspace that did not exist, which is the shape of the bug.
+ */
+const workspaces = (store, ...slugs) => {
+  for (const slug of slugs) {
+    store.createTenant({ slug, name: slug, host: `${slug}.titanium.bot`, status: "running", ownerEmail: `owner@${slug}.invalid` });
+  }
+  return store;
+};
+const memory = (...slugs) => workspaces(openStore({ file: ":memory:" }), ...(slugs.length > 0 ? slugs : ["demo"]));
 
 test("two workspaces each with a Titan hold two different addresses, and neither localpart is the other's", () => {
-  const store = memory();
+  const store = memory("demo", "titanium");
   try {
     const directory = createMailDirectory({ store, domain: DOMAIN });
     directory.mint("demo", [{ id: "agent_titan", name: "Titan" }]);
@@ -68,7 +82,7 @@ test("a bot that already has an address never gets a second one, however often t
 });
 
 test("five thousand codes are five thousand distinct addresses, and a retired one is never handed out again", () => {
-  const store = memory();
+  const store = memory("big");
   try {
     const directory = createMailDirectory({ store, domain: DOMAIN });
     const roster = [];
@@ -148,6 +162,30 @@ test("only a code localpart resolves; a name never does, however it is spelled",
   } finally { store.close(); }
 });
 
+test("nothing mints an address for a workspace that is gone", () => {
+  // ONBOARD-2, measured on the R750 2026-09-10. A removal retires every address at its second step
+  // and keeps serving the tenant row to the relay until its eighth, so the five minute sweep read a
+  // roster off a box that was not dead yet, posted here 28.7 s into the teardown, and this wrote
+  // agent218973@myagents.email ACTIVE for a customer who no longer existed. Nothing would ever have
+  // retired it: the sweep only retires codes for a roster it can READ, and that box is gone.
+  const store = memory("demo");
+  try {
+    const directory = createMailDirectory({ store, domain: DOMAIN });
+    const refused = directory.mint("went-away", [{ id: "a1", name: "Titan" }]);
+    assert.equal(refused.error, "no_such_workspace");
+    assert.match(refused.message, /There is no workspace called went-away/);
+    assert.equal(refused.minted, 0);
+    assert.equal(store.listMailAddresses("went-away").length, 0, "not even a retired row was written");
+    assert.equal(store.listMailAddresses().length, 0, "and nothing was written anywhere else either");
+
+    // A workspace that is there is untouched by any of this.
+    const minted = directory.mint("demo", [{ id: "a1", name: "Titan" }]);
+    assert.equal(minted.error, undefined);
+    assert.equal(minted.minted, 1);
+    assert.equal(store.listMailAddresses("demo").length, 1);
+  } finally { store.close(); }
+});
+
 test("approved senders is off for every workspace until somebody turns it on", () => {
   const store = memory();
   try {
@@ -181,6 +219,9 @@ test("the directory routes answer the relay's credential and refuse every other 
     assert.deepEqual(empty.body.tenants, {});
     assert.equal(empty.body.domain, "myagents.email");
 
+    // The workspace exists, the way one does on a live control plane. The mint refuses a slug with no
+    // tenant row, which is what stops the sweep writing an address for a customer who is gone.
+    workspaces(cp.store, "demo");
     const minted = await relay("POST", "/v1/relay/mail/mint", {
       slug: "demo",
       agents: [{ id: "a1", name: "Titan" }, { id: "g1", name: "Sales", isGroup: true }, { id: "a2", name: "Scribe" }],
@@ -223,6 +264,7 @@ test("the super admin sees how many addresses a workspace holds, and never a sec
   const relayToken = randomBytes(24).toString("hex");
   const cp = await startControlPlane({ env: { CP_RELAY_TOKEN: relayToken } });
   try {
+    workspaces(cp.store, "demo");
     await cp.request("POST", "/v1/relay/mail/mint", {
       body: { slug: "demo", agents: [{ id: "a1", name: "Titan" }, { id: "a2", name: "Scribe" }] },
       token: relayToken,
@@ -260,6 +302,7 @@ test("retiring, listing senders and the approved-senders switch all answer over 
   const cp = await startControlPlane({ env: { CP_RELAY_TOKEN: relayToken } });
   try {
     const admin = cp.config.adminToken;
+    workspaces(cp.store, "demo");
     await cp.request("POST", "/v1/relay/mail/mint", {
       body: { slug: "demo", agents: [{ id: "a1", name: "Titan" }] },
       token: relayToken,
@@ -315,7 +358,7 @@ test("no mail verb in the CLI opens the database directly", async () => {
 test("a bot that has left the roster loses its address, and a roster that says nothing changes none", () => {
   // Minting alone left a deleted bot's code active and routable for ever: measured on the R750 on
   // 2026-09-09, two throwaway gate probes deleted hours earlier still held live addresses.
-  const store = openStore({ file: ":memory:" });
+  const store = memory();
   try {
     const directory = createMailDirectory({ store, domain: "myagents.email" });
     const first = directory.mint("demo", [{ id: "a1", name: "Titan" }, { id: "a2", name: "cf-probe-833658" }]);

@@ -501,6 +501,12 @@ async function until(what, why, deadlineMs = 15_000) {
 test("a named sweep reads the workspace list again, then touches exactly that one box", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "relay-sweep-"));
   const store = openStore({ dataDir: root });
+  // THE CONTROL PLANE'S OWN ROWS. The mint refuses a slug with no tenant row (ONBOARD-2: the sweep
+  // minted an address 28.7 s into a removal on the R750 on 2026-09-10, for a customer who was gone),
+  // so a console serving two workspaces holds two rows, the way a real one does.
+  for (const slug of ["alpha", "beta"]) {
+    store.createTenant({ slug, name: slug, host: `${slug}.titanium.bot`, status: "running", ownerEmail: `owner@${slug}.invalid` });
+  }
   const [alphaBox, betaBox] = await Promise.all([startFakeBox("alpha"), startFakeBox("beta")]);
   const cp = await startStubControlPlane(store);
   const alpha = tenantRow("alpha", { gateway: alphaBox.url, token: "alpha-gateway-token" });

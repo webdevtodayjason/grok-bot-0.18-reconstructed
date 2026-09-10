@@ -20,10 +20,14 @@
 // The nine steps, in this order, each one written to the provisioning ledger as remove:<name>:
 //
 //   disable-signins  every account for the slug is disabled FIRST, so nobody can sign in mid-teardown
-//   addresses        every active directory address for the slug is retired. Nothing else ever will:
-//                    the mail sweep only retires codes for agents missing from a roster it could
-//                    READ, and it cannot read a box that no longer exists, so a removed tenant's
-//                    agent<code>@myagents.email would keep routing for ever
+//   addresses        every active directory address for the slug is retired. Almost nothing else ever
+//                    will: the mail sweep only retires codes for agents missing from a roster it
+//                    could READ, and it cannot read a box that no longer exists, so a removed
+//                    tenant's agent<code>@myagents.email would keep routing for ever. The word is
+//                    "almost" because the sweep can still MINT here -- measured on the R750
+//                    2026-09-10, 28.7 s into a removal, off a box that was not dead yet -- which is
+//                    why cp/mail.mjs refuses a mint for a slug with no tenant row and why step 8b
+//                    retires again once the row is gone
 //   proxy-key        the tenant's model key is revoked BEFORE the container goes. A box that is up
 //                    and cannot reach a model is visible; a box that is gone and can is not
 //   stop             POST /services/{uuid}/stop, bounded wait
@@ -33,6 +37,8 @@
 //                    relay does it: the control plane is uid 1001 and the volumes are 0700 uid 1000
 //   accounts         deleteTenant, then deleteAccount for each, then releaseSlug. The order is
 //                    load-bearing and the comment at that step says why
+//   addresses-late   the addresses again, now the tenant row is gone and nothing can mint another.
+//                    Only written when there was one to retire
 //   audit-ready      the last ledger row, and the only one that survives. The caller writes the
 //                    admin_actions row
 //
@@ -152,7 +158,11 @@ export function createDecommission({
     stopDeadlineMs = 30_000,
     // How long the data purge is allowed to keep asking while the relay answers one of its two
     // self-clearing refusals. Short, because it is waiting on a registry refresh and not on a build.
-    dataDeadlineMs = 30_000,
+    // 90 s, and it is arithmetic. Two of the relay's three self-clearing refusals wait on its tenant
+    // registry, which refreshes on a 60 second timer (ui/tenant-registry.mjs), so a 30 second poll
+    // lost that race every time it ran. This outlasts one full cycle with a margin for the round
+    // trips. It is not waiting on a build and it never has been.
+    dataDeadlineMs = 90_000,
     pollMs = 2_000,
   } = {}) {
     const slug = String(rawSlug ?? "");
@@ -358,6 +368,10 @@ export function createDecommission({
     // root and is never handed one.
     let dataDeleted = false;
     let bytesFreed = 0;
+    // What the purge said when it would not do it, kept in a variable rather than only in a ledger row
+    // that store.deleteTenant is about to wipe. It goes into the audit-ready row and home to the
+    // caller, which is what puts it on the gate's transcript and in the admin_actions detail.
+    let dataWhy = "";
     if (!deleteData) {
       record("data", "kept", KEPT(dataPath));
     } else {
@@ -369,17 +383,34 @@ export function createDecommission({
       // registry has forgotten this workspace, so `containerFor(slug)` is "" and the route cannot
       // name the computer it has to prove absent (409 container_unknown).
       //
-      // THE POLL. Two of the route's refusals are states that clear themselves: the registry holds a
-      // tenant entry for up to its own refresh interval after the container is gone
-      // (409 still_reachable), and docker can be momentarily unaskable (409 container_unknown). Both
-      // are "ask again in a moment", not "this failed", so they are polled inside the budget left and
-      // only the last of them is recorded if the window runs out.
+      // THE POLL. Three answers here mean "ask again in a moment" rather than "this failed", and the
+      // third is the one that kept a customer's data on the R750 on 2026-09-10.
+      //
+      //   409 still_reachable    the relay's registry holds a tenant entry for up to its own refresh
+      //                          interval after the container is gone
+      //   409 container_unknown  docker can be momentarily unaskable
+      //   status 0               THE REQUEST NEVER ARRIVED. createRelayAsk answers status 0 for any
+      //                          transport failure, and this step is the first single-shot POST after
+      //                          step 6 has just made a dozen keep-alive POSTs at 2 s intervals
+      //                          through the same pool. A Node server closes an idle connection at 5 s
+      //                          and undici does not retry a POST it dispatched onto a socket the
+      //                          other end had already closed. Step 6 retries and survived it; this
+      //                          one was single-shot, answered nothing, and the operator was told the
+      //                          data could not be deleted while the relay had never run the route.
+      //                          The route is idempotent (it re-stats the tree and refuses anything it
+      //                          cannot prove), so asking again is safe.
+      //
+      // Only the last answer is recorded if the window runs out, and WHAT IT SAID is kept for the
+      // audit row below: a refusal nobody wrote down is a refusal diagnosed by elimination.
       const purgeBy = Math.min(wholeDeadline, now() + Math.max(0, dataDeadlineMs));
       let purge = null;
+      let purgeTries = 0;
       for (;;) {
+        purgeTries += 1;
         purge = await askRelayPost("/tenant/purge", { slug, confirm: slug, container });
-        const again = purge.status === 409
-          && (purge.body?.error === "still_reachable" || purge.body?.error === "container_unknown");
+        const again = purge.status === 0
+          || (purge.status === 409
+            && (purge.body?.error === "still_reachable" || purge.body?.error === "container_unknown"));
         if (!again) break;
         if (now() + pollMs >= purgeBy) break;
         await sleep(pollMs);
@@ -390,12 +421,15 @@ export function createDecommission({
       if (purge.ok && (purge.body?.removed === true || purge.body?.deleted === true || purge.body?.ok === true)) {
         dataDeleted = true;
         bytesFreed = Number(purge.body?.freedBytes ?? purge.body?.bytesFreed ?? purge.body?.bytes ?? 0) || 0;
-        record("data", "ok", JSON.stringify({ path: purge.body?.dir?.path ?? purge.body?.path ?? dataPath, bytesFreed }));
+        record("data", "ok", JSON.stringify({ path: purge.body?.dir?.path ?? purge.body?.path ?? dataPath, bytesFreed, tries: purgeTries }));
       } else {
         // Carried on rather than stopped. The container is already proved gone, so the customer is
         // off the air either way, and a tenant row kept alive only because a directory would not
         // delete is a row that will be forgotten about. The sentence names the path.
-        record("data", "carried-on", String(purge.why ?? purge.body?.message ?? `the relay answered ${purge.status}`));
+        dataWhy = `${String(purge.why ?? purge.body?.message ?? `the relay answered ${purge.status}`)}`
+          + ` (asked ${purgeTries} time${purgeTries === 1 ? "" : "s"}, last answer ${purge.status}`
+          + `${purge.body?.error ? ` ${String(purge.body.error)}` : ""})`;
+        record("data", "carried-on", dataWhy);
       }
     }
 
@@ -424,16 +458,41 @@ export function createDecommission({
     const slugFree = !store.isSlugRetired(slug) && store.getTenant(slug) == null;
     record("accounts", "ok", JSON.stringify({ removed: accountsRemoved, slugFree, ledgerWiped: true }));
 
+    // ---- 8b. the addresses again, now the tenant row is gone -------------------------------------
+    //
+    // THE WINDOW THAT LET ONE THROUGH. Step 2 retires, and until the line above this control plane
+    // was still serving this workspace on /v1/relay/tenants -- so the relay's five minute sweep could
+    // read a roster off a box that had not finished dying and post a fresh mint. Measured on the
+    // R750 2026-09-10: agent218973@myagents.email, created_at 28.7 s into a removal that had already
+    // reported "0 bot addresses retired", alive for a customer who was gone.
+    //
+    // cp/mail.mjs now refuses a mint for a workspace with no tenant row, which closes that for ever
+    // going forward. This is the other half: a row a sweep already in flight wrote before the row
+    // above was deleted is retired here, after the tenant is gone and nothing can write another.
+    const retiredLate = [];
+    for (const address of activeAddresses(slug)) {
+      store.retireMailAddress(address.code);
+      retiredLate.push(address.address);
+    }
+    if (retiredLate.length > 0) record("addresses-late", "ok", JSON.stringify({ retired: retiredLate }));
+
     // ---- 9. audit-ready -------------------------------------------------------------------------
     //
     // The last ledger row and the only one that outlives the tenant, because the rows above went
     // with the tenant row at step 8. The caller writes the admin_actions row from what is returned.
+    // THE ONE LEDGER ROW THAT OUTLIVES THE TENANT, so it is the one place a failed purge can be
+    // written down. Step 7's own remove:data row went with store.deleteTenant above (by design, see
+    // the header), the effects array is dropped by every printer that only reads step and status, and
+    // the admin_actions row the caller writes said nothing either. That is why the R750's
+    // "data=carried-on, 0 bytes freed" had to be diagnosed by arithmetic instead of read off a line.
+    // Never again: the refusal's own words ride here.
     record("audit-ready", "ok", JSON.stringify({
       actor: String(actor ?? ""),
       provedBy,
       dataDeleted,
       bytesFreed,
-      addresses: retired.length,
+      ...(dataWhy.length > 0 ? { dataWhy } : {}),
+      addresses: retired.length + retiredLate.length,
       accounts: accountsRemoved.length,
       tookMs: now() - startedAt,
     }));
@@ -449,15 +508,20 @@ export function createDecommission({
       status: "removed",
       slug,
       message: `${slug} is removed. The container is gone${provedBy === "docker" ? " (the relay says the name is absent)" : provedBy === "coolify-404" ? " (Coolify no longer has the service; the relay could not be asked)" : ""}.`
-        + ` ${retired.length} bot address${retired.length === 1 ? "" : "es"} retired, ${accountsRemoved.length} sign-in${accountsRemoved.length === 1 ? "" : "s"} removed, and the name ${slug} is free again.`
+        + ` ${retired.length + retiredLate.length} bot address${retired.length + retiredLate.length === 1 ? "" : "es"} retired`
+        + `${retiredLate.length > 0 ? ` (${retiredLate.length} of them minted while the removal was running)` : ""}`
+        + `, ${accountsRemoved.length} sign-in${accountsRemoved.length === 1 ? "" : "s"} removed, and the name ${slug} is free again.`
         + ` ${dataSentence}${revokeNote}`,
       effects,
       containerGone,
       provedBy,
       dataDeleted,
       bytesFreed,
+      // The refusal's own words, so the route's admin_actions row and the gate's transcript can both
+      // name it. Empty when the data went, and empty when it was never asked for.
+      dataWhy,
       accountsRemoved,
-      addressesRetired: retired,
+      addressesRetired: [...retired, ...retiredLate],
       slugFree,
       dataPath,
       tookMs: now() - startedAt,

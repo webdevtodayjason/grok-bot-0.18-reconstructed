@@ -406,6 +406,115 @@ test("a purge the relay refuses does not strand the removal, and the answer says
   });
 });
 
+test("a purge that dies on the wire is asked again, and the bytes it reports are the bytes in the message", async () => {
+  // ONBOARD-2, FAULT 4, measured on the R750 2026-09-10. The removal ran 33.959 s, the container was
+  // proved gone, and the data step reported "carried-on, 0 bytes freed" with NO purge line in the
+  // relay's stdout for the whole window: the request never arrived. createRelayAsk answers status 0
+  // for a transport failure, the step was single-shot, and the operator was told the data could not be
+  // deleted. The route is idempotent, so asking again is safe and is the only honest answer.
+  await withWorld(async (world) => {
+    const built = await makeCustomer(world);
+    world.relay.state.purgeTransportFailures = 1;
+    const { decommission } = decommissionFor(world);
+    const answer = await decommission.remove({ slug: built.slug, confirm: built.slug, deleteData: true, pollMs: 5 });
+    assert.equal(answer.ok, true, answer.message);
+    assert.equal(answer.dataDeleted, true, answer.message);
+    assert.equal(answer.bytesFreed, 6_200_000);
+    assert.equal(existsSync(built.dataPath), false, "the tree is gone");
+    // THE NUMBER IN THE SENTENCE IS THE NUMBER THE ROUTE REPORTED, and not a number this file carries.
+    assert.match(answer.message, /6200000 bytes came back/);
+    assert.equal(answer.dataWhy, "", "nothing refused in the end, so there is nothing to explain");
+    const purges = world.relay.callsTo("/tenant/purge").filter((call) => call.body?.probeOnly !== true);
+    assert.ok(purges.length >= 2, `one dropped and one answered at least, saw ${purges.length}`);
+    const data = answer.effects.find((effect) => effect.step === "data");
+    assert.equal(JSON.parse(data.detail).tries >= 2, true, data.detail);
+  });
+});
+
+test("a registry that holds on for eighty seconds is still inside the budget", async () => {
+  // THE OTHER HALF OF THE SAME ARITHMETIC. The relay's registry refreshes on a 60 second timer, so the
+  // poll has to outlast one full cycle. It was 30 s, with a comment claiming it was waiting on that
+  // refresh, and it lost the race every time.
+  await withWorld(async (world) => {
+    const built = await makeCustomer(world);
+    // Nine refreshes: the route spends one per call, so this is eight polls at ten seconds before the
+    // ninth call goes through, which is the case a 30 second budget could never have survived.
+    world.relay.state.registryLag = 9;
+    let clock = 1_700_000_000_000;
+    const started = clock;
+    const { decommission } = decommissionFor(world, {
+      deps: { now: () => clock, sleep: async (ms) => { clock += Number(ms) || 0; } },
+    });
+    const answer = await decommission.remove({
+      slug: built.slug, confirm: built.slug, deleteData: true, pollMs: 10_000,
+    });
+    assert.equal(answer.dataDeleted, true, answer.message);
+    assert.equal(existsSync(built.dataPath), false);
+    assert.ok(clock - started >= 80_000, `the poll only lasted ${clock - started} ms`);
+    assert.ok(world.relay.state.refreshes >= 9, `the route refreshed ${world.relay.state.refreshes} time(s)`);
+  });
+});
+
+test("a purge that is refused leaves its reason on the one ledger row that outlives the tenant", async () => {
+  // FAULT 5(a). The refusal existed in exactly two places and both threw it away: the remove:data
+  // ledger row, which store.deleteTenant wipes one step later by design, and the effects array, which
+  // the gate printed as step=status with the detail dropped. So the cause had to be named by
+  // arithmetic. The audit-ready row is the one that survives, so that is where it goes.
+  await withWorld(async (world) => {
+    const built = await makeCustomer(world);
+    world.relay.state.purgeRefusal = "that workspace is still in the registry";
+    const { decommission } = decommissionFor(world);
+    const answer = await decommission.remove({ slug: built.slug, confirm: built.slug, deleteData: true, actor: "operator@titanium.bot" });
+    assert.equal(answer.ok, true);
+    assert.equal(answer.dataDeleted, false);
+    assert.match(answer.dataWhy, /still in the registry/, answer.dataWhy);
+    assert.match(answer.dataWhy, /asked 1 time/, answer.dataWhy);
+
+    const row = world.store.listSteps(built.slug).find((one) => one.step === "remove:audit-ready");
+    assert.ok(row != null, "the audit-ready row is the breadcrumb that outlives the tenant");
+    const detail = JSON.parse(row.detail);
+    assert.match(String(detail.dataWhy), /still in the registry/);
+    assert.equal(detail.dataDeleted, false);
+    assert.equal(detail.bytesFreed, 0);
+    // AND NOTHING ELSE RIDES ALONG. No credential, and no path outside the workspace's own tree.
+    assert.equal(row.detail.includes(world.relay.token), false, "a relay token is in an audit row");
+    assert.equal(/\/(etc|root|home|Users)\//.test(row.detail), false, row.detail);
+  });
+});
+
+test("an address minted while the removal is running is retired before the removal finishes", async () => {
+  // FAULT 3(b), measured on the R750 2026-09-10. The removal retires at step 2 and this control plane
+  // keeps serving the tenant row to the relay until step 8, so the five minute sweep read a roster off
+  // a box that was not dead yet and minted agent218973@myagents.email 28.7 s into a teardown that had
+  // already reported "0 bot addresses retired". It was active, for a customer who no longer existed,
+  // and nothing would ever have retired it.
+  await withWorld(async (world) => {
+    const built = await makeCustomer(world);
+    const { decommission } = decommissionFor(world, {
+      // Step 3, which lands between the retire at step 2 and the delete at step 8. This is the sweep
+      // arriving in the middle of the removal, which is the only way that row ever gets written.
+      proxy: {
+        configured: true,
+        async deleteKeyByAlias(slug) {
+          world.store.mintMailCode({ tenant: slug, agentId: "titan-2", agentName: "Titan", domain: "myagents.email" });
+          return { ok: true, alias: `titanbot-${slug}` };
+        },
+      },
+    });
+    const answer = await decommission.remove({ slug: built.slug, confirm: built.slug, deleteData: true });
+    assert.equal(answer.ok, true, answer.message);
+
+    const left = world.store.listMailAddresses(built.slug).filter((row) => row.state === "active");
+    assert.deepEqual(left, [], "an address outlived the customer it belonged to");
+    // BOTH RETIRES ARE COUNTED, and the sentence says where the second one came from.
+    assert.match(answer.message, /2 bot addresses retired \(1 of them minted while the removal was running\)/);
+    assert.equal(answer.addressesRetired.length, 2);
+    assert.equal(answer.effects.some((effect) => effect.step === "addresses-late"), true);
+    const row = world.store.listSteps(built.slug).find((one) => one.step === "remove:audit-ready");
+    assert.equal(JSON.parse(row.detail).addresses, 2);
+  });
+});
+
 // ---- what is left afterwards --------------------------------------------------------------------
 
 test("afterwards there is no tenant row, no account, the slug is not retired, and the name is offered again", async () => {

@@ -364,12 +364,24 @@ export function createTenantRegistry({
     all() { return order; },
     operator() { return entries.get(seed.slug) ?? seed; },
     refresh,
-    // A session naming a tenant we have never heard of is the one thing worth a refresh outside
+    // A session naming a tenant this console cannot serve is the one thing worth a refresh outside
     // the schedule: a customer who signed up thirty seconds ago should not wait a minute. Rate
     // limited so a stranger with a made-up slug in a signed cookie cannot pump the control plane.
+    //
+    // TWO CASES AND NOT ONE, and the second cost a customer their model on the R750 at 19:30:22Z on
+    // 2026-09-10. A slug nobody has heard of is obvious. A slug this registry KNOWS and has marked
+    // unreachable is the same thing from the caller's side and used to get no refresh at all: the
+    // row was read at the instant the container did not exist yet, verifyBoxes wrote reachable
+    // false, and every route that goes through contextOf answered "not available" until the 60
+    // second timer came round. The control plane pushes a new workspace's plan model in the seconds
+    // after its box first answers /health, so that window is exactly when it asks.
+    //
+    // The refresh is not awaited, here or before: this answers "a refresh was asked for", and the
+    // caller that asked is served by the NEXT call. That is one extra round trip instead of a minute.
     miss(slug) {
       const at = now();
-      if (entries.has(String(slug ?? ""))) return false;
+      const held = entries.get(String(slug ?? ""));
+      if (held != null && held.reachable !== false) return false;
       if (at - lastMissRefresh < missRefreshMs) return false;
       lastMissRefresh = at;
       void refresh().catch(() => {});

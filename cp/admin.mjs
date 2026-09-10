@@ -3105,8 +3105,15 @@ export function createAdminApi({
       // the card nor the CLI reads an empty string off a removal that stopped for a named reason.
       const said = String(removed?.why ?? removed?.message ?? "the removal did not finish");
       if (removed != null && typeof removed === "object") { removed.why = said; removed.message = String(removed.message ?? said); }
+      // THE ADMIN ROW NAMES A FAILED PURGE. It is the only durable record outside the removal's own
+      // audit-ready ledger row: on the R750 on 2026-09-10 this said "onboard-test-f7f435 is gone,
+      // data kept" for a removal that had ASKED for the data to go and been refused, and the reason
+      // existed nowhere a person could read it.
+      const dataNote = ok && deleteData && removed?.dataDeleted !== true && String(removed?.dataWhy ?? "").length > 0
+        ? ` The data was asked for and stayed: ${String(removed.dataWhy).slice(0, 300)}`
+        : "";
       ledger[ok ? "done" : "failed"](ok
-        ? `${slug} is gone${removed?.dataDeleted === true ? ", data and all" : ", data kept"}`
+        ? `${slug} is gone${removed?.dataDeleted === true ? ", data and all" : ", data kept"}.${dataNote}`
         : said);
       json(response, ok ? 200 : (Number(removed?.status) > 0 ? Number(removed.status) : 409), removed ?? { error: "remove_failed", message: "The removal answered nothing." });
       return true;

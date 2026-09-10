@@ -557,19 +557,52 @@ The labels are Jason's own words and the card shows exactly these.
 
 **The model goes before the read, and the order is not cosmetic.** `writeBoxDefaults` writes only
 `gates.json` and `{"SAND_BACKEND_URL":""}`, so a box nobody pointed at a model has Titan awake and
-**mute**. If the model did not apply the step goes amber and the job stops before the welcome with
-"Titan is up but has no model yet, so he would not answer. Fix the model on this row, then press Send
-the welcome."
+**mute**.
 
-**The `running` call is doing double duty.** It is the only relay call that reaches `contextOf`, which
-is the only caller of `registry.miss()`, so it forces the relay's out-of-schedule registry refresh
-instead of waiting up to its 60 s timer. That is why it goes before the sweep.
+**The model push is RETRIED, and that is the correction the first real run forced.** It used to happen
+exactly once, at the instant the box first answered `/health`, with a refusal written into a notes
+array nobody reads. Measured on the R750 2026-09-10: the push landed 7 s after the container started,
+the relay's registry had read that workspace's row while the container did not exist yet, so
+`use-included` answered **404 not available** and the box never got a model at all. The read loop then
+watched an empty model for 58 s and went amber naming the symptom. Now the read loop pushes again on
+every pass where the push itself was refused, the `plan-model` ledger row carries a `pushes` count
+(above one means a later push is what landed it), and the budget is **150 s** rather than 60 s, which
+is arithmetic: it has to outlast one full 60 s registry cycle. A `pinned` refusal is never retried,
+because it refuses for the same reason for ever.
+
+**What the relay refused is what the card says.** An amber from a refused push reads "…and the model
+push was refused: &lt;the relay's own words&gt;" and offers the wait, not "Fix the model on this row":
+on that run the model, the plan and the key were all correct and the operator was sent to edit a row
+with nothing wrong with it.
+
+**A known workspace that cannot be reached forces a refresh too.** `contextOf` calls
+`registry.miss()` on **both** branches, and `miss()` refreshes for a slug it has never heard of **and**
+for one it holds with `reachable === false`. It used to refuse the second case outright, which is
+exactly the state a box built thirty seconds ago is in, and the effect was that every route answered
+"not available" until the 60 s timer came round. The refresh is not awaited: the caller that asked is
+served on the **next** call, which is one extra round trip instead of a minute.
 
 Every step is one of `waiting`, `running`, `ok`, `amber` (done with a named caveat) or `failed`
 (stopped, with the one thing to press). A failed step offers **Retry**, which resumes at the first step
 that is not `ok`. A step with no ledger write for 3 minutes reads as stalled with the same Retry. A
 failed provision **keeps the account**, because a slow image pull must not cost a customer their
 existence. Nothing is ever half-green.
+
+**Which stop stops what, decided per step.** An amber is a caveat somebody has to look at. It is not
+automatically a reason to leave the rest of the onboarding unrun, and treating it as one is what left a
+customer with no addresses and no welcome on the first real run (R750, 19:31:27Z 2026-09-10: Waking
+Titan went amber because the relay was a minute behind with a model, and the sequencer was a straight
+chain, so both remaining steps read `waiting` for ever).
+
+| Amber on | What still runs | Why |
+|---|---|---|
+| **Building the computer** | nothing | there is no host to read a roster from, no Titan to introduce and no address to mint |
+| **Waking Titan** | the addresses sweep **and** the welcome | the sweep needs the box up and a roster; the welcome needs an owner row, a host and a sender. Neither needs a model, and **the welcome must never wait on one**: it carries the temporary password, and a customer whose mail was held back by a model setting has no way in at all |
+| **Giving the agents their addresses** | the welcome | without Titan's address the mail says a little less and still carries the password and the sign-in link |
+
+The card stays honest either way: any amber is still a stop, `done` needs all five green, and a titan
+amber with a green welcome draws an amber card with Retry on it. Something needs a look, and the
+customer was not left in the dark while it waits.
 
 **Measured on the R750's control-plane ledger 2026-09-07**, the only real provisioning before this
 wave: `richard-avery` ran directories through start in 0.41 s and reported `ready how gateway waitedMs
@@ -726,10 +759,19 @@ Each one is a ledger step `remove:<name>`, and one `admin_actions` row is writte
 
 1. **disable-signins** - every account for the tenant is disabled first, so nobody can sign in during
    the teardown.
-2. **addresses** - every active directory address for the slug is retired. **Nothing else ever will:**
-   the sweep only retires codes for agents missing from a roster it could *read*, and it cannot read a
-   box that no longer exists, so a removed tenant's `agent<code>@myagents.email` would keep routing for
-   ever. Retiring is permanent by design, and that is right here.
+2. **addresses** - every active directory address for the slug is retired. **Almost nothing else ever
+   will:** the sweep only retires codes for agents missing from a roster it could *read*, and it cannot
+   read a box that no longer exists, so a removed tenant's `agent<code>@myagents.email` would keep
+   routing for ever. Retiring is permanent by design, and that is right here.
+
+   **"Nothing else ever will" was wrong about one direction, and the first real removal proved it.**
+   Something else **mints**. This step runs at 2 and the control plane keeps serving the tenant row on
+   `/v1/relay/tenants` until step 8, so the relay's five minute sweep can read a roster off a box that
+   has not finished dying and post `/v1/relay/mail/mint`. Measured on the R750 2026-09-10:
+   `agent218973@myagents.email`, written **28.7 s into a removal** that had already reported "0 bot
+   addresses retired", left active for a customer who no longer existed. Two changes close it: `mint`
+   refuses a slug with no tenant row, and **step 8b** retires again once the row is gone and nothing can
+   write another. The message counts both, and says how many of them arrived mid-removal.
 3. **proxy-key** - the tenant's LiteLLM key is revoked **before** the container. A failed revoke carries
    on with a sentence naming `cp/cli.mjs proxy revoke <slug>`: a box that is up and cannot reach a model
    is visible, a box that is gone and can is not.
@@ -752,6 +794,21 @@ Each one is a ledger step `remove:<name>`, and one `admin_actions` row is writte
    it and answers the bytes freed. **It never takes a path from its caller.** With the switch off the
    card says what is true: "Their data is kept at /data/titanbot/&lt;slug&gt;. Nothing deletes it on a
    timer."
+
+   **Three answers here mean "ask again", and the third is what kept a customer's data on 2026-09-10.**
+   409 `still_reachable` and 409 `container_unknown` clear themselves. **Status 0 does not mean no** - it
+   is `createRelayAsk`'s answer to a transport failure, and this is the first single-shot POST after step
+   6 has just made a dozen keep-alive POSTs at 2 s intervals through the same pool. A Node server closes
+   an idle connection at 5 s and undici does not retry a POST it dispatched onto a socket the other end
+   had already closed. Step 6 retries and survived it; this step did not, answered nothing, and the
+   operator was told the data could not be deleted while the relay had **never run the route** (no purge
+   line in its stdout for the whole window). The route is idempotent, so it is now asked again.
+
+   **And the budget is 90 s, not 30 s.** The old comment said it was waiting on a registry refresh; that
+   refresh is on a **60 s** timer, so a 30 s poll lost the race every time it ran. The relay closes the
+   other half: when a stale `reachable` flag is the only thing standing in the way and the docker read
+   this same call just made says the container is absent, the route forces **one** registry refresh and
+   re-reads it before refusing. The answer carries `refreshed` when it did.
 8. **accounts and the slug** - `store.deleteTenant` **first**, then `store.deleteAccount` for each, then
    `store.releaseSlug` as a belt. The order is load-bearing: `deleteTenant` inserts a `retired_slugs` row
    whenever an account still points at the slug, and `deleteAccount` clears that retirement only when the
@@ -760,7 +817,11 @@ Each one is a ledger step `remove:<name>`, and one `admin_actions` row is writte
    a new company inheriting a previous customer's sign-ins, and with the sign-ins deleted there is
    nothing to inherit.
 9. **audit-ready** - one `admin_actions` row: who, when, whether the data went, which proof the
-   container's absence rested on, and every address retired.
+   container's absence rested on, and every address retired. **And, when the purge was asked for and
+   refused, its reason.** That sentence used to exist in exactly two places and both threw it away: the
+   `remove:data` ledger row, which `store.deleteTenant` wipes one step later by design, and the
+   `effects` array, which every printer renders as `step=status` with the detail dropped. The one run
+   that needed it had to be diagnosed by arithmetic instead.
 
 **What the ledger keeps.** `store.deleteTenant` also deletes the slug's ledger rows, so step 8 wipes
 `remove:disable-signins` through `remove:data` on its way past. The durable record is the returned
@@ -896,8 +957,8 @@ Three things had to be true for that arm to measure anything at all, and none of
 - **`tests/cp-support.mjs`'s fake relay answers `read: true`** on the ceiling and running routes,
   because the real relay does (`ui/server.mjs`, the ceiling route and the running route both carry
   it). It means THE BOX ANSWERED, as against the route merely working. Without it the fake looked
-  healthy while the sequence correctly read every answer as "nothing could be read back" and stopped
-  amber before the welcome.
+  healthy while the sequence correctly read every answer as "nothing could be read back" and went
+  amber on Waking Titan.
 - **That fake's sweep mints through the control plane's own door.** The real relay mints nothing
   itself: it reads the roster and POSTs it to `/v1/relay/mail/mint`, which writes the row that
   `cp/mail.mjs directory(slug)` later reads. A sweep that only answered 200 left step 4 retrying to

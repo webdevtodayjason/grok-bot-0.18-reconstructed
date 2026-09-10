@@ -310,6 +310,14 @@ async function console3({ noPush = "richard-avery", noSend = "", noSendFile = nu
   const beta = tenantRow("beta", { gateway: await betaBox.start() });
   const richard = tenantRow("richard-avery", { gateway: await richardBox.start() });
 
+  // AND THE CONTROL PLANE'S OWN ROWS FOR THEM. The mint refuses a workspace with no tenant row
+  // (ONBOARD-2: the five minute sweep minted an address 28.7 s into a removal, for a customer who
+  // was already gone, and nothing would ever have retired it). So a console serving three
+  // workspaces has three rows, the way a real one does.
+  for (const slug of ["alpha", "beta", "richard-avery"]) {
+    store.createTenant({ slug, name: slug, host: `${slug}.titanium.bot`, status: "running", ownerEmail: `owner@${slug}.invalid` });
+  }
+
   // Alpha claims the product domain, so alpha's edge is the one Resend reaches. Beta claims a
   // domain of its own, which has to keep working exactly as it did.
   writeFileSync(path.join(alpha.state, "mail.json"), JSON.stringify({

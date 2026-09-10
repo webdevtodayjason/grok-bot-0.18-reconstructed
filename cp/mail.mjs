@@ -105,6 +105,24 @@ export function createMailDirectory({ store, domain = mailDomain(), now = () => 
     mint(slug, agents) {
       const tenant = String(slug ?? "").trim();
       if (tenant.length === 0) return { error: "bad_request", message: "Name the workspace these agents belong to." };
+      // NOTHING MINTS FOR A WORKSPACE THAT IS GONE, OR GOING.
+      //
+      // Measured on the R750 2026-09-10: a removal retires every active address at its second step
+      // and keeps serving the tenant row to the relay until its eighth, so the five minute sweep ran
+      // 28.7 s into the teardown, read a roster off a box that was still alive, posted here, and this
+      // wrote agent218973@myagents.email ACTIVE for a customer who no longer existed. The row
+      // outlived the tenant, the ledger, the accounts and the slug, and nothing would ever have
+      // retired it: the sweep only retires codes for a roster it can READ, and that box is gone.
+      //
+      // One read of the tenant table closes that window for ever, wherever the mint comes from. The
+      // operator's own workspace is adopted and carries a row like any other, so it is unaffected.
+      if (typeof store.getTenant === "function" && store.getTenant(tenant) == null) {
+        return {
+          error: "no_such_workspace",
+          message: `There is no workspace called ${tenant}, so no address was minted.`,
+          domain: at, slug: tenant, minted: 0, retired: 0, addresses: [], approvedSendersOnly: false, senders: [],
+        };
+      }
       // What this workspace already held, so `minted` counts the addresses this pass actually made
       // rather than the bots it looked at. The relay logs that number every five minutes for ever,
       // and a number that never falls to zero is a number nobody reads.
