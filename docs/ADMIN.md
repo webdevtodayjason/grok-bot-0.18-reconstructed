@@ -413,8 +413,12 @@ once too. **Copy the welcome note** puts the sign-in address, their email and th
 clipboard as plain sentences.
 
 **The welcome email**, and the field beside it. It goes from the product's own address on the
-operator's domain, carries a one-time sign-in link **and** the temporary password, and names Titan's
-own agent address. Replies come back to `mail.welcome.replyTo`, which defaults to
+operator's domain, carries a sign-in link **and** the temporary password, and names Titan's own agent
+address. The link is **good for 24 hours, works every time it is clicked, and cannot be cancelled**
+-- it is a stateless bearer credential in a URL and the relay checks no revocation list (measured on
+this Mac 2026-09-10: one link verified at +1 s, +2 s and +23 h, refused `expired` at +24 h 1 min, and
+minting a second left the first working). Call it one-time when ONBOARD-3/ONBOARD-5 land a link that
+is consumed once, and not before. Replies come back to `mail.welcome.replyTo`, which defaults to
 `support@titaniumcomputing.com` -- a domain that already receives, because a reply address nobody
 reads is worse than one on the parent company's brand. Change it in one line:
 

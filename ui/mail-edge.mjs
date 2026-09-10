@@ -1559,16 +1559,24 @@ export function createProductMailRoute({
     const from = senderOf(settings, env);
     const fromDomain = domainOf(addressOfFrom(from));
 
-    // THE REPLY-TO, and the one place this route bends rather than refuses.
+    // THE REPLY-TO, and it goes out whatever domain it is on.
     //
-    // A reply address that is not a single address is the caller's bug and is refused outright. One
-    // that IS a single address but sits on another domain is DROPPED, the mail still goes, and the
-    // answer says so in plain words. The reason is measured rather than theoretical: the operator's
-    // support address is on a domain that already receives mail, while the product's From is on
-    // titanium.bot, where inbound is not switched on yet. Refusing the send over that would mean no
-    // customer ever gets a welcome on the default install, which is far worse than a missing
-    // courtesy header. The From is what a recipient sees and what is signed; Reply-To is a
-    // convenience, and the copy inside the mail names the support address in words anyway.
+    // A reply address that is not a single plain address is the caller's bug and is refused outright.
+    // One that IS a single address is SENT, on this domain or any other, and the answer says when it
+    // left the From's domain behind so an operator reading a send row can see it.
+    //
+    // THIS USED TO DROP A CROSS-DOMAIN ADDRESS, and that was wrong in the one case that matters --
+    // the default install. MEASURED on this Mac 2026-09-10 with the shipped defaults: the control
+    // plane asks for support@titaniumcomputing.com, the From is welcome@titanium.bot, the domains
+    // differ, the header was dropped, and `dig MX titanium.bot` returns NOTHING while
+    // titaniumcomputing.com answers with real MX hosts. So the first thing the product ever sent a
+    // business owner invited a reply to a mailbox that does not exist. Reply-To is an unsigned
+    // courtesy header: DKIM signs the From and the body, SPF and DMARC are evaluated on the envelope
+    // and the From domain, and Resend does not require reply_to to sit on a verified domain. Nothing
+    // is weakened by letting it through, and a reply that reaches a person is the whole point of it.
+    //
+    // The one caller is the control plane holding CP_RELAY_TOKEN, and the value is an operator's own
+    // setting (`mail.welcome.replyTo`), so this is not a field a stranger can aim anywhere.
     let replyTo = "";
     let replyToWhy = "";
     const asked = asString(body.replyTo);
@@ -1577,10 +1585,9 @@ export function createProductMailRoute({
       if (one.length === 0) {
         return refuse(res, 400, "That reply address is not a single plain email address, so nothing was sent.", "bad_reply_to");
       }
+      replyTo = one;
       if (fromDomain.length > 0 && domainOf(one) !== fromDomain) {
-        replyToWhy = `Replies go to ${addressOfFrom(from)} rather than ${one}, because a product email only sets a reply address on its own domain.`;
-      } else {
-        replyTo = one;
+        replyToWhy = `Replies go to ${one} rather than ${addressOfFrom(from)}, which is a different domain from the one this was sent from.`;
       }
     }
 

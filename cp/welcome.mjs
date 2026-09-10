@@ -369,7 +369,7 @@ export function createWelcome({
   };
 
   /**
-   * A one-time sign-in link for one account on one workspace.
+   * A sign-in link for one account on one workspace, good for 24 hours and not one-time.
    *
    * It is ui/session-token.mjs's ordinary session token, minted with that tenant's DERIVED key, and
    * the relay already consumes it at GET /login?sso=<token> (ui/server.mjs handleSso, verified by

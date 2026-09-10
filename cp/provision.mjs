@@ -597,8 +597,15 @@ export function createRelayAsk({ config, fetchImpl = globalThis.fetch, timeoutMs
  * service while the box keeps running with the customer's gateway token -- looks like silence from
  * every angle except the docker socket.
  */
-export async function containerProbe({ askRelayPost, slug }) {
-  const answer = await askRelayPost("/tenant/purge", { slug: String(slug ?? ""), probeOnly: true });
+export async function containerProbe({ askRelayPost, slug, container = "" }) {
+  // The container name is CARRIED, because the relay resolves it from its own tenant registry first
+  // and that registry forgets a workspace the moment it stops answering -- which is exactly when this
+  // probe is asked. Without it the route cannot name the computer and answers "nothing here can name
+  // that workspace's computer", which reads as "could not say" and throws the proof away.
+  const asked = String(container ?? "").trim();
+  const answer = await askRelayPost("/tenant/purge", {
+    slug: String(slug ?? ""), probeOnly: true, ...(asked.length > 0 ? { container: asked } : {}),
+  });
   if (!answer.ok) return { asked: true, present: null, why: answer.why || `the relay answered ${answer.status}` };
   const body = answer.body;
   const present = typeof body?.containerPresent === "boolean" ? body.containerPresent

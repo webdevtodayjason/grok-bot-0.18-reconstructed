@@ -332,9 +332,63 @@ test("with the data switch on the relay is asked and the tree is gone", async ()
     assert.equal(answer.bytesFreed, 6_200_000);
     assert.equal(world.relay.data.has(built.slug), false, "the relay removed its record of the tree");
     const purges = world.relay.callsTo("/tenant/purge").filter((call) => call.body?.probeOnly !== true);
-    assert.equal(purges.length, 1, "one purge, and it named only the slug");
-    assert.deepEqual(Object.keys(purges[0].body), ["slug"], "the control plane never sends the relay a PATH");
+    assert.equal(purges.length, 1, "one purge, and one only");
+    // THE BODY THE ROUTE TAKES. `confirm` because ui/purge-edge.mjs refuses a body without it, and
+    // `container` because by now the relay's registry has forgotten this workspace and the route
+    // cannot otherwise name the computer it has to prove absent. Asserted as the exact key set so a
+    // field going missing is a failing test rather than a 400 nobody reads.
+    assert.deepEqual(Object.keys(purges[0].body).sort(), ["confirm", "container", "slug"]);
+    assert.equal(purges[0].body.confirm, built.slug);
+    assert.equal(purges[0].body.container, built.container);
+    // And still never a PATH: the relay resolves the directory from its own tenant root.
+    assert.equal(Object.keys(purges[0].body).some((key) => /path|dir/i.test(key)), false,
+      "the control plane never sends the relay a PATH");
     assert.match(answer.message, /Their data is gone/);
+  });
+});
+
+test("a registry that still reaches the workspace is asked again rather than read as a failure", async () => {
+  await withWorld(async (world) => {
+    const built = await makeCustomer(world);
+    // THE REAL RELAY'S REGISTRY REFRESHES ON ITS OWN CLOCK. For up to one refresh after the container
+    // is gone it still holds an entry for the workspace, and ui/purge-edge.mjs answers 409
+    // still_reachable on that rather than deleting a live customer's data. It clears itself, so the
+    // caller polls; a caller that read the first 409 as "the relay said no" would delete nothing and
+    // tell the operator their data could not be removed.
+    world.relay.state.registryLag = 2;
+    const { decommission } = decommissionFor(world);
+    const answer = await decommission.remove({ slug: built.slug, confirm: built.slug, deleteData: true, pollMs: 5 });
+    assert.equal(answer.ok, true, answer.message);
+    assert.equal(answer.dataDeleted, true, answer.message);
+    assert.equal(answer.bytesFreed, 6_200_000);
+    assert.equal(existsSync(built.dataPath), false);
+    const purges = world.relay.callsTo("/tenant/purge").filter((call) => call.body?.probeOnly !== true);
+    // More than one removal request, which is the whole point: the first was refused and asked again.
+    // Not an exact count, because the container-gone probe reads the registry too and consumes a turn
+    // of the lag, and pinning that number would make this test about the probe instead.
+    assert.ok(purges.length >= 2, `one refusal and one success at least, saw ${purges.length}`);
+    for (const call of purges) {
+      assert.equal(call.body.confirm, built.slug, "every try carries the confirm");
+      assert.equal(call.body.container, built.container, "every try names the container");
+    }
+  });
+});
+
+test("a registry that never lets go records carried-on and says so, with the data still there", async () => {
+  await withWorld(async (world) => {
+    const built = await makeCustomer(world);
+    world.relay.state.registryLag = 1_000;
+    const { decommission } = decommissionFor(world);
+    const answer = await decommission.remove({
+      slug: built.slug, confirm: built.slug, deleteData: true, pollMs: 5, dataDeadlineMs: 40,
+    });
+    assert.equal(answer.ok, true, "the container is proved gone, so the customer is off the air either way");
+    assert.equal(answer.dataDeleted, false);
+    assert.equal(existsSync(built.dataPath), true, "nothing was deleted");
+    const carried = answer.effects.find((effect) => effect.step === "data");
+    assert.equal(carried.status, "carried-on");
+    assert.match(carried.detail, /can still reach that workspace/);
+    assert.match(answer.message, /Their data could NOT be deleted/);
   });
 });
 

@@ -175,6 +175,7 @@ import "./browser-tools-prompt.test.mjs";
 import "./browser-tools.test.mjs";
 import "./cp-admin.test.mjs";
 import "./cp-admin-page-routes.test.mjs";
+import "./cp-admin-guard.test.mjs";
 import "./cp-feedback.test.mjs";
 import "./cp-relay-pair.test.mjs";
 import "./cp-relay-registry.test.mjs";

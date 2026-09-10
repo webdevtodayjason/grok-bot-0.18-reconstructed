@@ -252,7 +252,7 @@ export function foldSteps(rows, { at = Date.now(), stallMs = 180_000, sendWelcom
 }
 
 /**
- * The one-time sign-in link for an account, minted here.
+ * The sign-in link for an account, minted here. Good for 24 hours, and NOT one-time.
  *
  * UNDERSTAND WHAT THIS IS. A stateless bearer credential in a URL. The relay verifies it with that
  * tenant's derived key (ui/server.mjs's handleSso) and NEVER checks it for revocation, so it works

@@ -50,16 +50,28 @@ const coolify = await startFakeCoolify();
 const box = await startStubBox({ answers: { listAgents: [TITAN], getOnboardingState: { done: false, maxAgents: 40 } } });
 const relay = await startStubRelay();
 const welcome = stubWelcome();
+// THE EFFECTS IN THE SHAPE cp/decommission.mjs ACTUALLY WRITES, which is `{step, status, detail}`.
+// This fixture used to say `{name, ok, detail}` -- a shape the library has never emitted -- so the
+// gate passed 30/30 while every chip on the real card was drawn with an empty label and a failed step
+// was painted green. It is copied from a real removal driven through the real relay route on this Mac
+// 2026-09-10, `carried-on` data step and all, because that mixture is what the colours have to
+// survive: two things the operator must go and finish, three deliberate non-events, four plain
+// successes.
+const REMOVAL_EFFECTS = [
+  { step: "disable-signins", status: "ok", detail: "1 account disabled" },
+  { step: "addresses", status: "ok", detail: "1 address retired" },
+  { step: "proxy-key", status: "skipped", detail: "no proxy is configured" },
+  { step: "stop", status: "skipped", detail: "this workspace had no service" },
+  { step: "service", status: "skipped", detail: "this workspace had no service" },
+  { step: "container-gone", status: "ok", detail: "docker says the container is absent" },
+  { step: "data", status: "carried-on", detail: "the relay answered 409" },
+  { step: "accounts", status: "ok", detail: "1 removed" },
+  { step: "audit-ready", status: "ok", detail: "" },
+];
 const decommission = stubDecommission({
   answer: {
     ok: true,
-    effects: [
-      { name: "disable-signins", ok: true, detail: "1 account disabled" },
-      { name: "addresses", ok: true, detail: "1 address retired" },
-      { name: "stop", ok: true, detail: "the container was stopped" },
-      { name: "container-gone", ok: true, detail: "docker says the container is absent" },
-      { name: "data", ok: true, detail: "6.2 MB freed" },
-    ],
+    effects: REMOVAL_EFFECTS,
     message: "onboard-test is gone, data and all.",
   },
 });
@@ -244,11 +256,26 @@ try {
   check("the data switch reached the route", decommission.removals[0]?.deleteData === true);
   const drawn = await page.evaluate(() => {
     const card = document.querySelector("#addClientResult .removedClient");
-    return card == null ? { found: false, names: [] } : { found: true, names: [...card.querySelectorAll(".chip")].map((one) => one.textContent.trim()) };
+    if (card == null) return { found: false, chips: [] };
+    return {
+      found: true,
+      chips: [...card.querySelectorAll(".chip")].map((one) => ({ text: one.textContent.trim(), cls: one.className })),
+    };
   });
   check("the removal's own effects are drawn where the operator can still read them",
-    drawn.found === true && drawn.names.includes("container-gone") && drawn.names.length === 5,
+    drawn.found === true && drawn.chips.length === REMOVAL_EFFECTS.length
+      && drawn.chips.every((chip) => chip.text.length > 0),
     JSON.stringify(drawn));
+  // THE LABEL AND THE COLOUR, which is the whole value of this card. A blank chip says nothing, and a
+  // green one over a step that did not happen says the wrong thing in the colour for success.
+  const byName = (name) => drawn.chips.find((chip) => chip.text.startsWith(`${name} `));
+  check("each chip names its step and its status",
+    byName("container-gone")?.text === "container-gone ok" && byName("data")?.text === "data carried-on",
+    JSON.stringify(drawn.chips.map((chip) => chip.text)));
+  check("a step the operator has to go and finish is not painted green",
+    /attack/.test(byName("data")?.cls ?? "") && /ok/.test(byName("container-gone")?.cls ?? "")
+      && !/attack|ok/.test(byName("stop")?.cls ?? ""),
+    JSON.stringify(drawn.chips));
   await page.screenshot({ path: path.join(SHOTS, "07-remove-done.png"), fullPage: true });
 
   check("the page threw nothing", errors.length === 0, errors.join(" | "));

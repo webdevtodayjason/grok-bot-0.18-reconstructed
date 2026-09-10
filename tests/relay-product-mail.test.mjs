@@ -27,6 +27,9 @@ import {
   normalizeMailSettings,
   productFrom,
 } from "../ui/mail-edge.mjs";
+// The control plane's own default reply address, imported rather than retyped: the point of the test
+// below is that the two files' defaults agree and that the pair of them lands in a real mailbox.
+import { WELCOME_REPLY_TO_DEFAULT } from "../cp/welcome.mjs";
 
 // The one credential the control plane and the relay already share. Taken from the relay harness so
 // the unit cases above and the booted relay below are held to the same value, and so a change there
@@ -250,21 +253,24 @@ test("a page larger than a product email may be is refused, and so is an oversiz
 
 // ---- the reply address --------------------------------------------------------------------------
 
-test("a reply address on the sender's own domain is used, and one on another domain is dropped and said", async () => {
+test("the reply address goes out on its own domain or any other, and a malformed one stops the send", async () => {
   const same = await send({ ...GOOD, replyTo: "help@titanium.bot" });
   assert.equal(same.res.status, 200);
   assert.equal(same.seen.resend[0].body.reply_to, "help@titanium.bot");
   assert.equal(same.res.body.replyToWhy, undefined);
 
-  // The operator's support address is on a domain that already receives mail while titanium.bot's
-  // inbound is not switched on yet, so this case is the live default rather than an edge. The mail
-  // still goes -- refusing it would mean no customer ever gets a welcome on the default install --
-  // and the answer says in plain words where replies will actually land.
+  // THE DEFAULT INSTALL IS THE CROSS-DOMAIN CASE, so it is the one that has to work. The operator's
+  // support address is on a domain that already receives mail; titanium.bot has no inbound at all
+  // (`dig MX titanium.bot` answers nothing, measured on this Mac 2026-09-10). This used to DROP the
+  // header, which meant the first thing the product ever sent a business owner invited a reply to a
+  // mailbox that does not exist. Reply-To is unsigned and Resend does not require it on a verified
+  // domain, so it goes.
   const other = await send({ ...GOOD, replyTo: "support@titaniumcomputing.com" });
   assert.equal(other.res.status, 200);
   assert.equal(other.res.body.sent, true);
-  assert.equal(other.seen.resend[0].body.reply_to, undefined, "no cross-domain reply header goes out");
-  assert.match(other.res.body.replyToWhy, /Replies go to welcome@titanium\.bot rather than support@titaniumcomputing\.com/);
+  assert.equal(other.seen.resend[0].body.reply_to, "support@titaniumcomputing.com",
+    "a reply a customer sends has to reach a mailbox somebody reads");
+  assert.match(other.res.body.replyToWhy, /Replies go to support@titaniumcomputing\.com rather than welcome@titanium\.bot/);
 
   // A reply address that is not a single address is the caller's bug and stops the send.
   for (const broken of ["not an address", "a@b.example, c@d.example", "<a@b.example>"]) {
@@ -273,6 +279,23 @@ test("a reply address on the sender's own domain is used, and one on another dom
     assert.equal(res.body.error, "bad_reply_to", broken);
     assert.equal(seen.resend.length, 0);
   }
+});
+
+test("a welcome sent with the shipped defaults carries a reply address on a domain that receives mail", async () => {
+  // The two halves of the default install, read from the two files that ship them rather than typed
+  // out here: the control plane's default reply address and the relay's default From. The From's
+  // domain has no inbound, so the reply address must be the other one and it must be on the wire.
+  assert.equal(PRODUCT_MAIL_FROM_DEFAULT, "Titanium Bot <welcome@titanium.bot>");
+  assert.equal(WELCOME_REPLY_TO_DEFAULT, "support@titaniumcomputing.com");
+  const { res, seen } = await send({ ...GOOD, replyTo: WELCOME_REPLY_TO_DEFAULT });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(seen.resend[0].body.from, PRODUCT_MAIL_FROM_DEFAULT, "the From keeps the verified domain");
+  assert.equal(seen.resend[0].body.reply_to, WELCOME_REPLY_TO_DEFAULT);
+  // INBOUND, not just a syntactically valid address. titanium.bot publishes no MX; a reply address on
+  // it is a reply nobody ever reads, which is why this assertion is about the DOMAIN and not the
+  // header. If titanium.bot ever gets inbound mail, PRODUCT_MAIL_FROM can change and this still holds.
+  assert.notEqual(seen.resend[0].body.reply_to.split("@")[1], "titanium.bot",
+    "titanium.bot has no MX record, so a reply addressed there reaches nobody");
 });
 
 // ---- the key, and the send itself --------------------------------------------------------------

@@ -841,6 +841,36 @@
   }
 
   /**
+   * One of a removal's nine effects, drawn the way cp/decommission.mjs actually writes it.
+   *
+   * THE SHAPE IS `{step, status, detail}` AND NOTHING ELSE. The first cut of this panel read
+   * `effect.name` and `effect.ok`, which cp/decommission.mjs has never emitted, so every chip on the
+   * one screen where an operator finds out what a removal did was drawn with an EMPTY LABEL, and
+   * `effect.ok === false` was never true, so a failed service delete and a container Coolify forgot
+   * were both painted in the colour for success. `name`/`ok` are still read as a fallback, because a
+   * panel that goes blank on an older answer is the same failure again.
+   *
+   * The colour follows the status and not a boolean: `failed` and `carried-on` are both things the
+   * operator has to go and finish, `skipped` and `kept` are deliberate non-events, and `queued` is
+   * Coolify taking a request rather than having done it -- which is amber by design, because a queued
+   * delete looks exactly like a successful one.
+   */
+  function effectLine(effect) {
+    const label = String(effect?.step ?? effect?.name ?? "");
+    const status = String(effect?.status ?? "");
+    const bad = effect?.ok === false || status === "failed" || status === "carried-on";
+    const muted = status === "skipped" || status === "kept";
+    const chip = bad ? "chip attack" : status === "queued" ? "chip locked" : muted ? "chip" : "chip ok";
+    const line = el("div", "row");
+    // The status is on the chip beside the name. "data" on its own does not say whether a customer's
+    // files are gone; "data carried-on" does, and it is the difference between reading this card and
+    // having to ask somebody.
+    line.appendChild(el("span", chip, status.length > 0 ? `${label} ${status}` : label));
+    line.appendChild(el("span", "quiet", String(effect?.detail ?? effect?.what ?? "")));
+    return line;
+  }
+
+  /**
    * ONBOARD-2 / ADMIN-5. Remove a customer, for a test and for churn.
    *
    * Three gates in front of it and they are not ceremony. Click again to confirm, then the workspace
@@ -919,12 +949,7 @@
         const card = el("div", "newClient removedClient");
         card.appendChild(el("strong", null, `${client.name || client.slug} was removed.`));
         card.appendChild(el("p", "quiet", String(answer.message ?? "")));
-        for (const effect of answer.effects ?? []) {
-          const line = el("div", "row");
-          line.appendChild(el("span", effect.ok === false ? "chip attack" : "chip ok", String(effect.name ?? "")));
-          line.appendChild(el("span", "quiet", String(effect.detail ?? effect.what ?? "")));
-          card.appendChild(line);
-        }
+        for (const effect of answer.effects ?? []) card.appendChild(effectLine(effect));
         const host = $("addClientResult");
         clear(host);
         host.appendChild(card);
@@ -934,12 +959,7 @@
         // The route's own sentence: a confirm that does not match, an adopted workspace, the
         // operator's own workspace, a container Coolify forgot while it kept running.
         banner(String(error.message));
-        for (const effect of error.body?.effects ?? []) {
-          const line = el("div", "row");
-          line.appendChild(el("span", effect.ok === false ? "chip attack" : "chip ok", String(effect.name ?? "")));
-          line.appendChild(el("span", "quiet", String(effect.detail ?? effect.what ?? "")));
-          result.appendChild(line);
-        }
+        for (const effect of error.body?.effects ?? []) result.appendChild(effectLine(effect));
       } finally { button.disabled = false; }
     });
 

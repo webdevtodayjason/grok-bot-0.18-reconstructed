@@ -749,15 +749,21 @@ stripped by every mail client worth the name and is evidence the page did not co
 should have, and an insecure image is a tracking pixel or a mixed-content warning on somebody's
 phone. The product's own mail draws its mark in HTML and CSS precisely so it needs no image at all.
 
-**The reply address** is the one place this route bends rather than refuses. A `replyTo` that is not
-a single address stops the send. One that IS a single address but sits on another domain is dropped,
-the mail still goes, and the answer carries a `replyToWhy` sentence saying where replies will land.
-The reason is live rather than theoretical: the operator's support address is
-`support@titaniumcomputing.com`, a domain that already receives mail, while the From is on
-`titanium.bot`, where inbound is not switched on yet. Refusing the send over that would mean no
-customer ever gets a welcome on the default install. The From is what a recipient sees and what is
-signed; Reply-To is a convenience, and the copy inside the mail names the support address in words
-anyway.
+**The reply address** goes out whatever domain it is on. A `replyTo` that is not a single plain
+address stops the send; one that IS a single address is sent as `Reply-To`, and when its domain is
+not the From's the answer carries a `replyToWhy` sentence saying so.
+
+That is the default install rather than an edge case, which is why it has to work. The operator's
+support address is `support@titaniumcomputing.com`, a domain that already receives mail; the From is
+`welcome@titanium.bot`, and **`titanium.bot` publishes no MX record at all** (measured from this Mac
+2026-09-10: `dig MX titanium.bot` answers nothing, while `titaniumcomputing.com` and
+`myagents.email` both answer with real hosts). This route used to DROP a cross-domain reply address,
+so on a default install the first thing the product ever sent a business owner invited a reply to a
+mailbox that does not exist. Nothing is weakened by letting it through: DKIM signs the From and the
+body, SPF and DMARC are evaluated on the envelope and the From domain, Resend does not require
+`reply_to` to sit on a verified domain, and the one caller is the control plane holding
+`CP_RELAY_TOKEN` carrying an operator's own `mail.welcome.replyTo`. If `titanium.bot` ever gets
+inbound mail, set `PRODUCT_MAIL_FROM` and the two agree again.
 
 A refusal from the mail service answers **the status and never the provider's body**, because the
 control plane writes what it is told into a row an operator reads.

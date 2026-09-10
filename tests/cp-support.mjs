@@ -13,6 +13,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { createApp, createHttpServer } from "../cp/server.mjs";
 import { loadConfig } from "../cp/provision.mjs";
 import { openStore } from "../cp/store.mjs";
+import { makePurgeDouble } from "./purge-double.mjs";
 
 // The container rows Coolify reports under /services/{uuid}/applications when it cannot work them
 // out from a compose. Their names are the compose service names, which is what the openapi says
@@ -250,7 +251,37 @@ export async function startFakeRelay(options = {}) {
     roster: options.roster ?? [{ id: "agent-titan", name: "Titan", isGroup: false }],
     // Product mail sends captured here rather than posted anywhere.
     mail: [],
+    // Where this relay believes workspaces live. Inferred from the first tree a test declared, because
+    // the relay is started before the control plane that knows the root. The real route realpaths it,
+    // so it has to be a directory that exists.
+    tenantRoot: String(options.tenantRoot ?? ""),
+    // How many more times the registry answers "I can still reach that workspace" after the container
+    // is gone. The real relay's registry refreshes on its own clock, so a caller that reads the 409 as
+    // a failure rather than asking again deletes nothing.
+    registryLag: Number(options.registryLag ?? 0),
+    // docker unanswerable, which the route refuses on rather than proceeding from.
+    dockerSilent: options.dockerSilent === true,
+    // Containers on the host this relay can see that no tenant row points at.
+    extraContainers: options.extraContainers ?? [],
   };
+
+  // The purge door, built out of ui/purge-edge.mjs itself.
+  const fallbackRoot = await mkdtemp(path.join(os.tmpdir(), "fake-relay-tenants-"));
+  const purge = makePurgeDouble({
+    relayToken: token,
+    tenantRootOf: () => {
+      if (state.tenantRoot.length > 0) return state.tenantRoot;
+      for (const row of data.values()) {
+        const held = String(row?.path ?? "");
+        if (held.length > 0) return path.dirname(held);
+      }
+      return fallbackRoot;
+    },
+    containerFor: (slug) => String(names.get(String(slug)) ?? ""),
+    onHost: (name) => coolify != null && coolify.containerPresent(name),
+    rows: data,
+    state,
+  });
 
   const server = http.createServer((request, response) => {
     const chunks = [];
@@ -314,23 +345,14 @@ export async function startFakeRelay(options = {}) {
       }
 
       if (url.pathname === "/tenant/purge") {
-        const slug = String(body?.slug ?? "");
-        // Which container name belongs to this workspace. The test says so, because on the real
-        // server the relay reads it off the tenant registry and this fake has none.
-        const name = String(names.get(slug) ?? "");
-        // The container view comes from the FAKE COOLIFY'S HOST SET, not from its service records,
-        // because the relay reads the docker socket and Coolify only reads its own database. Wiring
-        // those two together in a fake is how a test would miss the exact failure this step exists
-        // for: the record gone and the container still running.
-        const present = name.length > 0 && coolify != null && coolify.containerPresent(name);
-        if (body?.probeOnly === true) {
-          return send(200, { ok: true, slug, containerPresent: present, container: { name, present }, path: data.get(slug)?.path ?? "", exists: data.has(slug) });
+        // THE REAL ROUTE ANSWERS THIS, not a hand-written guess at it. See tests/purge-double.mjs:
+        // both ends of this contract shipped in one wave disagreeing on every field, and two fakes
+        // that had copied the caller's guess are what let that through 78 green tests.
+        if (state.purgeRefusal && body?.probeOnly !== true) {
+          return send(409, { ok: false, error: "purge_refused", message: String(state.purgeRefusal) });
         }
-        if (state.purgeRefusal) return send(409, { ok: false, error: "purge_refused", message: String(state.purgeRefusal) });
-        if (present) return send(409, { ok: false, error: "still_running", message: "that workspace's container is still on this host" });
-        const row = data.get(slug);
-        data.delete(slug);
-        return send(200, { ok: true, deleted: true, slug, path: row?.path ?? "", bytesFreed: Number(row?.bytes ?? 0) });
+        void purge(request, response, Buffer.concat(chunks).toString("utf8"));
+        return undefined;
       }
 
       return send(404, { error: "not_found" });
@@ -347,7 +369,10 @@ export async function startFakeRelay(options = {}) {
     state,
     mail: () => state.mail,
     callsTo: (pathname) => calls.filter((call) => call.path === pathname),
-    async close() { await new Promise((resolve) => server.close(resolve)); },
+    async close() {
+      await new Promise((resolve) => server.close(resolve));
+      await rm(fallbackRoot, { recursive: true, force: true });
+    },
   };
 }
 

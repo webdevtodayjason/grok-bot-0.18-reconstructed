@@ -809,6 +809,56 @@ it because the control plane runs as uid 1001 and physically cannot. Nothing del
 customer's tree on a timer, because there is no reaper in this product (ONBOARD-4), so with the switch off
 the files sit there until a person decides otherwise. See docs/ONBOARDING.md §4.
 
+### 13.1 `POST /mail/sweep`'s neighbour: `POST /tenant/purge`, the one route that deletes data
+
+It lives on the **relay** (`ui/purge-edge.mjs`), behind `CP_RELAY_TOKEN`, and it is the only line in
+this product that removes a customer's files. The control plane cannot: it runs as uid 1001 and a
+box's `volumes/{data,workspace,chrome}` are `0700` owned by uid 1000 (measured from inside
+`titanbot-cp` on the R750 2026-09-10, both `ls` and `touch` answer Permission denied). So the body
+and the answer are written out here, because a contract nobody wrote down is a contract two halves of
+one wave can ship disagreeing on -- which is exactly what happened when this route landed.
+
+**The body.** All three fields, and every one of them is required for a removal:
+
+```json
+{"slug": "acme", "confirm": "acme", "container": "titanbot-box-<uuid>"}
+```
+
+* `confirm` must equal `slug`, or the answer is `400 {"error":"confirm"}` and nothing is touched. A
+  body carrying only the slug deletes nothing.
+* `container` is the box's container name. The relay resolves it from its **own tenant registry**
+  first and falls back to this one, shape-checked against `titanbot-box-<id>`. It has to be carried,
+  because by the time the data is removed the registry has already forgotten the workspace and the
+  control plane's tenant row is the only thing left that knows the name. Without it the answer is
+  `409 {"error":"container_unknown"}`.
+* `probeOnly: true` reads and removes nothing and answers the same shape. That is how the removal's
+  container-gone step asks "is that container still on this host", and it is the only caller of it.
+* A **path is never sent**. The relay resolves the directory under its own tenant root and refuses a
+  symlink that leaves it.
+
+**The answer** on a removal that happened is `200` with
+`{message, removed: true, slug, container: {name, present, known, dockerAnswered}, dir: {path, exists, bytes, complete}, freedBytes}`.
+`removed` is the success flag and `freedBytes` is the number -- **not** `deleted` and not
+`bytesFreed`, which is what the caller guessed on the way in and is why this section exists.
+
+**The three refusals that are not failures**, and the caller polls all of them rather than giving up:
+
+| answer | meaning | what clears it |
+| --- | --- | --- |
+| `409 still_reachable` | the registry can still route to that workspace | one registry refresh, up to 60 s after the container goes |
+| `409 container_unknown` | nothing here can name the computer, or docker would not answer | the name being carried, or docker answering |
+| `409 container_present` | the container is still on this host, running or not | removing the container first |
+
+`cp/decommission.mjs` step 7 polls the first two inside `dataDeadlineMs` and records the last answer
+as `carried-on` if the window runs out: the container is already proved gone by then, so the customer
+is off the air either way, and a tenant row kept alive only because a directory would not delete is a
+row that gets forgotten about.
+
+**One test, one contract.** `tests/purge-double.mjs` builds the test double for this route out of
+`createTenantPurgeRoute` itself, and `tests/cp-remove.test.mjs`, `tests/onboard-seam.test.mjs` and
+`scripts/verify-onboard.mjs` all use it. No test writes this body out by hand, because two that did
+held the caller's wrong guess in place through 78 green assertions.
+
 ---
 
 ## 14. Provisioning

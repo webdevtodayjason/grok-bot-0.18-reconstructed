@@ -305,12 +305,21 @@ async function removeArm() {
       const built = await makeCustomer(world);
       const { decommission } = decommissionFor(world);
       const answer = await decommission.remove({ slug: built.slug, confirm: built.slug, deleteData: true });
-      await checking("with the switch on the relay is asked, and it is never handed a path", async () => {
-        assert.equal(answer.dataDeleted, true);
+      await checking("with the switch on the relay takes the body it refuses without, and is never handed a path", async () => {
+        assert.equal(answer.dataDeleted, true, answer.message);
         const purges = world.relay.callsTo("/tenant/purge").filter((call) => call.body?.probeOnly !== true);
         assert.equal(purges.length, 1);
-        assert.deepEqual(Object.keys(purges[0].body), ["slug"], "the control plane sent the relay a path");
+        // ui/purge-edge.mjs refuses a body whose `confirm` is not the slug and cannot name the
+        // container without the name carried, so both are asserted as the exact key set. The relay
+        // here is the REAL route (tests/purge-double.mjs), which is how this leg now measures the
+        // contract rather than a fake written from the caller's side.
+        assert.deepEqual(Object.keys(purges[0].body).sort(), ["confirm", "container", "slug"]);
+        assert.equal(purges[0].body.confirm, built.slug);
+        assert.equal(purges[0].body.container, built.container);
+        assert.equal(Object.keys(purges[0].body).some((key) => /path|dir/i.test(key)), false,
+          "the control plane sent the relay a path");
         assert.equal(world.relay.data.has(built.slug), false);
+        assert.equal(existsSync(built.dataPath), false, "the real route removed the real tree");
         return `${answer.bytesFreed} bytes freed, the relay resolved the path from its own tenant root`;
       });
     } finally { await world.dispose(); }

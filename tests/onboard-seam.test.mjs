@@ -26,6 +26,10 @@
 // for. Nothing between them is stubbed.
 import assert from "node:assert/strict";
 import http from "node:http";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { randomBytes } from "node:crypto";
 
 import assertModule from "node:assert/strict";
@@ -35,6 +39,7 @@ import { verifySessionToken, tenantSessionSecret } from "../cp/session.mjs";
 import { WELCOME_SUBJECT } from "../cp/welcome.mjs";
 import { boxContainerName, createCoolifyClient, loadConfig } from "../cp/provision.mjs";
 import { startFakeCoolify } from "./cp-support.mjs";
+import { makePurgeDouble } from "./purge-double.mjs";
 import { probeThrough, startAdminOnly, startStubBox } from "./helpers/onboard-fakes.mjs";
 
 void assertModule;
@@ -56,8 +61,23 @@ const freshBox = { listAgents: [TITAN], getOnboardingState: { done: false, maxAg
 async function startSeamRelay({ store, domain = "myagents.email", containers = new Map(), onHost = null } = {}) {
   const calls = [];
   const mail = [];
-  const state = { modelLabel: "", purgeRefusal: null, sweepBusy: 0, data: new Map() };
+  const state = { modelLabel: "", purgeRefusal: null, sweepBusy: 0, data: new Map(), registryLag: 0 };
   const token = `seam-relay-${randomBytes(8).toString("hex")}`;
+  // A real directory, because the purge door below is the REAL ui/purge-edge.mjs route and it
+  // realpaths its tenant root before it will touch anything under it.
+  const tenantRoot = await mkdtemp(path.join(os.tmpdir(), "seam-tenants-"));
+  // THE PURGE DOOR IS THE REAL ROUTE. See tests/purge-double.mjs: this file exists to catch two
+  // halves of a contract that disagree, and the first version of it hand-wrote the purge answer in
+  // the caller's own wrong shape, so the one contract that was genuinely broken -- `{slug}` against a
+  // route that refuses anything without `confirm` -- sailed through it.
+  const purge = makePurgeDouble({
+    relayToken: token,
+    tenantRootOf: () => tenantRoot,
+    containerFor: (slug) => String(containers.get(String(slug)) ?? ""),
+    onHost: (name) => (onHost == null ? false : onHost(name) === true),
+    rows: state.data,
+    state,
+  });
 
   const server = http.createServer((request, response) => {
     const chunks = [];
@@ -103,30 +123,31 @@ async function startSeamRelay({ store, domain = "myagents.email", containers = n
       }
 
       if (url.pathname === "/tenant/purge") {
-        const slug = String(body?.slug ?? "");
-        const name = String(containers.get(slug) ?? body?.container ?? "");
-        // THE CONTAINER VIEW COMES FROM THE HOST, never from Coolify's records. Wiring the two
-        // together in a fake is how a test would miss the exact failure this step exists for: the
-        // service record gone and titanbot-box-<uuid> still running with the customer's token.
-        const present = name.length > 0 && onHost != null && onHost(name);
-        if (body?.probeOnly === true) {
-          return send(200, { ok: true, slug, containerPresent: present, container: { name, present, known: name.length > 0, dockerAnswered: true }, dir: { path: state.data.get(slug)?.path ?? "", exists: state.data.has(slug) } });
+        if (state.purgeRefusal != null && body?.probeOnly !== true) {
+          return send(409, { ok: false, error: "purge_refused", message: String(state.purgeRefusal) });
         }
-        if (state.purgeRefusal != null) return send(409, { ok: false, error: "purge_refused", message: String(state.purgeRefusal) });
-        if (present) return send(409, { ok: false, error: "still_running", message: "that workspace's container is still on this host" });
-        const held = state.data.get(slug);
-        state.data.delete(slug);
-        return send(200, { ok: true, deleted: true, bytesFreed: Number(held?.bytes ?? 0), path: String(held?.path ?? "") });
+        void purge(request, response, Buffer.concat(chunks).toString("utf8"));
+        return undefined;
       }
       return send(404, { error: "not_found" });
     });
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   return {
-    token, calls, mail, state, containers,
+    token, calls, mail, state, containers, tenantRoot,
     url: `http://127.0.0.1:${server.address().port}`,
-    callsTo: (path) => calls.filter((call) => call.path === path),
-    close: () => new Promise((resolve) => server.close(resolve)),
+    callsTo: (pathname) => calls.filter((call) => call.path === pathname),
+    /** A real tree under the real tenant root, with the size the test wants the relay to report. */
+    async seedTree(slug, bytes = 6_200_000) {
+      const dir = path.join(tenantRoot, String(slug));
+      await mkdir(path.join(dir, "volumes", "data"), { recursive: true });
+      state.data.set(String(slug), { path: dir, bytes: Number(bytes) });
+      return dir;
+    },
+    async close() {
+      await new Promise((resolve) => server.close(resolve));
+      await rm(tenantRoot, { recursive: true, force: true });
+    },
   };
 }
 
@@ -263,7 +284,7 @@ test("the real removal library, driven by the real admin route, runs its effects
     // A neighbour, so the removal can be shown to stay inside its own workspace.
     plane.seedTenant({ slug: "stays", name: "Stays" });
     plane.store.mintMailCode({ tenant: "stays", agentId: "agent-other", agentName: "Titan", domain: "myagents.email" });
-    relay.state.data.set("gone-soon", { path: "/data/titanbot/gone-soon", bytes: 6_200_000 });
+    const tree = await relay.seedTree("gone-soon");
 
     // The confirm panel says what is about to happen, before anything happens.
     const plan = await plane.request("GET", "/v1/admin/clients/gone-soon/removal");
@@ -296,7 +317,14 @@ test("the real removal library, driven by the real admin route, runs its effects
     assert.equal(purges.length, 1, "one destructive purge");
     assert.equal("path" in purges[0].body, false, "the control plane never sends the relay a path");
     assert.equal("dir" in purges[0].body, false, "nor a dir");
+    // And it carried the two fields the REAL route refuses to work without. This is the contract the
+    // first version of this file could not see, because its purge answer was hand-written in the
+    // caller's own wrong shape: `{slug}` alone is a 400 from ui/purge-edge.mjs and deletes nothing.
+    assert.equal(purges[0].body.confirm, "gone-soon", "the purge has to name the workspace in confirm");
+    assert.equal(purges[0].body.container, container, "and carry the container, because the relay's registry has already forgotten it");
     assert.equal(removed.body.dataDeleted, true, removed.text);
+    assert.equal(removed.body.bytesFreed, 6_200_000, removed.text);
+    assert.equal(existsSync(tree), false, "the real route removed the real tree");
 
     // ONE CUSTOMER'S REMOVAL NEVER PRUNES THE WHOLE SERVER. cp/provision.mjs used to send
     // docker_cleanup=true, which dispatches Coolify's CleanupDocker across a host that also runs

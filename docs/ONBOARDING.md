@@ -934,3 +934,22 @@ greeting comes off the account row now.
 
 The rule this leaves behind: **a wave built as parallel items needs one test that uses none of their
 doubles.** Three green suites proved each item correct and proved nothing about the product.
+
+**And that rule was not enough, which the review found the same day.** This file's seam test was
+green, the four ONBOARD-2 suites were 78/78, and **Remove with "delete their data" on could not
+delete data, ever.** `cp/decommission.mjs` sent `{slug}`; `ui/purge-edge.mjs` refuses anything whose
+`confirm` is not the slug, needs the container name carried, and answers `removed`/`freedBytes` rather
+than `deleted`/`bytesFreed`. So the request was a `400`, the success test was false even on success,
+and the card told the operator their data could not be deleted. Nothing caught it because **both
+fakes had been written from the caller's side**: `tests/cp-support.mjs` and this file's own relay each
+hand-wrote a purge answer in the shape the caller expected, and `tests/relay-purge.test.mjs` asserted
+the opposite on the other side of the same wire. "Nothing stubbed between them" was true of the two
+libraries and false of the HTTP hop, and the break was on the hop.
+
+So the rule grows a second half: **when a wave ships both ends of a new HTTP contract, the test that
+joins them uses the REAL route, not a hand-written stand-in for it.** `tests/purge-double.mjs` builds
+the `/tenant/purge` double out of `createTenantPurgeRoute` itself and injects only the three things a
+test machine cannot have -- which containers are on the host, whether the console can still reach the
+workspace, and how big a tree is. Every caller's test uses that one double, so a field changing on
+either side fails every test that depends on it in the same commit. The body and the answer are
+written down in docs/TENANCY.md §13.1, which is where they should have been on day one.

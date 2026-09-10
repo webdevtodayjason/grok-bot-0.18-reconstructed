@@ -150,6 +150,9 @@ export function createDecommission({
     deadlineMs = 240_000,
     containerDeadlineMs = 120_000,
     stopDeadlineMs = 30_000,
+    // How long the data purge is allowed to keep asking while the relay answers one of its two
+    // self-clearing refusals. Short, because it is waiting on a registry refresh and not on a build.
+    dataDeadlineMs = 30_000,
     pollMs = 2_000,
   } = {}) {
     const slug = String(rawSlug ?? "");
@@ -314,7 +317,7 @@ export function createDecommission({
     } else {
       const goneBy = Math.min(wholeDeadline, now() + Math.max(0, containerDeadlineMs));
       for (;;) {
-        const probe = await containerProbe({ askRelayPost, slug });
+        const probe = await containerProbe({ askRelayPost, slug, container });
         if (probe.present === false) { containerGone = true; provedBy = "docker"; break; }
         lastWhy = probe.present === true
           ? `the relay still sees ${container}`
@@ -358,11 +361,36 @@ export function createDecommission({
     if (!deleteData) {
       record("data", "kept", KEPT(dataPath));
     } else {
-      const purge = await askRelayPost("/tenant/purge", { slug });
-      if (purge.ok && (purge.body?.deleted === true || purge.body?.ok === true)) {
+      // THE BODY THE RELAY ACTUALLY TAKES, and every field of it is load-bearing. ui/purge-edge.mjs
+      // refuses a body without `confirm` equal to the slug (400 confirm), so a request carrying only
+      // the slug deletes nothing and answers 400 -- which this step used to read as "the relay said
+      // no" and carry on past, telling the operator their data could not be deleted when it had
+      // never been asked for properly. And `container` is carried because by now the relay's own
+      // registry has forgotten this workspace, so `containerFor(slug)` is "" and the route cannot
+      // name the computer it has to prove absent (409 container_unknown).
+      //
+      // THE POLL. Two of the route's refusals are states that clear themselves: the registry holds a
+      // tenant entry for up to its own refresh interval after the container is gone
+      // (409 still_reachable), and docker can be momentarily unaskable (409 container_unknown). Both
+      // are "ask again in a moment", not "this failed", so they are polled inside the budget left and
+      // only the last of them is recorded if the window runs out.
+      const purgeBy = Math.min(wholeDeadline, now() + Math.max(0, dataDeadlineMs));
+      let purge = null;
+      for (;;) {
+        purge = await askRelayPost("/tenant/purge", { slug, confirm: slug, container });
+        const again = purge.status === 409
+          && (purge.body?.error === "still_reachable" || purge.body?.error === "container_unknown");
+        if (!again) break;
+        if (now() + pollMs >= purgeBy) break;
+        await sleep(pollMs);
+      }
+      // `removed` is what ui/purge-edge.mjs answers on success, and it is the only one of these the
+      // shipped route has ever sent. `deleted` and `ok` are kept so an older relay, or a double that
+      // was written against the wrong shape, still reads as success rather than silently as failure.
+      if (purge.ok && (purge.body?.removed === true || purge.body?.deleted === true || purge.body?.ok === true)) {
         dataDeleted = true;
-        bytesFreed = Number(purge.body?.bytesFreed ?? purge.body?.bytes ?? 0) || 0;
-        record("data", "ok", JSON.stringify({ path: purge.body?.path ?? dataPath, bytesFreed }));
+        bytesFreed = Number(purge.body?.freedBytes ?? purge.body?.bytesFreed ?? purge.body?.bytes ?? 0) || 0;
+        record("data", "ok", JSON.stringify({ path: purge.body?.dir?.path ?? purge.body?.path ?? dataPath, bytesFreed }));
       } else {
         // Carried on rather than stopped. The container is already proved gone, so the customer is
         // off the air either way, and a tenant row kept alive only because a directory would not
