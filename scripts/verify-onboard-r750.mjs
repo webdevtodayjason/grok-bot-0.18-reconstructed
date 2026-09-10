@@ -150,6 +150,19 @@ try {
   // THE OVERRIDE, NOT A COPY. One recipient. A bcc would put a live sign-in link and a temporary
   // password for a customer's workspace in a third party's inbox until the link expires.
   await page.fill("#acWelcomeTo", WELCOME_TO);
+
+  // THE PICKER'S OWN DEFAULT, left alone, and recorded. It matters which: writeBoxDefaults leaves a
+  // new box with no model, so a workspace nobody points at one has Titan awake and mute, and step 3
+  // stops amber before the welcome rather than mailing a customer a bot that cannot answer. If the
+  // providers panel returned no plan models the select hides in favour of a free-text field, and an
+  // empty one here would be exactly that silent no-model invite.
+  const chosenModel = await page.evaluate(() => {
+    const select = document.getElementById("acPlanModel");
+    const typed = document.getElementById("acPlanModelText");
+    if (select != null && select.hidden !== true) return String(select.value ?? "");
+    return String(typed?.value ?? "");
+  });
+  check(chosenModel.length > 0, "the plan model picker has a default to send", chosenModel.length > 0 ? chosenModel : "EMPTY, so Titan would be awake with no model");
   await shoot("form-filled");
 
   const pressedAt = Date.now();
