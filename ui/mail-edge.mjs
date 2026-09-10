@@ -661,6 +661,10 @@ export function createMailEdge({
   // without the sender, the recipient or the subject on it. The receiving workspace already has
   // the whole row from the mirror in server.mjs.
   ownSlug = "",
+  // KEYS-1. Whether this edge is the OPERATOR's own workspace. The two secrets on this card are the
+  // operator's business now, so a customer's save that carries one is refused in words rather than
+  // written. False -- the default and every customer -- is the closed door.
+  isOperator = false,
   legacyNoticeUntil = MAIL_LEGACY_STOP,
   now = () => Date.now(),
   log = (line) => console.log(line),
@@ -945,6 +949,24 @@ export function createMailEdge({
           JSON.stringify({ error: "that is too large to be a settings form" }));
       }
       return fail(res, 400, "the body must be JSON");
+    }
+    // KEYS-1. THE DOOR CLOSES BEHIND THE FIELD, not just in front of it.
+    //
+    // mergeMailSettings accepts `apiKey` and `webhookSecret` from any signed-in session, so taking
+    // the two inputs off the customer's screen would still leave a customer with a browser console
+    // able to write either one. Refused here, in words, for every workspace but the operator's own.
+    //
+    // REFUSED AND NOT SILENTLY DROPPED: a 200 that quietly ignores a field the caller sent is the
+    // APPS-DOC-1 failure -- the caller believes it worked and nothing says otherwise.
+    //
+    // BOTH FIELDS, even though only the sending key moves to the control plane. The signing secret
+    // stays on files ON PURPOSE (it is a routing discriminator: when two workspaces claim one domain
+    // the one whose secret verifies THIS body gets the message, so one global value would let the
+    // first claimant read another customer's mail), but it is still an operator's field and not a
+    // customer's, and the same sentence is the honest answer for both.
+    const operator = typeof isOperator === "function" ? isOperator() === true : isOperator === true;
+    if (!operator && (typeof patch?.apiKey === "string" || typeof patch?.webhookSecret === "string")) {
+      return sendJson(res, 400, { error: "not_yours", message: "Keys the product uses are set by your operator." });
     }
     const current = await readMailSettings(settingsFile);
     const next = mergeMailSettings(current, patch);
@@ -1249,7 +1271,10 @@ export function createMailSendRoute({
     const apiKey = asString(settings?.apiKey);
     if (apiKey.length === 0) {
       await settle("no_key", "", "the directory owner has no Resend key stored");
-      return refuse(res, 503, "This console has no mail key stored yet, so nothing was sent. The operator sets one on the Email card.", "no_key");
+      // KEYS-1. A BOT READS THIS SENTENCE ALOUD to a person who cannot act on it. It used to end
+      // "The operator sets one on the Email card", which is a card the customer cannot open and a
+      // thing they are not allowed to do. What is left is the fact and who to ask.
+      return refuse(res, 503, "This console cannot send mail yet. Ask your operator to switch sending on.", "no_key");
     }
 
     const from = buildFrom({ name: row.agentName, workspace: slug, address });

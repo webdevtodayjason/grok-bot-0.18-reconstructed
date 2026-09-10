@@ -726,9 +726,14 @@ async function legRefused() {
     check(socket.accepted, "the upgrade is accepted rather than destroyed", `${socket.statusLine || "no status line at all"} on ${MACHINE}`);
     check(socket.notes.length >= 1, "and ONE sentence reaches the page", `${JSON.stringify(socket.notes)} after ${waited} ms on ${MACHINE}`);
     const sentence = socket.notes.at(-1) ?? "";
-    check(/did not answer/i.test(sentence) && /Voice card/i.test(sentence),
-      "saying in plain words that the service did not answer, and where to check the key", JSON.stringify(sentence));
-    for (const word of ["xai", "openai", "grok", "websocket", "socket", "401", "upgrade", "undefined", "null"]) {
+    // KEYS-1 rewrote this sentence and this assertion with it. It used to require the words "Voice
+    // card", which was right while a CUSTOMER held the realtime key and is wrong now: the key is the
+    // operator's, pasted once at the super admin console, and the Voice card is gone. So what is
+    // asserted is that the sentence still names the cause and still says who can act on it -- and
+    // the word "key" is now BANNED from it rather than required, which the loop below checks.
+    check(/did not answer/i.test(sentence) && /operator/i.test(sentence),
+      "saying in plain words that the service did not answer, and who can do something about it", JSON.stringify(sentence));
+    for (const word of ["xai", "openai", "grok", "websocket", "socket", "401", "upgrade", "undefined", "null", "key", "voice card"]) {
       check(!sentence.toLowerCase().includes(word), `the sentence does not say ${word}`, JSON.stringify(sentence));
     }
     // The gate's reader records the `bye` frame's own reason first and the close frame after it, so

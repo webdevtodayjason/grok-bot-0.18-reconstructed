@@ -1966,7 +1966,10 @@ if (!WANT_BROWSER) {
     "panel-signins": ["#hours", "#outcome", "#signInsNote", "#addresses", "#accounts", "#attempts"],
     "panel-clients": ["#clients", "#addClientShow", "#addClientForm", "#acEmail", "#acCompany", "#acCeiling", "#acWelcome"],
     "panel-boxes": ["#boxes"],
-    "panel-system": ["#system"],
+    // KEYS-1 appends one block to System health: the three keys the PRODUCT uses. It is drawn in
+    // script rather than written into cp/admin/index.html, so it belongs in this list like every
+    // other control the panel had before.
+    "panel-system": ["#system", "#productKeys"],
     "panel-spend": ["#spend", "#spendNote", "#panel-spend .placeholder"],
     "panel-providers": [
       "#providersNote", "#providers", "#addProviderShow", "#addProviderForm", "#planModels",
@@ -2043,6 +2046,39 @@ if (!WANT_BROWSER) {
     }
   }
   check((await page.locator(".panel").count()) === panels.length, `${panels.length} panels and no more`, String(await page.locator(".panel").count()));
+
+  // ---- KEYS-1: the keys the product uses -------------------------------------------------------
+  //
+  // The block that took two vendor keys off every customer's screen. What is measured is that it is
+  // THERE, that it says "not set" on a control plane where nobody has pasted anything, that each row
+  // offers a password field rather than a plain one, and that nothing about the rail moved: this is
+  // an additive block appended in script, and a nav change would be somebody else's wave.
+  await openPanel("panel-system");
+  {
+    const keys = await page.evaluate(() => {
+      const block = document.getElementById("productKeys");
+      if (block == null) return null;
+      return {
+        heading: String(block.querySelector("h3")?.textContent ?? ""),
+        rows: Array.from(block.querySelectorAll("h4")).map((one) => String(one.textContent ?? "")),
+        states: Array.from(block.querySelectorAll("p.quiet")).map((one) => String(one.textContent ?? "")),
+        secretFields: block.querySelectorAll('input[type="password"]').length,
+        plainFields: block.querySelectorAll('input[type="text"], textarea').length,
+        // NOTHING may ever be pre-filled. A value written back into a field is a value on a screen.
+        prefilled: Array.from(block.querySelectorAll("input")).filter((one) => String(one.value).length > 0).length,
+      };
+    });
+    check(keys != null, "the Keys the product uses block is on System health");
+    check(keys?.heading === "Keys the product uses", "under its own heading", String(keys?.heading));
+    check(keys?.rows.length === 3, "with one row per key the product uses", (keys?.rows ?? []).join(", "));
+    check((keys?.states ?? []).filter((line) => /^Not set\./.test(line)).length === 3,
+      "each reading not set on a control plane nobody has pasted into", (keys?.states ?? []).map((one) => one.slice(0, 40)).join(" | "));
+    check(keys?.secretFields === 3 && keys?.plainFields === 0, "and each paste field is a password field and not a plain one",
+      `${keys?.secretFields} password, ${keys?.plainFields} plain`);
+    check(keys?.prefilled === 0, "with nothing pre-filled, because this page never writes a value back into a field");
+    const railNow = await page.evaluate(() => Array.from(document.querySelectorAll(".rail a")).map((one) => one.getAttribute("href")));
+    check(railNow.length === panels.length, "and the rail is untouched by it", railNow.join(" "));
+  }
   check(live?.panels === 8, "and the readiness flag says eight loaders ran, which is a different number on purpose", String(live?.panels));
 
   // ---- the rail, as a person uses it ------------------------------------------------------------

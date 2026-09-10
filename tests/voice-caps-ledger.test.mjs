@@ -317,7 +317,7 @@ test("a save sets, clears or KEEPS the key, so the card can save the rest of the
 // (tests/helpers/stub-realtime.mjs, which item C's gate imports) and adding a second shared file
 // would put a file in two waves' hands for the sake of thirty lines.
 
-async function openSocket({ dir, settings, stub = null, gateway = null, WebSocketImpl = null, origin = null, relay = {}, capTickMs = undefined, dialWatchdogMs = undefined }) {
+async function openSocket({ dir, settings, stub = null, gateway = null, WebSocketImpl = null, origin = null, relay = {}, capTickMs = undefined, dialWatchdogMs = undefined, secrets = null }) {
   await writeVoiceSettings(settings, { file: path.join(dir, "voice.json") });
   const logLines = [];
   const t = {
@@ -332,6 +332,10 @@ async function openSocket({ dir, settings, stub = null, gateway = null, WebSocke
   const edge = makeVoiceEdge({
     t, call, policy: makeVoicePolicy(relay), providerUrl: stub?.url ?? "ws://127.0.0.1:9/never",
     WebSocketImpl, log: (line) => logLines.push(String(line)),
+    // KEYS-1. The operator's own keys, when a test is measuring which one dials. Null -- the default
+    // and every other test in this file -- is a console with no control plane, which is exactly what
+    // this edge did before the door existed.
+    ...(secrets == null ? {} : { secrets }),
     ...(capTickMs == null ? {} : { capTickMs }),
     ...(dialWatchdogMs == null ? {} : { dialWatchdogMs }),
   });
@@ -532,7 +536,11 @@ test("a vendor the control plane does not allow is refused in words", async () =
 
 test("no key, voice switched off, and no bot are each one plain sentence", async () => {
   for (const [settings, pattern] of [
-    [{ enabled: true, vendor: "xai", apiKey: "" }, /no realtime voice key yet/],
+    // KEYS-1 rewrote this one, and it is Jason's own wording. A customer cannot act on a key any
+    // more -- it is the operator's, pasted once at the super admin console -- so the sentence names
+    // no key and no card, and it no longer ends "press the button again", which is the clause that
+    // instructed the loop he got stuck in on 2026-09-10.
+    [{ enabled: true, vendor: "xai", apiKey: "" }, /^Voice is not switched on for this workspace yet\.$/],
     [{ enabled: false, vendor: "xai", apiKey: PLANTED_KEY }, /switched off/],
   ]) {
     const dir = mkdtempSync(path.join(tmpdir(), "voice-refuse-"));
@@ -541,8 +549,10 @@ test("no key, voice switched off, and no bot are each one plain sentence", async
       session = await openSocket({ dir, settings });
       await session.settle(() => session.of("note").length > 0, `the refusal for ${JSON.stringify(settings)}`);
       assert.match(session.of("note")[0].text, pattern);
-      // Every refusal points at the one place a person can fix it.
-      assert.match(session.of("note")[0].text, /Voice card in Settings/);
+      // And no sentence a customer reads may name a key or a card they cannot open.
+      for (const banned of [/\bkey\b/i, /Voice card/i, /\bsecret\b/i, /\btoken\b/i]) {
+        assert.doesNotMatch(session.of("note")[0].text, banned, session.of("note")[0].text);
+      }
       assert.equal(session.of("state").at(-1).value, "off", "and the orb goes back to off");
     } finally {
       await session?.close();
@@ -670,6 +680,128 @@ test("a planted key's bytes appear in no URL, no ledger line, no log line and no
     assert.ok(!session.ledger().includes(head));
     assert.ok(!JSON.stringify(session.frames.json).includes(head));
     assert.ok(!session.logLines.join("\n").includes(head));
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// KEYS-1 adds a fifth surface, and it is the one this wave created: the key that dialled came from
+// the control plane rather than from a file, so the reader that fetched it and every line it logged
+// are now part of the same sweep. Neither was covered before, because /v1/relay/* was not a thing
+// this suite had ever touched.
+test("a key that came from the control plane is in no ledger line, no log line and no frame either", async () => {
+  const CP_KEY = `cp-planted-key-${"k".repeat(24)}`;
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-cp-sweep-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  let session = null;
+  const readerLines = [];
+  try {
+    session = await openSocket({
+      dir, stub,
+      // NOTHING on the file. This is a customer as they will be after this wave: no key of their own
+      // anywhere, and the product still talks.
+      settings: { enabled: true, vendor: "xai", apiKey: "" },
+      secrets: {
+        configured: true,
+        current: () => ({ "keys.voice.xai": CP_KEY }),
+        refresh: async () => ({ "keys.voice.xai": CP_KEY }),
+        value: async (name) => {
+          readerLines.push(`asked for ${name}`);
+          return name === "keys.voice.xai" ? CP_KEY : "";
+        },
+        start: () => () => {},
+      },
+    });
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update");
+    session.client.close(1000, "done");
+    await session.settle(() => (session.ledger().match(/"state":"closed"/g) ?? []).length > 0, "the settled row");
+
+    // It really did dial with it, as a header and never in the URL.
+    assert.equal(stub.events.requests[0].auth, `Bearer ${CP_KEY}`);
+    assert.ok(!stub.events.requests[0].url.includes(CP_KEY), "the key is in a URL");
+    // And it is nowhere it could be read back.
+    const head = CP_KEY.slice(0, 10);
+    for (const [what, text] of [
+      ["the minutes ledger", session.ledger()],
+      ["a relay log line", session.logLines.join("\n")],
+      ["a frame the browser was sent", JSON.stringify(session.frames.json)],
+      ["the reader's own trace", readerLines.join("\n")],
+      // And it did NOT get written down beside the workspace's own settings, which is the whole of
+      // "memory only": a customer's voice.json must be exactly as empty as it was.
+      ["the workspace's own settings file", readFileSync(path.join(dir, "voice.json"), "utf8")],
+    ]) {
+      assert.ok(!text.includes(CP_KEY), `the key is in ${what}`);
+      assert.ok(!text.includes(head), `a prefix of the key is in ${what}`);
+    }
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- KEYS-1: which key dials ---------------------------------------------------------------------
+//
+// The operator's own key at the control plane first, this workspace's own file second, nothing third.
+// There is no code anywhere that pushes a file value UP: that would be a new write path for a secret
+// and would undo write-only-from-the-console. The fallback IS the migration, which is what these
+// three assertions are really pinning.
+
+/** A stand-in for ui/relay-secrets.mjs, answering whatever this arm says the operator has pasted. */
+const secretsHolding = (keys) => ({
+  configured: true,
+  current: () => keys,
+  refresh: async () => keys,
+  value: async (name) => String(keys[String(name)] ?? ""),
+  start: () => () => {},
+});
+
+test("the operator's key beats the workspace's file, and the file beats nothing", async () => {
+  const OPERATOR_KEY = `operator-key-${"o".repeat(20)}`;
+  for (const arm of [
+    { what: "the operator's key wins over a file that has one", file: PLANTED_KEY, cp: OPERATOR_KEY, wire: OPERATOR_KEY },
+    { what: "and it works with no file key at all, which is every customer", file: "", cp: OPERATOR_KEY, wire: OPERATOR_KEY },
+    { what: "and the file is what dials when the control plane holds nothing", file: PLANTED_KEY, cp: "", wire: PLANTED_KEY },
+  ]) {
+    const dir = mkdtempSync(path.join(tmpdir(), "voice-prefer-"));
+    const stub = await startStubRealtime({ vendor: "xai" });
+    let session = null;
+    try {
+      session = await openSocket({
+        dir, stub,
+        settings: { enabled: true, vendor: "xai", apiKey: arm.file },
+        secrets: secretsHolding(arm.cp.length > 0 ? { "keys.voice.xai": arm.cp } : {}),
+      });
+      await session.settle(() => stub.events.requests.length > 0, `the dial for ${arm.what}`);
+      assert.equal(stub.events.requests[0].auth, `Bearer ${arm.wire}`, arm.what);
+      // Whatever dialled, the file is not rewritten and the other value is nowhere on the wire.
+      const other = arm.wire === OPERATOR_KEY ? PLANTED_KEY : OPERATOR_KEY;
+      assert.ok(!JSON.stringify(stub.events.requests).includes(other), `${arm.what}: the other key reached the vendor`);
+    } finally {
+      await session?.close();
+      await stub.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a workspace set to a service the operator has no key for is refused in words, never dialled with the other one", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-wrong-service-"));
+  const stub = await startStubRealtime({ vendor: "openai" });
+  let session = null;
+  try {
+    // The workspace's own choice is the second service; the operator has pasted only the first.
+    // Handing over the xAI key here would be a 401 the person reads as a broken product.
+    session = await openSocket({
+      dir, stub,
+      settings: { enabled: true, vendor: "openai", apiKey: "" },
+      secrets: secretsHolding({ "keys.voice.xai": `only-the-other-one-${"x".repeat(16)}` }),
+    });
+    await session.settle(() => session.of("note").length > 0, "the refusal");
+    assert.match(session.of("note")[0].text, /^Voice is not switched on for this workspace yet\.$/);
+    assert.equal(stub.events.requests.length, 0, "the vendor was dialled with somebody else's key");
   } finally {
     await session?.close();
     await stub.close();

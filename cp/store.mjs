@@ -425,7 +425,18 @@ export const FEEDBACK_FIELD_LIMIT = 256 * 1024;
 // pushed into a box (every exec daemon in a customer's container runs as uid 0, so a key inside one
 // is readable by that customer's own agents) -- so they go through the same door and come back out of
 // listSettings with no value at all.
-export const SECRET_SETTINGS = new Set(["github.token", "push.apns.key", "push.fcm.serviceAccount"]);
+// KEYS-1 adds the fourth, fifth and sixth, and they are the two vendor keys a CUSTOMER used to type
+// into their own console: the realtime voice key and the mail sending key. They are the operator's
+// now, held here and read only by the relay behind CP_RELAY_TOKEN, so they go in this set for the
+// same reason the three above are in it -- listSettings hands every value back wholesale and
+// cp/verification.mjs reads that list, so a name left out of here is a key in somebody's answer.
+// The names are cp/secrets.mjs's allowlist and are spelled out rather than imported: this module is
+// the store and importing a route module into it would invert the dependency. Its test asserts the
+// two lists are the same three names.
+export const SECRET_SETTINGS = new Set([
+  "github.token", "push.apns.key", "push.fcm.serviceAccount",
+  "keys.voice.xai", "keys.voice.openai", "keys.mail.send",
+]);
 
 const accountRow = (row) => (row == null ? null : {
   id: row.id,

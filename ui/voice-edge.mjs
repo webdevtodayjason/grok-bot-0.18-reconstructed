@@ -52,6 +52,10 @@ import { createHash } from "node:crypto";
 import { appendFile, chmod, chown, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+// KEYS-1. Which of the operator's keys dials for a given service. The name table and nothing else:
+// the reader itself is built once in ui/server.mjs and handed to this edge.
+import { voiceKeyName } from "./relay-secrets.mjs";
+
 // ---- the RFC 6455 codec (A1) --------------------------------------------------------------------
 //
 // Nothing in this tree did server-side websocket framing before: the VNC route pipes raw bytes to
@@ -634,7 +638,7 @@ export function mergeVoiceSettings(current, patch) {
  * shape is the only thing either route returns, so there is no route on this server that can read
  * a realtime key back out once it is set. cp/PROVIDERS-ROUTES.md 5 is the rule and this honours it.
  */
-export function voiceSettingsShape(settings, { vendors = null, agents = [], sessionCapSeconds = 0, dayCapSeconds = 0, dayUsedSeconds = 0, recent = [] } = {}) {
+export function voiceSettingsShape(settings, { vendors = null, agents = [], sessionCapSeconds = 0, dayCapSeconds = 0, dayUsedSeconds = 0, recent = [], available = null } = {}) {
   const value = normalizeVoiceSettings(settings);
   return {
     enabled: value.enabled,
@@ -648,6 +652,18 @@ export function voiceSettingsShape(settings, { vendors = null, agents = [], sess
     voice: value.voice,
     agentId: value.agentId,
     apiKeySet: value.apiKey.length > 0,
+    // KEYS-1. IS THERE A KEY FOR THIS WORKSPACE'S SERVICE AT ALL, wherever it came from -- the
+    // control plane's own or this workspace's file. It is a different question from apiKeySet, which
+    // is only about the file, and it is the one the console's "Let me talk to Titan" switch reads:
+    // a switch that turns on when there is nothing behind it is a Talk button that refuses.
+    //
+    // apiKeySet STAYS beside it and is not folded into it, because scripts/verify-voice.mjs asserts
+    // the file half survives a save that never carried a key, and those are genuinely two facts.
+    //
+    // `null` from the caller means "this build could not ask", and it degrades to the file answer
+    // rather than to false: a console that cannot reach the control plane must not report a working
+    // workspace as switched off.
+    available: available == null ? value.apiKey.length > 0 : available === true,
     // `label` is what the Voice card puts in the Service dropdown -- ui/machine-room/voice.js reads
     // `one.label` and an absent one renders a row of empty options, which is a control a person
     // cannot use. The labels in VENDORS name no vendor on purpose; docs/VOICE.md names them.
@@ -1334,21 +1350,36 @@ export function dialProviderSocket({ vendorId, apiKey, model, url, WebSocketImpl
 
 // ---- the session --------------------------------------------------------------------------------
 
+// KEYS-1 and VOICE-2 rewrote four of these, and the reasons are worth keeping.
+//
+// A CUSTOMER CANNOT ACT ON A KEY ANY MORE, so no sentence a customer reads may mention one. The
+// realtime key is the operator's, pasted once at the super admin console, and a person told to "add
+// one on the Voice card" is being sent to a card that no longer exists to do a thing they are not
+// allowed to do.
+//
+// AND "PRESS THE BUTTON AGAIN" IS GONE from the no-key sentence. Jason, 2026-09-10, stuck in exactly
+// the loop it instructed: "you can't exit out of this talk mode". toggle() read a state the relay had
+// already set back to off, so the second press redialled into the same refusal, and the shipped
+// sentence was what told him to keep pressing.
+//
+// `noKey` is HIS OWN WORDING, and the identical string lives in ui/machine-room/voice.js's NOTES so
+// that retitleNote -- where the relay's diagnosis outranks the page's -- cannot produce two wordings
+// for one condition.
 const SENTENCE = {
-  noKey: "This workspace has no realtime voice key yet. Add one on the Voice card in Settings and press the button again.",
-  notEnabled: "Voice is switched off for this workspace. Turn it on on the Voice card in Settings.",
+  noKey: "Voice is not switched on for this workspace yet.",
+  notEnabled: "Talking is switched off for this workspace. Turn it on in Settings.",
   badOrigin: "That came from a page this console does not serve, so I did not open the microphone.",
   noAgent: "There is no bot in this workspace to talk to yet.",
   sessionCap: "That is the time limit for one conversation. Press the button again to start a fresh one.",
   dayCap: "This workspace has used its voice time for today. It resets at midnight UTC.",
-  providerRefused: "The voice service would not take that key. Check it on the Voice card in Settings.",
+  providerRefused: "The voice service would not start this call. Tell your operator if it keeps happening.",
   // A DIAL THAT NEVER OPENED, which is what a wrong key and an unreachable address BOTH look like
   // from here. MEASURED on this Mac (node v22.23.1): a vendor answering 401 to the upgrade and a
   // vendor with nothing listening produce the same single error event, "Received network error or
   // non-101 status code", with no close event and no status code of any kind; a black-holed address
   // produces nothing at all for at least four seconds. So one sentence covers both causes and names
   // the thing a person can actually check. It was silence until 2026-09-10.
-  providerSilent: "The voice service did not answer. Check the key on the Voice card in Settings, then press the button again.",
+  providerSilent: "The voice service did not answer. Try again in a moment, and tell your operator if it keeps happening.",
   providerGone: "The voice line dropped. Press the button again.",
   // One call at a time per workspace. The day cap is a number read from the ledger, so N sockets
   // opened together each read the same remaining day and the cap multiplies by N.
@@ -1773,6 +1804,11 @@ export function makeVoiceEdge({
   // arrives is an assertion rather than an eight second wall-clock wait.
   dialWatchdogMs = DIAL_WATCHDOG_MS,
   newSessionId = () => `vs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+  // KEYS-1. The operator's own keys, read from the control plane and kept in memory by
+  // ui/relay-secrets.mjs. Null is a console with no control plane -- every single-box install, every
+  // gate on a laptop, grok-bot-local-vm -- and it means "there is only the file", which is exactly
+  // what this edge did before this existed.
+  secrets = null,
 }) {
   const settingsFile = t.voiceSettingsFile;
   const ledgerFile = t.voiceLedgerFile;
@@ -1789,6 +1825,26 @@ export function makeVoiceEdge({
     for (const one of [...sessions]) if (one.stopped) sessions.delete(one);
     return sessions.size;
   };
+
+  /**
+   * KEYS-1. WHICH KEY DIALS, and the order is the whole of the migration.
+   *
+   * The control plane first, this workspace's own file second, nothing third. No code path writes a
+   * file value up to the control plane: that would be a new write path for a secret and would undo
+   * write-only-from-the-console. The fallback IS the migration, so mail and voice keep working on a
+   * relay whose control plane holds nothing until the operator pastes each key once.
+   *
+   * Picked by THIS WORKSPACE'S OWN SERVICE, never by whichever key happens to exist. A workspace set
+   * to a service the operator has no key for answers "" and gets the plain refusal, because dialling
+   * one vendor with another vendor's credential is a 401 that reads to a person as a broken product.
+   */
+  async function keyFor(settings) {
+    const fromControlPlane = secrets == null
+      ? ""
+      : await secrets.value(voiceKeyName(settings.vendor)).catch(() => "");
+    if (String(fromControlPlane ?? "").length > 0) return String(fromControlPlane);
+    return String(settings.apiKey ?? "");
+  }
 
   const ledgerFor = (sessionId) => ({
     sessionId,
@@ -1812,6 +1868,10 @@ export function makeVoiceEdge({
         .map((a) => ({ id: String(a.id), name: String(a.name ?? "") }));
       return voiceSettingsShape(settings, {
         agents,
+        // KEYS-1. Whether there is a key for THIS workspace's service at all, wherever it lives.
+        // This is what the console's Talking switch reads, and it is asked through the reader's
+        // cached copy, so a settings GET costs no network after the relay's first read.
+        available: (await keyFor(settings)).length > 0,
         sessionCapSeconds: caps.sessionCapSeconds,
         dayCapSeconds: caps.dayCapSeconds,
         dayUsedSeconds: daySecondsUsed(rows, now(), { openCapSeconds: caps.sessionCapSeconds }),
@@ -1842,6 +1902,21 @@ export function makeVoiceEdge({
       res.writeHead(400, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: "the body must be JSON" }));
     }
+    // KEYS-1. THE DOOR CLOSES BEHIND THE FIELD, not just in front of it.
+    //
+    // Taking the key input off the customer's screen is not enough on its own: mergeVoiceSettings
+    // accepts `apiKey` from any signed-in session, so a customer with a browser console could still
+    // write one into their own workspace and have the relay dial with it. It is refused here, in
+    // words, for every workspace but the operator's own.
+    //
+    // REFUSED AND NOT SILENTLY DROPPED. A 200 that quietly ignores a field a caller sent is the
+    // failure APPS-DOC-1 is a row about: the caller believes it worked and nothing anywhere says
+    // otherwise. Refusing also keeps grok-bot-local-vm working, where there is no control plane and
+    // every session is the operator's, so the operator's own file stays writable.
+    if (typeof patch?.apiKey === "string" && t.operator !== true) {
+      res.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify({ error: "not_yours", message: "Keys the product uses are set by your operator." }));
+    }
     const next = mergeVoiceSettings(await readVoiceSettings(settingsFile), patch);
     t.ensureDir();
     try { await writeVoiceSettings(next, { file: settingsFile, ownLikeParent }); }
@@ -1867,7 +1942,11 @@ export function makeVoiceEdge({
     if (head != null && head.length > 0) socket.unshift(head);
     if (origin === false) return acceptAndSay(socket, key, SENTENCE.badOrigin, "a cross-origin upgrade");
 
-    const settings = await readVoiceSettings(settingsFile);
+    const onFile = await readVoiceSettings(settingsFile);
+    // KEYS-1. The key that will actually dial, resolved once: the operator's own from the control
+    // plane, else this workspace's file. Everything below -- the refusal, the session, the wire --
+    // reads this one object, so there is no second place the choice could be made differently.
+    const settings = { ...onFile, apiKey: await keyFor(onFile) };
     if (settings.apiKey.length === 0) return acceptAndSay(socket, key, SENTENCE.noKey, "no realtime key", "no-key");
     if (!settings.enabled) return acceptAndSay(socket, key, SENTENCE.notEnabled, "voice is switched off");
 
@@ -1995,17 +2074,23 @@ const voiceEdges = new Map();
  * cache shape and the same invalidation mailEdgeFor uses, so a tenant re-provisioned under a live
  * relay does not keep writing to a path that is no longer theirs.
  */
-export function voiceEdgeFor(t, { ownLikeParent = null, log = () => {}, relayBase = "", relayToken = "", WebSocketImpl = null, providerUrl = "" } = {}) {
+export function voiceEdgeFor(t, { ownLikeParent = null, log = () => {}, relayBase = "", relayToken = "", WebSocketImpl = null, providerUrl = "", secrets = null, policy = null } = {}) {
   const found = voiceEdges.get(t.slug);
   if (found != null && found.settingsFile === t.voiceSettingsFile) return found.edge;
   const edge = makeVoiceEdge({
     t,
     call: makeGatewayCall(t),
-    policy: makeVoicePolicy({ relayBase, relayToken, log }),
+    // ONE policy for the relay when the caller has one (ui/server.mjs builds it, so the Usage row on
+    // GET /me and this workspace's own upgrade read the same sixty second cache), and one of this
+    // edge's own when nobody handed one down, which is how every test builds an edge.
+    policy: policy ?? makeVoicePolicy({ relayBase, relayToken, log }),
     ownLikeParent,
     log,
     WebSocketImpl,
     providerUrl,
+    // KEYS-1. ONE reader for the whole relay, built in ui/server.mjs and handed down, so every
+    // workspace's edge reads the same cached copy and a fleet of tenants is not a fleet of timers.
+    secrets,
   });
   voiceEdges.set(t.slug, { settingsFile: t.voiceSettingsFile, edge });
   return edge;

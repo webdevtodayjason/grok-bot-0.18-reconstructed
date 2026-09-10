@@ -48,29 +48,71 @@ and not for every bot you own, and no interrupting mid-sentence on speakers.
 
 ---
 
-## 2. Where the key goes, and why not the other three places
+## 2. Where the key goes (rewritten 2026-09-10, KEYS-1)
 
-**A realtime key is per workspace and you write it on your own Voice card**, under Settings in your
-own console. It is write-only: the card shows whether a key is set and never what it is, and no route
-on this product reads one back. The relay reads it off its own disk when it dials and sends it to the
-vendor as an `Authorization` header — never in a URL, never in a websocket subprotocol (proxies log
-those), never in a log line, never in a ledger row. A test sweeps for its bytes.
+**The realtime key belongs to the operator, and a customer never sees a key field.** The super admin
+pastes it once at `api.titanium.bot/admin`, in the block called "Keys the product uses", and that is
+the only place in this product a person ever types one.
 
-This is the same door your Email settings already use, which has been in production since
-September 2026.
+This section used to say the opposite, and it is worth writing down why it changed rather than
+quietly editing it. Until 2026-09-10 the key was a **per-workspace** secret a customer wrote on their
+own Voice card. Jason, looking at that settings panel: *"A user is never going to put a resend key in.
+That's on the backend."* He is right, and not only about taste. A key field on a customer's screen is
+a key a customer can get wrong, a key that customer's own agents can be talked into reading out of
+their own box, and a vendor bill nobody can attribute.
 
-Three places it deliberately does **not** go:
+### Why one shared key is safe now, when it was not before
+
+The old argument was: *"One value shared by every customer is the thing this whole product was rebuilt
+to stop."* That argument was about **isolation**, and the isolation was never the key. It was the
+metering and the caps, and both of those are per workspace on the control plane and have been since
+VOICE-1:
+
+- Every session claims a ledger row **before** the provider hears a byte, against that workspace's
+  slug. Section 9 is that ledger.
+- The day cap and the session cap are read per workspace, and only the operator can change one.
+- A workspace that has spent its day is refused whichever key would have dialled.
+
+So what is shared by this change is **the vendor's bill**, which the operator was always paying
+anyway. What is not shared is any workspace's ability to spend past its own cap. If the caps were
+not there, this change would be wrong; they are, and it is not.
+
+### One key per service, and where it travels
+
+The names are `keys.voice.xai` and `keys.voice.openai` — one per **service**, because the service is a
+per-workspace choice and it decides which key dials. A workspace set to a service the operator has no
+key for gets the plain refusal, never the other service's key aimed at the wrong vendor: that would
+be a 401 a person reads as a broken product.
+
+The relay reads them from `GET /v1/relay/secrets` behind `CP_RELAY_TOKEN`, keeps them **in memory
+only**, refreshes every five minutes, and degrades to the last good copy on an outage. It sends the
+key to the vendor as an `Authorization` header — never in a URL, never in a websocket subprotocol
+(proxies log those), never in a log line, never in a ledger row. Tests plant a key and sweep the wire,
+the ledger, every log line, every frame the browser was sent, and the workspace's own settings file
+for its bytes and for a ten-character prefix of them.
+
+### The migration is the fallback, and there is no migration code
+
+The relay prefers the control plane's value and falls back to **the workspace's own file**. Nothing
+anywhere pushes a file value up to the control plane: that would be a brand new write path for a
+secret and would undo write-only-from-the-console.
+
+Measured on the R750 on 2026-09-10: no `voice.json` exists anywhere on that machine, so no customer
+has ever pasted a realtime key and the door starts empty. Paste it once at the admin console and
+talking works; until then it is off, and it was off before too.
+
+### Three places it still deliberately does not go
 
 - **Not the super-admin Providers panel.** Those keys are global to the whole install, they live at
   the metering proxy as credentials, they read back masked, and that file's own rules forbid a key
-  value in any answer with a test that plants one and sweeps every route for it. There is no
-  per-workspace row there for a per-workspace key to live in. The panel does carry two realtime
-  cards, and they are **labels only** — see section 10.
+  value in any answer with a test that plants one and sweeps every route for it. The realtime key is
+  now global too, but it is not a *chat* credential and has no row there. The panel does carry two
+  realtime cards, and they are **labels only** — see section 10.
 - **Not the endpoints catalog.** That is the input to the *chat* model resolver: it fetches a model
   list against every row and pins the winner into your box. A realtime row there would be offered to
   you as a chat model and would fail every message you sent.
-- **Not an environment variable on the relay or in your box.** One value shared by every customer is
-  the thing this whole product was rebuilt to stop.
+- **Not an environment variable on the relay or in your box.** An environment value is readable by
+  anything in that container, and every exec daemon in a customer's box runs as uid 0.
 
 ### The browser path, refused on purpose
 
@@ -107,16 +149,16 @@ Two consequences worth spelling out:
   other vendor has a switch for it; xAI documents no equivalent. Section 8.
 
 `REALTIME_VENDORS` in `cp/voice.mjs` is the authoritative table: the wire shape, the address, the
-default model, the voices and the published price with the date it was read. The CLI, your Voice card
-and this document all name those rows.
+default model, the voices and the published price with the date it was read. The CLI, the operator's
+own settings and this document all name those rows.
 
 ---
 
 ## 4. Who answers
 
-Your team lead, resolved by the relay and never named by the model. In order: the agent you chose on
-the Voice card; an agent whose email localpart is `titan`; the first worker on the roster; and if none
-of those exists, a refusal in one plain sentence.
+Your team lead, resolved by the relay and never named by the model. In order: the agent you chose in
+Settings; an agent whose email localpart is `titan`; the first worker on the roster; and if none of
+those exists, a refusal in one plain sentence.
 
 **The model never says which workspace or which agent.** Both come from your signed-in session. A
 model-supplied agent id would be a cross-tenant read through an open microphone.
@@ -191,9 +233,10 @@ than in minutes.
 **Wall clock, not audio seconds**, because a minute of wall clock is the only number you can predict
 before you start talking. A provider bills on audio seconds, and the ledger records both.
 
-**You cannot raise your own cap.** Your Voice card writes your key; the minutes live on the control
-plane behind the operator's own credential. A customer raising their own daily cap is unbounded spend
-on somebody else's invoice, and it would be one request away if the number lived beside the key.
+**You cannot raise your own cap.** The minutes live on the control plane behind the operator's own
+credential. A customer raising their own daily cap is unbounded spend on somebody else's invoice. Since
+KEYS-1 the key is the operator's too, so both halves of the spend decision are on one side of one
+door — which is the point, and is what makes one shared vendor key safe (section 2).
 
 The operator changes them:
 
@@ -372,8 +415,8 @@ xai-realtime     409  xAI realtime (voice) would not accept that key, so nothing
 
 Nothing is stored and nothing leaks, which is what matters. But "could not be reached" is a misleading
 reason for a control that can never succeed, and a realtime key does not belong there anyway.
-**VOICE-4** makes those two cards read-only and says where the key actually goes. Until then: use your
-workspace's Voice card.
+**VOICE-4** makes those two cards read-only and says where the key actually goes. Since KEYS-1 the
+answer is the "Keys the product uses" block on the same console's System health panel — section 2.
 
 ---
 
@@ -417,7 +460,7 @@ the server.
 
 **No key is ever pasted by a gate.** The vendor in every leg is a stub that speaks the event shape.
 Setting a key over ssh would be exactly the by-hand operation this product is being rebuilt to end;
-the mechanism is the Voice card.
+the mechanism is the "Keys the product uses" block in the super admin console.
 
 ### What the gates actually measured, 2026-09-10
 
@@ -440,7 +483,7 @@ reported and never asserted — was **22,418 ms**. That middle number is section
 throwaway customer minted inside the control-plane container and deleted afterwards. Console ready in
 511–634 ms. The talk button is on the composer. `GET /voice/settings` answers 200 with `apiKeySet:
 false` and no `apiKey` field at all. The press puts the sentence on screen in **1,654–2,069 ms**, with
-the control beside it that opens the Voice card; the orb goes off → thinking → off; no session opens
+the control beside it that opens Settings; the orb goes off → thinking → off; no session opens
 and no ledger row is written, and the operator's read says *not measured* rather than zero.
 
 A cross-origin upgrade carrying a **real session cookie** and `Origin: https://evil.example` was
@@ -462,21 +505,25 @@ sweeps each one for sixteen leak patterns.
 
 From the relay, on the socket it accepted:
 
-- No key yet: **"This workspace has no realtime voice key yet. Add one on the Voice card in Settings
-  and press the button again."** This is the one that also draws a control opening that card.
-- Voice switched off for the workspace: **"Voice is switched off for this workspace. Turn it on on the
-  Voice card in Settings."**
+- Talking not switched on for this workspace: **"Voice is not switched on for this workspace yet."**
+  Jason's own words, and the same string the page carries so the two cannot drift. It names no key
+  and no card, because after KEYS-1 a customer cannot act on either, and it deliberately does **not**
+  end "press the button again" — that clause is what instructed the loop he got stuck in on
+  2026-09-10, pressing Talk over and over into an identical refusal.
+- Talking switched off by the workspace itself: **"Talking is switched off for this workspace. Turn it
+  on in Settings."** This one a person *can* act on: it is the switch in Settings under General.
 - An upgrade from somewhere else: **"That came from a page this console does not serve, so I did not
   open the microphone."**
 - Nobody to talk to: **"There is no bot in this workspace to talk to yet."**
 - The session cap: **"That is the time limit for one conversation. Press the button again to start a
   fresh one."**
 - The day is spent: **"This workspace has used its voice time for today. It resets at midnight UTC."**
-- A key the vendor would not take: **"The voice service would not take that key. Check it on the Voice
-  card in Settings."** This is a vendor that accepted the line and then dropped it without a word.
+- The service would not start the call: **"The voice service would not start this call. Tell your
+  operator if it keeps happening."** This is a vendor that accepted the line and then dropped it
+  without a word. Naming a key here would be pointing a person at something only the operator holds.
 - The line never opened at all, which a wrong key and an unreachable service both look like from here:
-  **"The voice service did not answer. Check the key on the Voice card in Settings, then press the
-  button again."** This one also draws the control that opens the card.
+  **"The voice service did not answer. Try again in a moment, and tell your operator if it keeps
+  happening."**
 - Already talking in another tab: **"This workspace is already in a call. Stop that one and press the
   button again."**
 - The line went away: **"The voice line dropped. Press the button again."**

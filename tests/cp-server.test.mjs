@@ -596,8 +596,22 @@ async function sweepForSecrets(plane, coolify, account, extraSecrets) {
     const ledger = JSON.stringify(plane.store.listSteps("roofing").concat(plane.store.listSteps("acme")));
     assert.equal(ledger.includes(gatewayToken), false, "the provisioning ledger holds no secret");
 
+    // KEYS-1. The two vendor keys the product itself uses, planted STRAIGHT INTO THE STORE rather
+    // than through the route: the paste proves the value with the vendor first, and this sweep is
+    // about what comes back OUT, not about the writing. Three names, one distinctive value each, so
+    // a hit names which one leaked.
+    // The distinguishing part comes FIRST so the ten character prefixes differ too; three values
+    // that shared a prefix would make the partial half of this sweep one assertion instead of three.
+    const productKeys = [["vxai", "keys.voice.xai"], ["vopenai", "keys.voice.openai"], ["mailsend", "keys.mail.send"]]
+      .map(([tag, name]) => ({ name, value: `${tag}-planted-${"z".repeat(20)}` }));
+    for (const one of productKeys) plane.store.setSetting(one.name, one.value, "the sweep");
+
     const forbidden = [
       ...hashes, plane.config.sessionSecret, plane.config.adminToken, coolify.apiKey, gatewayToken,
+      ...productKeys.map((one) => one.value),
+      // AND A TEN CHARACTER PREFIX OF EACH, because a partial is still a leak: ten characters of a
+      // key is ten characters a log search finds.
+      ...productKeys.map((one) => one.value.slice(0, 10)),
       ...extraSecrets,
     ];
 
@@ -619,6 +633,18 @@ async function sweepForSecrets(plane, coolify, account, extraSecrets) {
       // wrong credential and with none. Both answer 401 and neither answers with anything.
       await plane.request("GET", "/v1/relay/tenants"),
       await plane.admin("GET", "/v1/relay/tenants"),
+      // KEYS-1 added the second and third route of that kind, and NEITHER /v1/relay/* NOR /v1/keys
+      // was in this sweep before. The relay's read is the one route on this service that answers
+      // with a vendor key at all, so it is swept with no credential, with the wrong one, and with
+      // the operator's; the super admin's own read answers presence and never a value, so it is
+      // swept with the operator token, which DOES open it.
+      await plane.request("GET", "/v1/relay/secrets"),
+      await plane.admin("GET", "/v1/relay/secrets"),
+      await plane.request("POST", "/v1/relay/secrets", { body: {} }),
+      await plane.admin("GET", "/v1/keys"),
+      await plane.request("GET", "/v1/keys"),
+      await plane.admin("POST", "/v1/keys/keys.mail.send", { value: "" }),
+      await plane.admin("POST", "/v1/keys/keys.not.a.name", { value: "a-long-enough-value" }),
       await plane.request("POST", "/v1/signups", { body: { email: "someone@example.com", password: "a-good-password", company: "Someone" } }),
       // PROXY-1. The admin console's own routes, opened with the operator token, because the spend
       // panel is the one place a virtual key could plausibly have been rendered. It answers with
