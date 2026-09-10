@@ -431,6 +431,22 @@ select:focus-visible {
   padding-right: 12px;
 }
 
+/* SETTINGS-2: the account tile the wave put at the foot of the roster is 61 px the roster never
+   carried, and the cap above was written when the roster held the stack and nothing else. MEASURED on
+   grok-bot-local-vm in real Chrome: with the foot mounted the roster came to 663.50 px inside a stage
+   row whose content box is 648 px, so it STRETCHED the row and took every column with it --
+   .transcript grew 567.75 -> 583.25 at 1440x900 and 487.75 -> 503.25 at 1100x820, which is
+   verify-mobile's desktop baseline going red over an element nothing in this wave touched. The stack
+   gives the foot its 61 px back, so the roster is the height it has always been and the row does not
+   move. `:has` rather than an unconditional number, because a console whose account-menu.js did not
+   load has no foot and should keep the whole cap. Lifted inside the drawer, where the roster is fixed
+   top to bottom and the shelf is not under it (:4547). */
+@media (min-width: 691px) {
+  .worker-roster:has(.account-foot) .worker-stack {
+    max-height: calc(100vh - 391px);
+  }
+}
+
 .worker-card {
   overflow: hidden;
   position: relative;
@@ -4838,56 +4854,94 @@ body[data-composer-drop="1"] .composer {
   .voice-orb[data-state="speaking"] { animation: none; }
 }
 
-/* The live half, above the composer. The durable record of a spoken turn is the transcript row
-   itself -- this is what is being heard and said right now, plus any note. The transcript is rebuilt
-   wholesale on every render, so nothing drawn here can live inside it. */
-/* :not([hidden]) because [hidden] LOSES to an author display rule, and this file already carries
-   three rules that exist only because that bit a shipped control (styles.css:3830, :4162, :4216).
-   A strip that cannot hide is a caption line sitting above every composer on every page. */
-.voice-strip:not([hidden]) {
-  display: grid;
-  gap: 0.4rem;
-  margin: 0 0 0.5rem;
-}
-.voice-caption {
-  margin: 0;
-  min-height: 1.1em;
-  color: var(--text-secondary);
-  font-size: 0.86rem;
-  font-style: italic;
-}
-.voice-caption:empty { display: none; }
-.voice-notes { display: grid; gap: 0.35rem; }
-.voice-note .message-bubble {
-  display: flex;
+/* VOICE-2 -- THE LIVE LINE, which replaced a strip that broke the footer.
+   ----------------------------------------------------------------------
+   The durable record of a spoken turn is the transcript row itself. This is the live half: what is
+   being heard or said right now, or one note, in ONE capped line.
+
+   WHY IT IS NOT A BAND ABOVE THE COMPOSER ANY MORE. The strip was an auto-placed child of
+   .control-shelf's three-column grid with no grid-column of its own, which is the third time that
+   bug has been found in this file (.composer-status at :3178 and .attachment-tray at :3832 each
+   carry a comment about it). MEASURED on grok-bot-local-vm in real Chrome at 1440x900, one press of
+   Talk with no voice switched on: the shelf 1392x106@24,776 -> 1392x196.02@24,685.98, the composer
+   600x54@459 -> 407.98x54@991, the message box 370.05 -> 178.03, .shelf-utilities wrapped to row two
+   at x41, .composer-aside rose 90 px onto the right rail and the transcript lost 45.5 px.
+   `grid-column: 1 / -1` where the strip sat measured WORSE (1392x208.55, three rows, the composer in
+   column one), because the strip is mounted after #workspace-list.
+
+   So the line has two homes and voice.js picks one by width: a slot in the composer's own row at
+   desktop, where nothing else moves at all, and the shelf's FIRST row under 900 px, where it spans
+   every column beside the two children already placed that way.
+
+   :not([hidden]) because [hidden] LOSES to an author display rule, and this file carries three rules
+   that exist only because that bit a shipped control (:3830, :4162, :4216). A line that cannot hide
+   is a sentence sitting in every composer on every page. */
+.voice-line:not([hidden]) {
+  display: inline-flex;
   align-items: center;
-  gap: 0.6rem;
-  flex-wrap: wrap;
-}
-.voice-note-action { font-size: 0.8rem; }
-
-.voice-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
-  gap: 0.6rem;
-}
-
-/* Each cell is a label wrapped round its own control, so the word has to sit ABOVE the control the
-   way every other field on this card does. MEASURED on the R750 2026-09-10: without this the three
-   labels ran into their own boxes on one line -- "Service" hard against the dropdown -- which is the
-   one row on the card that did not look like the rest of the console. */
-.voice-grid label {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  font-size: 0.78rem;
-  color: var(--ink-soft, #9aa4ad);
-}
-
-.voice-grid select,
-.voice-grid input {
-  width: 100%;
+  gap: 4px;
   min-width: 0;
+  /* A CEILING, not the sizing. The line and the message box SHARE what the composer has spare, and
+     the fifth track above is where that share is written: 1fr to the box and 0.7fr to the line, so
+     the box always keeps the larger half and both shrink together on a narrower screen. This cap is
+     only the point past which a very wide composer stops handing the line more room it does not need.
+
+     TWO SIZINGS WERE MEASURED AND REJECTED, and both are the same trap in different clothes:
+       `max-width: min(13rem, 40%)` on an `auto` track -- 1440x900, a 101.36 px line inside a
+       253.42 px track and a 112.63 px message box. A percentage max-width on a grid item resolves
+       against the grid AREA, which for an `auto` track depends on the item, so it is indefinite while
+       the track is being sized: the track took the sentence's whole max-content and only then did the
+       40% resolve, against the track it had just grown.
+       `minmax(0, 13rem)` as a fixed track -- fine at 1440 (a 158.05 px box) and broken at 1280, where
+       the composer has less to spare and the box measured 60.52 px. A track that does not yield is a
+       track that takes the message box with it. */
+  max-width: 13rem;
+  color: var(--text-tertiary);
+  font-size: 0.7rem;
+  line-height: 16px;
+}
+
+/* One node per shape, exactly one shown. The span is a status and may not look pressable; the button
+   carries the same sentence when that sentence leads somewhere, so the SENTENCE is the control's own
+   accessible name and NOTE_ACTIONS' words are the title beside it, rather than a second labelled
+   control the composer's row has no room for.
+
+   THREE LINES, NOT ONE, and that is what makes the whole sentence readable in a narrow line.
+   MEASURED: the sentence a workspace with no voice reads is 253 px of one line at this size, so on
+   one line it would lose its last eight characters to an ellipsis -- a truncated sentence in the one
+   place a person has to read one. The composer's content box is 42 px tall and three lines of this
+   size are 39, so the words fit inside a form whose height does not change. Past three it still
+   ellipsises, which only the microphone sentence reaches and only on a narrow window. */
+.voice-line-say:not([hidden]),
+.voice-line-do:not([hidden]) {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 13px;
+}
+
+.voice-line-do {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px dotted color-mix(in srgb, var(--teal-500) 70%, transparent);
+  background: none;
+  color: var(--teal-300);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.voice-line-do:hover { border-bottom-color: var(--teal-300); }
+
+/* The phone's home: the shelf's first row, full width, centred, with the whole sentence readable
+   because there is no composer beside it to protect. */
+.voice-line.is-shelf:not([hidden]) {
+  grid-column: 1 / -1;
+  justify-self: center;
+  max-width: min(72ch, 100%);
 }
 
 /* The spoken chip. A quiet mark on the person's own row saying that row was said out loud, not
@@ -4920,16 +4974,38 @@ body[data-composer-drop="1"] .composer {
   grid-template-columns: 38px minmax(0, 1fr) auto auto;
 }
 
+/* VOICE-2: THE FIFTH TRACK, AND WHY IT IS GATED ON AN ATTRIBUTE. The live line is a fifth child, and
+   the same bug bites again twice over. MEASURED at 1440x900: a fifth child with no new track took the
+   composer 600x54 -> 600x96 and put Send at row two column one, the exact failure the note above
+   records; and an UNCONDITIONAL fifth track, with the line hidden, took 4 px off the message box
+   through this grid's own 4 px gap. So the track exists only while voice.js has the line in the form
+   with something to say, and at rest the composer is the form it has always been, to the pixel.
+
+   The attribute's value is never read. It is a state flag, and the selector is listed beside
+   `.composer` in tests/machine-room-voice.test.mjs's allow-list for the same reason that one is:
+   deliberately, in this commit, rather than discovered in CI. */
+.composer[data-voice-line] {
+  grid-template-columns: 38px minmax(0, 1fr) minmax(0, 0.7fr) auto auto;
+}
+
 @media (max-width: 690px) {
   /* On a phone the textarea is the scarce thing, so the word goes and the orb stays -- the button
-     keeps its aria-label, so it still says what it is to anyone not reading the screen. It is then
-     the same 38px circle as the attach button beside it. */
+     keeps its aria-label, so it still says what it is to anyone not reading the screen. */
   .composer {
     grid-template-columns: 38px minmax(0, 1fr) auto auto;
   }
+
+  /* VOICE-2, A BROKEN WINDOW CLOSED IN THE SAME PASS. This shipped at 38x38 to match the attach
+     button beside it, and MEASURED at 390x844 that is under the 44 px floor :4641-4652 enforces for
+     .send-button, .composer-plus, #report-problem, #run-self-test and seven others -- the attach
+     button it was matched to is itself on that list, so matching it was matching the wrong number.
+     It costs the message box 6 px, which is recorded in the gate's output and in docs/GAP-ANALYSIS.md
+     rather than guessed at here. */
   .voice-talk {
-    width: 38px;
-    height: 38px;
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
     padding: 0;
     border-radius: 50%;
     justify-content: center;
@@ -4937,4 +5013,135 @@ body[data-composer-drop="1"] .composer {
   .voice-talk-label {
     display: none;
   }
+
+  /* The line is a row of the shelf at this width, so the sentence that leads somewhere is a full-width
+     tap target rather than a 17 px one -- the same 44 px floor :4641-4652 puts under every other
+     control on this row. A status that leads nowhere stays a line of text and costs the shelf nothing
+     but its own height, which is why the two are sized separately. Centred flow rather than a
+     44 px line-height: MEASURED, the line-height version took the shelf 133 -> 190 px, five more than
+     the target needs, because the box grew as well as the text inside it. */
+  .voice-line.is-shelf .voice-line-do:not([hidden]) {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    text-align: center;
+  }
+}
+
+/* ============================================================== VOICE-7: the speech panel
+   Jason, 2026-09-10 11:09: "a semi-transparent modal over the current chat window where that is
+   being built out. We see the words being created, and when it's done, that just becomes the next
+   line ... That modal goes away and that becomes the next line from whoever was speaking."
+
+   WHERE IT LIVES, AND WHY THAT IS THE WHOLE OF THE FOOTER PROOF. It is a child of
+   .conversation-space (index.html:134), which is position:relative and which app.js never rebuilds
+   -- renderTranscript only ever writes .transcript's innerHTML. So the panel floats over the
+   conversation and CANNOT touch .control-shelf: not a margin, not a grid row, nothing. The strip
+   this replaces was inserted before #composer and therefore became a grid ITEM of the shelf, which
+   is the measured cause of VOICE-6's growth (1392x106 to 1392x160 at 1440x900 on this Mac,
+   390x133 to 390x199 on a phone). Nothing in this block is inside that grid.
+
+   pointer-events: none on the layer, because the conversation underneath stays clickable while
+   somebody is talking. The panel is something to read, never something to dismiss.
+
+   IT MUST NOT READ AS AN ERROR (memory: host-notes-read-as-errors.md). No title, no icon, no close
+   control, no border that looks like dialog chrome, no condition name. An orb that is obviously
+   listening, and the words. It dissolves; it does not close.
+
+   COLOUR. --glass-strong is rgba(17,25,30,0.82), which is the brief's "Midnight at about 80 per
+   cent", and --blur-soft is the blur behind it -- both are this console's own tokens.css. The
+   accent is the orb's own --teal-300/--teal-500. The brand board's Signal Cyan #00C8F0 belongs to
+   titanium.bot's marketing site and appears nowhere in this console; using it here would make the
+   newest surface the one that does not match. Same named deviation as .voice-talk above. */
+.voice-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  place-items: center;
+  padding: 24px;
+  pointer-events: none;
+}
+/* :not([hidden]) for the same reason .voice-strip needs it: [hidden] loses to an author display
+   rule, and a panel that cannot hide is a permanent sheet over every conversation. */
+.voice-overlay:not([hidden]) { display: grid; }
+
+.voice-overlay-panel {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  width: min(34rem, 100%);
+  max-height: 60%;
+  overflow-y: auto;
+  padding: 20px 22px;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: var(--radius-lg);
+  background: var(--glass-strong);
+  box-shadow: var(--shadow-medium), var(--inset-highlight);
+  backdrop-filter: blur(var(--blur-soft)) saturate(118%);
+  opacity: 1;
+  transform: scale(1);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+/* The dissolve. The words stay put and fade; nothing slides, because a panel that moves on its way
+   out draws the eye to the exit instead of to the line it just became. */
+.voice-overlay[data-phase="gone"] .voice-overlay-panel {
+  opacity: 0;
+  transform: scale(0.985);
+}
+
+.voice-overlay-orb {
+  width: 0.85rem;
+  height: 0.85rem;
+  margin-top: 0.3rem;
+  border-radius: 50%;
+  background: var(--teal-300);
+  flex: 0 0 auto;
+  animation: voice-orb-listen 1.8s ease-in-out infinite;
+}
+
+.voice-overlay-text {
+  margin: 0;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 1.02rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+/* Before the first word arrives, and on a vendor that sends no live words at all. One plain word,
+   in the muted colour, so the panel is never an empty sheet. */
+.voice-overlay-waiting {
+  color: var(--text-tertiary);
+  font-size: 0.95rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-overlay-orb { animation: none; }
+  /* No fade either: the panel is there, and then it is not. The row it became is the record. */
+  .voice-overlay-panel { transition: none; }
+}
+
+@media (max-width: 690px) {
+  .voice-overlay { padding: 12px; }
+  .voice-overlay-panel {
+    max-height: 52%;
+    padding: 16px 16px;
+    gap: 11px;
+  }
+  .voice-overlay-text { font-size: 0.98rem; }
+}
+
+/* PUSH TO TALK, the button while it is held. A filled state rather than a second control, and the
+   three properties without which a press-and-hold on a 38px phone circle is a long-press context
+   menu, a text selection and a drag instead of a turn at the microphone. */
+.voice-talk {
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+.voice-talk.is-held {
+  border-color: var(--teal-300);
+  background: color-mix(in srgb, var(--teal-500) 46%, rgba(12, 23, 27, 0.5));
+  color: var(--text-primary);
 }

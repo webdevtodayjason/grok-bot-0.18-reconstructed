@@ -51,6 +51,9 @@ import { createAdminApi } from "./admin.mjs";
 import { createMailDirectory, createMailSends, mailDomain } from "./mail.mjs";
 import { createVoiceLog } from "./voice.mjs";
 import { createCodeTasks } from "./code.mjs";
+// KEYS-1. The three keys the product itself uses, their allowlist, their proofs and the two shapes
+// this file answers with. The routes are at the bottom of the dispatcher and the reasoning is there.
+import { beginKeyAction, keyDefinition, keyEvidence, keysDoor, parseKeyValue, proveKey, relaySecrets } from "./secrets.mjs";
 import { INTAKE_BYTES as FEEDBACK_BODY_BYTES, normalizeReport } from "./feedback.mjs";
 import { createProxyClient, includedModelRows } from "./proxy.mjs";
 import {
@@ -1224,14 +1227,23 @@ export function createApp(options = {}) {
     // Three relay routes and two operator routes, and the split is the whole design: the relay is
     // told NUMBERS and reports ROWS, and the operator is the only one who can change a number.
     //
-    // WHAT DOES NOT CROSS THIS LINE IN EITHER DIRECTION: the workspace's realtime key. It is written
-    // through the customer's own console into that workspace's own state file and read off the
-    // relay's own disk when it dials, and it travels to the vendor as an Authorization header and
-    // nowhere else. No route here takes one, answers one or could be made to log one. That is why the
-    // key is NOT on the super-admin Providers panel: those keys are global, they live at LiteLLM as
-    // credentials, they read back masked, and cp/PROVIDERS-ROUTES.md section 5 has a test that sweeps
-    // every GET route in that file for a planted key's bytes. A per-workspace realtime key has no row
-    // there to live in.
+    // WHAT DOES NOT CROSS THIS LINE IN EITHER DIRECTION: the realtime key. NONE of the five routes
+    // in this section takes one, answers one or could be made to log one, and that is still true and
+    // still tested.
+    //
+    // KEYS-1 AMENDED WHAT THAT SENTENCE MEANS, the way TENANT-5 amended the rule at the top of this
+    // file rather than deleting it. It used to be true of the whole SERVICE: the key was a
+    // per-workspace secret a customer typed into their own console and it never reached here at all.
+    // It is the operator's now, it is held in admin_settings write-only, and there is exactly one
+    // route on this service that answers with it -- GET /v1/relay/keys, behind CP_RELAY_TOKEN, at the
+    // bottom of this dispatcher with its own reasoning on it. Not this one, and not any voice route:
+    // the split below is unchanged, the relay is still told NUMBERS and still reports ROWS, and the
+    // caps are still the only thing an operator changes here.
+    //
+    // The key is still NOT on the super-admin Providers panel: those keys are global, they live at
+    // LiteLLM as credentials, they read back masked, and a realtime address is a websocket a proxy
+    // has no deployment shape for. PROVIDERS-10; the two cosmetic realtime rows that used to sit
+    // there are deleted, and "Keys the product uses" is where an operator pastes this one.
     //
     // The method refusal comes first on every one of them, the way the mail send pair does: a wrong
     // method charges nobody and learns nothing.
@@ -1640,6 +1652,85 @@ export function createApp(options = {}) {
       }
 
       return json(response, 404, { error: "not_found" });
+    }
+
+    // ---- KEYS-1: the keys the product uses (cp/secrets.mjs, docs/ADMIN.md) ----------------------
+    //
+    // Three branches, deliberately at the very bottom of this dispatcher and deliberately NOT under
+    // /v1/admin: cp/admin.mjs claims that whole prefix and answers 404 to anything it does not match
+    // itself, which is the same structural reason /v1/code/settings and /v1/mail/sends live out
+    // here. They are also a long way from the voice guard region above, which another wave owns this
+    // week.
+    //
+    // WHAT THIS CHANGES ABOUT THE RULE WRITTEN OVER THE VOICE ROUTES. That comment says the
+    // workspace's realtime key never crosses this service, and until today that was true: the key
+    // was a per-workspace secret a CUSTOMER typed into their own console. It is not a customer's any
+    // more. Jason, looking at the settings panel on 2026-09-10: "A user is never going to put a
+    // resend key in. That's on the backend." So the two vendor keys the product itself uses are the
+    // operator's, they are held here write-only, and the relay reads them behind its own credential.
+    //
+    // The isolation that mattered is NOT the key. It is the metering and the caps, and both of those
+    // are already per workspace on this service: voice minutes are claimed per tenant before the
+    // provider hears a byte, the day and session caps are per tenant, and the mail send ledger is
+    // per tenant. What is shared by this change is the vendor's bill, which the operator was always
+    // paying anyway; what is not shared is any workspace's ability to spend beyond its own cap.
+    // docs/VOICE.md section 2 is rewritten to say exactly that.
+    if (segments[1] === "keys") {
+      // The super admin's own read: presence, evidence, when and who, and never a value.
+      if (segments.length === 2 && method === "GET") {
+        if (!admin.requireSuperAdmin(request, response).ok) return undefined;
+        return json(response, 200, keysDoor(store));
+      }
+
+      // The paste. requireSuperAdmin and NOT requireAdmin, because the thing holding this door open
+      // is a BROWSER holding a session from POST /v1/sessions, not the operator's bearer -- which is
+      // the whole of ADMIN-4 and is written out at /v1/voice/usage above. requireSuperAdmin takes
+      // either, so the operator's CLI keeps working.
+      if (segments.length === 3 && method === "POST") {
+        const guard = admin.requireSuperAdmin(request, response);
+        if (!guard.ok) return undefined;
+        const name = String(segments[2] ?? "");
+        if (keyDefinition(name) == null) {
+          return json(response, 400, { error: "bad_request", message: "That is not a key this product uses. Nothing was stored." });
+        }
+        const parsed = parseKeyValue(body ?? {});
+        if (!parsed.ok) return json(response, 400, { error: "bad_request", message: `${parsed.why} Nothing was stored.` });
+        // PROVED BEFORE STORED. A key the vendor will not take is a feature that fails weeks later
+        // on somebody else's morning, which is the reason the GitHub token and both push
+        // credentials do this too. A refusal is 409 and the store is not touched.
+        const proof = await proveKey({ name, value: parsed.value, fetchImpl, env: process.env });
+        if (!proof.ok) return json(response, 409, { error: "key_refused", message: `${proof.why} Nothing was stored.` });
+        const actor = guard.account?.email ?? `operator via ${String(request.headers["x-titanbot-via"] ?? "api")}`;
+        const ledger = beginKeyAction(store, {
+          actor, via: String(request.headers["x-titanbot-via"] ?? "console"), ip: clientOf(request),
+          name, value: parsed.value, now: now(),
+        });
+        store.setSetting(name, parsed.value, actor);
+        ledger.done(`checked against ${proof.how}`);
+        return json(response, 200, {
+          name,
+          checkedWith: proof.how,
+          // NOT the key. Nothing on this service ever answers with it again.
+          evidence: keyEvidence(parsed.value),
+          message: "That key was accepted and is stored. Nothing here can show it again.",
+        });
+      }
+
+      return json(response, 404, { error: "not_found" });
+    }
+
+    // And what the RELAY reads, behind CP_RELAY_TOKEN like the registry, the mail routes and the two
+    // push credentials. THE METHOD REFUSAL IS FIRST, so a wrong method charges nobody and learns
+    // nothing; the relay keeps what comes back in memory, never writes it beside a state file, and
+    // never pushes it into a box (every exec daemon in a customer's container runs as uid 0, so a
+    // key inside one is readable by that customer's own agents).
+    //
+    // A name with nothing behind it is left out rather than answered empty, because the relay's
+    // fallback to a workspace's own file is decided by absence.
+    if (segments[1] === "relay" && segments[2] === "keys" && segments.length === 3) {
+      if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
+      if (!requireRelay(request, response)) return undefined;
+      return json(response, 200, relaySecrets(store));
     }
 
     return json(response, 404, { error: "not_found" });

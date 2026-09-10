@@ -290,6 +290,29 @@ test("no shape this module answers with can carry a secret", () => {
   assert.equal("webhookSecret" in shape, false);
 });
 
+// KEYS-1. EFFECTIVE presence, not file presence.
+//
+// The sending key is the operator's now: it lives at the control plane and the relay holds a copy in
+// memory, so this workspace's own file is only one of the two places it can be. A card that reads
+// `apiKeySet` off the file alone draws "not set" over a production workspace that has been sending
+// all week -- which is what the very first screenshot of a migrated instance would have shown.
+test("a key the relay holds for the product counts as set, even with nothing on this workspace's file", () => {
+  const onFile = { enabled: true, domain: DOMAIN, apiKey: "", webhookSecret: SECRET };
+  assert.equal(mailSettingsShape(onFile).apiKeySet, false, "nothing anywhere is not set");
+  assert.equal(mailSettingsShape(onFile, { keyElsewhere: true }).apiKeySet, true);
+  // And it is still the one thing it was: presence, never a value, and never the reason either.
+  const shape = mailSettingsShape(onFile, { keyElsewhere: true });
+  assert.equal("apiKey" in shape, false);
+  assert.equal(JSON.stringify(shape).includes(API_KEY), false);
+  // A file key alone is still enough, which is what keeps every single-box install reading true.
+  assert.equal(mailSettingsShape({ ...onFile, apiKey: API_KEY }).apiKeySet, true);
+  // The webhook secret is NOT affected: it never moved. It is a routing discriminator rather than a
+  // vendor credential -- when two workspaces claim one domain, the one whose secret verifies THIS
+  // body gets the message -- so one global value in front of every edge would let the first claimant
+  // read another customer's mail. It stays on each workspace's own file.
+  assert.equal(mailSettingsShape({ ...onFile, webhookSecret: "" }, { keyElsewhere: true }).webhookSecretSet, false);
+});
+
 test("a partial save sets a secret on a string, clears it on null, and keeps it when absent", () => {
   const current = { domain: DOMAIN, apiKey: API_KEY, webhookSecret: SECRET, routes: { billing: "agent_books" } };
   // Absent: the card saved the form without ever holding the secrets.

@@ -1,8 +1,17 @@
 /*
- * VOICE-1 — the console's side of talking to your agent.
- * ------------------------------------------------------
- * One button beside the composer, one orb, a microphone, a speaker, and a live caption. Press to
- * start, press to stop. There is no wake word and nothing listens when the button is off.
+ * VOICE-1 / VOICE-2 — the console's side of talking to your agent.
+ * ----------------------------------------------------------------
+ * One button beside the composer, one orb, a microphone, a speaker, and ONE capped line of live
+ * words. Press to start; press again, or Escape, to leave. There is no wake word and nothing listens
+ * when the button is off.
+ *
+ * VOICE-2, AND WHAT IT CHANGED. Talk mode used to be a room you could not leave. The live strip was
+ * an unplaced child of the footer's grid, so one press moved six rects and took 45.5 px off the
+ * conversation; a second press redialled instead of leaving, because it read a flag the relay had
+ * already cleared; Escape did nothing; and no code path anywhere cleared a note, so the sentence sat
+ * in the footer until the tab was reloaded. The Voice card went with it: a key belongs to the
+ * operator and lives in the admin console, so this file publishes the four facts item A's Settings
+ * rows read and holds no paste field of its own. The numbers are in the comments beside each fix.
  *
  * WHAT THIS FILE IS NOT. It is not a voice assistant. The realtime model on the other end of the
  * relay is a mouth and a pair of ears; it holds exactly one tool, which puts what you said into
@@ -32,8 +41,8 @@
  * says exactly this in its own comment).
  *
  * NO BARGE-IN. Speaking while your agent speaks interrupts nothing, because the microphone is shut.
- * On speakers that was never a feature: the thing being interrupted was the person. The Voice card
- * says so in one sentence.
+ * On speakers that was never a feature: the thing being interrupted was the person. docs/VOICE.md
+ * says so in one sentence, and so does the Settings row that switches talking on.
  *
  * PLAYBACK IS WEB AUDIO, which is a design decision with a cost. PCM16 deltas become AudioBuffers
  * on AudioBufferSourceNodes, scheduled OFF the socket's onmessage path -- draining the player inline
@@ -65,25 +74,100 @@
     "no-microphone": "This page has not been given the microphone yet. Allow it in your browser and press Talk again.",
     // No second clause telling the person to open settings: the control beside this sentence is that
     // clause, and MEASURED on screen the two together read as the same words twice.
-    "no-key": "Talking is not available on this workspace yet.",
+    //
+    // VOICE-2. The shipped sentence ended "Add one on the Voice card in Settings and press the button
+    // again", and the last clause INSTRUCTED THE LOOP Jason got stuck in: the press that reads this
+    // line cannot succeed, so "press the button again" is the one thing a person must not be told to
+    // do. The words are his own, and the relay says the same string, so retitleNote cannot put two
+    // wordings on one row.
+    "no-key": "Voice is not switched on for this workspace yet.",
     "day-cap": "This workspace has used all of today's talking time. It starts again at midnight UTC.",
     "session-cap": "That call reached its length limit. Press Talk to start another one.",
     "box-not-running": "Your agent's computer is not running, so there is nobody to talk to yet. Start it and press Talk again.",
     "line-dropped": "The line dropped. Press Talk to start again.",
   };
-  // The one note that leads somewhere: nothing is set up, so offer the card that sets it up.
-  const NOTE_ACTIONS = { "no-key": "Open voice settings" };
+  // The one note that leads somewhere. There is no Voice card any more -- a key is the operator's and
+  // lives in the admin console -- so this opens the workspace's own settings at the Talking row.
+  // These words are the control's TITLE and not its label: the sentence itself is what a person
+  // presses, because measured at 1440x900 a labelled button beside the sentence does not fit the
+  // composer's row without taking the message box under 150 px.
+  const NOTE_ACTIONS = { "no-key": "Open settings" };
   // A refusal the relay makes mid-call closes with a code, because by then there is no longer a
   // socket to send a frame down. The code names the condition so the right sentence -- and, for a
   // missing key, the right control -- can still be put in front of the person.
   const CLOSE_CONDITIONS = { 4001: "no-key", 4002: "day-cap", 4003: "session-cap", 4004: "box-not-running" };
 
-  const STRIP_ID = "voice-strip";
-  const CARD_ATTRIBUTE = "data-voice";
+  // THE LIVE LINE. One node, two homes, and it clears itself.
+  //
+  // WHY IT IS NOT A STRIP ANY MORE, and this is the whole of VOICE-2. The strip was inserted
+  // `beforebegin` #composer, which made it a FOURTH auto-placed child of .control-shelf's
+  // three-column grid with no grid-column of its own -- the third time that bug has been found in
+  // this file (.composer-status and .attachment-tray each carry a written comment about it).
+  // MEASURED on grok-bot-local-vm in real Chrome at 1440x900, one press of Talk on a workspace with
+  // no voice: the shelf went 1392x106@24,776 to 1392x196.02@24,685.98, the composer 600x54@459 to
+  // 407.98x54@991, the message box 370.05 to 178.03, .shelf-utilities wrapped to row two at x41,
+  // .composer-aside rose 90 px onto the right rail's Skills row and the transcript lost 45.5 px. A
+  // person could not read the sentence, leave the mode, or type.
+  //
+  // `grid-column: 1 / -1` where the strip sat is WORSE than shipped, not better: measured
+  // 1392x208.55, three rows, the composer in column one, because the strip is mounted AFTER
+  // #workspace-list and a full-width row there pushes everything onto a third. The two children that
+  // DO span the shelf are its first two, which is why the phone home below is `afterbegin`.
+  const LINE_ID = "voice-line";
+  // The width at or below which the line takes a row of the shelf instead of a slot in the composer.
+  // The phone composer is 358 px with a 178.98 px message box: there is no room in it for a sentence.
+  const LINE_SHELF_WIDTH = 900;
+  // How long a note stays before it takes itself away. Nothing used to clear one -- clearNotes ran
+  // only from start() and the ready frame -- so the sentence sat in the footer for the life of the
+  // tab and the only way out was a reload.
+  const NOTE_DISMISS_MS = 6000;
 
-  const escapeHtml = (value) => String(value ?? "")
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  // ---------------------------------------------------------------- VOICE-7: the speech panel
+  //
+  // Jason, 2026-09-10 11:09: "a semi-transparent modal over the current chat window where that is
+  // being built out. We see the words being created, and when it's done, that just becomes the next
+  // line ... That modal goes away and that becomes the next line from whoever was speaking."
+  //
+  // It is mounted in <section class="conversation-space">, and NOT on the road the line above takes.
+  // That is the whole of the footer proof and it is architectural rather than fought for: the line is
+  // a child of the composer or of the shelf, which is the box VOICE-6 had to measure its way out of.
+  // Nothing this panel does is inside that box, so the footer's rect cannot move whatever the panel
+  // says. .conversation-space is position:relative and app.js's renderTranscript only ever rewrites
+  // .transcript's innerHTML, so the panel also survives every wholesale repaint on its own.
+  const OVERLAY_ID = "voice-overlay";
+  // The fade in styles.css. Read once here so the node is not pulled out from under a transition that
+  // is still running; under prefers-reduced-motion it is skipped entirely.
+  const DISSOLVE_MS = 200;
+  // A turn that never ends. Every turn the relay knows about is closed by a hear-end frame, including
+  // the ones that produce no row at all, but a provider that simply stops mid-turn sends nothing --
+  // and somebody's half sentence sitting over their conversation forever is worse than losing the
+  // last few words of it.
+  const HEARD_STALE_MS = 8000;
+  // The one word the panel shows before the first word arrives, and for the whole of a turn on a
+  // provider that sends no live transcript. Plain English; never a condition name.
+  const LISTENING_WORD = "Listening";
+
+  // ---------------------------------------------------------------- VOICE-7: the two talk modes
+  //
+  // Jason, same message: "the talk button should be either: press it and it's on, so it's a toggle,
+  // on or off; or press and hold to talk and let go. That should be a setting for the user."
+  //
+  // PUSH IS THE DEFAULT because it is the one that cannot leave a microphone open by accident.
+  const TALK_MODES = ["push", "always"];
+  const TALK_MODE_DEFAULT = "push";
+  // Push to talk keeps the line up between holds so the second hold is instant -- the first one pays
+  // the dial, measured at 1.6 to 2.0 s through console.titanium.bot. But the caps count WALL CLOCK,
+  // not audio, so a line left up after somebody walked away spends a workspace's day: thirty minutes
+  // of a hundred and twenty minute allowance for one forgotten press. So it closes itself.
+  const PUSH_IDLE_CLOSE_MS = 60_000;
+  // Frames captured before the socket finished opening. Push to talk starts capturing on the press and
+  // the dial is not instant, so without this the first words of the first hold are lost every time.
+  // Bounded at two seconds, because the relay drops audio more than three seconds ahead of its own
+  // wall clock and counts it as a held frame.
+  const PENDING_FRAME_CAP = 20;
+  // Where the choice is remembered. Per browser, beside Theme and Microphone on the same settings
+  // section, and docs/VOICE.md says in those words that per browser is not per person.
+  const TALK_MODE_KEY = "titanbot.voice.talkMode";
 
   const sentenceFor = (condition) => NOTES[condition] ?? NOTES["line-dropped"];
   const orbStateFor = (value) => (ORB_STATES.includes(String(value)) ? String(value) : null);
@@ -169,6 +253,12 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     const frameBytes = options.frameBytes ?? FRAME_BYTES;
     const frameSamples = frameBytes / 2;
     const held = typeof options.held === "function" ? options.held : () => false;
+    // HELD AND MUTED ARE TWO DIFFERENT FACTS and are counted apart. `held` is the echo gate: the
+    // agent is making noise and the microphone must not hear it, which is a condition the gate's own
+    // proof reads a number off. `muted` is push to talk between holds -- the person simply is not
+    // talking. Folding them together would make the gate's count unreadable the moment anybody used
+    // push to talk, which is the default mode.
+    const muted = typeof options.muted === "function" ? options.muted : () => false;
     const onChunk = typeof options.onChunk === "function" ? options.onChunk : () => {};
     const source = options.source ?? "microphone";
     const audio = options.audio ?? {};
@@ -182,9 +272,17 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       throw new Error("this browser has no audio worklet");
     }
 
+    // deviceId is added ONLY when Settings holds one, so a workspace that never opened the row asks
+    // for exactly what it always asked for and `exact` can never refuse a microphone nobody chose.
+    const deviceId = String(options.deviceId ?? "").trim();
     const stream = source === "microphone"
       ? await getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        },
         video: false,
       })
       : source;
@@ -196,7 +294,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     const input = context.createMediaStreamSource(stream);
     input.connect(node);
 
-    const stats = { sent: 0, heldFrames: 0, heldMs: 0, bytes: 0 };
+    const stats = { sent: 0, heldFrames: 0, heldMs: 0, mutedFrames: 0, bytes: 0 };
     let pending = new Float32Array(0);
     let stopped = false;
 
@@ -211,6 +309,9 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       while (pending.length >= frameSamples) {
         const frame = pending.subarray(0, frameSamples);
         pending = pending.slice(frameSamples);
+        // Asked FIRST, and before the gate: in push to talk between holds there is nobody talking,
+        // so this is not the gate holding anything and must not be counted as though it were.
+        if (muted()) { stats.mutedFrames += 1; continue; }
         // Asked before every chunk. A held frame is never sent -- not muted on the wire, not
         // zero-filled, not queued for later: dropped, and counted.
         if (held()) {
@@ -310,54 +411,50 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     };
   }
 
-  // ------------------------------------------------------------------ the strip a person reads
+  // ------------------------------------------------------------------ the line a person reads
   //
   // The transcript is rebuilt wholesale on every render (app.js's renderAll), so nothing this file
   // draws can live inside it. The durable record of a spoken turn is the transcript row itself,
   // which carries the spoken chip because the relay sends the prompt under a "voice:" nonce. This
-  // strip is the LIVE half: what is being heard, what is being said, and any note.
-  function stripMarkup() {
-    return `<div class="voice-strip" id="${STRIP_ID}" data-voice-strip hidden>`
-      + `<p class="voice-caption" data-voice-caption></p>`
-      + `<div class="voice-notes" data-voice-notes></div>`
-      + `</div>`;
+  // line is the LIVE half, and it is ONE capped line: what is being heard or said, or one note.
+  //
+  // TWO CHILDREN, EXACTLY ONE SHOWN. A sentence that leads somewhere IS the control -- the button
+  // carries the sentence and NOTE_ACTIONS' words are its accessible name -- because a labelled
+  // button beside the sentence does not fit the composer's row (see NOTE_ACTIONS above). A sentence
+  // that leads nowhere is a span, because a status that cannot be pressed must not look pressable.
+  function lineMarkup() {
+    return `<span class="voice-line" id="${LINE_ID}" data-voice-line hidden>`
+      + `<span class="voice-line-say" data-voice-line-say hidden></span>`
+      + `<button class="voice-line-do" type="button" data-voice-line-do data-voice-open-settings hidden></button>`
+      + `</span>`;
   }
 
-  // A quiet row. Detail-less on purpose: an expander here would be a machine's innards beside a
-  // conversation. is-system is the console's own muted bubble; is-turn-failed is the one class this
-  // row may never carry, because none of these six sentences is a failed turn.
-  function noteMarkup(condition, text) {
-    const sentence = text && String(text).trim().length > 0 ? String(text).trim() : sentenceFor(condition);
-    const action = NOTE_ACTIONS[condition];
-    return `<article class="message-row is-system voice-note" data-voice-note="${escapeHtml(condition)}">`
-      + `<div class="message-bubble">${escapeHtml(sentence)}`
-      + (action ? `<button class="quiet-button voice-note-action" type="button" data-voice-open-settings>${escapeHtml(action)}</button>` : "")
-      + `</div></article>`;
+  // What the line says and whether it leads anywhere, with no DOM in sight, so a test can pin the
+  // words and item A can read the same two facts.
+  function lineFor(notes, caption) {
+    const first = Array.isArray(notes) ? notes[0] : null;
+    if (first == null) return { text: String(caption ?? ""), action: null };
+    const text = first.text != null && String(first.text).trim().length > 0
+      ? String(first.text).trim()
+      : sentenceFor(first.condition);
+    return { text, action: NOTE_ACTIONS[first.condition] ?? null };
   }
 
-  // ------------------------------------------------------------------ the Voice card
+  // ------------------------------------------------------------------ VOICE-7: the speech panel
   //
-  // Rendered into the settings panel this file finds itself, the road cloud-browser.js takes. It
-  // reads and writes /voice/settings on the relay; the answer only ever carries apiKeySet, so the
-  // field is paste-or-clear and can never show a value back.
+  // No title, no icon, no close control, no border that reads as dialog chrome, and no condition name
+  // anywhere: host-notes-read-as-errors.md is exactly the failure a machine-looking sheet over
+  // somebody's chat would reproduce. An orb that is plainly listening, and the words being built.
+  // It dissolves rather than closing, and what it leaves behind is the next line of the conversation.
   //
-  // The agent choice is the one control that decides whether the first press reaches the head of
-  // the team or a narrow worker, so it is a list of names and not a box to type an id into.
-  function voiceCardMarkup() {
-    return `<section class="settings-section" ${CARD_ATTRIBUTE}><h3>Talking</h3>`
-      + `<p>Press Talk beside the message box and say what you want. What you say goes into your agent's own conversation and he answers out loud, so it is the same thread you type in and the same memory. He is the only one who can act on it.</p>`
-      + `<div class="setting-row"><div><strong>Talking</strong><small data-voice-enabled-note>Reading from the relay…</small></div><button class="switch" type="button" data-voice-enabled aria-pressed="false"></button></div>`
-      + `<div class="field"><label for="voice-agent">Who you are talking to</label><select id="voice-agent" data-voice-agent></select><small class="field-hint">The head of your team, normally. Everything you say goes to this one agent.</small></div>`
-      // Model and Voice are PLACEHOLDERS and are never prefilled. The relay falls back to the
-      // service's own default when either is empty, so an empty field is the whole of "use theirs" --
-      // and a prefilled one put a vendor's product name on a customer's own card, which is the one
-      // place in this product that names no vendor anywhere else.
-      + `<div class="voice-grid"><label>Service<select data-voice-vendor></select></label><label>Model<input type="text" autocomplete="off" placeholder="The service's own" data-voice-model /></label><label>Voice<input type="text" autocomplete="off" placeholder="The service's own" data-voice-voice /></label></div>`
-      + `<div class="mail-block"><strong>Key</strong><small class="field-hint" data-voice-key-note>Reading from the relay…</small><div class="mail-secret-row"><input type="password" autocomplete="off" placeholder="Paste your key" data-voice-key /><button class="ghost-button" type="button" data-voice-key-set>Save key</button><button class="danger-button" type="button" data-voice-key-clear>Clear</button></div><small class="field-hint">The key stays on the relay and never reaches this page again. Nothing is spoken to the service from your browser; the relay holds that line, which is how the minutes below can be counted at all.</small></div>`
-      + `<div class="setting-row"><div><strong>Time used today</strong><small data-voice-usage>Reading from the relay…</small></div></div>`
-      + `<p class="field-hint">Speaking while your agent is speaking interrupts nothing: the microphone is shut while he talks, and for a third of a second after, so he never hears himself through your speakers. Wait for him to finish.</p>`
-      + `<div class="form-actions"><button class="primary-button" type="button" data-voice-save>Save</button></div>`
-      + `</section>`;
+  // aria-live="polite" so the words reach a screen reader as they firm up, and pointer-events are off
+  // in CSS so the conversation underneath stays usable while somebody is speaking.
+  function overlayMarkup() {
+    return `<div class="voice-overlay" id="${OVERLAY_ID}" data-voice-overlay hidden aria-live="polite">`
+      + `<div class="voice-overlay-panel" data-voice-overlay-panel>`
+      + `<span class="voice-overlay-orb" data-voice-overlay-orb></span>`
+      + `<p class="voice-overlay-text" data-voice-overlay-text></p>`
+      + `</div></div>`;
   }
 
   // ------------------------------------------------------------------ the session
@@ -375,11 +472,34 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     settings: null,
     byeReason: "",
     available: null,
+    /** The microphone the person picked in Settings, or "" for whichever the browser hands over. */
+    micDeviceId: "",
     /** The relay's hop ledger for the last turn, when it sent one. Never drawn. */
     hops: null,
+    /**
+     * VOICE-7. The speech panel, which is the person's OWN words and never the agent's. The line
+     * above is shared by both directions, and a reply painting over a half-finished sentence is
+     * exactly what that sharing used to do mid-turn.
+     */
+    heard: { open: false, text: "", turn: 0, phase: "", lands: false, nonce: "" },
+    /** The last confirmed words and the id of the row they became. Kept for the gate to compare. */
+    lastHeard: "",
+    lastNonce: "",
+    /**
+     * Whether this relay has sent a LABELLED frame on this line. A relay older than VOICE-7 sends only
+     * the three-in-one `heard`, and a page that ignored it would show a person nothing at all while
+     * they spoke. So the old frame still drives the panel, until a labelled one proves it does not
+     * have to -- and then it is dropped rather than painting the same words twice.
+     */
+    labelled: false,
+    /** Which of the two talk modes this browser is set to. */
+    talkMode: TALK_MODE_DEFAULT,
+    /** Push to talk: is the button (or the space bar) down right now. */
+    held: false,
+    /** Whether the microphone may send at all. False in push to talk between holds. */
+    talking: false,
   };
 
-  function ui() { return global.__mrUi ?? null; }
   function adapter() { return global.__machineRoomAdapter ?? null; }
 
   function relayFetch(path, init) {
@@ -390,6 +510,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     const next = orbStateFor(value);
     if (next == null) return;
     state.orb = next;
+    // WHILE THE AGENT SPEAKS THERE IS NO PANEL, which is the spec in one line: the orb on the button
+    // is the only sign. The relay suppresses the frames too, so this is the second of two guards, and
+    // it is the one that holds if the echo gate ever slips.
+    if (next === "speaking" && state.heard.open) closeOverlay();
     paint();
   }
 
@@ -417,8 +541,30 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   }
 
   function clearNotes() {
+    clearDismiss();
     state.notes = [];
     paint();
+  }
+
+  // ------------------------------------------------------------------ the note takes itself away
+  //
+  // Nothing ever cleared one. clearNotes ran from start() and from the ready frame and nowhere else,
+  // so the sentence sat in the footer for the life of the tab: Jason's screenshot is a footer with a
+  // note in it and no way out. The timer is the module's own global.setTimeout so the unit tests can
+  // drive it, and it is unref'd where that exists because stop() is called six times in a row by
+  // tests/machine-room-voice.test.mjs and a pending timer keeps a node test process alive. It also
+  // fires from visibilitychange, pagehide and beforeunload, where a timer must not outlive the page.
+  let dismissTimer = null;
+  function clearDismiss() {
+    if (dismissTimer == null) return;
+    try { global.clearTimeout(dismissTimer); } catch { /* a fake window may not have one */ }
+    dismissTimer = null;
+  }
+
+  function armDismiss() {
+    clearDismiss();
+    dismissTimer = global.setTimeout(() => { dismissTimer = null; state.notes = []; paint(); }, NOTE_DISMISS_MS);
+    dismissTimer?.unref?.();
   }
 
   function caption(text) {
@@ -432,31 +578,325 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     const button = document_.querySelector("[data-voice-talk]");
     if (button != null) {
       const node = button.querySelector("[data-voice-orb]");
-      if (node != null) node.setAttribute("data-state", state.orb);
-      button.setAttribute("aria-pressed", state.on ? "true" : "false");
+      // VOICE-7. AN ORB THAT SAYS LISTENING WHILE THE MICROPHONE IS SHUT IS A LIE, and push to talk
+      // creates exactly that: the line stays up between holds so the next one is instant, and the relay
+      // goes on saying "listening" because from its side nothing has changed. Between holds the orb is
+      // dark. Thinking and speaking still show through, because those happen after a release and they
+      // are the truth of that moment.
+      const shown = talkMode() === "push" && !state.talking && state.orb === "listening" ? "off" : state.orb;
+      if (node != null) node.setAttribute("data-state", shown);
+      // Engaged means "the microphone is open for me". In push to talk that is the hold and not the
+      // line, which outlives it by a minute.
+      const engaged = talkMode() === "push" ? state.held : state.on;
+      button.setAttribute("aria-pressed", engaged ? "true" : "false");
       button.classList.toggle("is-live", state.on);
+      button.classList.toggle("is-held", state.held);
     }
-    const strip = document_.getElementById(STRIP_ID);
-    if (strip == null) return;
-    const captionNode = strip.querySelector("[data-voice-caption]");
-    if (captionNode != null) captionNode.textContent = state.caption;
-    const notesNode = strip.querySelector("[data-voice-notes]");
-    if (notesNode != null) notesNode.innerHTML = state.notes.map((one) => noteMarkup(one.condition, one.text)).join("");
-    const empty = state.caption.length === 0 && state.notes.length === 0;
-    strip.hidden = empty;
+    const line = mountLine();
+    if (line == null) return;
+    const { text, action } = lineFor(state.notes, state.caption);
+    const say = line.querySelector("[data-voice-line-say]");
+    const does = line.querySelector("[data-voice-line-do]");
+    const shown = action == null ? say : does;
+    const other = action == null ? does : say;
+    // EVERY WRITE IS GUARDED ON A CHANGE. The body-wide observer below watches childList, and
+    // textContent replaces child nodes: an unguarded write repaints on its own mutation forever.
+    if (shown != null && shown.textContent !== text) shown.textContent = text;
+    if (other != null && other.textContent !== "") other.textContent = "";
+    if (say != null) say.hidden = action != null || text.length === 0;
+    if (does != null) {
+      does.hidden = action == null;
+      // NO aria-label HERE, on purpose. An aria-label REPLACES a button's own text for a screen
+      // reader, so labelling this "Open settings" would read the control out and swallow the sentence
+      // that is the whole reason it is on screen. The sentence is the accessible NAME; the action's
+      // words are the title, which is the accessible DESCRIPTION beside it.
+      if (action != null) does.setAttribute("title", action);
+    }
+    if (say != null) {
+      if (text.length > 0) say.setAttribute("title", text); else say.removeAttribute("title");
+    }
+    line.hidden = text.length === 0;
+    // THE FIFTH TRACK COSTS NOTHING AT REST. An unconditional empty track was measured to take 4 px
+    // off the message box through the composer's own 4 px gap, so the attribute the track hangs on
+    // is written only while the line is really in the form with something to say.
+    const form = document_.getElementById("composer");
+    if (form != null) {
+      if (!line.hidden && line.parentElement === form) form.setAttribute("data-voice-line", "up");
+      else form.removeAttribute("data-voice-line");
+    }
   }
 
-  async function start() {
+  // ------------------------------------------------------------------ where the line lives
+  //
+  // Two homes and no third. In the composer's own row the shelf does not move at all, which is the
+  // whole point: at 1440x900 the shipped strip moved six rects and cost the transcript 45.5 px. On a
+  // phone the composer is 358 px wide with a 178.98 px message box and there is no room in it for a
+  // sentence, so the line takes the shelf's FIRST row, full width, beside .composer-status and
+  // .attachment-tray -- the only two children of that grid already placed that way, and the only
+  // placement measured not to open a row nobody asked for.
+  //
+  // It never replaces a node app.js owns: it inserts its own and moves its own.
+  function mountLine() {
+    const document_ = global.document;
+    if (document_ == null) return null;
+    const form = document_.getElementById("composer");
+    const shelf = document_.querySelector(".control-shelf");
+    const width = Number(global.innerWidth ?? 0);
+    const inShelf = shelf != null && width > 0 && width <= LINE_SHELF_WIDTH;
+    const host = inShelf ? shelf : form;
+    if (host == null) return null;
+    let line = document_.getElementById(LINE_ID);
+    if (line == null) {
+      const talk = inShelf ? null : form?.querySelector("[data-voice-talk]");
+      if (talk != null) talk.insertAdjacentHTML("beforebegin", lineMarkup());
+      else host.insertAdjacentHTML(inShelf ? "afterbegin" : "beforeend", lineMarkup());
+      line = document_.getElementById(LINE_ID);
+      if (line == null) return null;
+    } else if (line.parentElement !== host) {
+      const talk = inShelf ? null : form?.querySelector("[data-voice-talk]");
+      try { host.insertBefore(line, inShelf ? host.firstChild : (talk ?? null)); }
+      catch { /* a host that will not take it keeps the line where it already is */ }
+    }
+    line.classList.toggle("is-shelf", inShelf);
+    return line;
+  }
+
+  // VOICE-7. Into .conversation-space, and DELIBERATELY NOT the road mountLine takes above: a node in
+  // the composer or the shelf is inside the box whose geometry VOICE-6 had to measure, and this panel
+  // must not be able to move the footer at all. The conversation space is position:relative and app.js
+  // only ever rewrites .transcript's innerHTML inside it, so this node is over the chat, is never
+  // rebuilt, and cannot reach the footer.
+  function mountOverlay() {
+    const document_ = global.document;
+    if (document_ == null) return;
+    if (document_.getElementById(OVERLAY_ID) != null) return;
+    const space = document_.querySelector(".conversation-space");
+    if (space == null) return;
+    space.insertAdjacentHTML("beforeend", overlayMarkup());
+    paintOverlay();
+  }
+
+  // ------------------------------------------------------- VOICE-7: the panel's state machine
+  //
+  // FOUR FRAMES DRIVE IT and the relay labels every one of them, which is the whole reason the panel
+  // can exist: until this wave the wire had a single `heard` frame carrying three different things
+  // under one shape (the partial transcript, the settled transcript, and the string the agent was
+  // actually handed), and a strip could paint all three the same way. A panel that has to open,
+  // follow the words and then DISSOLVE cannot.
+  //
+  //   hear-begin       the person started talking; no words yet.
+  //   hear             the transcript so far, replace-whole. `final` marks the settled one.
+  //   heard-confirmed  the bytes that went into the agent's conversation, and the id of the row.
+  //   hear-end         this turn is over, and why.
+  //
+  // FOUR THINGS THAT LOOK LIKE DETAIL AND ARE NOT:
+  //   1. REPLACE, NEVER APPEND. One service sends a cumulative transcript that corrects itself and
+  //      the other sends deltas; the relay hides that difference, and appending would write the
+  //      sentence N times on the first of them.
+  //   2. AN OLDER TURN MAY NEVER PAINT OVER A NEWER ONE. The settled transcript for one utterance is
+  //      not guaranteed to arrive before the next utterance's partials, so every frame carries the
+  //      relay's own utterance counter and a late one is dropped.
+  //   3. THE LAST WORDS ARE THE CONFIRMED ONES, not the transcription model's last word. Those are two
+  //      models and two strings. Dissolving on the settled transcript would leave the panel's last
+  //      words different from the line it becomes, which is the one thing Jason asked for.
+  //   4. IT DISSOLVES ON hear-end AND NEVER ON THE ROW APPEARING. The confirmation lands in
+  //      milliseconds; the agent's reply lands five to twenty-five seconds later and is not the
+  //      panel's business.
+  let dissolveTimer = null;
+  let staleTimer = null;
+
+  const reducedMotion = () => {
+    try { return global.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true; }
+    catch { return false; }
+  };
+
+  function armStale() {
+    if (staleTimer != null) global.clearTimeout(staleTimer);
+    staleTimer = global.setTimeout(() => { staleTimer = null; closeOverlay(); }, HEARD_STALE_MS);
+  }
+  function disarmStale() {
+    if (staleTimer != null) { global.clearTimeout(staleTimer); staleTimer = null; }
+  }
+
+  /**
+   * The person started talking. No words yet, which is also the whole of what a provider that sends
+   * no live transcript ever gives us -- so the panel opens here rather than on the first word, and a
+   * person pressing Talk always gets something honest on screen.
+   */
+  function overlayOpen(turn) {
+    if (state.orb === "speaking") return;
+    if (dissolveTimer != null) { global.clearTimeout(dissolveTimer); dissolveTimer = null; }
+    state.heard = { open: true, text: "", turn: Number(turn) || 0, phase: "open", lands: false, nonce: "" };
+    armStale();
+    paintOverlay();
+  }
+
+  /** More of the sentence. Replace, never append. */
+  function overlayPartial(text, turn) {
+    const at = Number(turn) || 0;
+    if (state.heard.open && at < state.heard.turn) return;
+    if (!state.heard.open) overlayOpen(at);
+    if (!state.heard.open) return;
+    state.heard.turn = at;
+    state.heard.text = String(text ?? "");
+    state.heard.phase = "partial";
+    armStale();
+    paintOverlay();
+  }
+
+  /**
+   * The bytes that went into the agent's conversation. This is the panel's LAST paint, and it is what
+   * makes "the words you were watching become the next line" true in bytes rather than approximately:
+   * the row in the transcript is built from this same string, under this same id.
+   *
+   * It does not dissolve. hear-end does, and it arrives immediately after this.
+   */
+  function overlayConfirmed(text, frame) {
+    const at = Number(frame?.turn) || 0;
+    if (state.heard.open && at < state.heard.turn) return;
+    const words = String(text ?? "");
+    // Kept after the panel has gone, because this is the claim the gate proves.
+    state.lastHeard = words;
+    state.lastNonce = String(frame?.nonce ?? "");
+    if (!state.heard.open) return;
+    if (words.length === 0) return;
+    state.heard.turn = at;
+    state.heard.text = words;
+    state.heard.phase = "final";
+    state.heard.lands = frame?.landed === true;
+    state.heard.nonce = state.lastNonce;
+    disarmStale();
+    paintOverlay();
+  }
+
+  /**
+   * This turn is over. Three turns produce no row at all -- an empty utterance, a yes that closed a
+   * card, a send the box refused -- and each of them arrives here with its own reason rather than
+   * leaving the panel waiting for a row that is never coming. The reason is not drawn: a person who
+   * just spoke does not need the machine's word for what happened to it.
+   */
+  function overlayEnd(turn) {
+    const at = Number(turn) || 0;
+    if (!state.heard.open) return;
+    if (at > 0 && at < state.heard.turn) return;
+    disarmStale();
+    // Nothing was heard, so there is nothing to read and nothing to leave behind.
+    if (state.heard.text.length === 0) { closeOverlay(); return; }
+    dissolve();
+  }
+
+  function dissolve() {
+    if (dissolveTimer != null) global.clearTimeout(dissolveTimer);
+    const document_ = global.document;
+    const node = document_?.getElementById(OVERLAY_ID) ?? null;
+    // Reduced motion skips the fade the way the orb animations already do: the panel is there, and
+    // then it is not, and the row it became is the record either way.
+    const wait = node == null || reducedMotion() ? 0 : DISSOLVE_MS;
+    if (node != null && wait > 0) node.setAttribute("data-phase", "gone");
+    dissolveTimer = global.setTimeout(() => { dissolveTimer = null; closeOverlay(); }, wait);
+  }
+
+  /** Gone, now, with no fade: pressing stop, the agent starting to speak, a turn that never ended. */
+  function closeOverlay() {
+    disarmStale();
+    if (dissolveTimer != null) { global.clearTimeout(dissolveTimer); dissolveTimer = null; }
+    state.heard = { open: false, text: "", turn: state.heard.turn, phase: "", lands: false, nonce: "" };
+    paintOverlay();
+  }
+
+  function paintOverlay() {
+    const document_ = global.document;
+    if (document_ == null) return;
+    const node = document_.getElementById(OVERLAY_ID);
+    if (node == null) return;
+    const words = state.heard.text;
+    const text = node.querySelector("[data-voice-overlay-text]");
+    if (text != null) {
+      const shown = words.length > 0 ? words : LISTENING_WORD;
+      // EVERY WRITE IS GUARDED ON A CHANGE, the same rule paint() keeps: the body-wide observer below
+      // watches childList, and textContent replaces child nodes, so an unguarded write repaints on its
+      // own mutation forever.
+      if (text.textContent !== shown) text.textContent = shown;
+      // One word in the muted colour rather than an empty sheet, which is what a person sees for the
+      // length of a turn on a provider that sends no live transcript.
+      text.classList.toggle("voice-overlay-waiting", words.length === 0);
+    }
+    // A LONG UTTERANCE KEEPS ITS NEWEST WORDS ON SCREEN. The panel has a ceiling so it can never cover
+    // the whole conversation, and nothing in it can be scrolled by hand -- pointer events are off on
+    // purpose so the chat underneath stays clickable while somebody is talking. So the words being
+    // said right now are kept in view from here instead.
+    const panel = node.querySelector("[data-voice-overlay-panel]");
+    if (panel != null && typeof panel.scrollHeight === "number") panel.scrollTop = panel.scrollHeight;
+    if (!state.heard.open) node.removeAttribute("data-phase");
+    node.hidden = !state.heard.open;
+  }
+
+  async function start(options = {}) {
     if (state.on) return;
     state.on = true;
     state.byeReason = "";
+    // Asked again on every line, because the relay on the other end of the next one may not be the
+    // relay that answered the last.
+    state.labelled = false;
     clearNotes();
     caption("");
+    // The relay owns the orb once the line is up; until `ready` arrives there is no frame to obey,
+    // and "thinking" is the honest one of the four for a line that is being dialled.
+    // PUSH TO TALK CAPTURES BEFORE THE LINE IS UP, and only push to talk does.
+    //
+    // The dial is not free -- 1.6 to 2.0 s through console.titanium.bot -- and in push to talk the
+    // person is already talking into a button they are holding down, so a capture that waited for the
+    // socket would lose the first words of every first hold. Those frames go into a bounded queue and
+    // are flushed the instant the socket opens.
+    //
+    // ALWAYS LISTENING KEEPS THE OLD ORDER, socket first, because there the press is a toggle and a
+    // line that is refused should never have touched the microphone at all. Holding a button down is a
+    // different kind of consent from pressing one.
+    const captureFirst = options.captureFirst === true;
+    // In always listening the microphone is open for the whole call and opening the line is what asks
+    // for that. In push to talk the hold is what asks, and holdStart has already said so.
+    if (talkMode() !== "push") state.talking = true;
     // The relay owns the orb once the line is up; until `ready` arrives there is no frame to obey,
     // and "thinking" is the honest one of the four for a line that is being dialled.
     orb("thinking");
     state.gate = echoGate({ sampleRate: SAMPLE_RATE });
     state.sound = player({ gate: state.gate });
+
+    // The queue is bounded at two seconds. The relay drops audio more than three seconds ahead of its
+    // own wall clock and counts it as a held frame, so a queue that grew without a ceiling would arrive
+    // as a burst the relay throws away -- which looks exactly like a microphone that is not working.
+    let pending = [];
+    const sendFrame = (buffer) => {
+      const socket = state.socket;
+      if (socket != null && socket.readyState === 1) {
+        if (pending.length > 0) {
+          const queued = pending;
+          pending = [];
+          for (const one of queued) { try { socket.send(one); } catch { /* the close handler has it */ } }
+        }
+        try { socket.send(buffer); } catch { /* the close handler has it */ }
+        return;
+      }
+      if (!captureFirst) return;
+      pending.push(buffer);
+      while (pending.length > PENDING_FRAME_CAP) pending.shift();
+    };
+    const beginCapture = () => captureAudio({
+      source: "microphone",
+      deviceId: state.micDeviceId,
+      sampleRate: SAMPLE_RATE,
+      frameBytes: FRAME_BYTES,
+      held: () => state.gate.holding(),
+      // Push to talk between holds. In always listening nothing is ever muted this way and the echo
+      // gate is the only thing that drops a frame.
+      muted: () => !state.talking,
+      onChunk: sendFrame,
+    });
+
+    if (captureFirst) {
+      try { state.capture = await beginCapture(); }
+      catch { stop("no-microphone"); return; }
+    }
     try {
       await openSocket();
     } catch {
@@ -466,19 +906,18 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       stop("no-key");
       return;
     }
-    try {
-      state.capture = await captureAudio({
-        source: "microphone",
-        sampleRate: SAMPLE_RATE,
-        frameBytes: FRAME_BYTES,
-        held: () => state.gate.holding(),
-        onChunk: (buffer) => {
-          if (state.socket != null && state.socket.readyState === 1) state.socket.send(buffer);
-        },
-      });
-    } catch {
-      stop("no-microphone");
-      return;
+    // WHATEVER WAS CAPTURED WHILE THE LINE WAS STILL OPENING GOES NOW, in order, and whether or not the
+    // button is still down. Flushing it only on the next frame that is allowed through would lose a
+    // hold SHORTER than the dial entirely: every frame after the release is muted, so the queue would
+    // sit there holding the only words that were ever said and never send them.
+    if (pending.length > 0) {
+      const queued = pending;
+      pending = [];
+      for (const one of queued) { try { state.socket?.send(one); } catch { /* the close handler has it */ } }
+    }
+    if (!captureFirst) {
+      try { state.capture = await beginCapture(); }
+      catch { stop("no-microphone"); return; }
     }
     reportHeld();
   }
@@ -503,6 +942,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   }
 
   function stop(condition, text) {
+    clearDismiss();
     if (heldTimer != null) { global.clearInterval(heldTimer); heldTimer = null; }
     send({ t: "stop" });
     try { state.capture?.stop(); } catch { /* already stopped */ }
@@ -516,6 +956,13 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     state.ready = null;
     state.hops = null;
     state.orb = "off";
+    // The line is down, so nothing more is coming for whatever is on the panel. It goes at once
+    // rather than fading, and the hold goes with it: a button drawn as held after the line has
+    // dropped is a microphone a person believes is open.
+    closeOverlay();
+    clearIdleClose();
+    state.held = false;
+    state.talking = false;
     caption("");
     const reason = condition || state.byeReason;
     // stop() is also called with no argument at all, for an ordinary press of the button.
@@ -523,11 +970,206 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     state.byeReason = "";
     // The relay's own sentence, already on screen, wins over ours; only the condition is taken from
     // the close, so the row can offer the card when nothing is set up.
-    if (reason && retitleNote(reason, relaySaidIt)) return;
-    if (reason) note(reason, text, relaySaidIt); else paint();
+    if (reason && retitleNote(reason, relaySaidIt)) { armDismiss(); return; }
+    if (reason) { note(reason, text, relaySaidIt); armDismiss(); return; }
+    // Nothing new to say. An ordinary stop leaves nothing standing either, or a note the relay sent
+    // mid-call outlives the call it was about: the button was pressed to leave, so leaving is what it
+    // does. A stop that DOES carry a reason is the two lines above, and that sentence is the whole
+    // point of the press.
+    if (state.notes.length > 0) { clearNotes(); return; }
+    paint();
   }
 
-  function toggle() { return state.on ? stop() : start(); }
+  // PRESSING IT AGAIN LEAVES. It used to read state.on, which the relay had already set false by the
+  // time a person pressed a second time, so the second press called start() and redialled into the
+  // same refusal -- and the sentence the page showed told them to do exactly that. Measured, the
+  // geometry after a second press was byte-identical to the break. A note on screen IS the mode.
+  function toggle() {
+    if (state.on) return stop();
+    if (state.notes.length > 0) { clearNotes(); return undefined; }
+    // Always listening: the line is open from this press to the next one, and the provider's own turn
+    // detection decides where one utterance ends and the next begins. The microphone is open the whole
+    // time, which is what the name says, and the echo gate still shuts it while the agent speaks.
+    state.talking = true;
+    return start();
+  }
+
+  // ------------------------------------------------------------------ VOICE-7: the two talk modes
+  //
+  // ONE PAIR OF ENTRY POINTS, talkDown and talkUp, and everything reaches the microphone through
+  // them: the button with a mouse, the button with a thumb, the space bar, and the desktop app's
+  // global hotkey when that wave lands. A hotkey with its own copy of this would be a third behaviour
+  // to keep in step with a setting.
+  function talkMode() { return TALK_MODES.includes(state.talkMode) ? state.talkMode : TALK_MODE_DEFAULT; }
+
+  function talkDown() {
+    if (talkMode() === "always") { toggle(); return undefined; }
+    return holdStart();
+  }
+  function talkUp() {
+    if (talkMode() === "always") return undefined;
+    return holdEnd();
+  }
+
+  // Push to talk. The first hold opens the line; later holds are instant because it is still up.
+  async function holdStart() {
+    if (state.held) return;
+    // A NOTE ON SCREEN IS THE MODE, which is the same rule the toggle keeps and for the same reason.
+    // While a refusal is standing the first press CLEARS it rather than dialling into the refusal
+    // again; without this, holding the button on a workspace with talking switched off redials every
+    // time and there is no way out of it. That loop is what Jason was stuck in: "you can't exit out of
+    // this talk mode" (VOICE-6). The press after this one opens a line normally.
+    if (!state.on && state.notes.length > 0) { clearNotes(); return; }
+    state.held = true;
+    state.talking = true;
+    clearIdleClose();
+    paint();
+    if (state.on) return;
+    await start({ captureFirst: true });
+  }
+
+  function holdEnd() {
+    if (!state.held) return;
+    state.held = false;
+    // The microphone closes on the release. The TURN then ends the way it ends in the other mode: the
+    // provider's own turn detection notices the silence. We do NOT send the provider's manual commit,
+    // because that needs turn detection switched off in the session frame, and this bridge writes that
+    // frame exactly once and byte-identically for the life of the socket -- rewriting it re-bills the
+    // whole conversation on one of the two services. docs/VOICE.md says so rather than claiming
+    // otherwise.
+    state.talking = false;
+    paint();
+    armIdleClose();
+  }
+
+  // A line nobody has held for a minute closes itself. The caps count WALL CLOCK, so a forgotten press
+  // in push to talk would otherwise spend thirty minutes of a hundred and twenty minute day with
+  // nobody in the room. Always listening has no such timer: there the line being up IS what the person
+  // asked for, and the way out is the button or Escape.
+  let idleTimer = null;
+  function clearIdleClose() {
+    if (idleTimer != null) { global.clearTimeout(idleTimer); idleTimer = null; }
+  }
+  function armIdleClose() {
+    clearIdleClose();
+    if (talkMode() !== "push") return;
+    idleTimer = global.setTimeout(() => {
+      idleTimer = null;
+      if (state.on && !state.held) stop();
+    }, PUSH_IDLE_CLOSE_MS);
+  }
+
+  // ------------------------------------------------------------- VOICE-7: where the choice lives
+  //
+  // THIS BROWSER, and the row that sets it sits under General > System beside Theme and Microphone,
+  // which are remembered the same way. It is deliberately NOT /voice/settings: that is one file per
+  // WORKSPACE, and two people sharing one would fight over how their own button behaves. Per browser
+  // is not per person, and docs/VOICE.md says so in those words rather than leaving it to be
+  // discovered on a second device.
+  //
+  // The module owns the value rather than the row, because the button is live the moment the console
+  // paints and long before any settings surface has been opened.
+  const talkModeOf = (value) => (TALK_MODES.includes(String(value)) ? String(value) : TALK_MODE_DEFAULT);
+
+  function readStoredTalkMode() {
+    try { return talkModeOf(global.localStorage?.getItem(TALK_MODE_KEY)); }
+    catch { return TALK_MODE_DEFAULT; }
+  }
+  function writeStoredTalkMode(mode) {
+    try { global.localStorage?.setItem(TALK_MODE_KEY, talkModeOf(mode)); }
+    catch { /* a private window, and the default is the right answer there */ }
+  }
+
+  /**
+   * The one door the settings row calls, and the only way this value is ever set.
+   *
+   * CHANGING THE MODE ENDS THE CALL YOU ARE IN. The alternative is a line that is up while the control
+   * that opened it has changed meaning underneath the person -- a microphone whose state nobody on
+   * screen can account for.
+   */
+  function setTalkMode(mode) {
+    const next = talkModeOf(mode);
+    const changed = next !== state.talkMode;
+    state.talkMode = next;
+    writeStoredTalkMode(next);
+    if (changed && state.on) { stop(); return next; }
+    paint();
+    return next;
+  }
+
+  // Escape leaves too, and it is guarded twice. app.js:6802 already owns a document-level Escape for
+  // the drawer, and this console has native <dialog>s -- the settings panel, onboarding, the report
+  // card -- that close on Escape; stealing it from one of those would read as a broken modal.
+  function onKeyDown(event) {
+    // SOMEBODY NEARER THE KEY ALREADY CLAIMED IT. This listener is on the document, so it runs after
+    // every handler between here and whatever was focused -- the transcript's own space handler for
+    // its focusable rows, the composer's Enter, the command palette. A key one of those has already
+    // acted on is not also a microphone.
+    if (event?.defaultPrevented === true) return;
+    if (event?.key === "Escape") { escapeStops(); return; }
+    if (event?.key !== " " && event?.code !== "Space") return;
+    // THE LATCH. A held key repeats, and without this the handler would fire tens of times a second
+    // for as long as somebody spoke.
+    if (event.repeat === true || state.held) return;
+    if (talkMode() !== "push" || !spaceMayTalk()) return;
+    event.preventDefault?.();
+    void talkDown();
+  }
+
+  /**
+   * ESCAPE LEAVES, in either mode, and it is guarded twice. app.js already owns a document-level
+   * Escape for the drawer and this console has native <dialog>s -- the settings panel, onboarding, the
+   * report card -- that close on Escape; stealing it from one of those would read as a broken modal.
+   *
+   * Its own function rather than a branch inside the listener, because it is also the way out of
+   * always listening that needs no pointer, and a test has to be able to ask this one question.
+   */
+  function escapeStops() {
+    if (!state.on && state.notes.length === 0) return false;
+    const document_ = global.document;
+    if (document_?.querySelector?.("dialog[open]") != null) return false;
+    if (document_?.body?.dataset?.drawer) return false;
+    // stop() clears a standing note when it has nothing new to say, so both branches really leave.
+    if (state.on) stop(); else clearNotes();
+    return true;
+  }
+
+  function onKeyUp(event) {
+    if (event?.key !== " " && event?.code !== "Space") return;
+    if (state.held) void talkUp();
+  }
+
+  // ------------------------------------------------------- VOICE-7: what may hold the space bar
+  //
+  // FIVE OTHER KEYDOWN PATHS live on this document -- the transcript's own space handler for evidence
+  // rows, Escape closing a drawer, the desktop chord, the composer's Enter, and the command palette --
+  // and the box's screen takes keystrokes outright, because it is an iframe and everything typed into
+  // it is meant for the machine on the other side. A space bar that opened a microphone through any of
+  // those reads as a broken console.
+  function spaceMayTalk() {
+    const document_ = global.document;
+    if (document_ == null) return false;
+    const active = document_.activeElement;
+    const tag = String(active?.tagName ?? "").toUpperCase();
+    if (active?.isContentEditable === true) return false;
+    if (/^(INPUT|TEXTAREA|SELECT|IFRAME)$/.test(tag)) return false;
+    // A focused control takes its own space bar, which is how a keyboard works. The exception is this
+    // one control, where the space bar IS the hold.
+    if (/^(BUTTON|A|SUMMARY)$/.test(tag)) return active?.closest?.("[data-voice-talk]") != null;
+    // And a control that is only a control by its role, which is what the transcript's own focusable
+    // rows are: an agent-to-agent blurb carries role="button" and tabindex="0" so a keyboard can open
+    // it, and app.js's transcript handler opens it on the space bar. Taking that key to open a
+    // microphone instead would be this module reaching into somebody else's control.
+    if (active?.getAttribute?.("role") === "button") return active?.closest?.("[data-voice-talk]") != null;
+    if (active?.closest?.("[data-evidence],[data-exchange]") != null) return false;
+    if (document_.querySelector("dialog[open]") != null) return false;
+    if (document_.body?.dataset?.drawer) return false;
+    // And only with the message box empty. A half-typed message and a microphone opening on the same
+    // key is two things happening at once, and only one of them was asked for.
+    const box = document_.getElementById("message-input");
+    if (box != null && String(box.value ?? "").trim().length > 0) return false;
+    return true;
+  }
 
   function socketUrl() {
     const location = global.location;
@@ -595,11 +1237,42 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       case "state":
         orb(frame.value);
         break;
-      // REPLACE-WHOLE on purpose. One vendor's transcription event is cumulative with corrections
-      // and the other's is incremental; appending a delta writes the sentence N times on the first.
-      case "heard":
-        caption(String(frame.text ?? ""));
+      // VOICE-7. The four labelled frames the speech panel is built out of. See the state machine
+      // above for what each one means and why the panel dissolves on the last of them.
+      case "hear-begin":
+        state.labelled = true;
+        overlayOpen(frame.turn);
         break;
+      // REPLACE-WHOLE on purpose. One vendor's transcription event is cumulative with corrections and
+      // the other's is incremental; appending a delta writes the sentence N times on the first. The
+      // settled transcript (`final`) is deliberately painted as another partial: it races the agent's
+      // own tool call, and dissolving here would flash the panel back a moment later.
+      case "hear":
+        state.labelled = true;
+        overlayPartial(String(frame.text ?? ""), frame.turn);
+        break;
+      // The bytes that went into the agent's conversation, and the id of the row they became. This is
+      // the panel's last paint, and it is what makes the words a person watched being built the same
+      // bytes as the line they turn into.
+      case "heard-confirmed":
+        state.labelled = true;
+        overlayConfirmed(String(frame.text ?? ""), frame);
+        break;
+      case "hear-end":
+        state.labelled = true;
+        overlayEnd(frame.turn);
+        break;
+      // THE THREE-IN-ONE FRAME VOICE-1 SHIPPED, which carried the partial transcript, the settled one
+      // and the agent's own tool argument under a single shape. A relay restart mid-call can leave a
+      // new page against an OLD relay, and that relay sends only this -- so it still drives the panel,
+      // because a person who is talking and seeing nothing is worse than a panel with no end frame
+      // (the stale timer takes that one away). Once a labelled frame has arrived, this is dropped:
+      // painting both would put the same words on screen twice.
+      case "heard":
+        if (!state.labelled) overlayPartial(String(frame.text ?? ""), state.heard.open ? state.heard.turn : 1);
+        break;
+      // The agent's reply, which is the line's own and never the panel's. Sharing one field between
+      // the two directions is what used to let his answer paint over her half-finished sentence.
       case "said":
         caption(String(frame.text ?? ""));
         break;
@@ -650,46 +1323,60 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     return parsed;
   }
 
+  // ------------------------------------------------------------------ what item A's rows read
+  //
+  // THE SEAM. There is no Voice card any more: a key belongs to the operator and lives in the admin
+  // console, and a customer's own choices are rows in Settings. Those rows read these four things and
+  // nothing else, so this file stays the only one that knows the relay's voice door.
+  //
+  // `available` is "a key exists for this workspace's service, wherever it came from" -- the control
+  // plane's, or the relay's own file. An older relay answers only apiKeySet, which means the same
+  // thing there, so the fallback keeps a workspace on the old answer working.
+  async function getSettings() {
+    try {
+      state.settings = await readSettings();
+    } catch {
+      return { enabled: false, available: false };
+    }
+    const value = state.settings ?? {};
+    const capSeconds = Number(value.dayCapSeconds) || 0;
+    return {
+      enabled: value.enabled === true,
+      available: value.available === true || (value.available == null && value.apiKeySet === true),
+      // THE MINUTES TRAVEL WITH THE ANSWER, because the row that draws them is one read away in
+      // Settings and a second round trip for two numbers the relay already sent is a second chance
+      // to disagree with itself. They are OMITTED, not zeroed, when this workspace has no day cap:
+      // the Usage row tests both for a finite number and draws no bar at all without them, and a bar
+      // reading 0 of 0 is a measurement nobody took.
+      ...(capSeconds > 0 ? {
+        minutesUsedToday: Math.round(((Number(value.dayUsedSeconds) || 0) / 60) * 10) / 10,
+        minutesCapToday: Math.round((capSeconds / 60) * 10) / 10,
+      } : {}),
+    };
+  }
+
+  async function setEnabled(on) {
+    const saved = await writeSettings({ enabled: on === true });
+    if (saved != null) state.settings = saved;
+    return getSettings();
+  }
+
+  // A picker is drawn only when the browser can name the microphones. enumerateDevices exists on
+  // every browser this console supports and answers empty labels until permission is given, which is
+  // a list worth showing; a browser without it gets no row rather than a control that decides nothing.
+  const supportsMicChoice = () => typeof global.navigator?.mediaDevices?.enumerateDevices === "function";
+  const getMicDeviceId = () => state.micDeviceId;
+  // Published BOTH ways on purpose, and the reason is worth the two lines. The rows in Settings test
+  // `supportsMicChoice === true` and call `micDeviceId()`, because that is the shape every other fact
+  // that surface reads already has; this file's own callers and its tests use the function and the
+  // get/set pair. A silent mismatch here does not throw -- it draws no Microphone row at all and
+  // reports the chosen device as "System default" forever -- which is exactly the class of seam that
+  // gets found in front of a customer rather than in a suite.
+  const setMicDeviceId = (id) => { state.micDeviceId = String(id ?? "").trim(); return state.micDeviceId; };
+
   function minutes(seconds) {
     const value = Math.max(0, Math.round(Number(seconds) || 0) / 60);
     return `${value < 10 ? value.toFixed(1) : Math.round(value)} min`;
-  }
-
-  function paintCard(root, settings) {
-    if (root == null || settings == null) return;
-    const set = (selector, value) => { const field = root.querySelector(selector); if (field) field.value = value ?? ""; };
-    const say = (selector, text) => { const field = root.querySelector(selector); if (field) field.textContent = text; };
-    const toggleNode = root.querySelector("[data-voice-enabled]");
-    if (toggleNode != null) toggleNode.setAttribute("aria-pressed", settings.enabled ? "true" : "false");
-    say("[data-voice-enabled-note]", settings.enabled
-      ? "On. The Talk button beside the message box is live."
-      : "Off. The Talk button is there but will not open a line.");
-    const vendor = root.querySelector("[data-voice-vendor]");
-    if (vendor != null) {
-      vendor.innerHTML = (settings.vendors ?? []).map((one) =>
-        `<option value="${escapeHtml(one.id)}"${one.id === settings.vendor ? " selected" : ""}>${escapeHtml(one.label)}</option>`).join("");
-    }
-    const agent = root.querySelector("[data-voice-agent]");
-    if (agent != null) {
-      agent.innerHTML = agentChoices(settings).map((one) =>
-        `<option value="${escapeHtml(one.id)}"${one.id === settings.agentId ? " selected" : ""}>${escapeHtml(one.name)}</option>`).join("");
-    }
-    set("[data-voice-model]", settings.model);
-    set("[data-voice-voice]", settings.voice);
-    say("[data-voice-key-note]", settings.apiKeySet
-      ? "A key is set. Paste a new one to replace it, or clear it."
-      : "No key yet. Talking will say so in plain words until one is set.");
-    say("[data-voice-usage]", `${minutes(settings.dayUsedSeconds)} of ${minutes(settings.dayCapSeconds)} today · up to ${minutes(settings.sessionCapSeconds)} in one call`);
-  }
-
-  function cardValues(root) {
-    return {
-      enabled: root.querySelector("[data-voice-enabled]")?.getAttribute("aria-pressed") === "true",
-      vendor: root.querySelector("[data-voice-vendor]")?.value ?? "",
-      model: root.querySelector("[data-voice-model]")?.value.trim() ?? "",
-      voice: root.querySelector("[data-voice-voice]")?.value.trim() ?? "",
-      agentId: root.querySelector("[data-voice-agent]")?.value ?? "",
-    };
   }
 
   // The roster the relay names, falling back to the console's own. The relay is the authority --
@@ -702,93 +1389,92 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     return (Array.isArray(roster) ? roster : []).map((one) => ({ id: one.id, name: one.name }));
   }
 
-  // The settings panel repaints whenever app.js fills one of its cards, and the observer below puts
-  // this card back each time. So a cached answer is painted rather than refetched: a card that asked
-  // the relay on every repaint would be a request loop nobody asked for.
-  async function fillCard(options = {}) {
+  // How the workspace's talking minutes read, in the words the Usage rows use. Item A draws them;
+  // this file owns the numbers because it owns the door they come from.
+  function usage() {
+    const value = state.settings ?? {};
+    return {
+      dayUsedSeconds: Number(value.dayUsedSeconds) || 0,
+      dayCapSeconds: Number(value.dayCapSeconds) || 0,
+      sessionCapSeconds: Number(value.sessionCapSeconds) || 0,
+    };
+  }
+
+  // ------------------------------------------------------------------ the way out of the note
+  //
+  // The line that says talking is not switched on IS the control that opens the row where it is.
+  // window.__mrSettings is item A's; when it is not there yet, or throws, the gear a person would
+  // press themselves is pressed instead, so this never leads nowhere.
+  function openSettings() {
     const document_ = global.document;
-    const root = document_?.querySelector(`[${CARD_ATTRIBUTE}]`);
-    if (root == null) return;
-    if (!options.force && state.settings != null) { paintCard(root, state.settings); return; }
-    try {
-      state.settings = await readSettings();
-      paintCard(root, state.settings);
-    } catch {
-      const note_ = root.querySelector("[data-voice-key-note]");
-      if (note_ != null) note_.textContent = "The relay did not answer about talking. Try again in a moment.";
+    const surface = global.__mrSettings;
+    if (surface != null && typeof surface.open === "function") {
+      try { surface.open("general", "voice"); return; } catch { /* the gear below is the fallback */ }
     }
-  }
-
-  function openCard() {
-    const document_ = global.document;
     if (document_ == null) return;
-    // The road cloud-browser.js takes: find the control a person would press, press it, then put
-    // the card back when the panel has painted. Nothing in app.js has to know this file exists.
-    const settings = document_.getElementById("shelf-settings");
-    if (settings != null) settings.click();
-    else ui()?.openPanel?.("Global router & policy", "Operator settings", "");
-    global.setTimeout(() => { mountCard(); }, 0);
-  }
-
-  function mountCard() {
-    const document_ = global.document;
-    if (document_ == null) return false;
-    if (document_.querySelector(`[${CARD_ATTRIBUTE}]`) != null) return true;
-    const list = document_.querySelector("#panel-content .settings-list");
-    if (list == null) return false;
-    const mail = list.querySelector("[data-mail]");
-    if (mail != null) mail.insertAdjacentHTML("afterend", voiceCardMarkup());
-    else list.insertAdjacentHTML("beforeend", voiceCardMarkup());
-    fillCard();
-    return true;
-  }
-
-  // ------------------------------------------------------------------ mounting
-  function mountStrip() {
-    const document_ = global.document;
-    if (document_ == null) return;
-    if (document_.getElementById(STRIP_ID) != null) return;
-    const composer = document_.getElementById("composer");
-    if (composer == null) return;
-    composer.insertAdjacentHTML("beforebegin", stripMarkup());
-    paint();
+    const gear = document_.getElementById("settings-button") ?? document_.getElementById("shelf-settings");
+    gear?.click?.();
   }
 
   function wire() {
     const document_ = global.document;
     if (document_ == null) return;
+    // VOICE-7. A CLICK IS THE ALWAYS-LISTENING PRESS AND NOTHING ELSE. In push to talk the hold has
+    // already been handled by pointerdown and pointerup, and the click that follows them must not
+    // toggle a second time on top of it.
     document_.addEventListener("click", (event) => {
       const talk = event.target?.closest?.("[data-voice-talk]");
-      if (talk != null) { event.preventDefault(); toggle(); return; }
-      if (event.target?.closest?.("[data-voice-open-settings]") != null) { event.preventDefault(); openCard(); return; }
-      const card = event.target?.closest?.(`[${CARD_ATTRIBUTE}]`);
-      if (card == null) return;
-      const switchNode = event.target.closest("[data-voice-enabled]");
-      if (switchNode != null) {
-        const on = switchNode.getAttribute("aria-pressed") === "true";
-        switchNode.setAttribute("aria-pressed", on ? "false" : "true");
-        return;
-      }
-      if (event.target.closest("[data-voice-save]") != null) {
-        writeSettings(cardValues(card)).then(() => fillCard({ force: true })).catch(() => {});
-        return;
-      }
-      if (event.target.closest("[data-voice-key-set]") != null) {
-        const field = card.querySelector("[data-voice-key]");
-        const value = field?.value ?? "";
-        if (value.trim().length === 0) return;
-        if (field != null) field.value = "";
-        writeSettings({ ...cardValues(card), apiKey: value }).then(() => fillCard({ force: true })).catch(() => {});
-        return;
-      }
-      if (event.target.closest("[data-voice-key-clear]") != null) {
-        writeSettings({ ...cardValues(card), apiKey: "" }).then(() => fillCard({ force: true })).catch(() => {});
-      }
+      if (talk != null) { event.preventDefault(); if (talkMode() !== "push") toggle(); return; }
+      if (event.target?.closest?.("[data-voice-open-settings]") != null) { event.preventDefault(); openSettings(); }
     });
+    // ---------------------------------------------------------- VOICE-7: press and hold
+    //
+    // The RELEASE listens on the document rather than on the button, because a thumb that slides off a
+    // 38 px circle before it lifts would otherwise never end the turn and would leave a microphone
+    // open with the button drawn as though it were not.
+    const release = () => { if (state.held) void talkUp(); };
+    const isTalk = (event) => {
+      const talk = event.target?.closest?.("[data-voice-talk]");
+      return talk != null && talk.disabled !== true ? talk : null;
+    };
+    document_.addEventListener("pointerdown", (event) => {
+      if (talkMode() !== "push" || isTalk(event) == null) return;
+      // No text selection, no drag, no focus ring flicker: a hold is a hold.
+      event.preventDefault();
+      void talkDown();
+    });
+    document_.addEventListener("pointerup", release);
+    document_.addEventListener("pointercancel", release);
+    // Touch as well as pointer. Both fire on a phone and both are guarded against a second start, and
+    // the preventDefault here is the one that stops a long press becoming the selection callout.
+    document_.addEventListener("touchstart", (event) => {
+      if (talkMode() !== "push" || isTalk(event) == null) return;
+      event.preventDefault();
+      void talkDown();
+    }, { passive: false });
+    document_.addEventListener("touchend", release);
+    document_.addEventListener("touchcancel", release);
+    document_.addEventListener("contextmenu", (event) => {
+      if (talkMode() === "push" && isTalk(event) != null) event.preventDefault();
+    });
+    document_.addEventListener("keydown", onKeyDown);
+    document_.addEventListener("keyup", onKeyUp);
+    // A window that loses focus never delivers the keyup for a space bar that is still down, and a
+    // pointer released outside the window never delivers its up either. Both leave a microphone open.
+    global.addEventListener?.("blur", release);
     // A tab nobody is looking at has no business holding a microphone open.
     document_.addEventListener("visibilitychange", () => { if (document_.hidden && state.on) stop(); });
     global.addEventListener?.("pagehide", () => { if (state.on) stop(); });
     global.addEventListener?.("beforeunload", () => { if (state.on) stop(); });
+    // The line has two homes and the window's width picks one. Without this, a window dragged narrow
+    // keeps a sentence inside a composer that no longer has room for it. Debounced to a frame, the
+    // way the repaint observer below is, because a drag fires this continuously.
+    let resizing = false;
+    global.addEventListener?.("resize", () => {
+      if (resizing) return;
+      resizing = true;
+      (global.requestAnimationFrame ?? ((fn) => global.setTimeout(fn, 16)))(() => { resizing = false; paint(); });
+    });
   }
 
   // The console repaints wholesale, which takes the strip with it; one observer puts it back. It is
@@ -802,8 +1488,12 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       scheduled = true;
       (global.requestAnimationFrame ?? ((fn) => global.setTimeout(fn, 16)))(() => {
         scheduled = false;
-        mountStrip();
-        mountCard();
+        // paint() mounts the line and then fills it, and every write it makes is guarded on a
+        // change, so putting it here cannot chase its own mutation round the loop.
+        paint();
+        // The panel lives in .conversation-space, which app.js never rebuilds -- but the space itself
+        // is not on screen until the console has booted, so it is mounted here rather than once.
+        mountOverlay();
       });
     });
     observer.observe(document_.body, { childList: true, subtree: true });
@@ -811,7 +1501,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
 
   // WHY THE BUTTON IS NOT DISABLED WHEN NO KEY IS SET, which B2 reads as if it should be. A
   // disabled control leads nowhere, and "nothing is set up yet" is precisely the case that has to
-  // lead somewhere -- the note carries the control that opens the card. So the only thing that
+  // lead somewhere -- the sentence itself opens the row that fixes it. So the only thing that
   // disables the button is a relay with no voice door at all (an older one, answering 404): there
   // the press could not produce a sentence, let alone a way forward.
   async function probe() {
@@ -835,7 +1525,12 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   }
 
   function boot() {
-    mountStrip();
+    // BEFORE THE FIRST PAINT. The button is live the moment the console draws, and a person whose
+    // choice is "always listening" must not get one hold's worth of the other behaviour while a
+    // settings surface they have not opened catches up.
+    state.talkMode = readStoredTalkMode();
+    paint();
+    mountOverlay();
     wire();
     observe();
     probe();
@@ -847,6 +1542,23 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     toggle,
     captureAudio,
     player,
+    // THE SEAM ITEM A DRAWS ITS ROWS FROM. General/System has two of them -- "Let me talk to Titan"
+    // and "Microphone" -- and neither is drawn at all when this module is absent. readSettings and
+    // saveSettings are here because the operator's own rows (which bot, which service, which voice)
+    // moved out of this file with the card, and the relay's door should still have exactly one
+    // caller in the console.
+    getSettings,
+    setEnabled,
+    get supportsMicChoice() { return supportsMicChoice(); },
+    micDeviceId: getMicDeviceId,
+    getMicDeviceId,
+    setMicDeviceId,
+    usage,
+    minutes,
+    readSettings,
+    saveSettings: writeSettings,
+    agentChoices,
+    openSettings,
     // The gate reads these from the page, beside the relay's own ledger row, because a held frame
     // is the one claim that needs proving on both sides of the wire.
     stats: () => ({
@@ -860,6 +1572,16 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       playerTime: state.sound?.currentTime() ?? 0,
       level: state.sound?.level() ?? 0,
       caption: state.caption,
+      mutedFrames: state.capture?.stats.mutedFrames ?? 0,
+      // VOICE-7. What the panel is showing right now, the words it last confirmed, and the id of the
+      // row those words became -- which is what lets a gate prove the panel's last words and the chat
+      // line are the same bytes without reading the DOM twice.
+      overlay: { open: state.heard.open, text: state.heard.text, phase: state.heard.phase, turn: state.heard.turn },
+      lastHeard: state.lastHeard,
+      lastNonce: state.lastNonce,
+      talkMode: talkMode(),
+      held: state.held,
+      talking: state.talking,
       notes: state.notes.map((one) => one.condition),
       ready: state.ready,
       hops: state.hops,
@@ -874,20 +1596,46 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     _FRAME_BYTES: FRAME_BYTES,
     _SAMPLE_RATE: SAMPLE_RATE,
     _CLOSE_CONDITIONS: CLOSE_CONDITIONS,
+    _NOTE_DISMISS_MS: NOTE_DISMISS_MS,
+    _LINE_SHELF_WIDTH: LINE_SHELF_WIDTH,
     _sentenceFor: sentenceFor,
     _orbStateFor: orbStateFor,
     _agentChoices: agentChoices,
-    _noteMarkup: noteMarkup,
-    _stripMarkup: stripMarkup,
-    _voiceCardMarkup: voiceCardMarkup,
-    _paintCard: paintCard,
-    _cardValues: cardValues,
+    _lineMarkup: lineMarkup,
+    _lineFor: lineFor,
+    _mountLine: mountLine,
+    _onKeyDown: onKeyDown,
+    // The pending dismiss timer, so a test can assert it was cleared rather than left to keep a
+    // process alive, and a gate can tell "it went away" from "nothing ever drew it".
+    _dismissTimer: () => dismissTimer,
     _echoGate: echoGate,
     _pcm16FromFloat32: pcm16FromFloat32,
     _float32FromPcm16: float32FromPcm16,
     _onMessage: onMessage,
     _onClose: onClose,
-    _minutes: minutes,
+    // VOICE-7. The panel, the two modes, and the one door the settings row calls.
+    talkMode,
+    // The same reader under the name docs/APPS.md gives the desktop shell's hotkey contract. One
+    // function, two names, rather than two readers that could disagree.
+    getTalkMode: talkMode,
+    setTalkMode,
+    talkDown,
+    talkUp,
+    _TALK_MODES: TALK_MODES,
+    _TALK_MODE_DEFAULT: TALK_MODE_DEFAULT,
+    _TALK_MODE_KEY: TALK_MODE_KEY,
+    _PUSH_IDLE_CLOSE_MS: PUSH_IDLE_CLOSE_MS,
+    _PENDING_FRAME_CAP: PENDING_FRAME_CAP,
+    _OVERLAY_ID: OVERLAY_ID,
+    _DISSOLVE_MS: DISSOLVE_MS,
+    _HEARD_STALE_MS: HEARD_STALE_MS,
+    _LISTENING_WORD: LISTENING_WORD,
+    _overlayMarkup: overlayMarkup,
+    _mountOverlay: mountOverlay,
+    _closeOverlay: closeOverlay,
+    _spaceMayTalk: spaceMayTalk,
+    _escapeStops: escapeStops,
+    _onKeyUp: onKeyUp,
   };
 
   if (global.document != null) {

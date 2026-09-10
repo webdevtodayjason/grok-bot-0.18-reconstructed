@@ -34,7 +34,11 @@ What you get:
 
 - A **talk button** beside the message box, and an orb beside it that shows off, listening, thinking
   or speaking.
-- **Press to start, press to stop.** There is no wake word and nothing is ever listening on its own.
+- **Two ways to talk, and you choose which.** Hold the button while you speak and let go, or press
+  once to start and press again to stop. Holding is the default. Section 13.
+- **A panel over the conversation while you talk**, with your words appearing in it as you say them.
+  When you stop, it dissolves and those words are the next line of the conversation. Section 13.
+- There is no wake word and nothing is ever listening on its own.
 - Everything spoken lands in the **same conversation you type in**, marked as spoken, and it is there
   on your phone afterwards.
 - A **held action** is read out as a question. "Send it?" A yes closes it through the same approval
@@ -48,29 +52,89 @@ and not for every bot you own, and no interrupting mid-sentence on speakers.
 
 ---
 
-## 2. Where the key goes, and why not the other three places
+## 2. Where the key goes (rewritten 2026-09-10, KEYS-1)
 
-**A realtime key is per workspace and you write it on your own Voice card**, under Settings in your
-own console. It is write-only: the card shows whether a key is set and never what it is, and no route
-on this product reads one back. The relay reads it off its own disk when it dials and sends it to the
-vendor as an `Authorization` header — never in a URL, never in a websocket subprotocol (proxies log
-those), never in a log line, never in a ledger row. A test sweeps for its bytes.
+**The realtime key belongs to the operator, and a customer never sees a key field.** The super admin
+pastes it once at `api.titanium.bot/admin`, in the block called "Keys the product uses", and that is
+the only place in this product a person ever types one.
 
-This is the same door your Email settings already use, which has been in production since
-September 2026.
+This section used to say the opposite, and it is worth writing down why it changed rather than
+quietly editing it. Until 2026-09-10 the key was a **per-workspace** secret a customer wrote on their
+own Voice card. Jason, looking at that settings panel: *"A user is never going to put a resend key in.
+That's on the backend."* He is right, and not only about taste. A key field on a customer's screen is
+a key a customer can get wrong, a key that customer's own agents can be talked into reading out of
+their own box, and a vendor bill nobody can attribute.
 
-Three places it deliberately does **not** go:
+### Why one shared key is safe now, when it was not before
+
+The old argument was: *"One value shared by every customer is the thing this whole product was rebuilt
+to stop."* That argument was about **isolation**, and the isolation was never the key. It was the
+metering and the caps, and both of those are per workspace on the control plane and have been since
+VOICE-1:
+
+- Every session claims a ledger row **before** the provider hears a byte, against that workspace's
+  slug. Section 9 is that ledger.
+- The day cap and the session cap are read per workspace, and only the operator can change one.
+- A workspace that has spent its day is refused whichever key would have dialled.
+
+So what is shared by this change is **the vendor's bill**, which the operator was always paying
+anyway. What is not shared is any workspace's ability to spend past its own cap. If the caps were
+not there, this change would be wrong; they are, and it is not.
+
+### One key per service, and where it travels
+
+The names are `keys.voice.xai` and `keys.voice.openai` — one per **service**, because the service is a
+per-workspace choice and it decides which key dials. A workspace set to a service the operator has no
+key for gets the plain refusal, never the other service's key aimed at the wrong vendor: that would
+be a 401 a person reads as a broken product.
+
+The relay reads them from `GET /v1/relay/keys` behind `CP_RELAY_TOKEN`, keeps them **in memory
+only**, refreshes every **60 seconds** with a hard **6 second** timeout, and degrades to the last good
+copy on an outage. Both numbers are shorter than the push credential reader's five minutes and ten
+seconds, and the reason is that this one is woken by a person holding a button: a rotation that takes
+five minutes to reach the relay is five minutes of a dial refused on a key the operator has already
+replaced, and a ten second timeout on the upgrade path is ten seconds of a lit Talk button with
+nothing said. Six seconds is thirty times the 194 ms relay-to-control-plane round trip measured on the
+R750 on 2026-09-10, so it fires on an outage and never on a slow answer. It sends the
+key to the vendor as an `Authorization` header — never in a URL, never in a websocket subprotocol
+(proxies log those), never in a log line, never in a ledger row. Tests plant a key and sweep the wire,
+the ledger, every log line, every frame the browser was sent, and the workspace's own settings file
+for its bytes and for a ten-character prefix of them.
+
+### The migration is the fallback, and there is no migration code
+
+The relay prefers the control plane's value and falls back to **the workspace's own file**. Nothing
+anywhere pushes a file value up to the control plane: that would be a brand new write path for a
+secret and would undo write-only-from-the-console.
+
+Measured on the R750 on 2026-09-10: no `voice.json` exists anywhere on that machine, so no customer
+has ever pasted a realtime key and the door starts empty. Paste it once at the admin console and
+talking works; until then it is off, and it was off before too.
+
+**Cannot see is not the same as not set.** The reader answers `blind` when there *is* a control plane,
+a read has been attempted, the last one did not get through, and nothing is cached from one that did.
+On that condition the press answers *"I could not start a voice session just now. Try again in a
+moment."* rather than the no-key sentence — because the no-key sentence sends the operator to paste a
+key, and if he has already pasted one and this relay simply cannot reach the control plane for a
+minute, that sends him to do a thing he has done already over a fault that clears itself. A console
+with no control plane is never blind (there is nothing there to be unable to reach), a control plane
+that answers with no key at all is never blind (an empty answer is an answer), and a control plane too
+old to have the route is never blind either (its files are the right home, and its mail sends
+perfectly).
+
+### Three places it still deliberately does not go
 
 - **Not the super-admin Providers panel.** Those keys are global to the whole install, they live at
   the metering proxy as credentials, they read back masked, and that file's own rules forbid a key
-  value in any answer with a test that plants one and sweeps every route for it. There is no
-  per-workspace row there for a per-workspace key to live in. The panel does carry two realtime
-  cards, and they are **labels only** — see section 10.
+  value in any answer with a test that plants one and sweeps every route for it. The realtime key is
+  now global too, but it is not a *chat* credential and has no row there. The panel used to carry two
+  cosmetic realtime cards; they are **deleted** — see section 10 for what pasting a key on one really
+  did.
 - **Not the endpoints catalog.** That is the input to the *chat* model resolver: it fetches a model
   list against every row and pins the winner into your box. A realtime row there would be offered to
   you as a chat model and would fail every message you sent.
-- **Not an environment variable on the relay or in your box.** One value shared by every customer is
-  the thing this whole product was rebuilt to stop.
+- **Not an environment variable on the relay or in your box.** An environment value is readable by
+  anything in that container, and every exec daemon in a customer's box runs as uid 0.
 
 ### The browser path, refused on purpose
 
@@ -94,7 +158,7 @@ Both speak a family of events with the same names. They do **not** take the same
 | Session frame | flat: `session.voice`, `session.turn_detection` at the top level, no `session.type` | typed: `session.type: "realtime"`, `audio.output.voice`, `audio.input.transcription` |
 | The other one's frame | — | **refuses it**: `Unknown parameter: 'session.voice'` |
 | `OpenAI-Beta` header | not used | must **not** be sent on the GA endpoint |
-| What you heard, as text | cumulative and self-correcting | incremental deltas |
+| Your own words, live | `conversation.item.input_audio_transcription.updated`: the **cumulative** transcript so far, which may correct itself and is explicitly **not** a delta; only when the transcription model is `grok-transcribe` | `conversation.item.input_audio_transcription.delta`: **newly available** text, which later deltas may revise |
 | Turn-taking controls | turn detection only | also `turn_detection.interrupt_response` |
 | Budget telemetry | **none at all** | `rate_limits.updated` every turn |
 
@@ -103,20 +167,101 @@ Two consequences worth spelling out:
 - **What you said is normalised to replace-the-whole-line** before it reaches the page. On one vendor
   the transcript is cumulative with corrections, so appending each update writes the sentence over
   and over.
+- **Both services send your words while you are still speaking**, which is what the panel in section
+  13 is built out of, and their own documentation is where that is read from rather than measured
+  here: xAI emits a cumulative, self-correcting transcript and says it is for live captions (its
+  voice reference, page dated 2026-08-04, read 2026-09-10), and it only does so when the input
+  transcription model is set, which this bridge already sets. OpenAI emits deltas of newly available
+  text that later deltas may revise, inside an ordinary speech-to-speech session, and tells you to
+  reconcile finals on the item id because their order between turns is not guaranteed (its realtime
+  transcription and conversation guides, read 2026-09-10). **Neither has been observed on a live
+  call from this product**, because no realtime key exists on any workspace to observe one with. The
+  panel is measured against the stub that speaks both event shapes.
 - **On xAI, holding the microphone shut is the only defence** against your team hearing itself. The
   other vendor has a switch for it; xAI documents no equivalent. Section 8.
 
+**Both services do send your words as you speak them**, and both are asked for them in the session
+frame this relay writes. The two shapes are genuinely different and the row above is the difference,
+read from each vendor's own reference on 2026-09-10:
+
+- xAI, `https://docs.x.ai/developers/rest-api-reference/inference/voice.md` (page dated 2026-08-04):
+  "Emitted as the user speaks, providing the cumulative transcript so far before the final `completed`
+  event. Note that this is the cumulative transcript which may have corrections to previous updated
+  transcripts — this is different from a transcript delta." It arrives **only** when
+  `audio.input.transcription.model` is `grok-transcribe`, which `ui/voice-edge.mjs` already sets.
+- OpenAI, `https://developers.openai.com/api/docs/guides/realtime-transcription`: the `.delta` carries
+  "newly available transcript text", and its own checklist says to decide "how your UI should revise
+  partial text when later deltas correct earlier text" and to "use `item_id` to order and reconcile
+  final transcripts". Ordering between two turns' completion events is explicitly not guaranteed. It
+  streams inside an ordinary speech-to-speech session, not only a transcription-only one.
+
+**Neither has been observed on a live key.** No workspace on this product has a realtime key to
+measure with (VOICE-1's shipped R750 result is the no-key sentence, and VOICE-2 is the row for
+fixing that), so both rows above are read from the vendors' documentation and everything below is
+measured against the stub provider in `tests/helpers/stub-realtime.mjs`, which speaks both shapes.
+
 `REALTIME_VENDORS` in `cp/voice.mjs` is the authoritative table: the wire shape, the address, the
-default model, the voices and the published price with the date it was read. The CLI, your Voice card
-and this document all name those rows.
+default model, the voices and the published price with the date it was read. The CLI, the operator's
+own settings and this document all name those rows.
+
+### What the page is told while you are talking (VOICE-7)
+
+Your words appear in a panel over the conversation while you speak, and when you stop it dissolves
+and those words are the next line in the chat. That needs the page to know which words are still
+being revised, which are finished, and which ones actually went to your team lead — three different
+things that travelled on one indistinguishable frame until 2026-09-10. The relay now says which:
+
+| frame | when | carries |
+|---|---|---|
+| `hear-begin` | you started talking | `turn`, `itemId` |
+| `hear` | the words so far, replacing what was there | `turn`, `itemId`, `text`, `final` |
+| `heard-confirmed` | your words went into your team lead's conversation | `turn`, `text`, `nonce`, `landed` |
+| `hear-end` | this turn is over | `turn`, `reason` |
+
+**`heard-confirmed` is the one that becomes the chat line, and it is not the same string as the last
+`hear`.** What you watch being built is the transcription model's output. What lands in the
+conversation is the realtime model's own tool argument, which is a second model reading the same
+audio. So the panel's last paint is the confirmed text, and the `nonce` on it is the same
+`voice:` nonce the durable entry is stamped with — which is what already draws the **Spoken** chip on
+that row, so the page can tie the panel to the line it turns into rather than drawing a line of its
+own.
+
+**It is sent when your box takes the words, not when your team lead answers.** That is 6 to 14
+milliseconds rather than 5.5 to 25 seconds, and a panel that waited for the answer would sit over the
+conversation for the whole of his thinking time.
+
+`hear-end` always arrives, including on the turns that never become a line at all, because a panel
+waiting for a line that is not coming stays on screen forever:
+
+| reason | what happened |
+|---|---|
+| `sent` | your words went in, and the line is on its way |
+| `answered-card` | a spoken yes or no closed something waiting on you, which is an answer and not a message |
+| `empty` | nothing intelligible came through |
+| `not-accepted` | your box would not take it, so no line will ever appear |
+| `no-words` | the transcription failed |
+| `no-answer` | the model answered without asking your team lead, which the instructions forbid but cannot prevent |
+| `line-closed` | the call ended with words still on screen |
+
+Two more rules the panel depends on. **Nothing is painted while your team lead is speaking**: the
+words the microphone picks up then are his own coming back through the speaker (section 8 has the
+measured case), so the relay drops them for as long as the microphone is held shut, and the orb on
+the button is the only sign while he talks. And **a new utterance starts empty**: the words are
+cleared when speech starts and when a transcription fails, not only when one completes. Before
+2026-09-10 an utterance whose completion never arrived bled into the next one — measured on this Mac
+(node v22.23.1): "open the box" then "what time is it" read `open the boxwhat time is it`. A one-line
+strip beside the box hid that. A panel over the conversation does not.
+
+The older `heard` frame is still sent, unchanged, beside all of these, so a page loaded before a
+relay restart keeps working for the rest of the call.
 
 ---
 
 ## 4. Who answers
 
-Your team lead, resolved by the relay and never named by the model. In order: the agent you chose on
-the Voice card; an agent whose email localpart is `titan`; the first worker on the roster; and if none
-of those exists, a refusal in one plain sentence.
+Your team lead, resolved by the relay and never named by the model. In order: the agent you chose in
+Settings; an agent whose email localpart is `titan`; the first worker on the roster; and if none of
+those exists, a refusal in one plain sentence.
 
 **The model never says which workspace or which agent.** Both come from your signed-in session. A
 model-supplied agent id would be a cross-tenant read through an open microphone.
@@ -191,9 +336,10 @@ than in minutes.
 **Wall clock, not audio seconds**, because a minute of wall clock is the only number you can predict
 before you start talking. A provider bills on audio seconds, and the ledger records both.
 
-**You cannot raise your own cap.** Your Voice card writes your key; the minutes live on the control
-plane behind the operator's own credential. A customer raising their own daily cap is unbounded spend
-on somebody else's invoice, and it would be one request away if the number lived beside the key.
+**You cannot raise your own cap.** The minutes live on the control plane behind the operator's own
+credential. A customer raising their own daily cap is unbounded spend on somebody else's invoice. Since
+KEYS-1 the key is the operator's too, so both halves of the spend decision are on one side of one
+door — which is the point, and is what makes one shared vendor key safe (section 2).
 
 The operator changes them:
 
@@ -353,27 +499,36 @@ already states.
 
 ---
 
-## 10. The two realtime cards on the Providers panel
+## 10. The two realtime cards on the Providers panel are GONE
 
-The super-admin Providers panel lists `xai-realtime` and `openai-realtime`. **They are labels.** They
-offer no model, hold no key, mint nothing at the metering proxy, and feed nothing the relay reads.
-They exist so the one panel an operator goes to when they want to know what this product can talk to
-does not look like it has never heard of realtime, and so the key-file slot names are written down
-where every other vendor's are.
+They used to be there as labels: `xai-realtime` and `openai-realtime`, offering no model, holding no
+key, minting nothing at the metering proxy, feeding nothing the relay reads. The idea was that the one
+panel an operator goes to should not look like it has never heard of realtime.
 
-Measured on this Mac 2026-09-09: both rows answer **zero models and zero keys**, and a key pasted into
-one is **refused and not stored** — the address is a websocket, so the panel's proof step cannot
-complete against it:
+**Jason measured what that actually cost, on 2026-09-10 at 07:49, in the live admin console.** He
+pasted a real xAI realtime key on the "xAI realtime (voice)" row and read back:
 
 ```
 xai-realtime     409  xAI realtime (voice) would not accept that key, so nothing was stored.
                       xAI realtime (voice) could not be reached (fetch failed)
 ```
 
-Nothing is stored and nothing leaks, which is what matters. But "could not be reached" is a misleading
-reason for a control that can never succeed, and a realtime key does not belong there anyway.
-**VOICE-4** makes those two cards read-only and says where the key actually goes. Until then: use your
-workspace's Voice card.
+Nothing was stored and nothing leaked, which was the part the old tests checked. What they did not
+check is that the one person who holds the key had been sent to a control that can never succeed and
+then told the vendor was down. That is worse than a cosmetic row: it is a wrong diagnosis printed in
+the operator's own console.
+
+The panel proves a key before storing it by fetching that row's catalog over HTTP. A realtime address
+is a websocket, so with `catalogPath` empty the proof falls through to POSTing `wss://` — hence "fetch
+failed". Both rows are **deleted** (PROVIDERS-10, closing VOICE-4), `tests/cp-voice.test.mjs` asserts
+they are gone *and* that no row on that panel carries a `wss://` address or the word `realtime`, and
+the panel carries one line saying where the key does go: the **"Keys the product uses"** block on the
+same console's System health panel — section 2 — which proves an xAI key against
+`https://api.x.ai/v1/models` and an OpenAI key against `https://api.openai.com/v1/models`. The same
+key serves chat and realtime at both vendors.
+
+`REALTIME_VENDORS` in `cp/voice.mjs` is, and always was, the authoritative table of what this product
+can talk to. It is untouched.
 
 ---
 
@@ -388,6 +543,10 @@ timeout 300 node scripts/verify-voice.mjs --leg caps      # a spent day: a refus
 timeout 300 node scripts/verify-voice.mjs --leg origin    # a cross-origin upgrade: refused in words
 timeout 300 node scripts/verify-voice.mjs --leg refused    # a vendor that says 401, and one that is not there
 timeout 300 node scripts/verify-voice.mjs --leg browser   # real Chrome, a WAV as the microphone
+timeout 300 node scripts/verify-voice.mjs --leg frames    # the words, labelled, at both viewports
+timeout 300 node scripts/verify-voice.mjs --leg overlay   # the panel and the two talk modes, two sizes
+node --test tests/voice-transcription.test.mjs           # the words at the socket, including the
+                                                        # turns that never become a line
 ```
 
 One leg per run: the live legs hold the host's one active agent, and every gate here fits a 300 second
@@ -417,7 +576,7 @@ the server.
 
 **No key is ever pasted by a gate.** The vendor in every leg is a stub that speaks the event shape.
 Setting a key over ssh would be exactly the by-hand operation this product is being rebuilt to end;
-the mechanism is the Voice card.
+the mechanism is the "Keys the product uses" block in the super admin console.
 
 ### What the gates actually measured, 2026-09-10
 
@@ -436,11 +595,30 @@ The hop ledger from that run: the tool call reaches `sendPrompt` in **12 ms**, t
 back **0 ms** after the entry is seen, and the wait in the middle — the team's own thinking, which is
 reported and never asserted — was **22,418 ms**. That middle number is section 5's whole point.
 
+**The words of a spoken turn, this Mac (MacBook-Pro.local, darwin arm64), against grok-bot-local-vm
+through a relay on loopback, 2026-09-10.** `--leg frames` **34 of 34**, run twice at two viewports in
+real Chrome with a WAV file as the microphone, reading the frames off the **page's own** voice socket
+rather than the relay's side of it. At **1440x900** and again at **390x844 with touch**, identically:
+25 frames on that socket per turn, of which **4 partials whose text grew** (`what` → `what is the teen`
+→ `what is the team` → `what is the team working on`, so the vendor's correction **replaced** the wrong
+word instead of being appended to it), **1** frame saying the words were finished
+(`What is the team working on?`), and **1** confirmation carrying the exact bytes that went into the
+conversation plus the `voice:` nonce the durable row is stamped with. The confirmation arrived **before**
+the dissolve, so it is the panel's last paint, and the row it became reads
+`You · What is the team working on? · Spoken` — the same bytes on screen. An utterance the model made
+nothing of closed its turn with the reason `empty` and confirmed nothing. The older `heard` frame went
+out 6 times per turn, unchanged. `--leg browser` re-run at the same commit: still **28 of 28**, with the
+tool call reaching `sendPrompt` in **9 ms** and the team's own thinking at **12,638 ms**.
+
+The held-card yes, the third turn that never becomes a line, is measured at the socket instead
+(`tests/voice-transcription.test.mjs`, 15 of 15 on this Mac): a real pending approval cannot be
+manufactured on the shared local box inside the gate's 300 second ceiling.
+
 **On the R750 (jason-PowerEdge-R750), through console.titanium.bot in real Chrome**, signed in as a
 throwaway customer minted inside the control-plane container and deleted afterwards. Console ready in
 511–634 ms. The talk button is on the composer. `GET /voice/settings` answers 200 with `apiKeySet:
 false` and no `apiKey` field at all. The press puts the sentence on screen in **1,654–2,069 ms**, with
-the control beside it that opens the Voice card; the orb goes off → thinking → off; no session opens
+the control beside it that opens Settings; the orb goes off → thinking → off; no session opens
 and no ledger row is written, and the operator's read says *not measured* rather than zero.
 
 A cross-origin upgrade carrying a **real session cookie** and `Origin: https://evil.example` was
@@ -462,21 +640,30 @@ sweeps each one for sixteen leak patterns.
 
 From the relay, on the socket it accepted:
 
-- No key yet: **"This workspace has no realtime voice key yet. Add one on the Voice card in Settings
-  and press the button again."** This is the one that also draws a control opening that card.
-- Voice switched off for the workspace: **"Voice is switched off for this workspace. Turn it on on the
-  Voice card in Settings."**
+- Talking not switched on for this workspace: **"Voice is not switched on for this workspace yet."**
+  Jason's own words, and the same string the page carries so the two cannot drift. It names no key
+  and no card, because after KEYS-1 a customer cannot act on either, and it deliberately does **not**
+  end "press the button again" — that clause is what instructed the loop he got stuck in on
+  2026-09-10, pressing Talk over and over into an identical refusal.
+- Talking switched off by the workspace itself: **"Talking is switched off in Settings."** This one a
+  person *can* act on, and the sentence names exactly where: the switch in Settings under General.
 - An upgrade from somewhere else: **"That came from a page this console does not serve, so I did not
   open the microphone."**
 - Nobody to talk to: **"There is no bot in this workspace to talk to yet."**
 - The session cap: **"That is the time limit for one conversation. Press the button again to start a
   fresh one."**
 - The day is spent: **"This workspace has used its voice time for today. It resets at midnight UTC."**
-- A key the vendor would not take: **"The voice service would not take that key. Check it on the Voice
-  card in Settings."** This is a vendor that accepted the line and then dropped it without a word.
-- The line never opened at all, which a wrong key and an unreachable service both look like from here:
-  **"The voice service did not answer. Check the key on the Voice card in Settings, then press the
-  button again."** This one also draws the control that opens the card.
+- The call would not start, however it failed: **"Talking is not working right now. Your operator can
+  see why."** ONE sentence covers the vendor refusing the line and the line never opening at all,
+  because this edge genuinely cannot tell them apart — MEASURED on a Mac (node v22.23.1): a vendor
+  answering 401 to the upgrade and a vendor with nothing listening produce the same single error
+  event, no close and no status code. Two sentences would be the relay guessing which in front of a
+  customer. And there is nothing a customer could act on either way after KEYS-1: the key and the
+  choice of vendor are both the operator's. The operator's own diagnosis is not lost — it is in the
+  relay log and in the ledger row's `closeReason`, which is where an operator looks.
+- The relay could not read the keys the product uses: **"I could not start a voice session just now.
+  Try again in a moment."** Not the no-key sentence, which would send the operator to paste a key he
+  has already pasted over a fault that clears itself. See §2 on `blind`.
 - Already talking in another tab: **"This workspace is already in a call. Stop that one and press the
   button again."**
 - The line went away: **"The voice line dropped. Press the button again."**
@@ -503,3 +690,166 @@ Spoken back by the model, which is a different voice and a different job:
   take it back to him."**
 - Two things waiting at once: the relay names them and says it will not guess which.
 - A held action that has already closed: **"that one already closed."**
+
+---
+
+## 13. The panel over the conversation, and the two ways to talk (VOICE-7)
+
+Jason, 2026-09-10: *"If we are showing what is being captured, a more elegant solution would be to
+have a semi-transparent modal over the current chat window where that is being built out. We see the
+words being created, and when it's done, that just becomes the next line ... Also the talk button
+should be either: press it and it's on, so it's a toggle, on or off; or press and hold to talk and
+let go. That should be a setting for the user."*
+
+### What you see
+
+While you are speaking, a panel floats over the conversation: a small orb that is plainly listening,
+and your words appearing in it as you say them, each update replacing the last rather than adding to
+it. When you stop, the panel dissolves and those words are the next line of the conversation, from
+you, marked as spoken, exactly where a typed message would be. Your team lead answers underneath it
+the way he always did, and while he is speaking there is no panel at all: the orb on the button is
+the only sign.
+
+There is no title on it, no icon, no close control and no border that looks like a dialog. It is
+something to read while you talk, not something to dismiss, and the conversation underneath stays
+clickable the whole time. That is deliberate: a machine-looking sheet over somebody's chat gets read
+as something going wrong.
+
+**Nothing in the footer changes size, at any point.** That is not a fight this code has to win every
+time somebody edits a style: the panel is a child of the conversation area, not of the row the
+message box lives in, so there is no arrangement of it that could make the footer grow. The caption
+strip it replaces was inserted next to the message box and therefore became part of that row's grid,
+which is exactly why the footer used to get taller (VOICE-6).
+
+**The last words you read are the words that become the line.** Those two are not the same thing by
+accident. What you watch being built comes from a transcription model; what actually reaches your
+team lead comes from the realtime model's own tool call, and they are two models producing two
+strings. So the panel's final paint is the second one — the bytes that were sent — and the gate
+compares it, character for character, against the row that lands.
+
+**Three turns produce no line, and the panel still goes.** A yes or no that closes an approval goes
+through that approval and never becomes prose; an utterance nothing was heard in produces nothing;
+and a transcription that gives up produces nothing. Each of those now says on the wire that no line
+is coming, so the panel ends the turn instead of waiting for a row that will never arrive. A turn
+that simply stops mid-way takes the panel away after eight seconds.
+
+### The two ways to talk
+
+In **Settings**, under **General** in the **System** group, beside Microphone and the talking
+switch, one row, **Talk mode**:
+
+| | what it does |
+|---|---|
+| **Push to talk** (the default) | Hold the button while you speak and let go. Or hold the space bar, when the message box is empty. |
+| **Always listening** | Press once to start and press again to stop. Escape stops it too. |
+
+**Push to talk is the default** because it is the one that cannot leave a microphone open by
+accident.
+
+Holding: the microphone opens on the press — before the line has finished opening, with the first
+couple of seconds held and sent the moment it does, because the line takes one and a half to two
+seconds to open through the console and the first words of a first hold would otherwise be lost every
+time. On the release the microphone shuts. **The line itself stays up for a minute**, so the next
+hold is instant rather than paying that wait again, and then it closes itself — the time limits count
+wall clock rather than audio, so a press somebody walked away from would otherwise spend half an hour
+of a two hour day with nobody in the room. Between holds the orb is dark, because an orb that says
+listening while the microphone is shut is a lie.
+
+Always listening: the microphone is open from the press to the next press and the service's own
+turn-taking decides where one utterance ends and the next begins. The orb shows listening between
+turns.
+
+**In both modes the microphone is still held shut while your team is speaking**, plus the third of a
+second in section 8. Nothing here weakens that, and the panel cannot open while he is talking either
+— if that gate ever slipped, the panel would draw his own words coming back through your speakers as
+though you had said them.
+
+**The release does not itself end the turn; the silence after it does.** The service's own turn
+detection is what decides an utterance is over, about seven tenths of a second after you stop making
+noise, in both modes. The vendors document a tighter way — turn detection switched off and a manual
+commit on release — and it is refused here, because it needs the session frame rewritten per mode and
+this bridge writes that frame exactly once and byte-identically for the life of the socket. Rewriting
+it re-bills the whole conversation every turn on one of the two services (section 7).
+
+**Changing the mode ends the call you are in.** A live microphone whose control has just changed
+meaning underneath you is a state nobody on screen can account for.
+
+### The space bar, and what it is not allowed to interrupt
+
+Holding the space bar is push-to-talk on a keyboard, and only when nothing else wants that key: not
+while any field, box or dropdown has the focus, not while something is being edited in place, not
+while a dialog or a drawer is open, not while the box's own screen has the keyboard (everything typed
+there is meant for the machine on the other side), and not while there is a half-typed message in the
+message box. A held key repeats, so the first press latches and every repeat until the release is
+ignored. A window that loses focus never delivers the release, so losing focus is treated as one.
+
+On a phone the button is a 38 px circle, and a press and hold on one of those is a long-press menu, a
+text selection and a drag unless all three are turned off on that one control. They are, and the gate
+holds a real touch on it rather than tapping.
+
+**Escape has the same rule, and one thing it cannot do anything about.** A drawer or a dialog that is
+open takes Escape first, which is right, and the call is still there afterwards. But when the box's
+own screen has the keyboard, nothing typed reaches the console at all: the screen is a frame and the
+browser hands every keystroke to the machine on the other side. Measured while building this: after a
+scroll that put the focus in that frame, Escape never arrived. There is no fix for that and none is
+wanted — the way out then is the button, which is always on the screen.
+
+### Where the choice is stored, and the one thing about it that is not finished
+
+**It is yours, not your workspace's, and today that means it is per browser.** Everything else about
+talking is written to one settings file per workspace; two people sharing a workspace would then fight
+over how their own button behaves, so this one row deliberately never goes through that door. No
+request body in the page carries it. What holds it instead is this browser — the same place the
+settings surface keeps Theme and the microphone choice, which are the two rows either side of it — so
+it does not follow you to your phone and it is gone if you clear site data. It falls back to holding
+when there is nothing stored, in a private window, and in a browser set to refuse site data.
+
+**Per browser is not per person, and that is the unfinished part.** A person who sets always-listening
+on their laptop gets holding again on their phone. The only per-person door on this product today is
+the one Notifications uses; moving this row onto it is a later wave's, and it is written here rather
+than left to be discovered on a second device.
+
+The page keeps its own copy whatever happens to that, because the button is live the moment the
+console paints, before any route has answered, and it has to know which of the two things it is before
+the first press. The settings row reaches it through one door, `setTalkMode`, and that door is also
+what ends the call you are in when you change the mode — the alternative is a live microphone whose
+control has changed meaning underneath you.
+
+The desktop app's global hotkey is a later wave. It presses this same control through the same pair of
+entry points, so it inherits whichever mode is set rather than being a third behaviour to keep in
+step.
+
+### What was measured, and where
+
+**On this Mac (MacBook-Pro.local, darwin arm64), 2026-09-10**, in headless Chrome through
+playwright-core against grok-bot-local-vm, user agent `titanbot-gate/verify-voice.mjs`.
+Two legs, run one at a time. `--leg overlay` drives the panel and the two modes in four
+combinations — each viewport in each mode, with a real touch hold on the phone rather than a tap —
+and measures the footer's rects before, during and after every turn. `--leg frames` reads the
+labelled frames off the page's own voice socket at both viewports and proves the confirmed bytes and
+the durable row are the same string. The line opened in tens to hundreds of milliseconds; the words
+changed between reads rather than merely being present; and the spoken row landed exactly once per
+turn carrying text byte-identical to the panel's last words, under a `voice:<session>:<n>` id.
+
+One thing those legs had to work around, and it is **not** this wave's: at 390x844 the console hides
+the gear on the shelf outright, and that gear is the only thing in the console a person can press to
+open Settings. So on a phone there is no visible way into Settings at all — not to this row, not to
+Inference, not to anything else on that surface. The legs open it by naming the section instead, and
+each one reports which route a person really had at that width. Filed as CONSOLE-PHONE-SETTINGS-1 with
+its owner and its proof; every settings card has been unreachable that way since voice first shipped.
+
+| | 1440x900 | 390x844 |
+|---|---|---|
+| the footer, before / during / after a turn | 1392x106 at y776, unchanged | 390x133 at y711, unchanged |
+| the message box | 600x54, never narrowed | 358x56, never narrowed |
+| the talk button | 74x38, never moved | 38x38, never moved |
+| the panel | 544 px wide, centred over the conversation | 350 px wide |
+
+The numbers this replaces, measured the same way on the same machine: with the caption strip up, the
+footer went to 1392x160 and then 1392x178 at 1440x900 while the message box narrowed to 568 px, and
+to 390x199 and then 390x255 at 390x844.
+
+**Not measured:** a real spoken turn, on any machine. There is no realtime key on this Mac or on any
+workspace of the production server, so every transcript event in every gate came from the stub that
+speaks both services' event shapes. What the two services do on a live call is read from their
+documentation above and is marked as such.

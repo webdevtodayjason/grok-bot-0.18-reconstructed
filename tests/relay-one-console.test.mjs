@@ -404,6 +404,49 @@ test("the mail webhook finds the workspace by the recipient's domain, and verifi
   } finally { await c.stop(); }
 });
 
+// ---- SETTINGS-2: who gets the operator section, and the relay is what decides -------------------
+//
+// The console draws an OPERATOR section holding endpoints, the job bus, the mail plane and the two
+// box buttons. Getting this field wrong is not a cosmetic bug: it is one customer reading another
+// customer's plumbing. So the rule is the relay's own tenantOf and the page never infers it, and
+// this is the test that says so on a console really serving two customers and an operator.
+
+test("a customer's session is not the operator's, and the console is told so rather than guessing", async () => {
+  const c = await startConsole();
+  try {
+    const read = async (cookie) => {
+      const answer = await fetch(`${c.relay.base}/auth/state`, { headers: cookie == null ? {} : { cookie } });
+      assert.equal(answer.status, 200);
+      return await answer.json();
+    };
+
+    // A stranger, above the gate. It answers what it always answered and nothing more: this route
+    // sits in the pre-login band and a field about who you are must not be answered to nobody.
+    const stranger = await read(null);
+    assert.deepEqual(stranger, { required: true, authenticated: false });
+
+    // Two customers. Neither is the operator, each is told its own workspace, and each carries its
+    // own address off the sign-in link's verified claims.
+    for (const slug of ["alpha", "beta"]) {
+      const state = await read(await signInAsTenant(c.relay, slug));
+      assert.equal(state.authenticated, true, slug);
+      assert.equal(state.operator, false, `${slug} was handed the operator section`);
+      assert.deepEqual(state.workspace, { slug, name: slug }, slug);
+      assert.deepEqual(state.person, { email: `${slug}@titanium.bot` }, slug);
+    }
+
+    // The instance password IS the operator's door: it is the machine's own door and names no
+    // person, which is why `person` is null rather than an address it would have to invent.
+    const operator = await read(await signInAsOperator(c.relay));
+    assert.equal(operator.operator, true);
+    assert.equal(operator.person, null, "the instance-password door names nobody");
+    assert.equal(typeof operator.workspace?.slug, "string");
+
+    // And nothing about any of that touched a box.
+    for (const gw of [c.gwA, c.gwB, c.gwOperator]) assert.equal(gw.calls.length, 0);
+  } finally { await c.stop(); }
+});
+
 // Imported for the shape assertions above; naming them keeps the reader and the linter agreed.
 assert.equal(typeof newAuthRecord, "function");
 assert.equal(typeof writeAuthFile, "function");

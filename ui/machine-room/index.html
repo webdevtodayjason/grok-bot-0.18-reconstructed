@@ -36,6 +36,10 @@
     <link rel="stylesheet" href="gap-badge.css" />
     <link rel="stylesheet" href="screen-tile.css" />
     <link rel="stylesheet" href="files-viewer.css" />
+    <!-- SETTINGS-2: the settings surface's own sheet, owned by settings.js the way push-settings.css
+         is owned by push-settings.js. Linked here as well as by the module so the panel is never
+         drawn once unstyled; the module's own ensureStylesheet is idempotent. -->
+    <link rel="stylesheet" href="settings.css" />
   </head>
   <body>
     <!-- CONSOLE-4: the boot cover. Static markup, so it is on screen with the FIRST paint rather
@@ -448,6 +452,14 @@
          console boots exactly as it did before and Settings simply has one fewer card, which is a
          gate assertion in scripts/verify-push.mjs rather than a claim made here. -->
     <script src="push-settings.js"></script>
+    <!-- SETTINGS-2. The settings surface and the account menu at the foot of the roster, on the same
+         seam and under the same contract: each publishes its object at load (window.__mrSettings,
+         window.__accountMenu), reads window.__mrUi and the adapter lazily, finds its own hosts in the
+         DOM, and no-ops with either absent. settings.js comes first because account-menu.js reads its
+         row list. With both removed the console boots exactly as before and app.js falls back to the
+         panel that shipped, which is a leg of scripts/verify-settings.mjs rather than a claim here. -->
+    <script src="settings.js"></script>
+    <script src="account-menu.js"></script>
     <script>
       // app.js builds its adapter synchronously, so the gateway is read first and app.js is
       // loaded after. If the gateway is unreachable the demo adapter runs and the page still

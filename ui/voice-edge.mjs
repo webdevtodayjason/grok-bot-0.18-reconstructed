@@ -34,11 +34,16 @@
  *      real silence, and the finished reply is split into sentences here. Nothing in this file,
  *      its copy or its doc claims streaming. True sentence streaming is one host-side projection
  *      and is filed as VOICE-3.
- *   3. The key does NOT come from the super-admin Providers panel. That panel is global, its keys
- *      live at LiteLLM as credentials and read back masked, and there is no per-workspace provider
- *      row at all. The realtime key is a PER-WORKSPACE secret in the tenant's own voice.json,
- *      written through the ordinary console session and never readable back -- mail's door, which
- *      already works in production -- and it reaches the vendor as an Authorization HEADER only.
+ *   3. The key is the OPERATOR's, and KEYS-1 moved it. It used to be a per-workspace secret a
+ *      customer typed into their own Voice card; Jason, 2026-09-10, over that panel: "A user is
+ *      never going to put a resend key in. That's on the backend." So the super admin pastes it once
+ *      at api.titanium.bot/admin under "Keys the product uses", the relay reads it from
+ *      GET /v1/relay/keys behind CP_RELAY_TOKEN and holds it in memory (ui/relay-secrets.mjs), and
+ *      keyFor() below prefers that over this workspace's own voice.json -- the file second, nothing
+ *      third, which is the whole of the migration. It still reaches the vendor as an Authorization
+ *      HEADER only. It is still NOT on the super-admin Providers panel: those keys are global, they
+ *      live at LiteLLM as credentials and read back masked, and a realtime key is not a LiteLLM
+ *      deployment. That is PROVIDERS-10, and the two cosmetic realtime rows there are now deleted.
  *
  * THE SILENT-SOCKET RULE, which the whole refusal path is built around. Measured: an unknown
  * upgrade path answers zero bytes with no status line, and real Chrome reports only `onerror` at
@@ -51,6 +56,10 @@
 import { createHash } from "node:crypto";
 import { appendFile, chmod, chown, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+
+// KEYS-1. Which of the operator's keys dials for a given service. The name table and nothing else:
+// the reader itself is built once in ui/server.mjs and handed to this edge.
+import { voiceKeyName } from "./relay-secrets.mjs";
 
 // ---- the RFC 6455 codec (A1) --------------------------------------------------------------------
 //
@@ -415,11 +424,28 @@ export const canonicalEvent = (type) => INBOUND_ALIASES.get(String(type ?? "")) 
  * with corrections -- each event carries the whole utterance so far -- and OpenAI's `.delta` is
  * incremental. Appending the delta on xAI writes the sentence N times, which is what the console
  * would then draw.
+ *
+ * IT ALSO KEEPS THE ITEM ID, and a new one RESETS the accumulator. MEASURED on this Mac (node
+ * v22.23.1, 2026-09-10) before that existed: on the incremental path an utterance whose `.completed`
+ * never arrives -- a `.failed`, a dropped event, two utterances close together -- bleeds into the
+ * next one, so "open the box" then "what time is it" reads "open the boxwhat time is it". A one-line
+ * strip hid that; VOICE-7 puts these words in a panel over the conversation where it is unmissable.
+ * OpenAI's own transcription guide says to reconcile finals on `item_id` for exactly this reason,
+ * and it does not guarantee ordering between two turns' `.completed` events.
  */
 export function makeCaption(mode = "cumulative") {
   let text = "";
+  let itemId = "";
+  /** A transcription event for a DIFFERENT item is a different utterance, so start it empty. */
+  const seat = (event) => {
+    const id = String(event?.item_id ?? "");
+    if (id.length === 0) return;
+    if (id !== itemId) text = "";
+    itemId = id;
+  };
   return {
     apply(event) {
+      seat(event);
       const whole = typeof event?.transcript === "string" ? event.transcript : null;
       const delta = typeof event?.delta === "string" ? event.delta : "";
       if (mode === "cumulative") text = whole != null && whole.length > 0 ? whole : (delta.length > 0 ? delta : text);
@@ -428,12 +454,14 @@ export function makeCaption(mode = "cumulative") {
       return text;
     },
     complete(event) {
+      seat(event);
       const whole = typeof event?.transcript === "string" ? event.transcript : null;
       if (whole != null && whole.length > 0) text = whole;
       return text;
     },
     get value() { return text; },
-    reset() { text = ""; },
+    get itemId() { return itemId; },
+    reset() { text = ""; itemId = ""; },
   };
 }
 
@@ -571,11 +599,15 @@ export function splitSentences(text, { max = 320 } = {}) {
 
 // ---- the settings door: voice.json --------------------------------------------------------------
 //
-// Custody, decided: the realtime key is a PER-WORKSPACE secret in the tenant's own state file,
-// written through the ordinary console session and never readable back. That is mail's door
-// (ui/mail-edge.mjs), which already works in production, and it is the only door in this wave that
-// touches a secret. The super-admin Providers panel is global and its keys read back masked; there
-// is no per-workspace provider row to put this on.
+// Custody, as KEYS-1 left it: the realtime key is the OPERATOR's. It is pasted once at the super
+// admin console, held in this process's memory by ui/relay-secrets.mjs, and keyFor() prefers it over
+// anything on disk. `apiKey` on this file is the FALLBACK and it is the migration: a relay whose
+// control plane holds nothing keeps dialling with the value it always dialled with, so there is no
+// window in which voice is broken and there is no code that moves a byte from here to there.
+//
+// Nothing writes this field from a customer's session any more. mergeVoiceSettings refuses a key
+// from every workspace but the operator's own, in words, because a 200 that silently drops a field
+// the caller sent is the failure where the caller believes it worked.
 
 const asString = (value) => (typeof value === "string" ? value.trim() : "");
 
@@ -634,7 +666,7 @@ export function mergeVoiceSettings(current, patch) {
  * shape is the only thing either route returns, so there is no route on this server that can read
  * a realtime key back out once it is set. cp/PROVIDERS-ROUTES.md 5 is the rule and this honours it.
  */
-export function voiceSettingsShape(settings, { vendors = null, agents = [], sessionCapSeconds = 0, dayCapSeconds = 0, dayUsedSeconds = 0, recent = [] } = {}) {
+export function voiceSettingsShape(settings, { vendors = null, agents = [], sessionCapSeconds = 0, dayCapSeconds = 0, dayUsedSeconds = 0, recent = [], available = null } = {}) {
   const value = normalizeVoiceSettings(settings);
   return {
     enabled: value.enabled,
@@ -648,6 +680,18 @@ export function voiceSettingsShape(settings, { vendors = null, agents = [], sess
     voice: value.voice,
     agentId: value.agentId,
     apiKeySet: value.apiKey.length > 0,
+    // KEYS-1. IS THERE A KEY FOR THIS WORKSPACE'S SERVICE AT ALL, wherever it came from -- the
+    // control plane's own or this workspace's file. It is a different question from apiKeySet, which
+    // is only about the file, and it is the one the console's "Let me talk to Titan" switch reads:
+    // a switch that turns on when there is nothing behind it is a Talk button that refuses.
+    //
+    // apiKeySet STAYS beside it and is not folded into it, because scripts/verify-voice.mjs asserts
+    // the file half survives a save that never carried a key, and those are genuinely two facts.
+    //
+    // `null` from the caller means "this build could not ask", and it degrades to the file answer
+    // rather than to false: a console that cannot reach the control plane must not report a working
+    // workspace as switched off.
+    available: available == null ? value.apiKey.length > 0 : available === true,
     // `label` is what the Voice card puts in the Service dropdown -- ui/machine-room/voice.js reads
     // `one.label` and an absent one renders a row of empty options, which is a control a person
     // cannot use. The labels in VENDORS name no vendor on purpose; docs/VOICE.md names them.
@@ -1058,19 +1102,27 @@ export function makeTurnRunner({
     newUserTurn() { rounds = 0; nudges = 0; },
 
     /**
-     * @returns {Promise<{ok:boolean, text:string, pieces:string[], attemptId:string, afterId:string,
-     *          afterMs:number, card:object|null, hops:object}>}
+     * `onSent` fires once, the instant sendPrompt is accepted, carrying the nonce that the durable
+     * user entry will be stamped with. `accepted` says whether anything reached Titan at all, which
+     * is what tells "he has not answered yet" from "this never went in".
+     *
+     * @returns {Promise<{ok:boolean, accepted:boolean, text:string, pieces:string[], attemptId:string,
+     *          afterId:string, afterMs:number, card:object|null, hops:object, nonce?:string}>}
      */
-    async run({ agentId, message, onNudge = () => {} }) {
+    async run({ agentId, message, nonce: given = "", onNudge = () => {}, onSent = () => {} }) {
       const hops = { t1: now(), t2: 0, t3: 0, t4: 0 };
       if (rounds >= maxRounds) {
-        return { ok: false, refused: true, text: "I have already asked him twice about that. Say it again and I will take it to him fresh.", pieces: [], attemptId: "", afterId: "", afterMs: 0, card: null, hops };
+        return { ok: false, refused: true, accepted: false, text: "I have already asked him twice about that. Say it again and I will take it to him fresh.", pieces: [], attemptId: "", afterId: "", afterMs: 0, card: null, hops };
       }
       rounds += 1;
       const before = await tailOf(agentId);
       const beforeId = before == null ? "" : String(before.at(-1)?.id ?? "");
       const beforeMs = before == null ? 0 : Number(before.at(-1)?.timestampMs ?? before.at(-1)?.createdAt) || 0;
-      const nonce = `voice:${now()}`;
+      // THE ID OF THE ROW THIS IS ABOUT TO BECOME. The caller supplies it when it needs to tell the
+      // page that id BEFORE the five-to-twenty-five second wait for Titan; this own-mint is the
+      // fallback for every caller that does not care. A bare millisecond clock is not unique across
+      // two sessions in the same millisecond, so a supplied one is scoped to its session.
+      const nonce = String(given ?? "").length > 0 ? String(given) : `voice:${now()}`;
       // MEASURED 6-14 ms and fire-and-forget: sendPrompt answers {accepted:true} unconditionally
       // (awaitTurn is gated on SAND_DISABLE_SEND_ACCEPT_RETURN, which is set nowhere), so the
       // answer is a receipt that the host took it and not that Titan replied.
@@ -1078,9 +1130,14 @@ export function makeTurnRunner({
         .then(() => true)
         .catch((error) => { log(`voice sendPrompt failed: ${error?.message ?? error}`); return false; });
       hops.t2 = now();
+      // THE CONFIRMATION, SAID THE MOMENT IT IS TRUE and not when Titan finishes. sendPrompt answers
+      // in 6-14 ms; run() does not return for 5.5 to 25 s. VOICE-7's panel over the conversation has
+      // to dissolve when the PERSON stops talking, so what the page needs -- the bytes that went into
+      // Titan's conversation and the nonce his durable row will carry -- is handed out here.
       if (!accepted) {
-        return { ok: false, text: "I could not get that to him just now. His box did not take it.", pieces: [], attemptId: "", afterId: beforeId, afterMs: beforeMs, card: null, hops, nonce };
+        return { ok: false, accepted: false, text: "I could not get that to him just now. His box did not take it.", pieces: [], attemptId: "", afterId: beforeId, afterMs: beforeMs, card: null, hops, nonce };
       }
+      try { onSent({ nonce, message, agentId }); } catch (error) { log(`voice onSent failed: ${error?.message ?? error}`); }
       const deadline = now() + waitCapS * 1000;
       let nudged = 0;
       while (now() < deadline) {
@@ -1100,7 +1157,7 @@ export function makeTurnRunner({
               afterId: String(landed.id ?? beforeId),
               afterMs: Number(landed.timestampMs ?? landed.createdAt) || now(),
               card: pickOneCard(pendingCardsOf(fresh)),
-              hops, nonce,
+              hops, nonce, accepted: true,
             };
           }
           // A card with no reply beside it is still an answer: he is waiting on the person.
@@ -1108,7 +1165,7 @@ export function makeTurnRunner({
           if (card != null) {
             hops.t3 = now();
             hops.t4 = now();
-            return { ok: true, text: "", pieces: [], attemptId: "", afterId: String(fresh.at(-1)?.id ?? beforeId), afterMs: Number(fresh.at(-1)?.timestampMs ?? now()), card, hops, nonce, cards: pendingCardsOf(fresh) };
+            return { ok: true, accepted: true, text: "", pieces: [], attemptId: "", afterId: String(fresh.at(-1)?.id ?? beforeId), afterMs: Number(fresh.at(-1)?.timestampMs ?? now()), card, hops, nonce, cards: pendingCardsOf(fresh) };
           }
         }
         // A nudge is driven off the roster's own working flag, never a bare timer, and each one is
@@ -1126,7 +1183,7 @@ export function makeTurnRunner({
         text: now() < deadline
           ? "He stopped working without answering that one. Ask again and I will take it back to him."
           : `He has not come back in ${waitCapS} seconds. It is still in his conversation on screen.`,
-        pieces: [], attemptId: "", afterId: beforeId, afterMs: beforeMs, card: null, hops, nonce,
+        pieces: [], attemptId: "", afterId: beforeId, afterMs: beforeMs, card: null, hops, nonce, accepted: true,
       };
     },
 
@@ -1334,21 +1391,42 @@ export function dialProviderSocket({ vendorId, apiKey, model, url, WebSocketImpl
 
 // ---- the session --------------------------------------------------------------------------------
 
+// KEYS-1 and VOICE-2 rewrote four of these, and the reasons are worth keeping.
+//
+// A CUSTOMER CANNOT ACT ON A KEY ANY MORE, so no sentence a customer reads may mention one. The
+// realtime key is the operator's, pasted once at the super admin console, and a person told to "add
+// one on the Voice card" is being sent to a card that no longer exists to do a thing they are not
+// allowed to do.
+//
+// AND "PRESS THE BUTTON AGAIN" IS GONE from the no-key sentence. Jason, 2026-09-10, stuck in exactly
+// the loop it instructed: "you can't exit out of this talk mode". toggle() read a state the relay had
+// already set back to off, so the second press redialled into the same refusal, and the shipped
+// sentence was what told him to keep pressing.
+//
+// `noKey` is HIS OWN WORDING, and the identical string lives in ui/machine-room/voice.js's NOTES so
+// that retitleNote -- where the relay's diagnosis outranks the page's -- cannot produce two wordings
+// for one condition.
 const SENTENCE = {
-  noKey: "This workspace has no realtime voice key yet. Add one on the Voice card in Settings and press the button again.",
-  notEnabled: "Voice is switched off for this workspace. Turn it on on the Voice card in Settings.",
+  noKey: "Voice is not switched on for this workspace yet.",
+  notEnabled: "Talking is switched off in Settings.",
   badOrigin: "That came from a page this console does not serve, so I did not open the microphone.",
   noAgent: "There is no bot in this workspace to talk to yet.",
   sessionCap: "That is the time limit for one conversation. Press the button again to start a fresh one.",
   dayCap: "This workspace has used its voice time for today. It resets at midnight UTC.",
-  providerRefused: "The voice service would not take that key. Check it on the Voice card in Settings.",
-  // A DIAL THAT NEVER OPENED, which is what a wrong key and an unreachable address BOTH look like
-  // from here. MEASURED on this Mac (node v22.23.1): a vendor answering 401 to the upgrade and a
-  // vendor with nothing listening produce the same single error event, "Received network error or
-  // non-101 status code", with no close event and no status code of any kind; a black-holed address
-  // produces nothing at all for at least four seconds. So one sentence covers both causes and names
-  // the thing a person can actually check. It was silence until 2026-09-10.
-  providerSilent: "The voice service did not answer. Check the key on the Voice card in Settings, then press the button again.",
+  // ONE SENTENCE FOR BOTH, and it is deliberate rather than lazy.
+  //
+  // MEASURED on this Mac (node v22.23.1): a vendor answering 401 to the upgrade and a vendor with
+  // nothing listening produce the same single error event, "Received network error or non-101 status
+  // code", with no close event and no status code of any kind; a black-holed address produces
+  // nothing at all for at least four seconds. So this edge genuinely cannot tell a refusal from an
+  // outage, and two sentences would be this process guessing which one in front of a customer.
+  //
+  // WHAT THEY LOST is the word "voice service", because under KEYS-1 there is nothing a customer can
+  // do about either cause: the key is the operator's and the vendor is the operator's choice. What
+  // is left is the fact and who can see the reason. The operator's own diagnosis is not lost -- it is
+  // in the relay log and in the ledger row's closeReason, where an operator looks.
+  providerRefused: "Talking is not working right now. Your operator can see why.",
+  providerSilent: "Talking is not working right now. Your operator can see why.",
   providerGone: "The voice line dropped. Press the button again.",
   // One call at a time per workspace. The day cap is a number read from the ledger, so N sockets
   // opened together each read the same remaining day and the cap multiplies by N.
@@ -1410,6 +1488,24 @@ export function makeVoiceSession({
   let dialWatch = null;
   /** The caps this session was authorised under, kept so the audio ceiling and the tick can read them. */
   let capSeconds = SESSION_CAP_SECONDS;
+  /**
+   * The orb's own value, kept here as well as sent, because two things read it: nothing may paint
+   * the person's words while the machine is the one making noise (docs/VOICE.md 8 records a measured
+   * feedback loop where the model's own speech came back through the microphone and transcribed as a
+   * user turn), and the VOICE-7 panel must never show the machine's words as the person's.
+   */
+  let orbState = "off";
+  /**
+   * The user turn whose words are on screen right now, or 0 when none is. Every open turn is closed
+   * EXACTLY ONCE by a `hear-end`, whatever happens to it, because a panel that waits for a chat row
+   * hangs on the three turns that never produce one: a spoken yes answering a held card, an empty
+   * utterance, and a send the box refused.
+   */
+  let hearTurn = 0;
+  // Counts the sends in this session, so a row id is unique without depending on the clock.
+  let sendSeq = 0;
+  /** The last turn a `hear-end` closed, so a transcript arriving after it cannot re-open the panel. */
+  let hearClosedTurn = 0;
 
   const secondsNow = () => Math.max(0, Math.round((now() - startedMs) / 1000));
   const bytesToSeconds = (bytes) => Math.round(bytes / (AUDIO_RATE * 2));
@@ -1428,6 +1524,68 @@ export function makeVoiceSession({
     heldFrames: gate.heldFrames + meter.browserHeld,
     closeReason,
   });
+
+  /** The orb, said once and remembered, so the two readers above never have to guess. */
+  const setState = (value) => { orbState = String(value ?? ""); browser?.state(orbState); };
+
+  /**
+   * VOICE-7's vocabulary, beside the `heard` frame and not instead of it.
+   *
+   * `heard` is shipped and drawn by ui/machine-room/voice.js, and a relay restart mid-call leaves an
+   * old page against a new relay, so it keeps going out exactly as it did. What it could never do is
+   * say WHICH of three different things it was carrying -- a partial transcript, the finished
+   * transcript, or the string the model actually handed to Titan -- which is what a panel that has to
+   * dissolve at the right moment needs. So:
+   *
+   *   hear-begin       {turn, itemId}                  the person started talking
+   *   hear             {turn, itemId, text, final}     the words so far, replace-whole
+   *   heard-confirmed  {turn, text, nonce, landed}     the bytes that went into Titan's conversation
+   *   hear-end         {turn, reason}                  this turn is over, and why
+   *
+   * `heard-confirmed` is the ONLY frame whose text is the same bytes as the chat row: the words the
+   * person watched being built are the transcription model's, and the string that becomes the row is
+   * the realtime model's own tool argument. Two models, two strings, and they will differ. The nonce
+   * is the one the durable entry carries, so the page can tie the panel to the row it becomes
+   * (ui/machine-room/gateway-adapter.js stamps `spoken` off that same `voice:` prefix).
+   */
+  /**
+   * Whether the machine is the one making noise. The orb alone is not enough: a speech_started event
+   * sets the orb back to listening before anything else runs, so the truth is the echo gate, which is
+   * booked from the BYTES of audio that went out and stays held for the tail after them. MEASURED: a
+   * guard on the orb alone admitted two partials of the model's own sentence.
+   */
+  const machineTalking = () => orbState === "speaking" || gate.holding();
+
+  const hearBegin = (itemId = "") => {
+    if (machineTalking()) return undefined;
+    hearTurn = Math.max(session.userTurn, 1);
+    browser?.sendJson({ t: "hear-begin", turn: hearTurn, itemId: String(itemId ?? "") });
+    return undefined;
+  };
+  const hear = (text, { final = false, itemId = "" } = {}) => {
+    // Never while the machine is the one talking. If the echo gate ever slips, the panel would
+    // otherwise render Titan's own sentence as though the person had said it.
+    if (machineTalking()) return undefined;
+    if (hearTurn === 0) {
+      // A vendor that sends a transcript without a speech_started still gets a panel. A transcript
+      // arriving AFTER this turn was closed does not: the `.completed` and the tool call race, and
+      // resurrecting the panel a moment after it dissolved is a flicker over the conversation.
+      const turn = Math.max(session.userTurn, 1);
+      if (turn <= hearClosedTurn) return undefined;
+      hearTurn = turn;
+    }
+    browser?.sendJson({ t: "hear", turn: hearTurn, itemId: String(itemId ?? ""), text: String(text ?? ""), final: final === true });
+    return undefined;
+  };
+  /** Closes an open turn once. A second call for the same turn is dropped, so no panel flickers back. */
+  const hearEnd = (reason) => {
+    if (hearTurn === 0) return undefined;
+    const turn = hearTurn;
+    hearClosedTurn = turn;
+    hearTurn = 0;
+    browser?.sendJson({ t: "hear-end", turn, reason: String(reason ?? "") });
+    return undefined;
+  };
 
   const sendProvider = (object) => {
     if (provider == null || provider.readyState !== 1) return false;
@@ -1461,9 +1619,16 @@ export function makeVoiceSession({
   const dispatch = async (toolCall) => {
     if (toolCall.name !== "titan") return answerTool(toolCall.callId, { error: "there is no such tool here" });
     meter.toolCalls += 1;
+    // The turn this call belongs to, taken here rather than read later: in always-listening the next
+    // utterance can start while this one is still with Titan, and the panel's frames have to stay
+    // with the words the person watched being built.
+    const turn = hearTurn || session.userTurn;
     let message = "";
     try { message = String(JSON.parse(toolCall.argumentsJson || "{}").message ?? "").trim(); } catch { message = ""; }
-    if (message.length === 0) return answerTool(toolCall.callId, { reply: "I did not catch that. Say it again." });
+    if (message.length === 0) {
+      hearEnd("empty");
+      return answerTool(toolCall.callId, { reply: "I did not catch that. Say it again." });
+    }
     browser?.sendJson({ t: "heard", text: message });
     // A whole-utterance yes or no while a card is on the table is an ANSWER to that card, and it
     // goes through the approval path the console already uses rather than into the conversation as
@@ -1473,6 +1638,9 @@ export function makeVoiceSession({
     if (decision != null && session.heldCard != null) {
       const card = session.heldCard;
       if (card.offeredTurn === session.userTurn) {
+        // The model talked itself into a confirmation inside one user turn. Nothing goes to Titan and
+        // no row appears, so the panel is closed rather than left over the conversation.
+        hearEnd("not-accepted");
         return answerTool(toolCall.callId, { reply: "Say that again and I will take it as your answer." });
       }
       session.heldCard = null;
@@ -1480,11 +1648,35 @@ export function makeVoiceSession({
         ? { ok: false, said: `There are ${card.count} things waiting on you. Say which one and I will take it back to him, or answer them on screen.` }
         : await resolveHeldCard({ call, agentId: agent.agentId, card, decision: decision.decision });
       const said = outcome.ok && String(outcome.requestId ?? "").length > 0 ? `${outcome.said} That was ${outcome.requestId}.` : outcome.said;
+      // A yes that closes a card never becomes a row in the conversation, so the panel is told the
+      // turn is over on its own terms rather than waiting for a row that is not coming.
+      hearEnd("answered-card");
       browser?.sendJson({ t: "said", text: said });
       return answerTool(toolCall.callId, { reply: said });
     }
-    browser?.state("thinking");
-    const result = await runner.run({ agentId: agent.agentId, message, onNudge: (text) => void say(text) });
+    setState("thinking");
+    // THE ID OF THE ROW THESE BYTES ARE ABOUT TO BECOME, minted here rather than inside the runner so
+    // that it is known before the send rather than after it. A bare millisecond clock is not unique
+    // across two sessions that open in the same millisecond, so it is scoped to this session and
+    // counted within it. `voice:` is the whole of what gateway-adapter.js reads to stamp a row spoken,
+    // so the prefix is load-bearing and the rest of the shape is ours.
+    sendSeq += 1;
+    const nonce = `voice:${sessionId}:${sendSeq}`;
+    const result = await runner.run({
+      agentId: agent.agentId,
+      message,
+      nonce,
+      onNudge: (text) => void say(text),
+      // The instant the box takes it, and not when Titan answers: these are the bytes that became
+      // the row, and the nonce that row carries.
+      onSent: () => {
+        browser?.sendJson({ t: "heard-confirmed", turn, text: message, nonce, landed: true });
+        hearEnd("sent");
+      },
+    });
+    // Nothing reached his box: a refused send, or a third round inside one user turn. Either way no
+    // durable row will ever appear, so the panel is closed here instead of hanging over the chat.
+    if (result.accepted !== true) hearEnd("not-accepted");
     const pieces = result.pieces.length > 0 ? result.pieces : (result.text.length > 0 ? [result.text] : []);
     let reply = pieces.join(" ");
     if (result.card != null) {
@@ -1525,18 +1717,43 @@ export function makeVoiceSession({
       if (meter.toolCalls === 0 && meter.audioOutBytes === 0) return void close("the voice service refused this session", SENTENCE.providerRefused, "no-key");
       return undefined;
     }
-    if (type === "session.updated") { browser?.state("listening"); return undefined; }
-    if (type === "input_audio_buffer.speech_started") { session.userTurn += 1; runner.newUserTurn(); browser?.state("listening"); return undefined; }
-    if (type === "input_audio_buffer.speech_stopped") { session.hops.t0 = now(); browser?.state("thinking"); return undefined; }
+    if (type === "session.updated") { setState("listening"); return undefined; }
+    if (type === "input_audio_buffer.speech_started") {
+      session.userTurn += 1;
+      runner.newUserTurn();
+      // THE RESET THAT WAS MISSING. Until 2026-09-10 the accumulator was cleared only by a
+      // `.completed`, so an utterance whose completion never arrived bled into the next one. A new
+      // utterance starts empty here whatever happened to the last one.
+      caption.reset();
+      setState("listening");
+      hearBegin(event?.item_id);
+      return undefined;
+    }
+    if (type === "input_audio_buffer.speech_stopped") { session.hops.t0 = now(); setState("thinking"); return undefined; }
     if (type === "conversation.item.input_audio_transcription.updated" || type === "conversation.item.input_audio_transcription.delta") {
       // REPLACE-WHOLE on both vendors. Append-the-delta writes the sentence N times on xAI.
-      browser?.sendJson({ t: "heard", text: caption.apply(event) });
+      const text = caption.apply(event);
+      browser?.sendJson({ t: "heard", text });
+      hear(text, { final: false, itemId: event?.item_id ?? caption.itemId });
       return undefined;
     }
     if (type === "conversation.item.input_audio_transcription.completed") {
       const text = caption.complete(event);
+      const itemId = event?.item_id ?? caption.itemId;
       caption.reset();
       browser?.sendJson({ t: "heard", text });
+      // The transcription model's own last word. It is a `hear` and NOT the end of the turn: this
+      // and the tool call race, and dissolving here would flicker the panel back when the confirmed
+      // text arrives a moment later.
+      hear(text, { final: true, itemId });
+      return undefined;
+    }
+    if (type === "conversation.item.input_audio_transcription.failed") {
+      // Handled nowhere in this file until 2026-09-10, which is how one utterance came to bleed into
+      // the next. The words are gone; the turn is not left open waiting for them.
+      log(`voice transcription failed: ${String(event?.error?.message ?? event?.error?.code ?? "").slice(0, 160)}`);
+      caption.reset();
+      hearEnd("no-words");
       return undefined;
     }
     if (type === "response.created") { responseInFlight = true; return undefined; }
@@ -1544,7 +1761,7 @@ export function makeVoiceSession({
       const audio = Buffer.from(String(event.delta ?? ""), "base64");
       if (audio.byteLength === 0) return undefined;
       meter.audioOutBytes += audio.byteLength;
-      if (!gate.holding()) { speakId += 1; browser?.sendJson({ t: "speak-begin", id: speakId }); browser?.state("speaking"); }
+      if (!gate.holding()) { speakId += 1; browser?.sendJson({ t: "speak-begin", id: speakId }); setState("speaking"); }
       // Booked from BYTES: the model sends audio far faster than it is spoken, so the room is loud
       // long after the queue is empty, and that window is exactly when the mic must stay shut.
       gate.book(audio.byteLength);
@@ -1573,12 +1790,17 @@ export function makeVoiceSession({
           void say("The voice service is rate limiting us. Give it a moment and say that again.");
         }
       }
-      if (!gate.holding()) browser?.state("listening");
+      if (!gate.holding()) setState("listening");
     }
-    for (const toolCall of toolCallsOf(event)) {
+    const calls = toolCallsOf(event);
+    for (const toolCall of calls) {
       // ONE call_id, dispatched once, on whichever of the three surfaces carried it first.
       if (dedupe.claim(toolCall.callId)) void dispatch(toolCall).catch((error) => log(`voice dispatch failed: ${error?.message ?? error}`));
     }
+    // A finished response that asked Titan nothing means the model answered out of its own head,
+    // which the instructions forbid but cannot prevent. No tool call, no row, so the turn is closed
+    // here rather than leaving the person's words sitting over the conversation forever.
+    if (type === "response.done" && !calls.some((toolCall) => toolCall.name === "titan")) hearEnd("no-answer");
     return undefined;
   };
 
@@ -1588,7 +1810,9 @@ export function makeVoiceSession({
     if (tick != null) clearInterval(tick);
     if (dialWatch != null) clearTimeout(dialWatch);
     if (sentence.length > 0) browser?.note(sentence, condition);
-    browser?.state("off");
+    // The line is going down with words on screen, so the panel is dissolved before the socket is.
+    hearEnd("line-closed");
+    setState("off");
     browser?.bye(reason, 1000, condition);
     try { provider?.close(1000, "done"); } catch { /* already gone */ }
     await ledger.settle(rowNow("closed", reason)).catch((error) => log(`voice could not settle the ledger: ${error?.message ?? error}`));
@@ -1668,7 +1892,7 @@ export function makeVoiceSession({
         sessionCapSeconds, dayRemainingSeconds,
         frameBytes: FRAME_BYTES, rate: AUDIO_RATE, echoTailMs: ECHO_TAIL_MS,
       });
-      browser.state("listening");
+      setState("listening");
 
       // ARMED BEFORE THE DIAL, cleared on the provider's own `open`. A failed upgrade does not close
       // and a black hole says nothing at all, so this is the only thing between a wrong key and half
@@ -1773,6 +1997,11 @@ export function makeVoiceEdge({
   // arrives is an assertion rather than an eight second wall-clock wait.
   dialWatchdogMs = DIAL_WATCHDOG_MS,
   newSessionId = () => `vs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+  // KEYS-1. The operator's own keys, read from the control plane and kept in memory by
+  // ui/relay-secrets.mjs. Null is a console with no control plane -- every single-box install, every
+  // gate on a laptop, grok-bot-local-vm -- and it means "there is only the file", which is exactly
+  // what this edge did before this existed.
+  secrets = null,
 }) {
   const settingsFile = t.voiceSettingsFile;
   const ledgerFile = t.voiceLedgerFile;
@@ -1789,6 +2018,26 @@ export function makeVoiceEdge({
     for (const one of [...sessions]) if (one.stopped) sessions.delete(one);
     return sessions.size;
   };
+
+  /**
+   * KEYS-1. WHICH KEY DIALS, and the order is the whole of the migration.
+   *
+   * The control plane first, this workspace's own file second, nothing third. No code path writes a
+   * file value up to the control plane: that would be a new write path for a secret and would undo
+   * write-only-from-the-console. The fallback IS the migration, so mail and voice keep working on a
+   * relay whose control plane holds nothing until the operator pastes each key once.
+   *
+   * Picked by THIS WORKSPACE'S OWN SERVICE, never by whichever key happens to exist. A workspace set
+   * to a service the operator has no key for answers "" and gets the plain refusal, because dialling
+   * one vendor with another vendor's credential is a 401 that reads to a person as a broken product.
+   */
+  async function keyFor(settings) {
+    const fromControlPlane = secrets == null
+      ? ""
+      : await secrets.value(voiceKeyName(settings.vendor)).catch(() => "");
+    if (String(fromControlPlane ?? "").length > 0) return String(fromControlPlane);
+    return String(settings.apiKey ?? "");
+  }
 
   const ledgerFor = (sessionId) => ({
     sessionId,
@@ -1812,6 +2061,10 @@ export function makeVoiceEdge({
         .map((a) => ({ id: String(a.id), name: String(a.name ?? "") }));
       return voiceSettingsShape(settings, {
         agents,
+        // KEYS-1. Whether there is a key for THIS workspace's service at all, wherever it lives.
+        // This is what the console's Talking switch reads, and it is asked through the reader's
+        // cached copy, so a settings GET costs no network after the relay's first read.
+        available: (await keyFor(settings)).length > 0,
         sessionCapSeconds: caps.sessionCapSeconds,
         dayCapSeconds: caps.dayCapSeconds,
         dayUsedSeconds: daySecondsUsed(rows, now(), { openCapSeconds: caps.sessionCapSeconds }),
@@ -1842,6 +2095,21 @@ export function makeVoiceEdge({
       res.writeHead(400, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: "the body must be JSON" }));
     }
+    // KEYS-1. THE DOOR CLOSES BEHIND THE FIELD, not just in front of it.
+    //
+    // Taking the key input off the customer's screen is not enough on its own: mergeVoiceSettings
+    // accepts `apiKey` from any signed-in session, so a customer with a browser console could still
+    // write one into their own workspace and have the relay dial with it. It is refused here, in
+    // words, for every workspace but the operator's own.
+    //
+    // REFUSED AND NOT SILENTLY DROPPED. A 200 that quietly ignores a field a caller sent is the
+    // failure APPS-DOC-1 is a row about: the caller believes it worked and nothing anywhere says
+    // otherwise. Refusing also keeps grok-bot-local-vm working, where there is no control plane and
+    // every session is the operator's, so the operator's own file stays writable.
+    if (typeof patch?.apiKey === "string" && t.operator !== true) {
+      res.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify({ error: "not_yours", message: "Keys the product uses are set by your operator." }));
+    }
     const next = mergeVoiceSettings(await readVoiceSettings(settingsFile), patch);
     t.ensureDir();
     try { await writeVoiceSettings(next, { file: settingsFile, ownLikeParent }); }
@@ -1867,8 +2135,26 @@ export function makeVoiceEdge({
     if (head != null && head.length > 0) socket.unshift(head);
     if (origin === false) return acceptAndSay(socket, key, SENTENCE.badOrigin, "a cross-origin upgrade");
 
-    const settings = await readVoiceSettings(settingsFile);
-    if (settings.apiKey.length === 0) return acceptAndSay(socket, key, SENTENCE.noKey, "no realtime key", "no-key");
+    const onFile = await readVoiceSettings(settingsFile);
+    // KEYS-1. The key that will actually dial, resolved once: the operator's own from the control
+    // plane, else this workspace's file. Everything below -- the refusal, the session, the wire --
+    // reads this one object, so there is no second place the choice could be made differently.
+    const settings = { ...onFile, apiKey: await keyFor(onFile) };
+    if (settings.apiKey.length === 0) {
+      // NO KEY AND CANNOT SEE ARE DIFFERENT SENTENCES. `blind` is true only when there IS a control
+      // plane, a read has been attempted, the last one did not get through, and nothing is cached
+      // from one that did -- so a relay holding a good copy of a control plane that has since gone
+      // down never lands here, and a deployment with no control plane at all never does either.
+      //
+      // It matters because the two are acted on by different people. "Voice is not switched on for
+      // this workspace yet" sends the operator to paste a key; if the key is already pasted and this
+      // relay simply cannot reach the control plane for a minute, that sends him to do a thing he
+      // has already done over a fault that clears itself. `busy` says try again, which is true.
+      if (secrets != null && secrets.blind === true) {
+        return acceptAndSay(socket, key, SENTENCE.busy, "the keys the product uses could not be read", "no-key");
+      }
+      return acceptAndSay(socket, key, SENTENCE.noKey, "no realtime key", "no-key");
+    }
     if (!settings.enabled) return acceptAndSay(socket, key, SENTENCE.notEnabled, "voice is switched off");
 
     // ONE CALL AT A TIME FOR A WORKSPACE, and the reservation is taken HERE, in the same tick as the
@@ -1995,17 +2281,23 @@ const voiceEdges = new Map();
  * cache shape and the same invalidation mailEdgeFor uses, so a tenant re-provisioned under a live
  * relay does not keep writing to a path that is no longer theirs.
  */
-export function voiceEdgeFor(t, { ownLikeParent = null, log = () => {}, relayBase = "", relayToken = "", WebSocketImpl = null, providerUrl = "" } = {}) {
+export function voiceEdgeFor(t, { ownLikeParent = null, log = () => {}, relayBase = "", relayToken = "", WebSocketImpl = null, providerUrl = "", secrets = null, policy = null } = {}) {
   const found = voiceEdges.get(t.slug);
   if (found != null && found.settingsFile === t.voiceSettingsFile) return found.edge;
   const edge = makeVoiceEdge({
     t,
     call: makeGatewayCall(t),
-    policy: makeVoicePolicy({ relayBase, relayToken, log }),
+    // ONE policy for the relay when the caller has one (ui/server.mjs builds it, so the Usage row on
+    // GET /me and this workspace's own upgrade read the same sixty second cache), and one of this
+    // edge's own when nobody handed one down, which is how every test builds an edge.
+    policy: policy ?? makeVoicePolicy({ relayBase, relayToken, log }),
     ownLikeParent,
     log,
     WebSocketImpl,
     providerUrl,
+    // KEYS-1. ONE reader for the whole relay, built in ui/server.mjs and handed down, so every
+    // workspace's edge reads the same cached copy and a fleet of tenants is not a fleet of timers.
+    secrets,
   });
   voiceEdges.set(t.slug, { settingsFile: t.voiceSettingsFile, edge });
   return edge;

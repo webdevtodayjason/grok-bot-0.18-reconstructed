@@ -82,7 +82,10 @@ import { allDockerNames, createTenantPurgeRoute, removeTreeFs, statTreeFs } from
 // audio socket. Everything else that would have had to live in this file -- the per-tenant edge
 // cache, the gateway caller, the caps, the ledger, the RFC 6455 codec -- is in there, because three
 // waves share this file and every line here is a surgical stage after a rebase.
-import { VOICE_SOCKET_PATH, originAllowed, voiceEdgeFor } from "./voice-edge.mjs";
+import { VOICE_SOCKET_PATH, daySecondsUsed, makeVoicePolicy, originAllowed, readVoiceLedger, voiceEdgeFor } from "./voice-edge.mjs";
+// KEYS-1. The relay's copy of the keys the product uses, read from the control plane and kept in
+// memory. One reader for the whole process; the file it falls back to is each workspace's own.
+import { createSecretsReader } from "./relay-secrets.mjs";
 import {
   CODE_DEFAULTS, CODE_SWEEP_MS, appendTaskRow as appendCodeTask, createCodeEdge,
   readTaskRows as readCodeTasks,
@@ -644,12 +647,12 @@ function buildContext(entry) {
     // volume, so a customer's Mail card reads both out of their own state directory and nobody
     // else's.
     mailSentLedgerFile: entry.operator ? MAIL_SENT_LEDGER_FILE : file("mail-sent.jsonl"),
-    // VOICE-1. The realtime key is a PER-WORKSPACE secret and it lives here, in the tenant's own
-    // state directory, beside the mail pair and for the same reason: it is written through the
-    // ordinary console session, it is never read back out of any route, and it belongs to one
-    // customer rather than to the deployment. The super-admin Providers panel could not hold it --
-    // that panel is global, its keys live at LiteLLM and read back masked, and there is no
-    // per-workspace provider row on it at all.
+    // VOICE-1, AMENDED BY KEYS-1. This file still exists and is still read, but it is now the
+    // FALLBACK rather than the home: the realtime key is the operator's, pasted once at the super
+    // admin console, held by the control plane and read into this process's memory. A workspace's own
+    // voice.json is what dials until the operator has pasted one, which is what makes that migration
+    // a single manual step with no window in which anything is broken. Only the operator's own
+    // workspace may still write one; every customer's save carrying a key is refused in words.
     voiceSettingsFile: entry.operator ? stateFile("voice.json", HERE) : file("voice.json"),
     // And what the minutes were spent on, on the same volume, so a workspace's caps are read from
     // its own ledger and nobody else's.
@@ -1217,6 +1220,10 @@ function mintAccountSession(req, res, payload, location) {
       nowMs: now, lifetimeMs,
       tenant: String(payload.tenant ?? ""),
       sub: String(payload.sub ?? ""),
+      // SETTINGS-2. The third claim, off the same verified token, for the same reason `sub` is
+      // here: the settings surface draws "Signed in as <address>" and this relay holds no account
+      // table to look one up in. Nothing decides anything on it -- see ui/auth.mjs.
+      email: String(payload.email ?? ""),
     }),
     { maxAgeSeconds: lifetimeMs / 1000, secure: secureOf(req) });
   res.writeHead(302, { location, "set-cookie": cookie, "cache-control": "no-store" });
@@ -1478,6 +1485,85 @@ function handleDeviceRevoke(req, res, t, sub, id) {
   console.log(`device ${id} revoked on ${t.slug}`);
   res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
   return res.end(JSON.stringify({ revoked: id, tenant: t.slug }));
+}
+
+// ---- GET /me, below the gate (SETTINGS-2) ------------------------------------------------------
+//
+// WHAT THIS IS FOR. The settings surface has to know two kinds of thing about the person reading it:
+// who they are, and whether they are the OPERATOR. The second is the important one. Everything
+// technical -- the endpoint picker, the provider groups, the job bus, the mail card, the host update
+// and reset -- lives in one Operator section that a customer must never see, and the console decides
+// whether to draw it from this one field.
+//
+// IT IS DERIVED HERE AND NOT GUESSED THERE. A page heuristic ("the job bus adapter answered, so this
+// must be the operator") is a customer one deploy away from the operator's rows. The relay already
+// resolves the tenant on every request; `tenantOf(req) === OPERATOR_SLUG` is the same answer every
+// other route below the gate acts on, and the console fails CLOSED when this route cannot be read.
+//
+// EVERY FIELD IS OMITTED RATHER THAN INVENTED. That is the PROXY-1 precedent and it is the whole of
+// the contract with the console: a row whose fact is absent is not drawn, and a zero that means "we
+// could not measure it" is worse than a missing row, because a person acts on a zero.
+//
+// TWO FIELDS ARE ABSENT ON PURPOSE TODAY, and both are honest absences rather than oversights:
+//
+//   person.email  The signed-in person's address is verified by the control plane at sign-in and is
+//                 in the token this relay exchanges for its own cookie -- and mintAccountSession
+//                 keeps only `tenant` and `sub` from it. Carrying the address would mean a new claim
+//                 in ui/auth.mjs's session cookie, which sits in the pre-login band another item is
+//                 finishing this week. So the Account block draws a name and no address until that
+//                 claim lands. Filed as ME-EMAIL-1.
+//   plan          Nothing on this relay names a plan. The registry carries the MODELS a plan
+//                 includes (PROXY-1) and no name for the plan itself, and the control plane, which
+//                 knows, has no route that hands one over. A made-up name on a billing screen is
+//                 the worst possible place for one. Filed as ME-PLAN-1.
+async function handleMe(req, res, t) {
+  const answer = {
+    workspace: { slug: t.slug, name: t.name || t.slug },
+    operator: tenantOf(req) === OPERATOR_SLUG,
+  };
+
+  // Minutes of spoken conversation today, out of this workspace's OWN ledger and its own caps.
+  // Both halves or neither: a bar with a number and no ceiling is a bar that cannot be drawn.
+  try {
+    const caps = await voicePolicy.for(t.slug);
+    const used = daySecondsUsed(await readVoiceLedger(t.voiceLedgerFile), Date.now(), { openCapSeconds: caps.sessionCapSeconds });
+    if (Number(caps.dayCapSeconds) > 0) {
+      answer.voiceMinutesToday = Math.round(Math.max(0, used) / 60);
+      answer.voiceMinutesCap = Math.round(Number(caps.dayCapSeconds) / 60);
+    }
+  } catch { /* no ledger yet, or no control plane to read a cap from: the row is not drawn */ }
+
+  // Minutes of cloud coding this calendar month, out of the same file the Computer strip reads, so
+  // the two can never disagree. The month is UTC, which is the same clock the voice day cap resets
+  // on; a person reading both on one screen should not be reading two midnights.
+  try {
+    const file = codeTasksFile(t.slug);
+    const rows = file.length === 0 ? [] : await readCodeTasks(file);
+    const nowMs = Date.now();
+    const monthStart = Date.UTC(new Date(nowMs).getUTCFullYear(), new Date(nowMs).getUTCMonth(), 1);
+    let seconds = 0;
+    for (const row of rows) {
+      const startedAt = Number(row?.startedAt ?? 0);
+      if (!Number.isFinite(startedAt) || startedAt < monthStart) continue;
+      const endedAt = Number(row?.endedAt ?? 0) > 0 ? Number(row.endedAt) : nowMs;
+      seconds += Math.max(0, (endedAt - startedAt) / 1000);
+    }
+    // Drawn only when this workspace has actually run one. A zero on a screen reads as "you have a
+    // coding allowance and have used none of it", which is not what an empty file means.
+    if (rows.length > 0) answer.codingMinutesThisMonth = Math.round(seconds / 60);
+  } catch { /* no task file: the row is not drawn */ }
+
+  // How many bots this workspace may have, asked of the BOX rather than read off a file, because the
+  // file is what a box was told and the host is what it resolved. A box that is not answering leaves
+  // the row out rather than reporting a ceiling of zero.
+  const capacity = await readAgentCapacity(t).catch(() => ({ ok: false }));
+  if (capacity.ok) {
+    answer.botCap = capacity.maxAgents;
+    if (capacity.bots != null) answer.botsInUse = capacity.bots;
+  }
+
+  res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+  return res.end(JSON.stringify(answer));
 }
 
 // ---- what the control plane asks this relay for (ADMIN-1) --------------------------------------
@@ -2650,21 +2736,42 @@ async function handleJobBusConsole(t, req, res, url) {
   return fail(res, 404, `not found: ${url.pathname}`);
 }
 
+// ---- KEYS-1: the keys the PRODUCT uses ---------------------------------------------------------
+//
+// One reader for the whole relay, started at boot beside the registry, memory only. It answers {}
+// with no control plane, which is every single-box install and every gate on a laptop, and that is
+// what makes every fallback below behave exactly as this relay did before this existed.
+//
+// The order everywhere it is consulted is: the control plane first, then the workspace's own file,
+// then nothing. There is deliberately no code anywhere that pushes a file value UP -- that would be
+// a new write path for a secret and would undo write-only-from-the-console. The fallback IS the
+// migration. docs/MAIL.md and docs/VOICE.md both say so, so nobody writes the push later.
+const secretsReader = createSecretsReader({ log: (line) => console.log(line) });
+
 // ---- voice (VOICE-1, docs/VOICE.md) -----------------------------------------------------------
 // What every voice edge on this relay shares. The caps come from the control plane behind the
 // credential this relay already holds: per-workspace overrides are deliberately NOT writable from a
 // console, because a customer raising their own cap is the bypass. With no control plane, which is
 // every developer box, the relay's own constants answer instead. Everything else voice needs is in
 // ui/voice-edge.mjs, so this file gains one import, two context fields, one route and one branch.
+//
+// ONE policy for the whole relay, rather than one per tenant edge. It is per-slug inside with its own
+// sixty second cache, so sharing it means the Usage row on GET /me and the workspace's own upgrade
+// read the same caps rather than racing two caches to two answers.
+const voicePolicy = makeVoicePolicy({ relayBase: RELAY?.cpUrl ?? "", relayToken: RELAY?.relayToken ?? "", log: (line) => console.log(line) });
+
 const voiceDeps = {
+  policy: voicePolicy,
   ownLikeParent,
   log: (line) => console.log(line),
   relayBase: RELAY?.cpUrl ?? "",
   relayToken: RELAY?.relayToken ?? "",
+  secrets: secretsReader,
   // The ONE override, and it is an ADDRESS, never a key: GROK_BOT_MAIL_API_BASE is the same shape for
   // mail (ui/mail-edge.mjs:588), and scripts/verify-voice.mjs points a spawned relay at its own stub
-  // vendor with it. A realtime KEY is never an environment variable on either side of this -- it lives
-  // in the workspace's own voice.json and reaches the vendor as a header.
+  // vendor with it. A realtime KEY is never an environment variable on either side of this -- since
+  // KEYS-1 it is the operator's, held by the control plane, read into memory here, and it reaches the
+  // vendor as a header. A workspace's own voice.json is the fallback until the operator pastes one.
   providerUrl: String(process.env.GROK_BOT_VOICE_WS_BASE ?? "").trim(),
 };
 
@@ -2723,6 +2830,16 @@ function mailEdgeFor(t) {
     // and their own domain routes exactly as it always did.
     ownsDirectory: () => t.slug === mailDirectoryOwnerSlug(),
     ownSlug: t.slug,
+    // KEYS-1. Only the operator's own workspace may still write the two secrets on this card, and
+    // the sending one is on its way out of files entirely. Every customer's save that carries either
+    // is refused in words.
+    isOperator: () => t.operator === true,
+    // KEYS-1. Whether a sending key exists somewhere other than this workspace's own file, which is
+    // the control plane holding the operator's. Without it the Email card on a workspace whose key
+    // has moved draws "not set" while its mail sends perfectly, and the first screenshot of a
+    // working instance is a screenshot of an apparently broken one. The cached copy, so this costs
+    // no network: `current()` never fetches.
+    keyElsewhere: () => String(secretsReader.current()["keys.mail.send"] ?? "").length > 0,
     log: (line) => console.log(line),
   });
   mailEdges.set(t.slug, { settingsFile: t.mailSettingsFile, edge });
@@ -3204,9 +3321,19 @@ function mailSendRoute() {
     // THE DIRECTORY OWNER'S settings and never the caller's. mailEdgeFor is per tenant and a
     // customer's own mail.json has an empty apiKey, so a route written the obvious way would find
     // no key on every customer and the bug would read as "Resend refused".
-    ownerSettings: () => {
+    // KEYS-1 AMENDS THIS, and this is the migration seam. The order is: the operator's own key at
+    // the control plane first, then the directory owner's file, then nothing. Nothing is written
+    // back the other way. Measured on the R750 2026-09-10, the directory owner's mail.json is the
+    // only key-bearing file on the machine, so until the operator pastes the sending key at the
+    // admin console this reads exactly what it read before and nobody's mail stops.
+    ownerSettings: async () => {
       const owner = contextOf(mailDirectoryOwnerSlug());
-      return owner == null ? Promise.resolve(null) : readMailSettings(owner.mailSettingsFile);
+      const onFile = owner == null ? null : await readMailSettings(owner.mailSettingsFile);
+      const fromControlPlane = await secretsReader.value("keys.mail.send").catch(() => "");
+      if (String(fromControlPlane ?? "").length === 0) return onFile;
+      // The rest of the owner's settings still come from the file -- the domain, the From name, the
+      // routes. Only the key is the control plane's.
+      return { ...(onFile ?? {}), apiKey: String(fromControlPlane) };
     },
     directoryDomain: () => mailDirectoryDomain(),
     noSend: (slug) => mailNoSendSlugs().has(String(slug ?? "")),
@@ -3219,6 +3346,11 @@ function mailSendRoute() {
       t.ensureDir();
       await appendMailLedger(row, { file: t.mailSentLedgerFile, ownLikeParent });
     },
+    // KEYS-1. "Nobody pasted a sending key" and "this relay cannot see the control plane" are the
+    // same empty string by the time ownerSettings answers, and they are not the same event. See the
+    // refusal in ui/mail-edge.mjs: the first settles `no_key` and stays until the operator acts, the
+    // second settles `key_unreachable` and clears on its own.
+    keysBlind: () => secretsReader.blind === true,
     log: (line) => console.log(line),
   });
   return mailSendRouteBuilt;
@@ -3935,9 +4067,40 @@ const server = createServer(async (req, res) => {
     }
     // Whether a password is configured is not a secret: the login page announces it to anyone who
     // asks for it. The console reads this to decide whether to draw a Log out control.
+    //
+    // SETTINGS-2 grew three fields on it, and the rule is that they are answered ONLY to a request
+    // that is already signed in. To anyone else this route says exactly what it always said, which
+    // is the two booleans, because it sits above the gate and answers strangers.
+    //
+    //   operator   WHO GETS THE OPERATOR SECTION, and the relay decides it rather than the page.
+    //              It is tenantOf's own answer, so it is the same rule the rest of this file runs
+    //              on: no control plane, no tenant claim, or a session minted by the INSTANCE
+    //              password. A console that inferred this from a slug or a hostname would be a
+    //              console one customer could talk into drawing the operator's endpoints.
+    //   workspace  the slug and the display name, so the account strip at the foot of the roster
+    //              can name what you are signed in to without a second request.
+    //   person     the address on the session, or null. Null is the instance-password door, which
+    //              names nobody on purpose, and an old cookie minted before the claim existed.
+    //
+    // An absent field means false or null and the page must read it that way; that is what keeps a
+    // console served by an older relay from drawing an operator section it should not have.
     if (req.method === "GET" && url.pathname === "/auth/state") {
+      const authenticated = isAuthorized(req);
+      const answer = { required: AUTH != null, authenticated };
+      if (authenticated) {
+        const slug = tenantOf(req);
+        // registry.get and NOT contextOf, which answers null for a workspace whose box is not
+        // running. Naming the workspace you are signed in to does not need a box to be up, and a
+        // strip that loses its own name the moment a box restarts is the kind of thing a person
+        // reads as being signed out.
+        const entry = slug == null ? null : registry.get(slug);
+        answer.operator = slug === OPERATOR_SLUG;
+        answer.workspace = entry == null ? null : { slug: String(entry.slug), name: String(entry.name || entry.slug) };
+        const email = String(sessionPayload(req)?.email ?? "").trim();
+        answer.person = email.length > 0 ? { email } : null;
+      }
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      return res.end(JSON.stringify({ required: AUTH != null, authenticated: isAuthorized(req) }));
+      return res.end(JSON.stringify(answer));
     }
     // STORE-1. The token door, beside /auth/state and above the login gate for the same reason the
     // preflight is: the caller minting a token has no credential this console would recognise yet.
@@ -4006,6 +4169,12 @@ const server = createServer(async (req, res) => {
       if (req.method === "GET" && id === undefined) return handleDeviceList(req, res, t, sub);
       if (req.method === "DELETE" && id !== undefined) return handleDeviceRevoke(req, res, t, sub, decodeURIComponent(id));
       return fail(res, 405, id === undefined ? "GET" : "DELETE");
+    }
+    // SETTINGS-2. Who this is, for the settings surface. Below the gate, deliberately NOT beside
+    // /auth/state, which sits in the pre-login band another item is finishing this week.
+    if (url.pathname === "/me") {
+      if (req.method !== "GET") return fail(res, 405, "GET");
+      return await handleMe(req, res, t);
     }
     // PUSH-1, through the hook seam, so this file carries the dispatch and ui/push-edge.mjs carries
     // every rule. With no push-edge.mjs this falls through to the 404 at the bottom, which is what a
@@ -4529,13 +4698,17 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/job-bus/status" || url.pathname.startsWith("/job-bus/token")) {
       return await handleJobBusConsole(t, req, res, url);
     }
-    // The console's half of agent email: the domain, the addresses, the webhook URL and the two
-    // write-only secrets. Behind the session like every other console route, and it never reads a
-    // secret back out. MAIL-1.
+    // The console's half of agent email: the domain, the addresses and the webhook URL. Behind the
+    // session like every other console route, and it never reads a secret back out. MAIL-1.
+    //
+    // KEYS-1. The two secrets are the OPERATOR's: a save carrying `apiKey` or `webhookSecret` from
+    // any workspace but his own is refused 400 "not_yours" in ui/mail-edge.mjs, because removing the
+    // fields from the screen would still leave a customer with a browser console able to write one.
     if (url.pathname === "/mail/settings") return await mailEdgeFor(t).handleSettings(req, res);
-    // VOICE-1. The Voice card's own door: the vendor, which bot the voice talks to, the caps it is
-    // under, what it has spent today, and the key as a write-only field. Behind the session like
-    // every other console route, and it reports the key as a boolean and never as a value.
+    // VOICE-1. The workspace's own voice door: the service, which bot the voice talks to, the caps it
+    // is under, what it has spent today, and whether talking is available at all. Behind the session
+    // like every other console route; it reports the key as a boolean and never as a value, and since
+    // KEYS-1 a customer's save carrying one is refused rather than written.
     if (url.pathname === "/voice/settings") return await voiceEdgeFor(t, voiceDeps).handleSettings(req, res);
     // The console's half of coding tasks: what is running, a Stop, and the limits in plain words.
     // Behind the session like every other console route, scoped to the session's own tenant, and it
@@ -4635,6 +4808,11 @@ if (AUTH == null && !isLoopbackHost(BIND)) {
 // operator alone, which is exactly what it did before any of this existed.
 await registry.refresh().catch((error) => console.log(`reg  first read failed: ${error?.message ?? error}`));
 registry.start();
+// KEYS-1. The keys the product uses, read once at boot and every five minutes after, on an unref'd
+// timer so a gate's relay still exits. NOT awaited: a control plane that is slow must not hold the
+// first customer at the door, and the first press that needs a key waits for one read of its own.
+// With no control plane this starts nothing at all and returns immediately.
+secretsReader.start();
 // The hook seam (ui/relay-hooks.mjs), loaded ONCE here and awaited into boot, before the first
 // request. A hook that was sometimes present and sometimes not would be the worst of both halves, and
 // loading it lazily on the first /api call would put an import on a request path.

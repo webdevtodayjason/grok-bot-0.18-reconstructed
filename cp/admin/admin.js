@@ -1593,6 +1593,11 @@
     // and the page file is untouched. It renders once per loadSystem and reads its state from the
     // same answer every other card on this panel comes from.
     await drawPushDoors(host);
+    // KEYS-1. The keys the PRODUCT uses, under the two push credentials, because they are the same
+    // kind of fact: "can this deployment do the thing it claims". Drawn from here rather than written
+    // into cp/admin/index.html for exactly the reason written over drawPushDoors -- the page file is
+    // shared and this block is built in script so nothing in the rail or any other panel is touched.
+    await drawProductKeys(host);
   }
 
   // ---- PUSH-1: the two push credentials ---------------------------------------------------------
@@ -1709,6 +1714,68 @@
   }
 
   // ---- end PUSH-1 ------------------------------------------------------------------------------
+
+  // ---- KEYS-1: the keys the product uses -------------------------------------------------------
+  //
+  // THREE PASTE FORMS, and the reason they are here at all is a thing Jason said on 2026-09-10,
+  // looking at a customer's own settings panel: "A user is never going to put a resend key in. That's
+  // on the backend." Until this block, two vendor keys were typed by a CUSTOMER into their own
+  // console -- the realtime voice key and the mail sending key. They are the operator's now. They are
+  // pasted here once, stored write-only, and read by one thing: the console relay, behind its own
+  // credential, in memory, never into a box.
+  //
+  // The shape is pushPasteForm's, unchanged, which is the same shape the Feedback panel's repository
+  // token uses, because they are the same act and a second shape for one act is how one of them grows
+  // a habit the other does not have. It clears the field on the way OUT, so a failed request leaves
+  // nothing behind either, and nothing on this page ever writes a value back into a field.
+  //
+  // VENDOR NAMES ARE ALLOWED HERE AND NOWHERE A CUSTOMER CAN READ. This is the operator's screen and
+  // he has to know which account a key comes from.
+  //
+  // NOT HERE: the inbound mail signing secret. It looks like the fourth member of this set and it is
+  // not -- it is a routing discriminator, not a vendor credential (when two workspaces claim one mail
+  // domain the one whose secret verifies THIS body gets the message), so one global value in front of
+  // every edge would let the first claimant read another customer's mail. It stays on each
+  // workspace's own file. cp/secrets.mjs and docs/MAIL.md both say so.
+
+  const KEYS_BLOCK_ID = "productKeys";
+
+  async function drawProductKeys(host) {
+    let door;
+    try { door = await api("GET", "/v1/keys"); }
+    catch (error) {
+      host.appendChild(card("Keys the product uses", null, `the keys could not be read: ${String(error.message)}`));
+      return;
+    }
+    const old = document.getElementById(KEYS_BLOCK_ID);
+    if (old) old.remove();
+    const block = el("section", "pushDoors");
+    block.id = KEYS_BLOCK_ID;
+    block.appendChild(el("h3", null, "Keys the product uses"));
+    block.appendChild(el("p", "quiet", "Paste each one once. They are stored write-only: this page never shows one again,"
+      + " and the only thing that reads them is the product itself. No customer ever sees a key field."
+      + " Each is checked with the vendor before it is stored, and a key the vendor refuses is not kept."));
+
+    for (const row of door.keys ?? []) {
+      block.appendChild(el("h4", null, String(row.label)));
+      block.appendChild(el("p", "quiet", row.stored
+        ? `Stored ${Number(row.at) > 0 ? when(new Date(Number(row.at)).toISOString()) : "at some point"}${row.actor ? ` by ${row.actor}` : ""}. It is ${row.evidence}, and nothing here can show it. Paste a new one to replace it.`
+        : `Not set. ${String(row.why)}`));
+      block.appendChild(pushPasteForm({
+        id: String(row.name).replace(/[^a-z0-9]+/gi, "-"),
+        submit: "Check it with the vendor and store it",
+        fields: [{ name: "value", placeholder: String(row.placeholder), secret: true }],
+        why: "The vendor is asked one cheap authenticated question before anything is stored. The key"
+          + " leaves this service only to the console relay, which holds it in memory and never writes"
+          + " it beside a file or pushes it into a box.",
+        onSave: (payload) => api("POST", `/v1/keys/${encodeURIComponent(String(row.name))}`, payload),
+      }));
+    }
+
+    host.parentNode.appendChild(block);
+  }
+
+  // ---- end KEYS-1 ------------------------------------------------------------------------------
 
   // ---- panel 5: spend --------------------------------------------------------------------------
 
@@ -2917,6 +2984,14 @@
         note.push(String(answer.db.why));
       }
     }
+    // WHERE THE VOICE KEY WENT, said on the panel somebody would look for it on. This page used to
+    // carry two rows called "xAI realtime (voice)" and "OpenAI realtime (voice)", and pasting a key
+    // on one of them answered that the vendor could not be reached -- MEASURED by Jason at 07:49 on
+    // 2026-09-10 -- because this panel proves a key by fetching the row's catalog and a realtime
+    // address is a websocket. Those rows are deleted (cp/proxy.mjs says why). One line here so the
+    // operator who goes looking is sent to the block that does take it, rather than concluding the
+    // feature is broken.
+    note.push("the key the product talks with is under Keys the product uses, on the System health panel, not here");
     $("providersNote").textContent = note.join(" - ");
 
     const host = $("providers");

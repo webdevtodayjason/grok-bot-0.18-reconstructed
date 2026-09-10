@@ -191,9 +191,22 @@ test("a relay with no docker still serves the pages and the reads that do not ne
     assert.deepEqual(await model.json(), { model: null, endpoint: null, source: "unknown", note: NOT_AVAILABLE.liveModel });
 
     // The login state is what the console asks for first. Nothing about it touches the box.
+    //
+    // SETTINGS-2 grew three fields on it and this is the assertion that proves the growth is safe
+    // HERE, which is the case that matters: a relay with no docker at all still answers the whole
+    // shape. `operator` is true because there is no control plane and no tenant claim, `workspace`
+    // is read off the registry rather than off a context, so a box that is not running does not take
+    // the workspace's own name off its own screen, and `person` is null because the instance-password
+    // door names nobody.
     const state = await fetch(`${relay.base}/auth/state`);
     assert.equal(state.status, 200);
-    assert.deepEqual(await state.json(), { required: false, authenticated: true });
+    assert.deepEqual(await state.json(), {
+      required: false,
+      authenticated: true,
+      operator: true,
+      workspace: { slug: "titanium", name: "Titanium" },
+      person: null,
+    });
 
     // And the host bundle's version file is read off the mounted runtime directory, so the route
     // exists; with no directory configured it says so rather than reaching for docker.

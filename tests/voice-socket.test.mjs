@@ -175,12 +175,20 @@ test("the relay comes up, and the voice door answers on it", async (t) => {
       const frames = framesIn(answer.bytes);
       const note = frames.find((frame) => frame.t === "note");
       assert.ok(note != null, `no sentence came back: ${JSON.stringify(frames)}`);
-      // The person reads plain words. No vendor name, no tool name, and it says where to fix it.
-      assert.match(note.text, /no realtime voice key yet/);
-      assert.match(note.text, /Voice card in Settings/);
+      // The person reads plain words, and after KEYS-1 that means no key and no card either: the
+      // realtime key is the operator's now, so a customer told to add one is being sent to a card
+      // that no longer exists to do a thing they are not allowed to do. Jason's own wording.
+      assert.equal(note.text, "Voice is not switched on for this workspace yet.");
       for (const vendor of ["xAI", "x.ai", "OpenAI", "Grok", "grok", "realtime provider"]) {
         assert.ok(!note.text.includes(vendor), `the sentence names ${vendor}`);
       }
+      for (const banned of [/\bkey\b/i, /Voice card/i, /\bsecret\b/i, /\btoken\b/i]) {
+        assert.doesNotMatch(note.text, banned, note.text);
+      }
+      // AND IT NO LONGER SAYS "press the button again". That clause is what instructed the loop
+      // Jason got stuck in on 2026-09-10: the relay had already set the state back to off, so the
+      // second press redialled into the identical refusal with no way out of talk mode.
+      assert.doesNotMatch(note.text, /press the button again/i);
       assert.ok(frames.some((frame) => frame.t === "state" && frame.value === "off"), "the orb is told to go back to off");
       const bye = frames.find((frame) => frame.t === "bye");
       assert.ok(bye != null, "and it says goodbye rather than just stopping");
@@ -219,12 +227,12 @@ test("the relay comes up, and the voice door answers on it", async (t) => {
       // container's. Getting this wrong would refuse every real customer on the public name.
       const sameHost = await rawUpgrade(port, "/voice/socket", { cookie, origin: `http://127.0.0.1:${port}` });
       const note = framesIn(sameHost.bytes).find((frame) => frame.t === "note");
-      assert.match(note?.text ?? "", /no realtime voice key yet/, "it got past the origin check to the real refusal");
+      assert.match(note?.text ?? "", /not switched on for this workspace/, "it got past the origin check to the real refusal");
       const forwarded = await rawUpgrade(port, "/voice/socket", {
         cookie, origin: "https://console.titanium.bot", forwardedHost: "console.titanium.bot",
       });
       const forwardedNote = framesIn(forwarded.bytes).find((frame) => frame.t === "note");
-      assert.match(forwardedNote?.text ?? "", /no realtime voice key yet/, "and the forwarded host is what is compared");
+      assert.match(forwardedNote?.text ?? "", /not switched on for this workspace/, "and the forwarded host is what is compared");
     });
 
     await t.test("a key written through the door never comes back out of it", async () => {

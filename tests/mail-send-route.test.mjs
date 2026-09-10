@@ -283,6 +283,51 @@ test("the directory owner's key is the one read, and an empty one closes the row
   // The row is not left reading `sending` for ever when we know why it stopped.
   assert.equal(seen.closed.length, 1);
   assert.equal(seen.closed[0].outcome, "no_key");
+  // And the sentence a bot reads aloud points at the one person who can act, and names nothing the
+  // person cannot act on: no key, no service, no route.
+  assert.match(res.body.message, /Ask your operator/);
+  assert.equal(/key|token|secret|Resend|api\./i.test(res.body.message), false, res.body.message);
+});
+
+// KEYS-1. The SECOND way the key comes back empty, and it is not the same event.
+//
+// Since the sending key became the operator's, an empty answer from ownerSettings can mean either
+// "nobody has pasted one" or "this relay cannot see the control plane this minute". They are acted on
+// by different people: the first is a thing the operator does once, the second is broken and clears
+// itself. A row reading `no_key` over the second sends him to paste a key he already pasted.
+test("a relay that cannot read the keys the product uses settles key_unreachable, never no_key", async () => {
+  const { seen, res } = await send(GOOD, {}, {
+    ownerSettings: async () => ({ apiKey: "", domain: DOMAIN }),
+    keysBlind: () => true,
+  });
+  assert.equal(res.status, 503);
+  assert.equal(res.body.error, "key_unreachable");
+  assert.equal(seen.resend.length, 0, "nothing was sent on a key we could not read");
+  assert.equal(seen.closed.length, 1);
+  assert.equal(seen.closed[0].outcome, "key_unreachable");
+  // It says try again, because it really does clear on its own, and it does not say "you have no
+  // key" -- which is the sentence that sends the wrong person to the wrong screen.
+  assert.match(res.body.message, /Try again/);
+  assert.equal(/no key|not switched on/i.test(res.body.message), false, res.body.message);
+  assert.equal(/key|token|secret|Resend|control plane/i.test(res.body.message), false, res.body.message);
+});
+
+test("blind is only consulted when there is no key at all: a working key sends whatever the reader says", async () => {
+  // The order matters. A relay holding a good copy of a control plane that has since gone down, or a
+  // workspace whose own file still carries the key, must send exactly as it always did.
+  const { seen, res } = await send(GOOD, {}, { keysBlind: () => true });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(seen.resend.length, 1, "a send with a key in hand must not be refused over a reader's mood");
+  assert.equal(seen.closed[0].outcome, "sent");
+});
+
+test("a keysBlind that throws is read as not blind, so a fault in the reader cannot invent an outage", async () => {
+  const { seen, res } = await send(GOOD, {}, {
+    ownerSettings: async () => ({ apiKey: "", domain: DOMAIN }),
+    keysBlind: () => { throw new Error("the reader is broken"); },
+  });
+  assert.equal(res.body.error, "no_key");
+  assert.equal(seen.closed[0].outcome, "no_key");
 });
 
 test("Resend refusing is said in plain words and the row is closed as failed", async () => {
