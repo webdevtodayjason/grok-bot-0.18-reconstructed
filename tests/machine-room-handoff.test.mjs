@@ -35,10 +35,15 @@ async function loadCard() {
   const cardStart = source.indexOf("  function handoffCardMarkup(");
   assert.notEqual(cardStart, -1, "app.js no longer draws the hand-off card");
   const cardBody = source.slice(cardStart, source.indexOf("\n  }\n", cardStart) + 4);
+  // CONSOLE-ATTR-1's helper, sliced in the same way, because the card now calls it. It is the real
+  // one rather than a stub: what a shell reads off a pending hand-off is part of this card's contract.
+  const hookStart = source.indexOf("  function needsYouCardAttrs(");
+  assert.notEqual(hookStart, -1, "app.js no longer carries the needs-you card hook");
+  const hookBody = source.slice(hookStart, source.indexOf("\n  }\n", hookStart) + 4);
   const dims = source.slice(source.indexOf("  const BOX_HANDOFF_THUMB_W"), source.indexOf("  const BOX_HANDOFF_THUMB_H") + 60);
   const fn = new Function(
     "escapeHtml", "message", "skipSupported", "view",
-    `${dims}\n${stateBody}\n${cardBody}\nreturn handoffCardMarkup(message, escapeHtml, skipSupported, view);`,
+    `${dims}\n${stateBody}\n${hookBody}\n${cardBody}\nreturn handoffCardMarkup(message, escapeHtml, skipSupported, view);`,
   );
   return (message, skipSupported = true, view = {}) => fn(escapeHtml, message, skipSupported, view);
 }

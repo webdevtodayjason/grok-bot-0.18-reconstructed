@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,17 +35,33 @@ const fail = (res, status, message) => {
 };
 
 /** One push edge on a real port, with one workspace and a sub the test can change. */
-async function standUp({ sub = "person-a" } = {}) {
+async function standUp({ sub = "person-a", roster = null, tail = null, reports = null, boxAnswers = true } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "relay-push-"));
   const t = { slug: "demo", name: "demo", file: (name) => path.join(dir, name), ensureDir: () => {} };
   const subRef = { value: sub };
+  const sent = [];
   const handler = pushRoutes({
     readBody, fail,
     tenants: () => [t],
     contextOf: () => t,
     subOf: () => subRef.value,
-    gatewayCall: async () => ({ status: 200, text: "{}", type: "application/json" }),
-    senderFor: () => ({ async send() { return { ok: true, status: 200 }; } }),
+    // A box stands in, because the two routes a shell reads are the ones that project a real
+    // transcript. `{}` for everything is the default, which is what an older host answers.
+    gatewayCall: async (_t, command) => {
+      if (!boxAnswers) return { status: 0, text: "", type: "" };
+      const body = command === "listAgents" ? (roster ?? {})
+        : command === "listProblemReports" ? { reports: reports?.() ?? [] }
+          : command === "getAgentTranscriptTail" ? { entries: tail?.() ?? [] }
+            : {};
+      return { status: 200, text: JSON.stringify(body), type: "application/json" };
+    },
+    // The stream's own clocks, turned down so a test is seconds rather than a minute. Production
+    // numbers are the defaults in ui/push-edge.mjs and are printed in docs/APPS.md.
+    streamDebounceMs: 25,
+    streamMinAgeMs: 50,
+    streamRefreshMs: 150,
+    streamHeartbeatMs: 60_000,
+    senderFor: () => ({ async send(row) { sent.push(row); return { ok: true, status: 200 }; } }),
     log: () => {},
   });
   const server = createServer(async (req, res) => {
@@ -73,7 +89,54 @@ async function standUp({ sub = "person-a" } = {}) {
     const response = await fetch(`${base}${pathname}`, { method, headers: { "content-type": "application/json" }, body: raw });
     return { status: response.status, text: await response.text() };
   };
-  return { dir, t, ask, askRaw, subRef, close: () => new Promise((resolve) => server.close(resolve)), edge: handler.edge };
+  const listening = new Set();
+  /** One SSE connection, read as whole frames, with the reader closed by the caller. */
+  const listen = async (pathname = "/push/events") => {
+    const controller = new AbortController();
+    listening.add(controller);
+    const response = await fetch(`${base}${pathname}`, { headers: { accept: "text/event-stream" }, signal: controller.signal });
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let held = "";
+    const frames = [];
+    const pump = (async () => {
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          held += decoder.decode(value, { stream: true });
+          for (;;) {
+            const cut = held.indexOf("\n\n");
+            if (cut < 0) break;
+            const block = held.slice(0, cut);
+            held = held.slice(cut + 2);
+            if (block.startsWith("data: ")) frames.push(JSON.parse(block.slice("data: ".length)));
+          }
+        }
+      } catch { /* the caller hung up */ }
+    })();
+    return {
+      status: response.status,
+      headers: response.headers,
+      frames,
+      /** Waits for at least `want` frames, or gives up, so a test never hangs on one that never comes. */
+      async settle(want, ms = 3000) {
+        const stop = Date.now() + ms;
+        while (frames.length < want && Date.now() < stop) await new Promise((resolve) => setTimeout(resolve, 25));
+        return frames;
+      },
+      close() { listening.delete(controller); controller.abort(); return pump; },
+    };
+  };
+  // Every open stream first, then the edge, then the port: server.close() waits for its connections,
+  // and an SSE connection is a connection that never ends on its own.
+  const close = async () => {
+    for (const controller of [...listening]) { listening.delete(controller); controller.abort(); }
+    handler.edge.close();
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  };
+  return { dir, t, ask, askRaw, listen, sent, subRef, close, edge: handler.edge };
 }
 
 test("POST /push/devices registers, is idempotent per device, and answers no token", async (tt) => {
@@ -156,6 +219,296 @@ test("GET and PUT /push/settings are per person and name the scope", async (tt) 
   assert.equal((await relay.ask("GET", "/push/settings")).body.scope, "workspace");
 });
 
+// ---- APPS-DOC-1: the wire shape, refused by name rather than answered 200 and ignored -----------
+//
+// THE DEFECT, measured on grok-bot-local-vm 2026-09-10 against the real handler over a temp state
+// directory. The prose in docs/APPS.md named these fields without spelling them, the phone app sent
+// the prose's reading, and the route answered 200 {"message":"Saved."} -- and did not merely ignore
+// the body, it OVERWROTE with the defaults. A phone "saving quiet hours" switched the customer's
+// quiet hours OFF and turned two kinds they had muted back ON.
+
+test("the shape the document's prose implied is refused by name, and changes nothing", async (tt) => {
+  const relay = await standUp();
+  tt.after(() => relay.close());
+
+  // What the customer holds before the bad save.
+  await relay.ask("PUT", "/push/settings", { kinds: { widget: false, secret: false }, quietHours: { on: true, from: 23, to: 6 }, utcOffsetMinutes: -300 });
+
+  // The prose's reading, which used to answer 200 and write the defaults over all of that.
+  const refused = await relay.ask("PUT", "/push/settings", { enabled: true, kinds: ["widget"], quietHours: { enabled: true, fromHour: 1, toHour: 9 } });
+  assert.equal(refused.status, 400);
+  assert.equal(refused.body.error, "bad_request");
+  assert.equal(refused.body.field, "enabled", "the 400 names the first field that stopped it");
+  assert.match(refused.body.message, /no setting called "enabled"/);
+  assert.match(refused.body.message, /Nothing was stored/);
+
+  // AND THE POINT OF THE WHOLE ROW: the customer's switches are exactly as they were.
+  const after = await relay.ask("GET", "/push/settings");
+  assert.equal(after.body.settings.kinds.widget, false);
+  assert.equal(after.body.settings.kinds.secret, false);
+  assert.equal(after.body.settings.quietHours.on, true);
+  assert.equal(after.body.settings.quietHours.from, 23);
+  assert.equal(after.body.settings.utcOffsetMinutes, -300);
+
+  // A list where a map belongs, once the unknown top-level field is gone, is named too.
+  const list = await relay.ask("PUT", "/push/settings", { kinds: ["widget"] });
+  assert.equal(list.status, 400);
+  assert.equal(list.body.field, "kinds");
+  assert.match(list.body.message, /map of card kind/);
+});
+
+test("a type is strict, because loose coercion gave one body three different answers", async (tt) => {
+  const relay = await standUp();
+  tt.after(() => relay.close());
+  // MEASURED, all three in one run against the old route: kinds:{widget:"false"} stayed ON (only a
+  // strict false muted), quietHours.on:"true" read OFF (only a strict true armed), and
+  // utcOffsetMinutes:"-300" was honoured. Three outcomes, no complaint about any of them.
+  for (const [body, field] of [
+    [{ kinds: { widget: "false" } }, "kinds.widget"],
+    [{ quietHours: { on: "true" } }, "quietHours.on"],
+    [{ utcOffsetMinutes: "-300" }, "utcOffsetMinutes"],
+    [{ kinds: { mentions: false } }, "kinds.mentions"],
+    [{ quietHours: { fromHour: 1 } }, "quietHours.fromHour"],
+  ]) {
+    const answer = await relay.ask("PUT", "/push/settings", body);
+    assert.equal(answer.status, 400, `${JSON.stringify(body)} is refused`);
+    assert.equal(answer.body.field, field);
+  }
+  // An hour out of range is REFUSED rather than wrapped. clampHour is a modulo, so 99 used to store as
+  // 3 and -4 as 20: a typo silently became a different, perfectly valid quiet window.
+  for (const hours of [{ from: 99 }, { to: -4 }, { from: 1.5 }]) {
+    const answer = await relay.ask("PUT", "/push/settings", { quietHours: hours });
+    assert.equal(answer.status, 400, `${JSON.stringify(hours)} is refused`);
+    assert.match(answer.body.message, /whole hour from 0 to 23/);
+  }
+  // And a body that is not an object at all. Both of these answered 200 "Saved." and wrote defaults.
+  for (const raw of ["[1,2]", '"hello"', "null"]) {
+    const answer = await relay.askRaw("PUT", "/push/settings", raw);
+    assert.equal(answer.status, 400, `${raw} is refused`);
+    assert.match(answer.text, /has to be a JSON object/);
+  }
+});
+
+test("a field left out means unchanged, so a panel may send only what the person touched", async (tt) => {
+  const relay = await standUp();
+  tt.after(() => relay.close());
+  // THE DEFECT: the route was a full REPLACE. With two kinds off and quiet hours on, a later
+  // PUT {kinds:{report:false}} answered 200 and left every other switch back at the default.
+  await relay.ask("PUT", "/push/settings", { kinds: { widget: false, secret: false }, quietHours: { on: true, from: 23, to: 6 }, utcOffsetMinutes: -300 });
+  const partial = await relay.ask("PUT", "/push/settings", { kinds: { report: false } });
+  assert.equal(partial.status, 200);
+  assert.equal(partial.body.settings.kinds.report, false, "what was sent landed");
+  assert.equal(partial.body.settings.kinds.widget, false, "and what was not sent is untouched");
+  assert.equal(partial.body.settings.kinds.secret, false);
+  assert.equal(partial.body.settings.quietHours.on, true);
+  assert.equal(partial.body.settings.quietHours.from, 23);
+  assert.equal(partial.body.settings.utcOffsetMinutes, -300);
+
+  // An empty object is a valid no-op: every field absent, so every field unchanged.
+  const nothing = await relay.ask("PUT", "/push/settings", {});
+  assert.equal(nothing.status, 200);
+  assert.equal(nothing.body.settings.kinds.widget, false);
+  assert.equal(nothing.body.settings.quietHours.on, true);
+});
+
+test("a POST to /push/settings is a 405, which is what the route's own sentence always said", async (tt) => {
+  const relay = await standUp();
+  tt.after(() => relay.close());
+  // The route accepted POST while its own refusal sentence said "GET or PUT", docs/APPS.md said PUT,
+  // and both shells wrote "a POST is not a route" in their contract notes. Three statements of a rule
+  // the code did not keep.
+  const posted = await relay.ask("POST", "/push/settings", { kinds: { widget: false } });
+  assert.equal(posted.status, 405);
+  assert.equal(posted.body.error, "GET or PUT");
+  assert.equal((await relay.ask("GET", "/push/settings")).body.settings.kinds.widget, true, "and nothing was stored by it");
+});
+
+// ---- PUSH-5: GET /push/pending -------------------------------------------------------------------
+
+const HANDOFF = {
+  kind: "send-message", id: "t14s0", timestampMs: Date.UTC(2026, 8, 10, 10, 0, 0),
+  boxRequestId: "box-1", boxInstruction: "Sign in to the bank so I can download the statement",
+  message: { type: "text", content: "I need you at the keyboard." },
+};
+const WIDGET = {
+  kind: "send-message", id: "t12s0", timestampMs: Date.UTC(2026, 8, 10, 10, 0, 0),
+  message: { type: "widget", widget: { prompt: "Which invoice should I chase first?" } },
+};
+const ROSTER = [{ id: "agent-1", name: "Books", newestEntryId: "t14s0", unreadCount: 1, updatedAt: 1 }];
+
+test("GET /push/pending answers the decided list off the relay's own decider", async (tt) => {
+  const relay = await standUp({ roster: ROSTER, tail: () => [HANDOFF, WIDGET] });
+  tt.after(() => relay.close());
+
+  const answer = await relay.ask("GET", "/push/pending");
+  assert.equal(answer.status, 200);
+  assert.equal(answer.body.badge, 2, "the workspace's unfiltered pending count, the same number a push carries");
+  assert.equal(answer.body.agents, 1);
+  assert.equal(answer.body.cards.length, 2);
+  assert.equal(answer.headers.get("cache-control"), "no-store");
+
+  const handoff = answer.body.cards.find((card) => card.kind === "box-handoff");
+  assert.equal(handoff.agent.id, "agent-1");
+  assert.equal(handoff.agent.name, "Books");
+  assert.equal(handoff.entry, "t14s0");
+  assert.equal(handoff.requestId, "box-1");
+  assert.equal(handoff.pending, true);
+  assert.equal(handoff.muted, false);
+  assert.equal(handoff.title, "Take the keyboard for Books", "the title a push carries, not the agent's own instruction");
+  assert.equal(handoff.body, "Open it to read what it needs done.", "one of the six fixed sentences");
+  assert.equal(handoff.link.app, "titaniumbot://card?tenant=demo&agent=agent-1&entry=t14s0&kind=box-handoff");
+  assert.ok(handoff.link.web.endsWith("/?agent=agent-1&entry=t14s0"));
+  assert.match(handoff.key, /^[0-9a-f]{32}$/, "the same collapse key a push uses");
+  // RULE 5. The instruction the agent wrote is the field a notification body never carries, and this
+  // route is a notification body with a different shape.
+  assert.ok(!answer.text.includes("Sign in to the bank"));
+});
+
+test("the caller's own switches decorate a row and never change the badge", async (tt) => {
+  const relay = await standUp({ roster: ROSTER, tail: () => [HANDOFF, WIDGET] });
+  tt.after(() => relay.close());
+  await relay.ask("PUT", "/push/settings", { kinds: { widget: false } });
+
+  const answer = await relay.ask("GET", "/push/pending");
+  assert.equal(answer.body.badge, 2, "the card is still waiting whether or not anybody was told about it");
+  assert.equal(answer.body.cards.find((card) => card.kind === "widget").muted, true);
+  assert.equal(answer.body.cards.find((card) => card.kind === "box-handoff").muted, false);
+
+  // Another person on the same workspace has their own switches and the same badge.
+  relay.subRef.value = "person-b";
+  const theirs = await relay.ask("GET", "/push/pending");
+  assert.equal(theirs.body.badge, 2);
+  assert.equal(theirs.body.cards.find((card) => card.kind === "widget").muted, false);
+});
+
+test("a second read inside the memo window is the same picture with its age on it", async (tt) => {
+  const relay = await standUp({ roster: ROSTER, tail: () => [HANDOFF] });
+  tt.after(() => relay.close());
+  const before = relay.edge.stats().gatewayCalls;
+  const first = await relay.ask("GET", "/push/pending");
+  const cost = relay.edge.stats().gatewayCalls - before;
+  assert.equal(cost, 3, "one listAgents, one listProblemReports and one tail read on a one-agent box");
+  assert.equal(first.body.ageMs, 0);
+
+  const second = await relay.ask("GET", "/push/pending");
+  assert.equal(relay.edge.stats().gatewayCalls - before, cost, "a poll inside the memo window costs nothing");
+  assert.equal(second.body.at, first.body.at, "and is the same picture");
+  assert.ok(second.body.ageMs >= 0, "with the age on it, so a caller can see how old what it got is");
+  assert.equal(second.body.memoMs, 5000);
+});
+
+test("a box that does not answer is a 503 and never an empty list", async (tt) => {
+  // An empty list tells a tray everything has been answered, which is a customer's badge dropping to
+  // zero because a box was briefly unreachable. That is the same failure shape as the bare-array
+  // roster this module's own gate caught: absent, not red.
+  const relay = await standUp({ boxAnswers: false });
+  tt.after(() => relay.close());
+  const answer = await relay.ask("GET", "/push/pending");
+  assert.equal(answer.status, 503);
+  assert.equal(answer.body.error, "no_answer");
+  assert.ok(!Object.hasOwn(answer.body, "cards"));
+});
+
+test("/push/pending is a GET, and the method is refused in words", async (tt) => {
+  const relay = await standUp({ roster: ROSTER, tail: () => [HANDOFF] });
+  tt.after(() => relay.close());
+  assert.equal((await relay.ask("POST", "/push/pending", {})).status, 405);
+  assert.equal((await relay.ask("POST", "/push/events", {})).status, 405);
+});
+
+// ---- PUSH-4: the desktop transport over a real SSE connection ------------------------------------
+
+test("GET /push/events carries the pending cards on connect, with the headers a live edge needs", async (tt) => {
+  const relay = await standUp({ roster: ROSTER, tail: () => [HANDOFF, WIDGET] });
+  tt.after(() => relay.close());
+  await relay.ask("POST", "/push/devices", { platform: "desktop", token: "a-device-id", deviceId: "mac-1" });
+
+  const stream = await relay.listen();
+  tt.after(() => stream.close());
+  assert.equal(stream.status, 200);
+  // The exact header set relayEvents already proves through Cloudflare in front of the R750. A stream
+  // that invents its own passes locally and stalls live.
+  assert.equal(stream.headers.get("content-type"), "text/event-stream");
+  assert.equal(stream.headers.get("cache-control"), "no-cache");
+  assert.equal(stream.headers.get("x-accel-buffering"), "no");
+
+  const frames = await stream.settle(2);
+  assert.equal(frames.length, 2);
+  assert.ok(frames.every((frame) => frame.channel === "push-card"));
+  const handoff = frames.map((frame) => frame.payload).find((card) => card.kind === "box-handoff");
+  assert.equal(handoff.state, "pending");
+  assert.equal(handoff.badge, 2);
+  assert.equal(handoff.title, "Take the keyboard for Books");
+  assert.equal(handoff.body, "Open it to read what it needs done.");
+  assert.ok(!JSON.stringify(frames).includes("Sign in to the bank"), "no field a model wrote rides a frame");
+  assert.ok(!JSON.stringify(frames).includes("a-device-id"), "and no device token either");
+});
+
+test("registering a desktop arms nothing, and a connected one is what arms a pass", async (tt) => {
+  const relay = await standUp({ roster: ROSTER, tail: () => [HANDOFF] });
+  tt.after(() => relay.close());
+  const registered = await relay.ask("POST", "/push/devices", { platform: "desktop", token: "a-device-id", deviceId: "mac-1" });
+  assert.equal(registered.status, 200);
+  assert.equal(registered.body.platform, "desktop");
+
+  const quiet = await relay.edge.sweepOnce("nobody listening");
+  assert.equal(quiet.swept[0].skipped, "only a desktop is registered and none is listening");
+  assert.equal(quiet.swept[0].calls, 0, "a registered desktop costs its workspace nothing while nobody is connected");
+  assert.equal(relay.sent.length, 0, "and no vendor is ever asked about a desktop");
+
+  const stream = await relay.listen();
+  tt.after(() => stream.close());
+  await stream.settle(1);
+  const busy = await relay.edge.sweepOnce("one listening");
+  assert.equal(busy.swept[0].skipped, undefined);
+  assert.equal(busy.swept[0].listening, 1);
+  assert.equal(relay.sent.length, 0, "still nothing to a vendor");
+});
+
+test("a card answered while a tray is connected arrives as a closed frame on the same key", async (tt) => {
+  let open = true;
+  const relay = await standUp({
+    roster: ROSTER,
+    // The host rewrites the stamp in place, so a hand-off that has been handed back carries a
+    // boxResolution on the same entry rather than a new one.
+    tail: () => [open ? HANDOFF : { ...HANDOFF, boxResolution: "handed_back" }],
+  });
+  tt.after(() => relay.close());
+  await relay.ask("POST", "/push/devices", { platform: "desktop", token: "a-device-id", deviceId: "mac-1" });
+
+  const stream = await relay.listen();
+  tt.after(() => stream.close());
+  const first = await stream.settle(1);
+  assert.equal(first[0].payload.state, "pending");
+  const key = first[0].payload.key;
+
+  open = false;
+  // The real trigger is a frame off the box's own /events, debounced. With no box behind this harness
+  // the fallback refresh is what fires -- fifteen seconds in production, turned down to 150 ms here.
+  const settled = await stream.settle(2, 5_000);
+  assert.equal(settled.length, 2);
+  assert.equal(settled[1].payload.state, "closed");
+  assert.equal(settled[1].payload.key, key, "the same key the pending frame used, so a tray takes that notification down");
+});
+
+test("a tray never writes the shared ledger, because `alerted` is terminal for every device", async (tt) => {
+  const relay = await standUp({ roster: ROSTER, tail: () => [HANDOFF] });
+  tt.after(() => relay.close());
+  await relay.ask("POST", "/push/devices", { platform: "desktop", token: "a-device-id", deviceId: "mac-1" });
+  const stream = await relay.listen();
+  tt.after(() => stream.close());
+  await stream.settle(1);
+  // If a tray delivery were recorded in push-sent.json the same card would be silenced for a phone
+  // that registers afterwards, which is rule 4 turned into a defect.
+  assert.equal(existsSync(path.join(relay.dir, "push-sent.json")), false);
+
+  // And the phone that registers afterwards IS alerted about the card that was already waiting.
+  await relay.ask("POST", "/push/devices", { platform: "ios", token: "apns-one", deviceId: "phone-1" });
+  await relay.edge.sweepOnce("after a phone arrived");
+  assert.equal(relay.sent.length, 1);
+  assert.equal(relay.sent[0].platform, "ios");
+});
+
 test("the wrong method is a refusal and never a silent success", async (tt) => {
   const relay = await standUp();
   tt.after(() => relay.close());
@@ -173,7 +526,8 @@ test("a body the parser cannot take is refused rather than stored as an empty de
   assert.equal((await relay.ask("POST", "/push/devices")).status, 400);
 
   // And a body that is not JSON. Refused by the parser, with nothing stored and nothing guessed.
-  assert.equal((await relay.askRaw("POST", "/push/settings", "{ not json")).status, 400);
+  // PUT, because a POST to this route is now a 405 and the method is checked before the body is read.
+  assert.equal((await relay.askRaw("PUT", "/push/settings", "{ not json")).status, 400);
   assert.equal((await relay.askRaw("POST", "/push/devices", "not json either")).status, 400);
   assert.equal((await relay.ask("GET", "/push/devices")).body.devices.length, 0);
 });

@@ -807,6 +807,45 @@ the composer came off the bottom.
 **The iPhone's own keyboard is unmeasured.** Chrome cannot raise one. This is built to the platform
 rule and asserted against a simulated resize, and that is the whole of the claim.
 
+### The three hooks a shell reads off this page (CONSOLE-ATTR-1)
+
+Both app shells load this console rather than shipping a copy of it, and the desktop one has a reader:
+until a device is signed in it has no bearer and no route, so a small injected script reads the DOM
+and raises a tray event with what it found. Three attributes are the whole of what it is allowed to
+read, and they are in this repository because they are this page's contract and not the shell's:
+
+| Attribute | Where it is | Written by |
+|---|---|---|
+| `data-needs-you-count` | the roster's needs-you pill, `index.html` | `renderNeedsYouCount` writes the **number** as the value, on every roster change |
+| `data-needs-you-card` | every **pending** card, carrying `<conversation id>:<entry id>`, with `data-card-id` (the same string), `data-card-kind`, `data-agent`, `data-title` and `data-href` beside it | `needsYouCardAttrs` in `app.js`, called from the pending branch of `decisionMarkup`, `handoffCardMarkup` and `reportCardMarkup` and nowhere else |
+| `data-talk-button` | the talk button, `index.html` | static markup, so it is there before `voice.js` boots and stays there when `probe()` disables the button |
+
+**The count attribute existed with no value, and an empty attribute was worse than none.** The
+shell's reader falls back to the number of elements its selector matched, and this pill is in the
+markup and matches even while it is hidden and empty — so a console with **zero** agents waiting
+reported **1**. Measured on this Mac 2026-09-10 by running that reader verbatim against the shipped
+markup: 0 → **1**, 3 → 3; with the value written, 0 → 0. A quiet console put a phantom 1 on the tray.
+
+Three rules the card attributes keep, each of them a way to be wrong quietly:
+
+- **Only a pending card carries them.** Every settled branch, every answer in flight, the skill card,
+  and the rail's second drawing of the same hand-off carry nothing — the rail one because attributing
+  both copies would count every open hand-off twice.
+- **A card with no durable id carries none of them.** The adapter falls back to the literal `"agent"`
+  when the host sent no author and to `entry-<n>` when it sent no entry id; either would mint a deep
+  link that lands on nothing, so the whole set is dropped instead.
+- **`data-title` on a hand-off is the relay's own fixed sentence**, `Take the keyboard for <agent>`,
+  and never the agent-written instruction the card shows on screen. That is `ui/push-edge.mjs` rule 5
+  reaching one surface further out.
+
+The node list is only the open conversation, by construction, so it is a partial picture of what is
+waiting; `GET /push/pending` is the authority and these are the fallback for a shell with no bearer
+yet. The full contract, with the shapes, is **docs/APPS.md** section 6 and section 15.
+`tests/console-needs-you-attributes.test.mjs` pins all three out of the shipped files.
+
+**The phone shell reads no page at all today** — it holds a bearer and calls the routes. Only the
+desktop has a reader, and only because its window opens before anybody has signed in.
+
 ### Boy-scout, inside these files
 
 The settings panel had 31 descendants past the right edge at 390 px — the Job Bus table is 631 px
@@ -856,6 +895,16 @@ Two things the gate does deliberately, and says so in its own header:
 - **Nothing is scrolled before a control is hit-tested.** A control a person needs at all times has
   to be where they can press it, and "it works once you scroll to it" is the failure this gate
   exists to catch.
+
+**One baseline in it went stale and was re-measured 2026-09-10.** The desktop leg pins where Send sits
+at 1440x900, and 959..1053 was measured at `3bfaca9` (2026-09-09 20:53). The Talk button landed beside
+the message box three hours later at `c57dac3`, left of Send in the same flex row, and moved Send
+**63 px** right without anything here noticing — so every wave that ran this gate afterwards read a red
+leg about a deliberate change. It is **1022..1116** now, measured on grok-bot-local-vm 2026-09-10, and
+the leg asserts the button's **width** as well as its position: a Send that changes size at a desktop
+width is the regression this row is for, and a Send that moved because a control was added beside it is
+a baseline somebody owed an update. `verify-mobile --width --desktop`: **27 passed, 0 failed, 1
+skipped** on this Mac after the correction.
 
 **The budget is the ceiling, and the tail legs can run into it.** Eleven legs at two device sizes do
 not always fit the 260 s that keeps the gate inside the 300 s run ceiling, and the two that wait on

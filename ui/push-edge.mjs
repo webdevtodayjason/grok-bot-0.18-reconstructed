@@ -465,6 +465,30 @@ const normalisePlatform = (value) => {
   return p === "ios" || p === "android" || p === "desktop" ? p : "";
 };
 
+/**
+ * PUSH-4. WHICH ROWS A VENDOR CAN REACH, AND WHICH ONE THIS RELAY CARRIES ITSELF.
+ *
+ * `platform: desktop` was accepted from the first day and then routed to the APNs sender, on the
+ * reasoning that a desktop app is signed by the same Apple account. It is not a transport: Windows
+ * has no APNs at all, and macOS needs an `aps-environment` entitlement and an embedded provisioning
+ * profile before an app can ask for a device token, which is the same restricted class that stops an
+ * ad hoc build launching. So the desktop shell left registration switched off and polled three
+ * gateway calls a second instead.
+ *
+ * And registering anyway was worse than not registering, in a way the filed row understated. A
+ * desktop row holds a device ID where an APNs token belongs, and Apple's refusal for that is
+ * `BadDeviceToken`, which `prunesDevice` deliberately does not prune -- measured on this Mac
+ * 2026-09-10: 400 BadDeviceToken, 403 InvalidProviderToken, 400 DeviceTokenNotForTopic and 500 all
+ * answer "" -- so every card burned six attempts on the backoff, gave up, and the row stayed in
+ * push.json for ever. There was no exit.
+ *
+ * So a desktop row is carried by GET /push/events instead: the same six sentences, the same collapse
+ * key, the same fixed titles, over an SSE this module serves itself. It reaches no vendor, it is
+ * skipped by both the alert and the silent badge update, and on its own it does not arm the sweep.
+ */
+export const VENDOR_PLATFORMS = Object.freeze(["ios", "android"]);
+export const carriedByStream = (platform) => str(platform).trim().toLowerCase() === "desktop";
+
 const normaliseEnv = (value) => (str(value).trim().toLowerCase() === "sandbox" ? "sandbox" : "production");
 
 function normaliseSettings(raw) {
@@ -476,6 +500,126 @@ function normaliseSettings(raw) {
     quietHours: { on: quiet.on === true, from: clampHour(quiet.from ?? DEFAULT_SETTINGS.quietHours.from), to: clampHour(quiet.to ?? DEFAULT_SETTINGS.quietHours.to) },
     utcOffsetMinutes: Math.max(-840, Math.min(840, Math.trunc(num(raw?.utcOffsetMinutes)))),
   };
+}
+
+// ---- what a shell may send to /push/settings, and the refusal when it sends something else ------
+//
+// APPS-DOC-1, and it is the worst shape a mismatch can take. docs/APPS.md named these fields in
+// prose without spellings, the phone app sent the prose's reading
+// ({enabled, kinds: [...], quietHours: {enabled, fromHour, toHour}}), and the route answered
+// 200 {"message":"Saved."}. Measured on grok-bot-local-vm 2026-09-10 against the real handler over a
+// temp state directory: it did not merely ignore the body, it OVERWROTE. A workspace holding
+// {widget:false, secret:false, quietHours:{on:true,from:23,to:6}, utcOffsetMinutes:-300} came back
+// with every kind on, quiet hours OFF at the default 22..7 and the offset 0. A phone "saving quiet
+// hours" switched the customer's quiet hours off and un-muted two kinds they had turned off.
+//
+// FOUR RULES, and each of them is a measured failure rather than a preference.
+//
+// 1. AN UNKNOWN FIELD IS A 400 THAT NAMES IT. A body with no known field at all ({hello:"world"}),
+//    and a body that is not an object at all (a JSON array), both answered 200 "Saved." and wrote
+//    the defaults. A client cannot debug what it is told went fine.
+// 2. A TYPE IS STRICT, AND THE OLD COERCION WAS THREE DIFFERENT ANSWERS TO ONE BODY. Measured:
+//    kinds:{widget:"false"} stayed ON (only a strict `false` mutes), quietHours.on:"true" read OFF
+//    (only a strict `true` arms), and utcOffsetMinutes:"-300" was HONOURED (Number()). One loosely
+//    typed body, three outcomes, no complaint from the server about any of them.
+// 3. AN HOUR OUT OF RANGE IS REFUSED, NOT WRAPPED. clampHour is a modulo, so `from: 99` stored as 3
+//    and `to: -4` stored as 20: a typo silently became a different, perfectly valid quiet window.
+//    The store still clamps whatever is already on disk, because a stored row has to be readable;
+//    the WIRE refuses, because a wire has a client on the other end who can be told.
+// 4. A FIELD LEFT OUT MEANS UNCHANGED. The route was a full REPLACE: with two kinds off and quiet
+//    hours on, a later PUT {kinds:{report:false}} answered 200 and left every other switch back at
+//    the default. Any panel that sends only what the person changed silently reset the rest, and the
+//    console's own Notifications card is being rebuilt right now, so this rule lives here and in the
+//    document rather than in whichever panel happens to send a whole body today.
+//
+// The six kinds are the only kinds, and there is no master switch: a shell that wants one sends
+// every kind false, which is the mechanism this relay actually has. Said here and in docs/APPS.md
+// because both app repositories had already written their own.
+export const SETTINGS_FIELDS = Object.freeze(["kinds", "quietHours", "utcOffsetMinutes"]);
+export const QUIET_HOURS_FIELDS = Object.freeze(["on", "from", "to"]);
+export const MAX_UTC_OFFSET_MINUTES = 840;
+
+const isPlainObject = (value) => value != null && typeof value === "object" && !Array.isArray(value);
+const isWholeHour = (value) => Number.isInteger(value) && value >= 0 && value <= 23;
+const shapeOf = (value) => (value === null ? "null" : Array.isArray(value) ? "a list" : typeof value);
+/** "a, b and c", because a refusal a person reads is a sentence and not a comma-separated list. */
+const listOf = (names) => (names.length < 2 ? str(names[0]) : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`);
+
+/**
+ * The body of a PUT /push/settings, checked. `{ok: true, patch}` is what to merge; `{ok: false,
+ * field, message}` names the one field that stopped it, in the plain words the 400 carries.
+ * A field that is absent is absent from the patch, which is what makes an omission mean unchanged.
+ */
+export function validateSettings(raw) {
+  const bad = (field, message) => ({ ok: false, field, message });
+  if (!isPlainObject(raw)) {
+    return bad("body", `The body has to be a JSON object with kinds, quietHours or utcOffsetMinutes in it, and this was ${shapeOf(raw)}. Nothing was stored.`);
+  }
+  for (const field of Object.keys(raw)) {
+    if (!SETTINGS_FIELDS.includes(field)) {
+      return bad(field, `There is no setting called "${field}". This route takes ${listOf(SETTINGS_FIELDS)}, and a field you leave out is left as it was. Nothing was stored.`);
+    }
+  }
+  const patch = {};
+
+  if (Object.hasOwn(raw, "kinds")) {
+    if (!isPlainObject(raw.kinds)) {
+      return bad("kinds", `kinds is a map of card kind to true or false, and this was ${shapeOf(raw.kinds)}. A list of the kinds you want on is not read at all. Nothing was stored.`);
+    }
+    const kinds = {};
+    for (const [kind, value] of Object.entries(raw.kinds)) {
+      if (!KIND_SET.has(kind)) {
+        return bad(`kinds.${kind}`, `There is no card kind called "${kind}". The six are ${listOf(PUSH_CARD_KINDS)}. Nothing was stored.`);
+      }
+      if (typeof value !== "boolean") {
+        return bad(`kinds.${kind}`, `kinds.${kind} has to be true or false, and this was ${shapeOf(value)}. Nothing was stored.`);
+      }
+      kinds[kind] = value;
+    }
+    patch.kinds = kinds;
+  }
+
+  if (Object.hasOwn(raw, "quietHours")) {
+    if (!isPlainObject(raw.quietHours)) {
+      return bad("quietHours", `quietHours is an object with on, from and to in it, and this was ${shapeOf(raw.quietHours)}. Nothing was stored.`);
+    }
+    const quiet = {};
+    for (const [field, value] of Object.entries(raw.quietHours)) {
+      if (!QUIET_HOURS_FIELDS.includes(field)) {
+        return bad(`quietHours.${field}`, `quietHours has no field called "${field}". It takes ${listOf(QUIET_HOURS_FIELDS)}, and the UTC offset is utcOffsetMinutes at the top level rather than inside here. Nothing was stored.`);
+      }
+      if (field === "on") {
+        if (typeof value !== "boolean") return bad("quietHours.on", `quietHours.on has to be true or false, and this was ${shapeOf(value)}. Nothing was stored.`);
+        quiet.on = value;
+        continue;
+      }
+      if (!isWholeHour(value)) {
+        return bad(`quietHours.${field}`, `quietHours.${field} is a whole hour from 0 to 23, and this was ${JSON.stringify(value) ?? shapeOf(value)}. Quiet hours are whole hours plus one UTC offset; minutes have nowhere to go. Nothing was stored.`);
+      }
+      quiet[field] = value;
+    }
+    patch.quietHours = quiet;
+  }
+
+  if (Object.hasOwn(raw, "utcOffsetMinutes")) {
+    const value = raw.utcOffsetMinutes;
+    if (!Number.isInteger(value) || Math.abs(value) > MAX_UTC_OFFSET_MINUTES) {
+      return bad("utcOffsetMinutes", `utcOffsetMinutes is a whole number of minutes from -${MAX_UTC_OFFSET_MINUTES} to ${MAX_UTC_OFFSET_MINUTES}, and this was ${JSON.stringify(value) ?? shapeOf(value)}. It is what a browser's getTimezoneOffset() answers, negated. Nothing was stored.`);
+    }
+    patch.utcOffsetMinutes = value;
+  }
+
+  return { ok: true, patch };
+}
+
+/** What is stored, with a validated patch laid over it. An absent field is an unchanged field. */
+export function mergeSettings(current, patch) {
+  const held = normaliseSettings(current);
+  return normaliseSettings({
+    kinds: { ...held.kinds, ...(isPlainObject(patch?.kinds) ? patch.kinds : {}) },
+    quietHours: { ...held.quietHours, ...(isPlainObject(patch?.quietHours) ? patch.quietHours : {}) },
+    utcOffsetMinutes: Object.hasOwn(patch ?? {}, "utcOffsetMinutes") ? patch.utcOffsetMinutes : held.utcOffsetMinutes,
+  });
 }
 
 function normaliseDevice(raw) {
@@ -598,9 +742,17 @@ export function createPushStore({ file, now = () => Date.now() }) {
       const state = await read();
       return normaliseSettings(state.settings[str(sub)] ?? {});
     },
-    async saveSettings(sub, raw) {
+    /**
+     * A MERGE, not a replace. APPS-DOC-1 rule 4: a body carrying only what the person changed used
+     * to reset every other switch to the default, which is how a phone saving quiet hours turned
+     * two muted kinds back on. A field that is not in the patch is left exactly as it was stored.
+     * The route hands this a body `validateSettings` has already checked; the two other callers (a
+     * test, and the gate setting up a quiet window) hand it a plain object, which is read the same
+     * forgiving way `normaliseSettings` reads a row already on disk.
+     */
+    async saveSettings(sub, patch) {
       const state = await read();
-      state.settings[str(sub)] = normaliseSettings(raw);
+      state.settings[str(sub)] = mergeSettings(state.settings[str(sub)] ?? {}, patch);
       await write(state);
       return state.settings[str(sub)];
     },
@@ -859,10 +1011,12 @@ export function createFcmSender({ serviceAccount, projectId, fetchImpl = fetch, 
  */
 export function prunesDevice({ platform, status, reason }) {
   const why = str(reason).trim().toUpperCase();
-  // ios AND desktop, because the desktop app is signed by the same Apple account and goes through the
-  // same APNs sender (see `sender` below, which picks APNs for both). Written as `!== "android"` rather
-  // than as a list, so a fourth platform added later cannot quietly fall through to the Firebase table
-  // and leave a dead token being retried forever.
+  // THE APPLE TABLE, and since PUSH-4 it is the ios rule alone: a desktop row reaches no vendor at
+  // all now (see `carriedByStream` above and `deliver` below), so nothing on this path ever answers
+  // about one. The shape stays `!== "android"` rather than a list of names, because that is what
+  // stops a fourth platform added later falling quietly through to the Firebase table below, where a
+  // 410 means nothing and a dead token would be retried for ever. That is the exact defect this line
+  // was written to fix when it read `=== "ios"`.
   if (platform !== "android") {
     if (status === 410) return "Apple says the app is gone from that device";
     if (why === "UNREGISTERED" || why === "EXPIREDTOKEN") return `Apple answered ${why}`;
@@ -909,6 +1063,23 @@ export function createPushEdge({
   now = () => Date.now(),
   sweepMs = 15_000,
   callTimeoutMs = 4_000,
+  // PUSH-5. How long one collected picture of a workspace's cards stands in for the next request.
+  // A FULL collection is 1 + 1 + N gateway calls and about 30 KB decoded on a twelve-agent box
+  // (listAgents 11,857 B, listProblemReports 14 B empty, getAgentTranscriptTail {limit:5} 1,535 B,
+  // measured on grok-bot-local-vm 2026-09-10). The sweep only stays cheap because it reads the tails
+  // of agents whose roster row moved; a route has no previous roster to diff against, so without a
+  // memo a desktop polling once a second would be a worse cost than the polling this replaces. The
+  // age is on every answer, so a caller can see how old the picture it got is.
+  pendingMemoMs = 5_000,
+  // PUSH-4's stream. The debounce is how long a burst of box frames is allowed to settle before the
+  // cards are re-read, and the minimum age is the floor under how often that read can happen at all,
+  // so a busy box cannot turn one connected desktop into a collection a frame.
+  streamDebounceMs = 500,
+  streamMinAgeMs = 1_000,
+  // And the fallback for a box whose /events this relay cannot hold open: the connection still
+  // refreshes on the sweep's own cadence rather than going quiet.
+  streamRefreshMs = 15_000,
+  streamHeartbeatMs = 25_000,
   stub = String(process.env.SAND_PUSH_STUB ?? "") === "1",
   log = () => {},
 } = {}) {
@@ -916,6 +1087,13 @@ export function createPushEdge({
   const ledgers = new Map();
   // What the roster said last pass, per tenant, so a pass can tell a moved agent from a still one.
   const seen = new Map();
+  // One collected picture of a workspace's cards, per tenant, shared by GET /push/pending and every
+  // open GET /push/events. Concurrent readers cost one collection between them, not one each.
+  const memo = new Map();
+  // The desktop connections this relay is holding, per tenant. A workspace with none of these and no
+  // vendor-backed device reaches its box zero times, which is the assertion the no-device case
+  // already carries and the reason a desktop row is safe to register.
+  const streams = new Map();
   let timer = null;
   let running = false;
   let passes = 0;
@@ -981,7 +1159,7 @@ export function createPushEdge({
     let made;
     const stubSender = () => createStubSender({ file: t.file(PUSH_STUB_LEDGER_FILE), log });
     if (stub) made = stubSender();
-    else if (platform === "ios" || platform === "desktop") {
+    else if (platform === "ios") {
       made = creds.apns?.key && http2 != null
         ? createApnsSender({ ...creds.apns, http2, log, now })
         : stubSender();
@@ -994,21 +1172,18 @@ export function createPushEdge({
     return made;
   }
 
-  // ---- one pass over one tenant ----------------------------------------------------------------
+  // ---- the one path a card list comes off a box, whoever is asking ------------------------------
+  //
+  // The sweep, GET /push/pending and GET /push/events all project cards through these two functions,
+  // so there is one decider and one set of wire shapes rather than three that drift. What is NOT
+  // shared is the choice of which agents earn a tail read: the sweep keeps its roster-moved-or-open
+  // diff exactly as it was (that is what makes it cheap, and its tests are the proof), while a route
+  // has no previous roster to diff against and reads them all behind the memo below.
 
-  async function sweepTenant(t, reason) {
-    const store = storeFor(t);
-    // RULE 1. The first act is a file read. A workspace with no phone reaches no box.
-    const state = await store.read();
-    if (state.devices.length === 0) return { slug: TENANT_KEY(t), devices: 0, sent: 0, calls: 0, skipped: "no device is registered" };
-
-    const callsBefore = gatewayCalls;
-    const ledger = ledgerFor(t);
-    const rows = await ledger.read();
-    const at = num(now());
-
+  /** listAgents and listProblemReports, in the two shapes the host actually answers. */
+  async function readBoard(t) {
     const roster = await call(t, "listAgents", {});
-    if (roster == null) return { slug: TENANT_KEY(t), devices: state.devices.length, sent: 0, calls: gatewayCalls - callsBefore, skipped: "its box did not answer listAgents" };
+    if (roster == null) return null;
     // listAgents answers a BARE ARRAY, and this cost a gate run to find out. Measured on
     // grok-bot-local-vm 2026-09-10: `POST /api/listAgents` answers `[{...}, ...]` with no wrapper,
     // while listProblemReports beside it answers `{reports: [...]}` and getAgentTranscriptTail answers
@@ -1016,8 +1191,67 @@ export function createPushEdge({
     // so the array is the shape to believe; the object form is read too, because a wrapper is exactly
     // the kind of thing a later host adds and a silently-empty roster is a push nobody gets.
     const agents = Array.isArray(roster) ? roster : (Array.isArray(roster?.agents) ? roster.agents : []);
-
     const reports = await call(t, "listProblemReports", {});
+    return { agents, reports };
+  }
+
+  /** One tail read per wanted agent, plus the report offers, projected into cards. */
+  async function collectCards(t, { at, wanted, reports }) {
+    const cards = [];
+    for (const agent of wanted) {
+      const tail = await call(t, "getAgentTranscriptTail", { id: str(agent.id), limit: 5 });
+      if (tail == null) continue;
+      cards.push(...cardsFromTail(tail?.entries, {
+        tenant: TENANT_KEY(t), agentId: str(agent.id), agentName: str(agent.name), nowMs: at,
+      }));
+    }
+    cards.push(...cardsFromReports(Array.isArray(reports) ? reports : reports?.reports, { tenant: TENANT_KEY(t), nowMs: at }));
+    return cards;
+  }
+
+  /**
+   * The whole workspace's cards, read fresh or served out of the memo, with the age on the answer.
+   * `null` means the box did not answer and nothing was ever collected, which is a 503 and not an
+   * empty list: an empty list would tell a desktop tray that everything had been answered.
+   */
+  async function cardsNow(t, { maxAgeMs = pendingMemoMs } = {}) {
+    const key = TENANT_KEY(t);
+    const at = num(now());
+    const held = memo.get(key);
+    if (held != null && at - held.at < Math.max(0, num(maxAgeMs))) return { ...held, ageMs: at - held.at, fresh: false };
+    const board = await readBoard(t);
+    if (board == null) return held == null ? null : { ...held, ageMs: at - held.at, fresh: false, stale: true };
+    const cards = await collectCards(t, { at, wanted: board.agents, reports: board.reports });
+    const made = { at, cards, agents: board.agents.length };
+    memo.set(key, made);
+    return { ...made, ageMs: 0, fresh: true };
+  }
+
+  // ---- one pass over one tenant ----------------------------------------------------------------
+
+  async function sweepTenant(t, reason) {
+    const store = storeFor(t);
+    // RULE 1. The first act is a file read. A workspace with no phone reaches no box.
+    const state = await store.read();
+    if (state.devices.length === 0) return { slug: TENANT_KEY(t), devices: 0, sent: 0, calls: 0, skipped: "no device is registered" };
+    // PUSH-4, AND IT IS THE SAME RULE ONE LINE FURTHER ON. A desktop row reaches no vendor, so on its
+    // own it must not arm this loop either: registering one has to cost a workspace nothing while
+    // nobody is connected, or the desktop app is right to leave registration switched off. With a
+    // connection open the pass runs, because a card the tray has to hear about is what it is for.
+    const carried = state.devices.filter((device) => carriedByStream(device.platform));
+    const listening = streamsFor(t);
+    if (carried.length === state.devices.length && listening === 0) {
+      return { slug: TENANT_KEY(t), devices: state.devices.length, carried: carried.length, listening: 0, sent: 0, calls: 0, skipped: "only a desktop is registered and none is listening" };
+    }
+
+    const callsBefore = gatewayCalls;
+    const ledger = ledgerFor(t);
+    const rows = await ledger.read();
+    const at = num(now());
+
+    const board = await readBoard(t);
+    if (board == null) return { slug: TENANT_KEY(t), devices: state.devices.length, sent: 0, calls: gatewayCalls - callsBefore, skipped: "its box did not answer listAgents" };
+    const { agents, reports } = board;
 
     // Which agents earn a tail read: the ones whose roster row moved, plus every agent this relay
     // already alerted about and has not closed, because the CLOSE is what drops the badge and a
@@ -1043,21 +1277,18 @@ export function createPushEdge({
     }
     seen.set(TENANT_KEY(t), after);
 
-    const cards = [];
-    for (const agent of wanted) {
-      const tail = await call(t, "getAgentTranscriptTail", { id: str(agent.id), limit: 5 });
-      if (tail == null) continue;
-      cards.push(...cardsFromTail(tail?.entries, {
-        tenant: TENANT_KEY(t), agentId: str(agent.id), agentName: str(agent.name), nowMs: at,
-      }));
-    }
-    cards.push(...cardsFromReports(Array.isArray(reports) ? reports : reports?.reports, { tenant: TENANT_KEY(t), nowMs: at }));
+    const cards = await collectCards(t, { at, wanted, reports });
 
     const decided = await decide({ t, store, state, cards, rows, at });
     await ledger.write(rows);
     return {
       slug: TENANT_KEY(t),
       devices: state.devices.length,
+      // How many of those rows a vendor cannot reach, and how many desktops this relay is holding a
+      // stream for. Printed rather than inferred, because "one device registered and zero calls made"
+      // is the claim PUSH-4 turns on and a gate has to be able to read both halves of it.
+      carried: carried.length,
+      listening,
       cards: cards.length,
       pending: decided.badge,
       sent: decided.sent,
@@ -1098,6 +1329,13 @@ export function createPushEdge({
       // device must not be written to again in this pass.
       for (const device of [...state.devices]) {
         if (!state.devices.includes(device)) continue;
+        // PUSH-4. A desktop row is carried by GET /push/events and reaches no vendor at all, for the
+        // alert and for the silent badge update alike. It is skipped here rather than counted as a
+        // refusal, because a refusal earns a backoff and six attempts against a vendor that was never
+        // going to be asked. Its own dedupe is per connection and it never writes push-sent.json:
+        // `alerted` is terminal for every device (rule 4 below), so recording a tray delivery in the
+        // shared ledger would silence the same card for a phone that registers afterwards.
+        if (carriedByStream(device.platform)) continue;
         const settings = normaliseSettings(state.settings[device.sub] ?? {});
         // A per-kind switch turns off the ALERT, never the silent badge update: a badge that stays
         // high for a card the person switched off would be a number they cannot clear.
@@ -1229,6 +1467,178 @@ export function createPushEdge({
     return false;
   }
 
+  // ---- what a card looks like on the wire, for a route and for a frame alike --------------------
+  //
+  // ONE ROW SHAPE, so a tray drawn off GET /push/pending and a tray updated off GET /push/events are
+  // drawing the same thing. `body` is CARD_BODY's fixed sentence for the kind and never a field a
+  // model wrote (rule 5) -- what a tray shows is what a lock screen would have shown. `title` is the
+  // same title a push carries, which for a hand-off is "Take the keyboard for <agent>" and never the
+  // agent-written instruction the console's own card displays. `muted` is decoration computed from
+  // the CALLER's own per-kind switches; it never changes `badge`, because a badge is the count of
+  // cards that are waiting and a switch only decides whether anybody was told.
+  function cardRow(t, card, { settings } = {}) {
+    const link = deepLinks(card, { host: str(hostOf(t)) });
+    return {
+      key: str(card.key),
+      kind: str(card.kind),
+      agent: { id: str(card.agentId), name: str(card.agentName) },
+      entry: str(card.entryId),
+      requestId: str(card.requestId),
+      title: str(card.title),
+      body: CARD_BODY[str(card.kind)] ?? "",
+      link: { app: link.app, web: link.web },
+      at: num(card.at),
+      deadlineMs: num(card.deadlineMs),
+      pending: card.pending === true,
+      muted: settings?.kinds?.[str(card.kind)] === false,
+    };
+  }
+
+  /** The caller's own switches, for the `muted` decoration and for nothing else. */
+  async function settingsOf(t, sub) {
+    const state = await storeFor(t).read();
+    return normaliseSettings(state.settings[str(sub)] ?? {});
+  }
+
+  // ---- the desktop transport: an SSE this module serves itself ----------------------------------
+  //
+  // WHY IT IS AT /push/events AND NOT ON THE RELAY'S OWN /events. The tenant context this module is
+  // handed already carries `gateway` and `headers()` (ui/server.mjs's buildContext), /push/* is
+  // already dispatched here, is already on the relay's CORS path list and already resolves a device
+  // bearer. So a stream served here costs ZERO lines outside this file. Riding the literal GET /events
+  // would cost a call site inside relayEvents plus a new seam function in ui/relay-hooks.mjs -- two
+  // files this wave does not own, one of them holding the login template another wave is in. If those
+  // frames are ever wanted on /events as well, that is a separate six-line change and a separate
+  // merge; nothing here has to move for it.
+  //
+  // THE HEADER SET IS relayEvents's, COPIED RATHER THAN INVENTED. text/event-stream, cache-control
+  // no-cache, connection keep-alive and x-accel-buffering: no are the four that are already proved to
+  // survive Cloudflare in front of the R750; a stream that invents its own passes locally and stalls
+  // live. The upstream is aborted on `res` close, the same way, so a closed tray does not leave a
+  // connection open against the box.
+  const streamsFor = (t) => (streams.get(TENANT_KEY(t))?.size ?? 0);
+
+  async function openStream({ t, req, res, sub }) {
+    const key = TENANT_KEY(t);
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    });
+    const held = streams.get(key) ?? new Set();
+    const conn = { sub: str(sub), alive: true, sent: new Map() };
+    held.add(conn);
+    streams.set(key, held);
+
+    const write = (text) => {
+      if (!conn.alive) return;
+      try { res.write(text); } catch { conn.alive = false; }
+    };
+    // The envelope the console's own adapter already reads: a `channel` naming the frame and the body
+    // under `payload` (gateway-adapter.js's job-bus case). A shell reads the same two keys.
+    const frame = (payload) => write(`data: ${JSON.stringify({ channel: "push-card", payload })}\n\n`);
+
+    let busy = false;
+    let again = false;
+    const project = async () => {
+      if (!conn.alive) return;
+      // One projection at a time per connection, with a single trailing re-run: a box emitting frames
+      // faster than a collection takes must not queue a collection per frame.
+      if (busy) { again = true; return; }
+      busy = true;
+      try {
+        const picture = await cardsNow(t, { maxAgeMs: streamMinAgeMs });
+        if (picture == null || !conn.alive) return;
+        const settings = await settingsOf(t, conn.sub);
+        const badge = picture.cards.filter((card) => card.pending === true).length;
+        const seenNow = new Set();
+        for (const card of picture.cards) {
+          if (card.pending !== true) continue;
+          seenNow.add(card.key);
+          const row = cardRow(t, card, { settings });
+          const line = JSON.stringify(row);
+          if (conn.sent.get(card.key)?.line === line) continue;
+          conn.sent.set(card.key, { line, row });
+          frame({ state: "pending", badge, ageMs: picture.ageMs, ...row });
+        }
+        for (const [cardKey, before] of [...conn.sent]) {
+          if (seenNow.has(cardKey)) continue;
+          conn.sent.delete(cardKey);
+          // Answered, dismissed or expired. The same key the pending frame used, so a tray takes the
+          // notification down rather than drawing a second one about it.
+          frame({ state: "closed", badge, ageMs: picture.ageMs, key: cardKey, kind: before.row.kind, agent: before.row.agent, entry: before.row.entry });
+        }
+      } catch (error) {
+        log(`push  a desktop stream for ${key} could not read its cards: ${str(error?.message)}`);
+      } finally {
+        busy = false;
+        if (again) { again = false; void project(); }
+      }
+    };
+
+    const controller = new AbortController();
+    let debounce = null;
+    let beat = null;
+    let slow = null;
+    const bump = () => {
+      if (debounce != null) return;
+      debounce = setTimeout(() => { debounce = null; void project(); }, streamDebounceMs);
+      debounce.unref?.();
+    };
+    const shut = () => {
+      if (!conn.alive && debounce == null && beat == null) return;
+      conn.alive = false;
+      held.delete(conn);
+      if (held.size === 0) streams.delete(key);
+      if (debounce != null) { clearTimeout(debounce); debounce = null; }
+      if (beat != null) { clearInterval(beat); beat = null; }
+      if (slow != null) { clearInterval(slow); slow = null; }
+      try { controller.abort(); } catch { /* already gone */ }
+    };
+    res.on("close", shut);
+    res.on("error", shut);
+    // So the edge's own close() can take every tray down with it rather than leaving a fetch pinned
+    // against a box per connection.
+    conn.close = () => { shut(); try { res.end(); } catch { /* already gone */ } };
+
+    // The picture as it stands, before anything changes, so a tray that has just started knows what
+    // is waiting without a card having to move first.
+    write(": open\n\n");
+    await project();
+
+    beat = setInterval(() => write(": still here\n\n"), streamHeartbeatMs);
+    beat.unref?.();
+    // The fallback, for a box whose /events this relay cannot hold: the connection still catches up on
+    // the sweep's own cadence rather than going quiet. With an upstream it is a cheap backstop, because
+    // the memo is shared and a collection it asks for was very likely just made.
+    slow = setInterval(() => { void project(); }, streamRefreshMs);
+    slow.unref?.();
+
+    const gateway = str(t?.gateway);
+    if (gateway.length > 0 && typeof t?.headers === "function") {
+      void (async () => {
+        try {
+          const upstream = await fetchImpl(`${gateway}/events`, { headers: t.headers(), signal: controller.signal });
+          if (!upstream.ok || upstream.body == null) {
+            log(`push  ${key}'s box would not hand over /events for a desktop stream (HTTP ${num(upstream?.status)}); the stream falls back to a ${Math.round(streamRefreshMs / 1000)}s refresh`);
+            return;
+          }
+          const reader = upstream.body.getReader();
+          for (;;) {
+            const { done } = await reader.read();
+            if (done) break;
+            // What CHANGED is not read off the frame: the box's vocabulary is the box's, and a frame
+            // is only ever taken as "something moved". The cards are then re-read through the one
+            // decider, which is the whole point of there being one.
+            bump();
+          }
+        } catch { /* the box went away, or this connection did */ }
+      })();
+    }
+    return conn;
+  }
+
   async function sweepOnce(reason = "the timer") {
     if (running) return { ok: false, why: "a pass is already running" };
     running = true;
@@ -1288,6 +1698,13 @@ export function createPushEdge({
         if (!answer.ok) {
           return json(res, 400, { error: "bad_request", message: "Name the platform as ios, android or desktop, and send a deviceId and a token. Nothing was stored." });
         }
+        // A NEW DEVICE IS THE OTHER EVENT THAT CAN CHANGE A TERMINAL ANSWER, and PUSH-4 made it one
+        // that happens. `muted` means no device wanted this card, which is now also what a workspace
+        // whose only device is a desktop writes for every card, so the first phone to register would
+        // otherwise walk into a queue of cards nobody will ever be alerted to. Saving the switches
+        // already reopens them for exactly this reason; registering does too, and it is one decision
+        // per registration rather than one every fifteen seconds.
+        await wakeMuted(t);
         return json(res, 200, {
           deviceId: answer.device.deviceId,
           platform: answer.device.platform,
@@ -1310,34 +1727,92 @@ export function createPushEdge({
 
     if (pathname === "/push/settings") {
       if (req.method === "GET") {
+        // `scope` is "person" or "workspace" and never "account", which is the word section 2's prose
+        // used and which both app repositories wrote down. person is a named account; workspace is the
+        // instance-password door and the operator, which have no person behind them.
         return json(res, 200, { settings: await store.settingsFor(sub), kinds: PUSH_CARD_KINDS, scope: sub.length > 0 ? "person" : "workspace" });
       }
-      if (req.method === "PUT" || req.method === "POST") {
+      // PUT AND ONLY PUT. The route accepted POST as well, while its own refusal sentence said
+      // "GET or PUT", docs/APPS.md said PUT and both shells wrote "a POST is not a route" in their
+      // contract notes -- three statements of a rule the code did not keep. It keeps it now.
+      if (req.method === "PUT") {
         let body;
         try { body = JSON.parse(str(await readBody(req)) || "{}"); } catch { return fail(res, 400, "that was not JSON") ?? true; }
-        const settings = await store.saveSettings(sub, body);
-        // SAVING SETTINGS IS THE ONE EVENT THAT CAN CHANGE A TERMINAL ANSWER, so it is the one event
-        // that reopens one. A `muted` row is terminal on purpose -- that is the fix for a card being
-        // re-decided every 15 s for ever -- but a person who has just turned a switch back ON means the
-        // cards already waiting, not only the next one. So its row is dropped here and decided again on
-        // the next pass: if the switch is still off it goes straight back to muted, which costs one
-        // decision per save rather than one every fifteen seconds. A quiet-hours row has its deadline
-        // cleared for the same reason, so a window somebody just shortened releases its catch-up then
-        // rather than at the hour the old window would have ended.
-        const ledger = ledgerFor(t);
-        const rows = await ledger.read();
-        let woke = 0;
-        for (const [key, row] of [...rows]) {
-          if (row.state === "muted") { rows.delete(key); woke += 1; }
-          else if (row.state === "held" && row.heldUntil > 0) { rows.set(key, { ...row, heldUntil: 0 }); woke += 1; }
-        }
-        if (woke > 0) await ledger.write(rows);
+        // APPS-DOC-1. A shape this route cannot read is a 400 that NAMES the field, never a 200 that
+        // stores something else. An empty object is a valid no-op save: every field is absent, so
+        // every field is unchanged, which is what lets a panel PUT only what a person touched.
+        const checked = validateSettings(body);
+        if (!checked.ok) return json(res, 400, { error: "bad_request", field: checked.field, message: checked.message });
+        const settings = await store.saveSettings(sub, checked.patch);
+        // SAVING SETTINGS IS ONE OF THE TWO EVENTS THAT CAN CHANGE A TERMINAL ANSWER, so it is one of
+        // the two that reopens one (registering a device is the other). A `muted` row is terminal on
+        // purpose -- that is the fix for a card being re-decided every 15 s for ever -- but a person
+        // who has just turned a switch back ON means the cards already waiting, not only the next one.
+        // So its row is dropped here and decided again on the next pass: if the switch is still off it
+        // goes straight back to muted, which costs one decision per save rather than one every fifteen
+        // seconds. A quiet-hours row has its deadline cleared for the same reason, so a window somebody
+        // just shortened releases its catch-up then rather than at the hour the old window would have
+        // ended.
+        await wakeMuted(t);
         return json(res, 200, { settings, message: "Saved." });
       }
       return fail(res, 405, "GET or PUT") ?? true;
     }
 
+    // PUSH-5. WHAT IS WAITING, DECIDED HERE RATHER THAN AGAIN IN EVERY SHELL. No route answered this,
+    // so the badge and the card decision existed only inside a push payload and the desktop app ported
+    // the whole decider -- the six kinds, the collapse hash, the pending rules -- into its own Rust and
+    // polled the three underlying calls. Two copies of one rule drift, and the copy on the shell is the
+    // one nobody notices has drifted.
+    if (pathname === "/push/pending") {
+      if (req.method !== "GET") return fail(res, 405, "GET") ?? true;
+      const picture = await cardsNow(t, { maxAgeMs: pendingMemoMs });
+      // Not an empty list. An empty list tells a tray that everything has been answered, which is a
+      // customer's badge going to zero because a box was briefly unreachable.
+      if (picture == null) return json(res, 503, { error: "no_answer", message: "That box did not answer, so there is nothing to say about what is waiting." });
+      const settings = await settingsOf(t, sub);
+      const badge = picture.cards.filter((card) => card.pending === true).length;
+      return json(res, 200, {
+        at: picture.at,
+        // How old the picture is. A caller polling faster than the memo gets the same answer with a
+        // rising age rather than a fresh collection, and can see that it did.
+        ageMs: picture.ageMs,
+        memoMs: pendingMemoMs,
+        agents: picture.agents,
+        // THE WORKSPACE'S UNFILTERED PENDING COUNT, which is the same number the push payload carries,
+        // and NOT the console's needs-you pill: that counts agents, at most one each, and is never
+        // raised for a local-tool ask or a secret request, so the two disagree the moment one agent
+        // holds two cards (PUSH-3, and docs/APPS.md says so in plain words). The caller's own switches
+        // decorate each row with `muted` and never change this number.
+        badge,
+        cards: picture.cards.map((card) => cardRow(t, card, { settings })),
+      });
+    }
+
+    // PUSH-4. The desktop transport: the same cards, as they change, with no vendor anywhere in it.
+    if (pathname === "/push/events") {
+      if (req.method !== "GET") return fail(res, 405, "GET") ?? true;
+      await openStream({ t, req, res, sub });
+      return true;
+    }
+
     return fail(res, 404, `not found: ${req.method} ${pathname}`) ?? true;
+  }
+
+  /**
+   * This workspace's terminal rows, reopened. Called by the two events that can change the answer a
+   * card got: a person saving their switches, and a device registering.
+   */
+  async function wakeMuted(t) {
+    const ledger = ledgerFor(t);
+    const rows = await ledger.read();
+    let woke = 0;
+    for (const [key, row] of [...rows]) {
+      if (row.state === "muted") { rows.delete(key); woke += 1; }
+      else if (row.state === "held" && row.heldUntil > 0) { rows.set(key, { ...row, heldUntil: 0 }); woke += 1; }
+    }
+    if (woke > 0) await ledger.write(rows);
+    return woke;
   }
 
   /** Revoking a device bearer removes its push row too, so a revoked phone stops being notified in
@@ -1356,8 +1831,19 @@ export function createPushEdge({
     storeFor,
     ledgerFor,
     decide,
-    stats: () => ({ passes, gatewayCalls, running }),
-    close() { if (timer != null) clearInterval(timer); timer = null; for (const made of senderCache.map.values()) made.close?.(); },
+    cardsNow,
+    streamsFor,
+    stats: () => ({ passes, gatewayCalls, running, streams: [...streams.values()].reduce((total, held) => total + held.size, 0) }),
+    close() {
+      if (timer != null) clearInterval(timer);
+      timer = null;
+      // Every desktop connection this relay is holding, and the upstream each of them opened against
+      // a box. A close that left them behind would leave a fetch per tray pinned against the gateway.
+      for (const held of [...streams.values()]) for (const conn of [...held]) conn.close?.();
+      streams.clear();
+      memo.clear();
+      for (const made of senderCache.map.values()) made.close?.();
+    },
   };
 }
 

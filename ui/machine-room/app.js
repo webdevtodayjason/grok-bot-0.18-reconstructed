@@ -636,6 +636,15 @@
     const slot = document.querySelector("[data-needs-you-count]");
     if (!slot) return;
     const count = needsYouCount();
+    // CONSOLE-ATTR-1. The NUMBER, as the attribute's value, and it is not decoration. The desktop
+    // shell's injected reader tries the attribute's value, then a number anywhere in the text, then --
+    // failing both -- the number of elements its selector matched. This pill is always in the markup
+    // and matches even while it is hidden and empty, so with the attribute carrying nothing a console
+    // with ZERO agents waiting reported 1, indistinguishable from a real 1. Measured on this Mac
+    // 2026-09-10 by running that reader verbatim against the shipped markup: 0 -> 1, 3 -> 3; with the
+    // value written, 0 -> 0 and 3 -> 3. This is called at the end of renderRoster, so it is written on
+    // first paint and on every roster change. docs/APPS.md section 6 is the contract.
+    slot.dataset.needsYouCount = String(count);
     slot.hidden = count === 0;
     slot.textContent = count === 0 ? "" : `${count} need${count === 1 ? "s" : ""} you`;
     slot.title = count === 0 ? "" : "Agents whose last turn ended asking you something";
@@ -1076,7 +1085,15 @@
       return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card" style="--card-accent:${accent}"><div class="inline-card-header"><span class="inline-card-icon">${offer.status === "sent" ? "✓" : "✕"}</span><span class="inline-card-copy"><strong>${escapeHtml(title)}</strong><small class="approval-result">${escapeHtml(settled + held)}</small></span></div><div class="inline-card-actions"><button class="card-action" type="button" data-report-dismiss="${escapeHtml(offer.id)}">Dismiss</button></div></div></article>`;
     }
     const note = offer.note ? `<small class="field-hint">${escapeHtml(offer.note)}</small>` : "";
-    return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card problem-report-card" style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(title)}</strong><small>Would you like to send this to the developers?</small></span></div><div class="tag-list">${chip}</div><div class="field"><label class="sr-only" for="report-body-${escapeHtml(offer.id)}">What is sent to the developers</label><textarea id="report-body-${escapeHtml(offer.id)}" data-report-body="${escapeHtml(offer.id)}" rows="8" aria-describedby="report-custody-${escapeHtml(offer.id)}">${escapeHtml(offer.body)}</textarea><small class="field-hint" id="report-custody-${escapeHtml(offer.id)}">${escapeHtml(REPORT_CUSTODY)}</small>${note}</div><div class="inline-card-actions"><button class="card-action primary" type="button" data-report-send="${escapeHtml(offer.id)}">Send</button><button class="card-action" type="button" data-report-drop="${escapeHtml(offer.id)}">Not now</button></div></div></article>`;
+    // CONSOLE-ATTR-1, the sixth kind, and only on this branch: the returns above are sending, sent
+    // and dropped. The durable id is `pendingId` -- the problem-report ROW id, which is exactly what
+    // ui/push-edge.mjs uses as this card's entry id -- and NOT `offer.id`, which is the page-local
+    // `offer-<seq>` that dies with the page and that the relay says in so many words it never pushes.
+    // An offer with no pendingId is a card the relay will never send, so it carries nothing. The title
+    // is the relay's own -- the report's title -- rather than the copy this card prefixes with the
+    // agent's name when it is drawn in a conversation that is not its own.
+    const hook = needsYouCardAttrs(escapeHtml, { kind: "report", agentId: offer.agentId, entryId: offer.pendingId, agentName: offer.agentName, title: offer.title });
+    return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card problem-report-card"${hook} style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(title)}</strong><small>Would you like to send this to the developers?</small></span></div><div class="tag-list">${chip}</div><div class="field"><label class="sr-only" for="report-body-${escapeHtml(offer.id)}">What is sent to the developers</label><textarea id="report-body-${escapeHtml(offer.id)}" data-report-body="${escapeHtml(offer.id)}" rows="8" aria-describedby="report-custody-${escapeHtml(offer.id)}">${escapeHtml(offer.body)}</textarea><small class="field-hint" id="report-custody-${escapeHtml(offer.id)}">${escapeHtml(REPORT_CUSTODY)}</small>${note}</div><div class="inline-card-actions"><button class="card-action primary" type="button" data-report-send="${escapeHtml(offer.id)}">Send</button><button class="card-action" type="button" data-report-drop="${escapeHtml(offer.id)}">Not now</button></div></div></article>`;
   }
 
   // FEEDBACK-2b: drawing is what marks a pending row seen, and the only card appended after the
@@ -1534,6 +1551,63 @@
     return `Stored securely and never shown in this chat. It becomes $${String(card.field ?? "credential")} in this agent's shell, so commands it runs can read it.`;
   }
 
+  // ---- CONSOLE-ATTR-1: the hooks a shell reads off this page when it has no bearer yet ----------
+  //
+  // The desktop shell loads this console in its window and, until a device is signed in, has no token
+  // and no route -- so an injected script reads the DOM. Three attributes are the whole contract
+  // (docs/APPS.md section 6): the count on the roster pill, this set on every PENDING card, and
+  // data-talk-button on the talk button in index.html.
+  //
+  // A SIGNED-IN SHELL SHOULD ASK GET /push/pending INSTEAD. This page only ever draws the open
+  // conversation, so the marked nodes are a partial list by construction and the number moves as the
+  // person clicks around. The route is the authority; this is the fallback.
+  //
+  // WHAT THIS IS CAREFUL ABOUT, because each one is a way to be wrong quietly:
+  //
+  //   A DEAD DEEP LINK. The shell opens /?agent=&entry=, so an agent id that is really the literal
+  //   "agent" (gateway-adapter.js's fallback when the host sent no author), the person's own "you",
+  //   or an index-based `entry-<n>` id (the adapter's fallback when the host sent no entry id, which
+  //   is not stable across a re-read and is not an id the relay knows) has to carry NO attribute
+  //   rather than a link that lands nowhere. The whole set goes or none of it does, so absence means
+  //   "the relay cannot push this", never "this is not pending".
+  //
+  //   data-card-id IS REQUIRED BY THE READER. It drops any card without one, so emitting
+  //   data-needs-you-card alone would be a node the shell counts and cannot open.
+  //
+  //   data-title IS THE RELAY'S OWN TITLE. For a hand-off that is "Take the keyboard for <agent>" and
+  //   never entry.boxInstruction, which is the agent-written sentence this card displays on screen and
+  //   which ui/push-edge.mjs rule 5 exists to keep off a lock screen. A tray is a lock screen with a
+  //   different shape.
+  //
+  //   THE AGENT IS THE CONVERSATION, not the entry's author. The link's job is to open the card where
+  //   the person can answer it, and that is the conversation they are looking at. In a room the
+  //   author is a member agent and the first member is not the room, so both of those mint a link to
+  //   somewhere the card is not; the context id opens the room, which is where the card is drawn.
+  //
+  // escapeHtml is an argument so this stays sliceable for a test, the way handoffCardMarkup is.
+  function needsYouCardAttrs(escapeHtml, { kind, agentId, entryId, agentName, title }) {
+    // The six kinds the relay pushes, in push-edge.mjs's own order. The seventh thing that looks like
+    // a card here is the skill draft, which is not a question and is never pushed.
+    const PUSHED_KINDS = ["auto-review", "local-tool", "widget", "secret", "box-handoff", "report"];
+    if (!PUSHED_KINDS.includes(typeof kind === "string" ? kind : "")) return "";
+    const agent = typeof agentId === "string" ? agentId.trim() : "";
+    const entry = typeof entryId === "string" ? entryId.trim() : "";
+    if (agent.length === 0 || agent === "agent" || agent === "you") return "";
+    if (entry.length === 0 || /^entry-\d+$/.test(entry)) return "";
+    // One id in one spelling on both attributes: the marker carries the agent and the entry the brief
+    // asks for, and the reader's required data-card-id is the same string, so neither side parses.
+    const id = `${agent}:${entry}`;
+    // A console path, which is the only href shape the shell's reader accepts; anything else it drops.
+    const href = `/?agent=${encodeURIComponent(agent)}&entry=${encodeURIComponent(entry)}`;
+    const named = typeof title === "string" ? title.trim() : "";
+    const who = (typeof agentName === "string" ? agentName.trim() : "") || agent;
+    return ` data-needs-you-card="${escapeHtml(id)}" data-card-id="${escapeHtml(id)}"`
+      + ` data-card-kind="${escapeHtml(kind)}" data-agent="${escapeHtml(who)}"`
+      + (named.length > 0 ? ` data-title="${escapeHtml(named)}"` : "")
+      + ` data-href="${escapeHtml(href)}"`;
+  }
+  // ---- end CONSOLE-ATTR-1 --------------------------------------------------------------
+
   function decisionMarkup(message) {
     const card = message.card;
     if (card.status === "sending") {
@@ -1580,7 +1654,12 @@
           // with the field rather than after it.
           ? `<div class="field"><label class="sr-only" for="secret-input-${escapeHtml(message.id)}">${escapeHtml(card.field ?? "credential")}</label><input id="secret-input-${escapeHtml(message.id)}" data-secret-input="${escapeHtml(message.id)}" type="password" autocomplete="off" aria-describedby="secret-hint-${escapeHtml(message.id)}" placeholder="${escapeHtml(card.field ?? "credential")}" /><small class="field-hint secret-hint" id="secret-hint-${escapeHtml(message.id)}">${escapeHtml(secretCustodyHint(card))}</small></div><button class="card-action primary" type="button" data-submit-secret="${escapeHtml(message.id)}">Save securely</button>`
           : `<span class="field-hint">Answer this in the host app. This page has no command to carry a credential to it.</span>`;
-    return `<div class="inline-card" style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small>${escapeHtml(card.detail || "The agent is blocked until you answer.")}</small></span>${dismiss}</div>${card.rule ? `<div class="tag-list"><span class="tag">would add rule · ${escapeHtml(card.rule)}</span></div>` : ""}<div class="inline-card-actions">${actions}</div></div>`;
+    // CONSOLE-ATTR-1, and ONLY on this branch: every return above is a card that is settled or has an
+    // answer in flight, and a shell counting those would be a tray showing work nobody has to do.
+    // Four of the six push kinds come through here (auto-review, local-tool, widget, secret) and
+    // `card.title` is the same title the relay puts in the notification for each of them.
+    const hook = needsYouCardAttrs(escapeHtml, { kind: card.kind, agentId: activeContext().id, entryId: message.id, agentName: contextName(), title: card.title });
+    return `<div class="inline-card"${hook} style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(card.title)}</strong><small>${escapeHtml(card.detail || "The agent is blocked until you answer.")}</small></span>${dismiss}</div>${card.rule ? `<div class="tag-list"><span class="tag">would add rule · ${escapeHtml(card.rule)}</span></div>` : ""}<div class="inline-card-actions">${actions}</div></div>`;
   }
 
   // Whose attachments these are. The host's read commands take the agent, and a room's files
@@ -1685,7 +1764,23 @@
         + `<button class="card-action" type="button" data-handoff-action="done" ${attrs}>I'm done</button>`
         + (skipSupported ? `<button class="handoff-skip-link" type="button" data-handoff-action="skip" ${attrs}>Skip</button>` : "")
       : `<button class="card-action" type="button" data-handoff-action="open" ${attrs}><span aria-hidden="true">&#9635;</span> Open computer</button>`;
-    return `<div class="inline-card handoff-card" data-handoff-card data-state="${escapeHtml(state)}" data-request-id="${escapeHtml(requestId)}" data-agent-id="${escapeHtml(agentId)}" style="--card-accent:${state === "pending" ? "var(--amber-500)" : state === "done" ? "var(--green-500)" : "var(--stone-500)"}">`
+    // CONSOLE-ATTR-1. Only a pending hand-off is a card a person still has to act on, and the title is
+    // the RELAY's own fixed sentence rather than `instruction`, which the agent wrote and which
+    // ui/push-edge.mjs deliberately never sends. The entry id is message.id, not requestId: the relay
+    // keys a box-handoff card on the transcript entry and carries the requestId separately.
+    // The rail's copy of this same hand-off (renderHandoffRail) carries nothing, or every open
+    // hand-off would count twice.
+    const agentName = view.agentName ?? "";
+    const hook = state === "pending"
+      ? needsYouCardAttrs(escapeHtml, {
+        kind: "box-handoff",
+        agentId: view.contextId ?? "",
+        entryId: message.id,
+        agentName,
+        title: `Take the keyboard for ${String(agentName).trim() || "your agent"}`,
+      })
+      : "";
+    return `<div class="inline-card handoff-card" data-handoff-card${hook} data-state="${escapeHtml(state)}" data-request-id="${escapeHtml(requestId)}" data-agent-id="${escapeHtml(agentId)}" style="--card-accent:${state === "pending" ? "var(--amber-500)" : state === "done" ? "var(--green-500)" : "var(--stone-500)"}">`
       + `<div class="handoff-card-head"><strong>Computer</strong>${pill}</div>`
       + `<p class="handoff-instruction" data-handoff-instruction>${escapeHtml(instruction)}</p>`
       + `<div class="handoff-thumb-frame" style="width:${BOX_HANDOFF_THUMB_W}px;height:${BOX_HANDOFF_THUMB_H}px">${plate}</div>`
@@ -4742,6 +4837,12 @@
     return {
       live: lead?.handoff ?? null,
       agentId,
+      // CONSOLE-ATTR-1: the name the RELAY puts in the notification title for this card, so a shell
+      // reading the page and a shell reading a push are told the same sentence, and the conversation
+      // the card's deep link has to open. In a room `agentId` is the lead member, which is who the
+      // hand-off commands are addressed to and is NOT where the card is drawn.
+      agentName: lead?.name ?? "",
+      contextId: activeContext().id,
       frame: boxHandoffFrame(agentId, requestId),
       // False only where the host has not said which seat this agent is on. That is the one case
       // where no picture is drawn at all, because the alternative is a confident picture of the

@@ -180,6 +180,12 @@ function standUpFront({ stateDir, nowRef, subRef }) {
     name: "operator",
     file: (name) => path.join(stateDir, name),
     ensureDir: () => {},
+    // PUSH-4. What the desktop transport opens: the tenant's own frame stream, with the tenant's own
+    // headers, exactly as ui/server.mjs's relayEvents does. In production `gateway` is the box's own
+    // URL out of buildContext; here it is the live relay, which is the thing in front of this box, so
+    // the stream under test is reading a REAL SSE and not a fixture.
+    gateway: RELAY,
+    headers: (extra = {}) => ({ "user-agent": UA_GATE, ...extra }),
   };
   const readBody = (req) => new Promise((resolve, reject) => {
     let text = "";
@@ -284,6 +290,76 @@ function standUpFront({ stateDir, nowRef, subRef }) {
 }
 
 const recordedLog = [];
+// Every frame the desktop transport wrote on this run, so the secret sweep at the end covers them the
+// same way it covers a recorded send. A new surface that carries a card is a new surface that could
+// carry a token, and the sweep is the leg this whole file would be worthless without.
+const recordedFrames = [];
+
+/**
+ * One desktop connection to GET /push/events on the front, read as whole frames. PUSH-4: the transport
+ * a desktop gets instead of a vendor, which means no APNs entitlement and no Firebase project.
+ */
+async function openTray(front, label) {
+  const base = `http://127.0.0.1:${front.server.address().port}`;
+  const controller = new AbortController();
+  const at = Date.now();
+  const response = await fetch(`${base}/push/events`, {
+    headers: { "user-agent": UA_GATE, accept: "text/event-stream" },
+    signal: controller.signal,
+  });
+  const frames = [];
+  const comments = [];
+  let headersAt = Date.now() - at;
+  if (response.status === 200 && response.body != null) {
+    void (async () => {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let held = "";
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          held += decoder.decode(value, { stream: true });
+          for (;;) {
+            const cut = held.indexOf("\n\n");
+            if (cut < 0) break;
+            const block = held.slice(0, cut);
+            held = held.slice(cut + 2);
+            if (block.startsWith("data: ")) {
+              const text = block.slice("data: ".length);
+              recordedFrames.push(text);
+              // The envelope is {channel, payload}; what every leg below asks about is the CARD, so
+              // the card is what `payload` holds here and the channel is kept beside it. Reading the
+              // envelope as the card is how the first run of this leg reported a row of undefineds.
+              const envelope = JSON.parse(text);
+              frames.push({ at: Date.now(), channel: String(envelope?.channel ?? ""), payload: envelope?.payload ?? {} });
+            } else if (block.startsWith(":")) comments.push(block);
+          }
+        }
+      } catch { /* the gate hung up, or the relay did */ }
+    })();
+  }
+  return {
+    label,
+    status: response.status,
+    headers: response.headers,
+    openedAt: at,
+    headersAt,
+    frames,
+    comments,
+    /** Waits for a frame the predicate likes, and answers it with how long it took. */
+    async waitFor(fn, ms) {
+      const stop = Date.now() + ms;
+      for (;;) {
+        const found = frames.find((frame) => fn(frame.payload));
+        if (found != null) return { ...found, waitedMs: found.at - at };
+        if (Date.now() > stop || budgetLeft() <= 0) return null;
+        await sleep(100);
+      }
+    },
+    close() { try { controller.abort(); } catch { /* already gone */ } },
+  };
+}
 
 /** Every line the stub sender wrote, newest last. */
 function recordedSends(stateDir) {
@@ -412,6 +488,11 @@ try {
     // --host: registration, a real pending hand-off, the one send, collapse, quiet hours, revoke.
     // ===========================================================================================
 
+    // PUSH-4's connection, opened once the card exists and held across the hand-back, and closed on
+    // every exit path including a thrown assertion. Declared here because the secret sweep at the end
+    // reads its frames whether or not a card ever appeared.
+    let tray = null;
+
     console.log("\n== registration");
     const registered = await ask("POST", "/push/devices", { platform: "ios", token: "gate-device-token-0123456789abcdef", deviceId: "gate-phone-1", name: "the gate's iPhone" });
     check(registered.status === 200 && registered.body?.deviceId === "gate-phone-1", "a device registers behind the door", `HTTP ${registered.status} ${JSON.stringify(registered.body).slice(0, 120)}`);
@@ -421,6 +502,79 @@ try {
     const listed = await ask("GET", "/push/devices");
     check(listed.body?.devices?.length === 1, "one device is on the list", `${listed.body?.devices?.length} device(s)`);
     check(!Object.hasOwn(listed.body?.devices?.[0] ?? {}, "token"), "and the list never carries a token", "deviceId, platform, name, env and timestamps only");
+
+    // =============================================================================================
+    // PUSH-4. A DESKTOP COSTS ITS WORKSPACE NOTHING UNTIL SOMEBODY IS LISTENING.
+    //
+    // This is the claim that makes registering a desktop safe, and it is the reason the desktop app
+    // left registration switched off: before this, a registered device of any kind armed the 15 s
+    // sweep for that workspace, and a desktop row holds a device id where an APNs token belongs, so
+    // every card was refused with BadDeviceToken -- which deliberately does not prune -- burned six
+    // attempts and gave up with the row still on disk.
+    //
+    // A WORKSPACE OF ITS OWN, because the main one already has a phone on it and a phone is a reason
+    // to look. This is the only honest way to measure "a desktop alone".
+    // =============================================================================================
+    console.log("\n== the desktop transport, with no vendor anywhere in it");
+    const deskDir = mkdtempSync(path.join(tmpdir(), "push-gate-desk-"));
+    const desk = standUpFront({ stateDir: deskDir, nowRef, subRef: { value: "" } });
+    await new Promise((resolve) => desk.server.listen(0, "127.0.0.1", resolve));
+    const deskAsk = async (method, pathname, body) => {
+      const response = await fetch(`http://127.0.0.1:${desk.server.address().port}${pathname}`, {
+        method,
+        headers: { "user-agent": UA_GATE, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+      });
+      const text = await response.text();
+      let parsed = null;
+      try { parsed = text.length > 0 ? JSON.parse(text) : null; } catch { parsed = null; }
+      return { status: response.status, body: parsed, text };
+    };
+    try {
+      const deskRow = await deskAsk("POST", "/push/devices", { platform: "desktop", token: "mac-hardware-id-not-an-apns-token", deviceId: "gate-mac-1", name: "the gate's Mac" });
+      check(deskRow.status === 200 && deskRow.body?.platform === "desktop", "a desktop registers", `HTTP ${deskRow.status} ${JSON.stringify(deskRow.body).slice(0, 110)}`);
+
+      const callsBefore = desk.edge.stats().gatewayCalls;
+      const quietPass = await desk.edge.sweepOnce("a desktop and nobody listening");
+      const quietCalls = desk.edge.stats().gatewayCalls - callsBefore;
+      check(quietCalls === 0 && quietPass.swept?.[0]?.calls === 0,
+        "and a pass with nobody listening reaches the box ZERO times",
+        `${quietCalls} gateway call(s), the pass said "${String(quietPass.swept?.[0]?.skipped ?? "")}"`);
+      check(quietPass.swept?.[0]?.devices === 1 && quietPass.swept?.[0]?.carried === 1 && quietPass.swept?.[0]?.listening === 0,
+        "with the row on disk all the same, so it is registration and not a refusal",
+        `devices ${quietPass.swept?.[0]?.devices}, carried by the stream ${quietPass.swept?.[0]?.carried}, listening ${quietPass.swept?.[0]?.listening}`);
+      check(recordedSends(deskDir).length === 0, "and no vendor was asked about it at all", "nothing recorded by the stub sender");
+
+      // And with a tray connected the pass runs, because a card a tray has to hear about is what it
+      // is for. Measured against the live box: this is 1 + 1 + N calls, the same as a phone's pass.
+      const tray = await openTray(desk, "the arming tray");
+      try {
+        check(tray.status === 200, "a tray opens GET /push/events", `HTTP ${tray.status}`);
+        check(tray.headers.get("content-type") === "text/event-stream"
+          && tray.headers.get("cache-control") === "no-cache"
+          && tray.headers.get("x-accel-buffering") === "no",
+          "with the header set relayEvents already proves through Cloudflare",
+          `${tray.headers.get("content-type")}, ${tray.headers.get("cache-control")}, x-accel-buffering ${tray.headers.get("x-accel-buffering")}`);
+        const armedBefore = desk.edge.stats().gatewayCalls;
+        const armed = await desk.edge.sweepOnce("a desktop with a tray connected");
+        check(armed.swept?.[0]?.skipped === undefined && armed.swept?.[0]?.listening === 1,
+          "and a connected tray is what arms the pass", `listening ${armed.swept?.[0]?.listening}, ${desk.edge.stats().gatewayCalls - armedBefore} gateway call(s) this pass`);
+        check(recordedSends(deskDir).length === 0, "and still nothing goes to a vendor", "the desktop reaches no APNs and no Firebase");
+      } finally { tray.close(); }
+
+      // The tray gone, the workspace goes quiet again. This is the half that makes the claim a rule
+      // rather than a first-pass accident.
+      await sleep(250);
+      const after = await desk.edge.sweepOnce("the tray gone");
+      check(after.swept?.[0]?.skipped === "only a desktop is registered and none is listening" && after.swept?.[0]?.calls === 0,
+        "and with the tray gone the workspace reaches its box zero times again",
+        `"${String(after.swept?.[0]?.skipped ?? "")}", ${after.swept?.[0]?.calls} call(s)`);
+    } finally {
+      desk.edge.close();
+      await new Promise((resolve) => desk.server.close(resolve));
+      rmSync(deskDir, { recursive: true, force: true });
+    }
 
     console.log("\n== a real pending hand-off on the local box");
     await makeScratchAgent();
@@ -437,7 +591,14 @@ try {
         "the same card a second time sends nothing",
         "quiet hours hold the alert",
         "and release exactly one catch-up on the same key",
-        "answering the card drops the badge through a silent send");
+        "answering the card drops the badge through a silent send",
+        "GET /push/pending answers this card, with the relay's own title and sentence",
+        "and its badge equals the gate's own count of pending cards read from the box",
+        "and a second read inside the memo window costs no gateway call",
+        "a tray gets this card on connect",
+        "on the channel the console's own adapter already reads",
+        "and the tray's row is the row the route answers",
+        "and the hand-back arrives as a closed frame on the same key");
     } else {
       check(true, "a real pending hand-off appears on the box", `${seconds(Date.now() - askedAt)} from prompt to pending, requestId ${String(handoff.requestId).slice(0, 12)}`);
 
@@ -498,6 +659,64 @@ try {
       // PUSH-3 is the filed row; this line is why it is filed.
       const consoleNeedsYou = rosterOf(await gw("listAgents", {}).catch(() => null)).filter((agent) => agent.awaitingUserResponse != null).length;
       info(`the app badge says ${sent.badge} (cards) and the console's needs-you count says ${consoleNeedsYou} (agents, at most one each, two kinds missing) — ${sent.badge === consoleNeedsYou ? "they agree here and will not once an agent holds two cards" : "they already disagree on this box"}. Filed as PUSH-3`);
+
+      // =========================================================================================
+      // PUSH-5. WHAT IS PENDING, ANSWERED BY A ROUTE INSTEAD OF DECIDED AGAIN IN EVERY SHELL.
+      //
+      // Compared against the gate's OWN count, read straight from the box a moment earlier -- the
+      // same independent number the badge is compared against above. That is the whole point: if
+      // this route agreed with the badge but both were wrong, neither leg would notice.
+      // =========================================================================================
+      console.log("\n== what is pending, from the relay's own decider");
+      const pendingBefore = front.edge.stats().gatewayCalls;
+      const pending = await ask("GET", "/push/pending");
+      const pendingCost = front.edge.stats().gatewayCalls - pendingBefore;
+      const mineOnRoute = (pending.body?.cards ?? []).filter((card) => card.agent?.id === agentId && card.kind === "box-handoff");
+      check(pending.status === 200 && mineOnRoute.length === 1
+        && mineOnRoute[0].key === sent.cardKey
+        && mineOnRoute[0].title === title
+        && mineOnRoute[0].body === "Open it to read what it needs done."
+        && mineOnRoute[0].pending === true,
+        "GET /push/pending answers this card, with the relay's own title and sentence",
+        `HTTP ${pending.status}, ${mineOnRoute.length} row(s) for this agent, key ${String(mineOnRoute[0]?.key ?? "absent")}${mineOnRoute[0]?.key === sent.cardKey ? " — the same key the push used" : ""}`);
+      const routeDrift = Math.abs(Number(pending.body?.badge) - waiting.total);
+      check(Number.isFinite(Number(pending.body?.badge)) && routeDrift <= 1,
+        "and its badge equals the gate's own count of pending cards read from the box",
+        `the route says ${pending.body?.badge} over ${pending.body?.agents} agent(s), the gate counted ${waiting.total}${routeDrift === 0 ? "" : ` (${routeDrift} apart; seconds apart on a box three waves share)`}`);
+      info(`one full collection cost ${pendingCost} gateway call(s) over ${pending.body?.agents} agent(s) and ${Buffer.byteLength(pending.text, "utf8")} bytes of answer, on grok-bot-local-vm`);
+      // THE MEMO IS THE WHOLE DIFFERENCE between this route and the polling it replaces. Without it a
+      // desktop polling once a second pays 1 + 1 + N calls a second.
+      const memoBefore = front.edge.stats().gatewayCalls;
+      const again2 = await ask("GET", "/push/pending");
+      check(front.edge.stats().gatewayCalls === memoBefore && again2.body?.at === pending.body?.at,
+        "and a second read inside the memo window costs no gateway call",
+        `${front.edge.stats().gatewayCalls - memoBefore} call(s), the same picture ${again2.body?.ageMs} ms old`);
+      // Nothing a model wrote on the wire, on this new surface as on the old one.
+      check(!pending.text.includes("Sign in") && !/boxInstruction|instruction/.test(pending.text),
+        "and no field a model wrote rides the answer",
+        `${Buffer.byteLength(pending.text, "utf8")} bytes, six fixed sentences and ids`);
+
+      // =========================================================================================
+      // PUSH-4. THE SAME CARD, ON A TRAY, WITH NO VENDOR ANYWHERE IN IT.
+      //
+      // Opened HERE and held across the hand-back below, because the thing worth measuring is a
+      // card closing under a connection that was already open, which is what a tray actually does.
+      // =========================================================================================
+      console.log("\n== the desktop tray sees the same card");
+      tray = await openTray(front, "the card tray");
+      const onConnect = await tray.waitFor((card) => card.key === sent.cardKey && card.state === "pending", within(15_000));
+      check(onConnect != null, "a tray gets this card on connect", onConnect == null
+        ? "nothing inside 15s"
+        : `${onConnect.waitedMs} ms from the connection opening, ${tray.frames.length} frame(s) in all`);
+      const trayRow = onConnect?.payload ?? {};
+      check(onConnect?.channel === "push-card", "on the channel the console's own adapter already reads", String(onConnect?.channel ?? "absent"));
+      check(trayRow.title === title
+        && trayRow.body === "Open it to read what it needs done."
+        && trayRow.agent?.id === agentId
+        && trayRow.entry === mineOnRoute[0]?.entry
+        && String(trayRow.link?.app ?? "").startsWith("titaniumbot://card?"),
+        "and the tray's row is the row the route answers",
+        `${trayRow.kind} · "${String(trayRow.title ?? "").slice(0, 40)}" · badge ${trayRow.badge} · entry ${String(trayRow.entry ?? "").slice(0, 12)}`);
 
       console.log("\n== the same card, again");
       const beforeSecond = recordedSends(stateDir).length;
@@ -567,6 +786,17 @@ try {
           check(mine(recordedSends(stateDir)).filter((row) => row.silent === false).length === 1, "and no second alert went out for a card that is done", `${mine(recordedSends(stateDir)).filter((row) => row.silent === false).length} alert(s) for this card in the whole run`);
         }
       }
+
+      // PUSH-4's other half: the tray that was open before the hand-back has to see the card go. A
+      // `closed` frame on the SAME key is what takes the notification down rather than drawing a
+      // second one about it.
+      if (tray != null) {
+        const closedFrame = await tray.waitFor((card) => card.key === sent.cardKey && card.state === "closed", within(45_000));
+        check(closedFrame != null, "and the hand-back arrives as a closed frame on the same key", closedFrame == null
+          ? `nothing inside ${seconds(within(45_000))} (${tray.frames.length} frame(s) on this connection in all)`
+          : `${Math.round((closedFrame.at - (onConnect?.at ?? tray.openedAt)) / 100) / 10}s after the pending one, badge ${closedFrame.payload?.badge}, key ${String(closedFrame.payload?.key ?? "").slice(0, 12)}…`);
+        info(`the tray held ${tray.frames.length} frame(s) and ${tray.comments.length} heartbeat comment(s) over ${seconds(Date.now() - tray.openedAt)}`);
+      }
     }
 
     console.log("\n== revoking the device");
@@ -582,10 +812,15 @@ try {
     console.log("\n== what was written down");
     // THE LEG THIS WHOLE FILE WOULD BE WORTHLESS WITHOUT. Every recorded byte and every log line,
     // swept for a credential and for transcript prose past the clipped reason.
+    // AND EVERY TRAY FRAME IS SWEPT THE SAME WAY. PUSH-4 added a surface that carries a card, so it
+    // added a surface that could carry a token, and a new wire nobody sweeps is how the first one
+    // came to carry a live `Authorization: Bearer sk_live_…` on its way to a lock screen.
+    if (tray != null) tray.close();
     const ledgerFile = path.join(stateDir, PUSH_STUB_LEDGER_FILE);
-    const everything = `${existsSync(ledgerFile) ? readFileSync(ledgerFile, "utf8") : ""}\n${recordedLog.join("\n")}`;
+    const everything = `${existsSync(ledgerFile) ? readFileSync(ledgerFile, "utf8") : ""}\n${recordedLog.join("\n")}\n${recordedFrames.join("\n")}`;
+    info(`${recordedFrames.length} tray frame(s) are in the sweep below, beside every recorded send and every log line`);
     const leaks = [
-      ["a whole device token", /gate-device-token-0123456789abcdef|a-refreshed-token/],
+      ["a whole device token", /gate-device-token-0123456789abcdef|a-refreshed-token|mac-hardware-id-not-an-apns-token/],
       ["a private key", /BEGIN (EC |RSA )?PRIVATE KEY/],
       ["a bearer", /eyJ[A-Za-z0-9_-]{10,}/],
       ["a gateway token", /SAND_HOST_GATEWAY_TOKEN|Bearer [A-Za-z0-9]{20,}/],
@@ -630,6 +865,61 @@ try {
     check(live, "the console boots with push-settings.js loaded", live ? "window.__machineRoomAdapter is up" : "the adapter never appeared");
     const published = await page.evaluate(() => typeof window.__pushSettings?.mount === "function");
     check(published, "and the module published itself on the seam", `window.__pushSettings.mount is ${published ? "a function" : "absent"}`);
+
+    // =============================================================================================
+    // CONSOLE-ATTR-1, IN A REAL BROWSER ON A REAL BOOT, because a unit test slicing app.js proves the
+    // string is written and not that the page carries it.
+    //
+    // THE DEFECT THIS CLOSES. The desktop shell's injected reader tries, per selector, the attribute's
+    // VALUE, then a number anywhere in the text, then -- failing both -- the number of elements the
+    // selector matched. `data-needs-you-count` was on the pill with no value, and the pill is in the
+    // markup and matches even while it is hidden and empty, so a console with ZERO agents waiting
+    // reported 1. That reader is run here, verbatim in its own shape, against the live DOM.
+    // =============================================================================================
+    console.log("\n== the three hooks a shell reads off this page");
+    const hooks = await page.evaluate(() => {
+      const slot = document.querySelector("[data-needs-you-count]");
+      // The desktop shell's own three readings, in its own order (src-tauri/src/inject.js).
+      const firstInteger = (text) => { const m = /-?\d+/.exec(String(text ?? "")); return m == null ? null : Number(m[0]); };
+      const nodes = slot == null ? [] : [slot];
+      const read = nodes.length === 0 ? null
+        : firstInteger(nodes[0].getAttribute("data-needs-you-count"))
+          ?? firstInteger(nodes[0].textContent)
+          ?? nodes.length;
+      return {
+        present: slot != null,
+        attribute: slot?.getAttribute("data-needs-you-count") ?? null,
+        text: (slot?.textContent ?? "").trim(),
+        hidden: slot?.hidden === true,
+        readsAs: read,
+        talk: document.querySelectorAll("[data-talk-button]").length,
+        talkIsTheVoiceButton: document.querySelector("[data-talk-button]")?.id ?? "",
+        cards: [...document.querySelectorAll("[data-needs-you-card]")].map((node) => ({
+          id: node.getAttribute("data-card-id"),
+          agent: node.getAttribute("data-agent"),
+          title: node.getAttribute("data-title"),
+        })),
+      };
+    });
+    check(hooks.present && hooks.attribute !== null && /^-?\d+$/.test(String(hooks.attribute)),
+      "the roster pill carries data-needs-you-count with a NUMBER in it",
+      `attribute "${hooks.attribute}", text "${hooks.text}", hidden ${hooks.hidden}`);
+    check(hooks.readsAs === Number(hooks.attribute),
+      "and the shell's own reader answers that number rather than falling through to a node count",
+      `the reader answers ${hooks.readsAs}; before this it answered ${hooks.text.length === 0 ? 1 : "the text's number"} for the same page`);
+    check(hooks.talk === 1 && hooks.talkIsTheVoiceButton === "voice-talk",
+      "the talk button carries data-talk-button",
+      `${hooks.talk} element(s), id "${hooks.talkIsTheVoiceButton}"`);
+    // Every pending card in the open conversation, or none: this console boots on whatever
+    // conversation the shared box happens to be showing, so an empty list is an honest answer and a
+    // card that IS drawn has to be complete.
+    const broken = hooks.cards.filter((card) => !card.id || !card.agent || card.agent === "agent" || /^entry-\d+$/.test(card.id));
+    check(broken.length === 0,
+      "and every pending card carrying the marker carries a durable id and agent with it",
+      hooks.cards.length === 0
+        ? "no pending card is drawn in the conversation this boot opened, which is an honest zero on a shared box"
+        : `${hooks.cards.length} card(s), ${broken.length} incomplete`);
+    info(`the page read: count "${hooks.attribute}", ${hooks.cards.length} pending card marker(s), ${hooks.talk} talk hook`);
 
     if (!live) {
       notReached("the console never came up",

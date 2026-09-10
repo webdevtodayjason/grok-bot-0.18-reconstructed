@@ -29,7 +29,7 @@ iPhone UA, real Chrome through playwright-core.
 | `npm test` | **2,719 pass, 0 fail** | the whole suite, not only the new files |
 | `verify-door.mjs --all` | **96 pass, 0 fail, 0 skip**, then after the review pass added seven legs: **`--cors` 25 pass, `--app` 15 pass, 0 fail** | the door at both phone widths, CORS, and a real page on a second origin minting, reading, holding `/events` 30 s and revoking |
 | `verify-cost.mjs` (3 runs) | **15 pass, 0 fail, 1 skip** | first paint, idle, hidden, resume, the asset cache, noVNC printed by name, the desktop A/B |
-| `verify-push.mjs --host` | **32 pass, 0 fail, 1 skip**, re-run unchanged after the review pass | a real pending hand-off to exactly one recorded send, collapse, quiet hours, the badge, revoke |
+| `verify-push.mjs --host` | **32 pass, 0 fail, 1 skip**, re-run unchanged after the review pass. **Since grown to 49 pass, 0 fail, 1 skip** by the app-contract follow-up, whose own legs and numbers are in section 15 | a real pending hand-off to exactly one recorded send, collapse, quiet hours, the badge, revoke, and since section 15 the desktop transport and the pending route |
 | `verify-push.mjs --console` | **16 pass, 0 fail, 4 skip** | the Notifications card at 390x844 and the absent-module case |
 | the bearer-to-push composition | **11 pass, 0 fail** | the one thing no single item could measure: a bearer from `/auth/token` is what opens `/push/devices`, and revoking it closes both |
 | `verify-mobile.mjs --width --fonts --desktop` | **36 pass, 0 fail** | regression, including the desktop baseline this wave repaired |
@@ -460,6 +460,10 @@ figures decoded bytes.**
 
 ### Registering
 
+**Every body and every answer on these routes is spelled out field by field in section 15, and a test
+round-trips each one through the live route.** Read that section before writing a client: this block is
+the map and section 15 is the wire. The prose here was not enough once already — see APPS-DOC-1.
+
 ```
 POST /push/devices
 { "platform": "ios" | "android" | "desktop",
@@ -471,8 +475,12 @@ POST /push/devices
 
 GET    /push/devices              → the person's devices, with NO token on any row
 DELETE /push/devices/<deviceId>   → stops notifying it at once, and only the person's own rows
-GET    /push/settings             → { settings, kinds, scope }
-PUT    /push/settings             → the per-kind switches, quiet hours and one UTC offset
+GET    /push/settings             → { settings, kinds, scope }   — scope is "person" or "workspace"
+PUT    /push/settings             → kinds as a MAP of kind to boolean, quietHours {on, from, to},
+                                    utcOffsetMinutes at the TOP LEVEL. A field left out is unchanged;
+                                    an unknown field or a wrong type is a 400 naming it. PUT only.
+GET    /push/pending              → what is waiting, decided by this relay (section 15, PUSH-5)
+GET    /push/events               → the same cards as they change, for a desktop (section 15, PUSH-4)
 ```
 
 **A row is keyed on (account, deviceId), and both halves matter.** The `deviceId` is chosen by the app
@@ -631,6 +639,57 @@ count said **1**. They are both correct about what they count; they are counting
 Filed as **PUSH-3**, owner the phone pane. The console's own Notifications card says so in plain
 words, where a customer comparing the two numbers can read it.
 
+### The three attributes on the console's own page, for a shell that reads the DOM
+
+**CONSOLE-ATTR-1.** The desktop shell loads `console.titanium.bot` in its window, and until a device
+is signed in it has no bearer and no route — so a small injected script reads the page instead. Three
+attributes are the contract for that, and they are the only three:
+
+| Attribute | Where | What it carries |
+|---|---|---|
+| `data-needs-you-count` | the roster's needs-you pill | the number, as the attribute's **value** |
+| `data-needs-you-card` | every **pending** card in the open conversation | `<conversation id>:<entry id>`, and `data-card-id` carries the same string, so neither side parses anything |
+| `data-card-kind` | beside it | one of the six kinds, spelled the way the relay spells it |
+| `data-agent` | beside it | the conversation's display name, falling back to its id, never empty |
+| `data-title` | beside it | the relay's own fixed title for that card |
+| `data-href` | beside it | `/?agent=<id>&entry=<id>` — a console path, which is the only shape the shell's reader accepts |
+| `data-talk-button` | the console's talk button | present |
+
+**The count attribute already existed with no value, and that was actively wrong.** The slot is
+`<span class="roster-needs-you" data-needs-you-count hidden>` and only its `textContent` was ever
+written. The desktop's reader tries, in order, the attribute's value, then a number anywhere in the
+text, then **the number of elements the selector matched** — and a hidden, empty pill matches, so with
+**zero** agents needing a person it reported **1**, indistinguishable from a real count of 1. Measured
+on this Mac 2026-09-10 by running that reader verbatim against the shipped markup: count 0 → **1**,
+count 3 → 3. With the value written: 0 → 0, 3 → 3. A quiet console put a phantom 1 on the tray for
+ever, and a real 1 could not be told from it.
+
+**Three things a shell author has to know about the card attributes**, because each of them is a way to
+be wrong quietly:
+
+- **The card list is only the OPEN conversation, by construction.** The console draws cards for the
+  active context alone, so `[data-needs-you-card]` is a partial list whose length changes when the
+  person clicks around, while the count attribute is workspace-wide. **`GET /push/pending` is the
+  authority** and these attributes are the fallback for a shell that has no bearer yet.
+- **`data-title` on a hand-off card is the relay's fixed sentence** — `Take the keyboard for <agent>` —
+  and never the agent-written instruction the card displays on screen. That instruction is the field
+  rule 5 exists to keep off a lock screen, and a tray is a lock screen with a different shape.
+- **A card with no durable id carries none of them.** An agent id the adapter could not resolve, an
+  index-based `entry-<n>` id that is not stable across a re-read, and a page-local report offer that
+  the relay will never push are all skipped outright rather than given a dead deep link. So the
+  absence of the attribute means **the relay cannot push this card**, never "this card is not
+  pending".
+- **The id is the CONVERSATION and the entry, not the author and the entry.** The relay reads one
+  transcript tail per row of `listAgents`, and a room is a row, so a card raised inside a room is a
+  card on the room. The page's two obvious values are both wrong there — the entry's author is the
+  member agent that raised it, and the first member is whoever happens to be first — and either one
+  would open the console somewhere the card is not. The conversation opens the card where the person
+  can answer it, which is what the link is for.
+
+Settled cards, cards with an answer in flight, the skill card and the rail's copy of the hand-off carry
+nothing: the rail card is the same hand-off drawn a second time, and attributing both would make every
+open hand-off count twice.
+
 ### The deep link
 
 ```
@@ -654,7 +713,13 @@ no registered push device is skipped entirely, so the whole mechanism costs noth
 customer without a phone. Measured: the sweep makes **zero** gateway calls for such a workspace, and
 the gate counts them to prove it.
 
-For a workspace with a device: one `listAgents` and one `listProblemReports`, then one
+**And the same rule one line further on, since PUSH-4.** A registered *desktop* reaches no vendor, so
+on its own it must not arm this loop either: a workspace whose only device is a desktop, with nobody
+connected to `GET /push/events`, also reaches its box **zero** times. With a stream open the pass runs,
+because a card a tray has to hear about is what it is for. Both halves are counted by the gate, because
+"one device registered and zero calls made" is the claim that makes registering a desktop safe.
+
+For a workspace with a phone: one `listAgents` and one `listProblemReports`, then one
 `getAgentTranscriptTail {id, limit: 5}` for each agent whose roster row moved **or** that still has
 an open card this relay alerted about. The roster is the change **detector** only; the tail read is
 the authority on what the card is, because `awaitingUserResponse` is a single slot per agent with
@@ -765,7 +830,13 @@ the two control-plane credential doors.
 4. **A dead desktop token was never pruned.** `prunesDevice` matched only `ios`, so a Mac's 410 fell
    through to the Firebase table where a 410 means nothing, and the row stayed. The test is now
    `platform !== "android"`, written that way so a fourth platform added later cannot fall through
-   either.
+   either. **Since PUSH-4 a desktop reaches no vendor at all** (section 15, "the desktop transport"),
+   so nothing on that table ever answers about one — but the `!== "android"` *shape* is what stopped
+   the defect and is what the suite pins, because the next platform somebody adds is the one that
+   would otherwise fall through. And the exit was worse than "the row stayed": a desktop row holds a
+   device id where an APNs token belongs, Apple answers `BadDeviceToken` for that, and
+   `BadDeviceToken` deliberately does not prune — so a registered desktop burned six attempts on the
+   backoff, gave up, and kept its row for ever.
 
 ### Not measured
 
@@ -884,3 +955,380 @@ no `/v1` and no websocket, so there is no live screen from a phone. Push registr
 kind on Android, quiet hours holding the alert but never the badge. The deep link is
 `titaniumbot://card?tenant=&agent=&entry=&kind=` with the https fallback `/?agent=&entry=`, and the
 card it names may already have expired by the time a thumb reaches it.
+
+---
+
+## 15. The wire shapes, exactly
+
+**Why this section exists at all.** Every field in it was named in prose somewhere above, and prose
+was not enough. The phone app read section 6's sentence "the per-kind switches, quiet hours and one
+UTC offset" and sent `{enabled, kinds: ["widget"], quietHours: {enabled, fromHour, toHour}}`. The
+relay answered **200 `{"message":"Saved."}`** and stored none of it — and, measured on
+grok-bot-local-vm 2026-09-10 against the real handler, did not merely ignore it but **overwrote**: a
+workspace holding two muted kinds and quiet hours 23..6 came back with every kind on, quiet hours
+**off** at the default 22..7, and the offset 0. A phone "saving quiet hours" turned the customer's
+quiet hours off. A 200 that ignores a body is the worst shape a mismatch can take, and a document that
+describes a field without spelling it is how one is built.
+
+So this section is the spelling, and it is **pinned by a test rather than by discipline**:
+`tests/apps-wire-shapes.test.mjs` reads every example below out of this file, starts a real relay from
+a copy of `ui/`, mints a real bearer, drives each documented body through the live route, and asserts
+the answer has **exactly** the keys the documented answer has — no key missing, no key extra, at every
+level. An example edited here that the relay does not actually answer turns that test red.
+
+Filed as **APPS-DOC-1**.
+
+### How to read it
+
+Every heading below is `METHOD path — what it is`, and the block under it is the literal JSON. Values
+that change per call (tokens, ids, timestamps) are shown as a realistic example; the **keys and the
+types** are the contract. Every route below is behind a device bearer for a shell, or the session
+cookie for the console's own panel; none of them checks a credential itself.
+
+### The token door
+
+##### `POST /auth/token` — the body, an account sign-in
+```json
+{"email": "owner@example.com", "password": "the account's own password", "device": {"id": "dev_mac_9f2", "name": "Jason's iPhone", "platform": "ios"}}
+```
+
+##### `POST /auth/token` — the body, the instance-password door
+```json
+{"password": "the instance password", "device": {"id": "dev_mac_9f2", "name": "the operator's laptop", "platform": "desktop"}}
+```
+
+##### `POST /auth/token` — the body, a silent re-mint for the same device
+```json
+{"device": {"id": "dev_mac_9f2"}}
+```
+
+The re-mint carries the live bearer in `Authorization`. `device` is optional in all three bodies, and
+`platform` is `ios`, `android` or `desktop` and nothing else. A `deviceId` at the top level is
+accepted as well as `device.id`, because the push route spells it that way and sending the push
+spelling here once minted a bearer for a freshly generated id instead of refusing. **Read the id off
+the answer rather than assuming it.**
+
+##### `POST /auth/token` — the answer
+```json
+{"token": "tbd1.…", "expiresAt": 1791606000000, "renewed": false, "tenant": "demo",
+ "device": {"id": "dev_mac_9f2", "name": "Jason's iPhone", "platform": "ios", "createdAt": 1789000000000, "lastSeenAt": 1789000000000, "revokedAt": null}}
+```
+
+The token is answered **once, here**, and is never read back on any other route.
+
+##### `GET /auth/devices` — the answer
+```json
+{"tenant": "demo",
+ "devices": [{"id": "dev_mac_9f2", "name": "Jason's iPhone", "platform": "ios", "createdAt": 1789000000000, "lastSeenAt": 1789000300000, "revokedAt": null}]}
+```
+
+A revoked device stays on this list with `revokedAt` stamped, so it is visible that it was taken away.
+**No row on this list carries a token**, here or on the push list below.
+
+##### `DELETE /auth/devices/<id>` — the answer
+```json
+{"revoked": "dev_mac_9f2", "tenant": "demo"}
+```
+
+**`revoked` is the id, not a boolean** — the push route's `removed` beside it *is* a boolean, and the
+two routes are spelled differently. This is the kind of thing a document written from prose gets wrong:
+the first draft of this section said `{"id": …, "revoked": true}` and the round-trip test caught it
+before a shell author did.
+
+### Registering for notifications
+
+##### `POST /push/devices` — the body
+```json
+{"platform": "ios", "token": "whatever the platform SDK handed back", "deviceId": "dev_mac_9f2", "name": "Jason's iPhone", "env": "production"}
+```
+
+`deviceId` is the **same** stable id the bearer was minted for. `env` is `production` or `sandbox` and
+defaults to production. `platform` is `ios`, `android` or `desktop`; a desktop row is carried by
+`GET /push/events` below and reaches no vendor. Anything else is a 400 that says so, and the row is
+keyed on **(account, deviceId)**, so one physical machine signed into two accounts is two rows.
+
+##### `POST /push/devices` — the answer
+```json
+{"deviceId": "dev_mac_9f2", "platform": "ios", "replaced": false, "message": "That device will be notified from now on."}
+```
+
+`replaced` is true when the same account registered the same `deviceId` before. **The token is never
+answered back, here or anywhere.**
+
+##### `GET /push/devices` — the answer
+```json
+{"devices": [{"deviceId": "dev_mac_9f2", "platform": "ios", "name": "Jason's iPhone", "env": "production", "createdAt": 1789000000000, "updatedAt": 1789000300000, "tokenAt": 1789000300000}]}
+```
+
+A list shows exactly what a `DELETE` can remove and nothing else: this person's own rows, or every row
+in the workspace for the instance-password door.
+
+##### `DELETE /push/devices/<deviceId>` — the answer
+```json
+{"deviceId": "dev_mac_9f2", "removed": true, "message": "That device will not be notified again."}
+```
+
+`removed` is false with the same 200 when there was no such row, because "there is nothing here by
+that name" is an answer and not a failure.
+
+### The switches
+
+##### `GET /push/settings` — the answer
+```json
+{"settings": {"kinds": {"auto-review": true, "local-tool": true, "widget": true, "secret": true, "box-handoff": true, "report": true},
+              "quietHours": {"on": false, "from": 22, "to": 7},
+              "utcOffsetMinutes": 0},
+ "kinds": ["auto-review", "local-tool", "widget", "secret", "box-handoff", "report"],
+ "scope": "person"}
+```
+
+Three things a shell author gets wrong from the prose and will not get wrong from this:
+
+- **`kinds` on the settings object is a MAP of kind to boolean.** A list of the kinds you want on is
+  not read at all. The `kinds` beside it, at the top level, is the flat list of the six the server
+  knows, so a panel draws the server's kinds rather than inventing its own.
+- **`quietHours` is `{on, from, to}`**, whole hours, and **`utcOffsetMinutes` is at the TOP LEVEL** of
+  the settings object rather than inside `quietHours`.
+- **`scope` is `"person"` or `"workspace"`**, never `"account"`. A named account is a person; the
+  instance-password door and the operator have nobody behind them, so their settings mean the whole
+  workspace.
+
+**There is no master switch.** The relay holds the six per-kind switches, quiet hours and the offset,
+and nothing that means "none of it". A shell that wants one sends every kind `false`, which is the
+mechanism this relay actually has; turning it back on sends them all `true`, so nobody is left with
+six off switches behind an on switch.
+
+##### `PUT /push/settings` — the body
+```json
+{"kinds": {"widget": false, "secret": false}, "quietHours": {"on": true, "from": 23, "to": 6}, "utcOffsetMinutes": -300}
+```
+
+**A field you leave out is left as it was.** This route is a merge and not a replace, so a panel may
+`PUT` only what the person touched — `{"kinds": {"report": false}}` is a complete, valid body, and so
+is `{}`. It was a full replace until this ship, which is the other half of why a phone saving quiet
+hours un-muted two kinds: the body it sent carried no `kinds` and the route wrote the defaults.
+
+`utcOffsetMinutes` is what a browser's `getTimezoneOffset()` answers, **negated** (the console sends
+`-300` for US Central daylight time). The cost of an offset rather than a zone name is that a
+daylight-saving change is an hour out until the app next opens.
+
+##### `PUT /push/settings` — the answer
+```json
+{"settings": {"kinds": {"auto-review": true, "local-tool": true, "widget": false, "secret": false, "box-handoff": true, "report": true},
+              "quietHours": {"on": true, "from": 23, "to": 6},
+              "utcOffsetMinutes": -300},
+ "message": "Saved."}
+```
+
+The switches come back off the relay rather than out of the page, so a panel draws what was stored.
+
+##### `PUT /push/settings` — the refusal
+```json
+{"error": "bad_request", "field": "enabled", "message": "There is no setting called \"enabled\". This route takes kinds, quietHours and utcOffsetMinutes, and a field you leave out is left as it was. Nothing was stored."}
+```
+
+**400 and the field's name, never 200 and something else stored.** What is refused, and why each one
+is a refusal rather than a quiet coercion — every line of this was measured on grok-bot-local-vm
+2026-09-10 against the route as it was:
+
+| Sent | Was | Is now |
+|---|---|---|
+| a field this route does not have (`enabled`), or a body with no known field at all | 200, and the defaults written over everything | 400 naming the field |
+| a body that is not an object (a list, a string, `null`) | 200 `"Saved."`, defaults written | 400 saying the body has to be an object |
+| `kinds` as a list | 200, every kind left on | 400 saying `kinds` is a map |
+| a kind the server does not have (`kinds.mentions`) | 200, silently dropped | 400 naming `kinds.mentions` and listing the six |
+| `kinds: {"widget": "false"}` | **stayed ON** — only a strict `false` mutes | 400 naming `kinds.widget` |
+| `quietHours: {"on": "true"}` | **read OFF** — only a strict `true` arms | 400 naming `quietHours.on` |
+| `utcOffsetMinutes: "-300"` | **honoured**, because `Number()` took it | 400 naming `utcOffsetMinutes` |
+| `quietHours: {"from": 99}` | stored as **3** — `clampHour` is a modulo | 400 saying a whole hour from 0 to 23 |
+| `quietHours: {"to": -4}` | stored as **20** | 400, the same |
+| `quietHours: {"fromHour": 1}` | 200, silently dropped | 400 naming `quietHours.fromHour` and saying where the offset lives |
+| a `POST` instead of a `PUT` | **accepted and saved**, while the route's own refusal sentence said "GET or PUT" | 405 `{"error": "GET or PUT"}` |
+
+One loosely typed body used to produce three different outcomes — honoured, ignored, inverted — and
+the server complained about none of them. That is the thing the strictness is for. The store still
+reads a row already on disk forgivingly, because a stored row has to stay readable; the **wire**
+refuses, because a wire has a client on the other end who can be told.
+
+**Saving reopens what was muted.** A `PUT` here drops this workspace's `muted` ledger rows and clears
+any quiet-hours deadline, so cards already waiting are decided once on the next pass rather than only
+the next new one. Registering a device does the same thing, for the same reason.
+
+### What is waiting, without deciding it yourself
+
+##### `GET /push/pending` — the answer
+```json
+{"at": 1789000300000, "ageMs": 0, "memoMs": 5000, "agents": 12, "badge": 3,
+ "cards": [{"key": "d6a325d5713e8b038b0d582fb726f1e2",
+            "kind": "box-handoff",
+            "agent": {"id": "agent_7c1", "name": "Books"},
+            "entry": "t14s0",
+            "requestId": "box-1",
+            "title": "Take the keyboard for Books",
+            "body": "Open it to read what it needs done.",
+            "link": {"app": "titaniumbot://card?tenant=demo&agent=agent_7c1&entry=t14s0&kind=box-handoff",
+                     "web": "https://console.titanium.bot/?agent=agent_7c1&entry=t14s0"},
+            "at": 1789000290000,
+            "deadlineMs": 0,
+            "pending": true,
+            "muted": false}]}
+```
+
+**PUSH-5.** No route answered this, so the badge and the card decision existed only inside a push
+payload — and the desktop shell ported the whole decider, the six kinds and the collapse hash
+included, into its own Rust and polled the three underlying calls. Two copies of one rule drift, and
+the copy on the shell is the one nobody notices has drifted.
+
+What each field means, and the three that are easy to misread:
+
+- **`key` is the collapse key**, and it is the same 32-hex value `apns-collapse-id` and Android's
+  `notification.tag` carry for that card, so a tray and a lock screen are talking about one thing.
+- **`body` is one of the six fixed sentences**, chosen by kind, and never a field a model wrote. This
+  route is a notification body with a different shape and it keeps the same rule.
+- **`title` is the title a push carries.** For a hand-off that is `Take the keyboard for <agent>`, and
+  **never** the agent-written instruction the console's own card displays on screen.
+- **`pending`** is false for a card that has been answered, dismissed or has expired. The list carries
+  those too, so a tray can take a notification down rather than waiting for it to vanish.
+- **`muted`** is computed from **the caller's own** per-kind switches. It decorates a row and never
+  changes `badge`.
+- **`deadlineMs`** is non-zero only for `auto-review` and `local-tool`, the two kinds that die in ten
+  minutes. A card may already have expired by the time a thumb reaches it.
+- **`ageMs` and `memoMs`**: how old this picture is, and how long one stands in for the next request.
+
+**`badge` is the workspace's unfiltered pending count** — the same number the push payload carries —
+**and it is not the console's needs-you pill.** The pill counts *agents*, at most one per agent, off
+`awaitingUserResponse`, which is never raised for a local-tool permission ask or a secret request. So
+it misses two of the six kinds and under-counts whenever one agent holds two cards. Measured on
+grok-bot-local-vm 2026-09-10 with a real pending hand-off plus two other waves' cards on the same box:
+**badge 3, pill 1**. Both are right about what they count. That is **PUSH-3**, it is not closed by this
+route, and a shell that shows both numbers should expect them to differ.
+
+**What it costs, and why there is a memo.** A full collection is **1 + 1 + N** gateway calls —
+`listAgents`, `listProblemReports`, then one `getAgentTranscriptTail {limit: 5}` per agent. **Measured
+on grok-bot-local-vm 2026-09-10** by `verify-push --host` against the live twelve-agent box: **14
+gateway calls** upstream, about **30 KB decoded** off the box (11,857 + 14 + 12 × 1,535), and a
+**1,757-byte** answer out to the caller — the answer is small because it is ids and six fixed
+sentences; the cost is the reading. The sweep only stays cheap because it reads the tails of agents
+whose roster row moved; a route has no previous roster to diff against. So one collected picture stands
+in for the next **5 seconds** with its age on the answer: measured in the same run, a second read
+inside the window cost **0 gateway calls** and answered the same picture 71 ms old. A client polling
+once a second therefore gets a rising `ageMs` rather than fourteen calls a second, and without the memo
+this route would be a worse cost than the polling it replaces.
+
+**A box that does not answer is a 503, never an empty list**, because an empty list tells a tray that
+everything has been answered:
+
+##### `GET /push/pending` — the refusal when the box is unreachable
+```json
+{"error": "no_answer", "message": "That box did not answer, so there is nothing to say about what is waiting."}
+```
+
+### The desktop transport, which needs no vendor
+
+##### `GET /push/events` — the response headers
+```
+content-type: text/event-stream
+cache-control: no-cache
+connection: keep-alive
+x-accel-buffering: no
+```
+
+**PUSH-4.** `POST /push/devices` accepted `platform: desktop` from the first day and then routed it to
+the **APNs** sender, on the reasoning that a desktop app is signed by the same Apple account. That is
+not a transport. Windows has no APNs at all, and macOS needs an `aps-environment` entitlement and an
+embedded provisioning profile, the same restricted class that stops an ad hoc build launching. So the
+desktop shell left registration switched off and polled.
+
+And registering anyway was **worse than not registering**, in a way worth writing down because the
+filed row understated it. A desktop row holds a device id where an APNs token belongs, and Apple's
+answer to that is `BadDeviceToken` — which `prunesDevice` deliberately does **not** prune, because a
+bad token is our bug and not the device's. Measured on this Mac 2026-09-10: 400 `BadDeviceToken`,
+403 `InvalidProviderToken`, 400 `DeviceTokenNotForTopic` and 500 all answer "". So every card went
+`failed`, burned six attempts on the backoff, gave up, and the row stayed in `push.json` for ever.
+There was no exit at all.
+
+So a desktop is carried here instead. **What registration now means for a desktop:**
+
+- the row is recorded exactly as any other, keyed on (account, deviceId), and `token` may be the
+  machine's own stable id — nothing is ever sent to it;
+- **no vendor is ever asked about it**, for the alert and for the silent badge update alike;
+- **on its own it does not arm the 15-second sweep.** A workspace whose only device is a desktop, with
+  nobody connected, reaches its box **zero times** — the same assertion the no-device case carries.
+  With a stream open the pass runs, because a card a tray has to hear about is what it is for.
+
+On connect the stream writes **the cards as they stand**, one frame each, so a tray that has just
+started knows what is waiting without a card having to move first. After that it re-reads when the
+box's own `/events` moves (debounced, and never more often than once a second), and on a slow refresh
+as a fallback for a box whose stream this relay cannot hold.
+
+##### `GET /push/events` — a pending frame
+```json
+{"channel": "push-card",
+ "payload": {"state": "pending", "badge": 3, "ageMs": 0,
+             "key": "d6a325d5713e8b038b0d582fb726f1e2",
+             "kind": "box-handoff",
+             "agent": {"id": "agent_7c1", "name": "Books"},
+             "entry": "t14s0",
+             "requestId": "box-1",
+             "title": "Take the keyboard for Books",
+             "body": "Open it to read what it needs done.",
+             "link": {"app": "titaniumbot://card?tenant=demo&agent=agent_7c1&entry=t14s0&kind=box-handoff",
+                      "web": "https://console.titanium.bot/?agent=agent_7c1&entry=t14s0"},
+             "at": 1789000290000, "deadlineMs": 0, "pending": true, "muted": false}}
+```
+
+##### `GET /push/events` — a closed frame
+```json
+{"channel": "push-card",
+ "payload": {"state": "closed", "badge": 2, "ageMs": 0,
+             "key": "d6a325d5713e8b038b0d582fb726f1e2",
+             "kind": "box-handoff",
+             "agent": {"id": "agent_7c1", "name": "Books"},
+             "entry": "t14s0"}}
+```
+
+The payload inside a `pending` frame is the **same row** `GET /push/pending` answers, with `state` and
+`badge` on it, so a tray has one shape to draw and not two. A `closed` frame is the same `key`, so the
+notification it closes is the one that comes down rather than a second one appearing about it.
+
+Four rules a shell author should know about this stream:
+
+1. **The dedupe is per connection, and this path never writes `push-sent.json`.** `alerted` is
+   terminal for every device in that ledger, so recording a tray delivery there would silence the same
+   card for a phone that registered afterwards. Two trays both get the whole picture on connect.
+2. **The collapse key and the six sentences are a push's**, so what a tray shows is what a lock screen
+   would have shown.
+3. **Read it with `fetch` plus a stream reader, never `EventSource`**, for the same reason `/events`
+   says so: `EventSource` cannot carry the `Authorization` header.
+4. **It is not the relay's `GET /events`.** That one is the box's own frame stream, piped through
+   unchanged, and it carries no cards. This one is at `/push/events`, is answered by the push module
+   itself, and carries nothing but cards.
+
+### What this section measured, on what, at what
+
+**grok-bot-local-vm on this Mac, 2026-09-10**, against a relay spawned from this worktree talking to
+that box, one gate at a time behind the shared box lock, gate user agent
+`titanbot-gate/verify-push.mjs`. `node scripts/verify-push.mjs --host` — **49 pass, 0 fail, 1 skip**
+(the skip is the mint door, which this relay does not serve; it is closed separately by
+`tests/apps-wire-shapes.test.mjs`, which mints a real bearer through it).
+
+| Leg | Result |
+| --- | --- |
+| a registered desktop, nobody connected | **0 gateway calls**, the pass saying `only a desktop is registered and none is listening`, with the row on disk (devices 1, carried 1, listening 0) and nothing handed to a sender |
+| a tray connecting | `GET /push/events` answered **200** with `text/event-stream`, `no-cache`, `x-accel-buffering: no`; the pass then ran (listening 1) and still reached no vendor. With the tray gone: back to **0 calls** |
+| `GET /push/pending` against a real pending hand-off | **badge 3**, against the gate's own independent count of **3** read straight from the box across 12 agents. The row carried the push's own collapse key, `Take the keyboard for <agent>`, and `Open it to read what it needs done.` |
+| what one collection costs | **14 gateway calls over 12 agents**, a **1,757-byte** answer; a second read inside the memo window **0 calls**, the same picture 71 ms old |
+| the tray and the card | the pending frame **2 ms** after the connection opened, on channel `push-card`, carrying the same row the route answers; the **closed** frame on the same key **4 s** after the hand-back |
+| what was written down | 4 tray frames swept beside every recorded send and log line for a device token, a private key, a bearer and a gateway token: **clean**. Longest notification body 45 characters |
+
+`npm test` over the whole suite: **2,778 pass, 0 fail** on the same machine, including the 13 wire-shape
+round-trips through a real relay and the 12 that pin the three page attributes out of the shipped files.
+
+### One thing this section does not document
+
+**A real APNs or FCM send.** No credential exists yet, so every measured number in this document came
+off the stub sender, which records exactly what would have gone out. The day a credential lands,
+nothing in this section changes except which sender the edge picks.
+
+**And nothing here is measured on the R750.** Everything on this page is grok-bot-local-vm. Nothing is
+done until it is measured on the R750 through `console.titanium.bot`.

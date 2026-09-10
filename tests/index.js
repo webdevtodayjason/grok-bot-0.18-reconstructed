@@ -260,3 +260,9 @@ import "./cp-code.test.mjs";
 // protocol, the private-never-public asset policy, and the case where both modules are absent.
 import "./api-diet.test.mjs";
 import "./asset-cache.test.mjs";
+// APPS-DOC-1, PUSH-4, PUSH-5 and CONSOLE-ATTR-1: the app-contract follow-up. The wire shapes
+// docs/APPS.md documents, round-tripped through a real relay, and the three attributes a shell reads
+// off the console's own page when it has no bearer yet.
+import "./apps-wire-shapes.test.mjs";
+import "./console-app-hooks.test.mjs";
+import "./console-needs-you-attributes.test.mjs";

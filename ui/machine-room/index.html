@@ -227,7 +227,13 @@
                form a default button submits, which would send the composer on every press. The orb
                lives inside it and its four states are driven only by voice.js from the relay's
                frames. The label stays a word, because an icon alone never said what this does. -->
-          <button class="voice-talk" id="voice-talk" type="button" data-voice-talk aria-pressed="false" aria-label="Talk to your agent"><span class="voice-orb" data-voice-orb data-state="off"></span><span class="voice-talk-label">Talk</span></button>
+          <!-- CONSOLE-ATTR-1: data-talk-button is the desktop shell's hook for its global hotkey, and
+               it lives HERE rather than being set by voice.js, so it is present before that module
+               boots and stays present when probe() disables the button or the module fails to load.
+               The shell's other selectors do not match this button: its aria-label is "Talk to your
+               agent", and the list's case-insensitive rule wants an exact "Talk", so without this the
+               hotkey falls back to putting the cursor in the composer. docs/APPS.md section 6. -->
+          <button class="voice-talk" id="voice-talk" type="button" data-voice-talk data-talk-button aria-pressed="false" aria-label="Talk to your agent"><span class="voice-orb" data-voice-orb data-state="off"></span><span class="voice-talk-label">Talk</span></button>
           <button class="send-button" type="submit"><span>➤</span> Send</button>
         </form>
         <div class="shelf-utilities">

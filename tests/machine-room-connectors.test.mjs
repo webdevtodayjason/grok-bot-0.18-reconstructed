@@ -471,9 +471,14 @@ async function markupHelpers() {
     return source.slice(start, end + 4);
   };
   const escapeHtml = (v) => String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  // This slice already carries CONSOLE-ATTR-1's needsYouCardAttrs, which sits between DECISION_ACTIONS
+  // and decisionMarkup. What it cannot carry is activeContext and contextName, which decisionMarkup
+  // asks for the conversation a pending card's deep link names. They are injected, because what this
+  // file measures is the masked input and not the link; tests/console-needs-you-attributes.test.mjs
+  // and tests/console-app-hooks.test.mjs are where those calls are pinned.
   const decisions = source.slice(source.indexOf("  const DECISION_ACTIONS = {"), source.indexOf("  function decisionMarkup("));
-  const fn = new Function("escapeHtml", "adapter", `${grab("connectorSecretMarkup")}\n${grab("listenerConnectMarkup")}\n${decisions}${grab("decisionMarkup")}\nreturn { connectorSecretMarkup, listenerConnectMarkup, decisionMarkup };`);
-  return fn(escapeHtml, { connectListener: () => {}, submitSecretRequest: () => {} });
+  const fn = new Function("escapeHtml", "adapter", "activeContext", "contextName", `${grab("connectorSecretMarkup")}\n${grab("listenerConnectMarkup")}\n${decisions}${grab("decisionMarkup")}\nreturn { connectorSecretMarkup, listenerConnectMarkup, decisionMarkup };`);
+  return fn(escapeHtml, { connectListener: () => {}, submitSecretRequest: () => {} }, () => ({ kind: "worker", id: "agent-under-test" }), () => "The agent under test");
 }
 
 test("the connector key form is masked and carries no value in the markup", async () => {

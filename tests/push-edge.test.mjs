@@ -21,7 +21,7 @@ import {
   PUSH_STUB_LEDGER_FILE, SENT_LEDGER_CAP,
   buildApnsMessage, buildFcmMessage, cardKey, cardsFromEntry, cardsFromReports, cardsFromTail,
   clipReason, createPushEdge, createPushStore, createSentLedger, createStubSender, deepLinks,
-  prunesDevice, quietHoursEndMs, quietHoursHold,
+  prunesDevice, quietHoursEndMs, quietHoursHold, validateSettings,
 } from "../ui/push-edge.mjs";
 
 const fresh = () => mkdtempSync(path.join(tmpdir(), "push-edge-"));
@@ -352,6 +352,77 @@ test("settings are per person, keyed on sub, and the instance door means the wor
   // An hour out of range is clamped rather than stored: a 47 in this field is a quiet window that
   // never opens and never closes.
   assert.equal((await store.saveSettings("person-c", { quietHours: { on: true, from: 47, to: -3 } })).quietHours.from, 23);
+});
+
+test("a save changes what it names and leaves the rest, which is what stops a settings screen wiping a customer's switches", async () => {
+  const t = tenantContext();
+  const store = createPushStore({ file: t.file(PUSH_FILE) });
+  await store.saveSettings("person-a", { kinds: { widget: false, secret: false }, quietHours: { on: true, from: 23, to: 6 }, utcOffsetMinutes: -300 });
+
+  // MEASURED on grok-bot-local-vm (this Mac) 2026-09-10 against the REPLACING version this pass
+  // removed: this body answered 200 and left quiet hours off at 22 to 7, the offset 0, and widget and
+  // secret back ON. A shell that sends only what the person touched silently reset everything else.
+  const after = await store.saveSettings("person-a", { kinds: { report: false } });
+  assert.equal(after.kinds.report, false, "the switch that was named changed");
+  assert.equal(after.kinds.widget, false, "and one that was not is left alone");
+  assert.equal(after.kinds.secret, false);
+  assert.deepEqual(after.quietHours, { on: true, from: 23, to: 6 }, "quiet hours a body never mentioned are not reset");
+  assert.equal(after.utcOffsetMinutes, -300);
+
+  // Nested, too: naming one hour does not throw the other two away.
+  const nested = await store.saveSettings("person-a", { quietHours: { to: 8 } });
+  assert.deepEqual(nested.quietHours, { on: true, from: 23, to: 8 });
+
+  // And it is what is on disk, not only what was answered.
+  assert.deepEqual((await store.settingsFor("person-a")).quietHours, { on: true, from: 23, to: 8 });
+});
+
+test("the settings body is checked before anything is written, and the refusal names the field", () => {
+  // The first row is the shape the phone app sent off this document's prose. It answered 200 and wrote
+  // the DEFAULTS over the customer's own switches until this pass; each refusal now names the one
+  // field a shell author has to change. tests/apps-wire-shapes.test.mjs drives the documented one of
+  // these through the live route; this is the whole table, at the unit.
+  const cases = [
+    [{ enabled: true }, "enabled", /no setting called "enabled"/],
+    [{ hello: "world" }, "hello", /no setting called "hello"/],
+    [{ kinds: ["widget"] }, "kinds", /kinds is a map of card kind to true or false/],
+    [{ kinds: { widget: "false" } }, "kinds.widget", /kinds\.widget has to be true or false/],
+    [{ kinds: { email: true } }, "kinds.email", /no card kind called "email"/],
+    [{ quietHours: { enabled: true } }, "quietHours.enabled", /quietHours has no field called "enabled"/],
+    [{ quietHours: { fromHour: 1 } }, "quietHours.fromHour", /utcOffsetMinutes at the top level/],
+    [{ quietHours: { on: "true" } }, "quietHours.on", /quietHours\.on has to be true or false/],
+    [{ quietHours: { from: 99 } }, "quietHours.from", /whole hour from 0 to 23/],
+    [{ quietHours: { to: -4 } }, "quietHours.to", /whole hour from 0 to 23/],
+    [{ utcOffsetMinutes: "-300" }, "utcOffsetMinutes", /whole number of minutes/],
+    [{ utcOffsetMinutes: 99999 }, "utcOffsetMinutes", /whole number of minutes/],
+    [["widget"], "body", /has to be a JSON object/],
+    ["nope", "body", /has to be a JSON object/],
+    [null, "body", /has to be a JSON object/],
+  ];
+  for (const [body, field, message] of cases) {
+    const verdict = validateSettings(body);
+    assert.equal(verdict.ok, false, JSON.stringify(body));
+    assert.equal(verdict.field, field, `the refusal names the field a shell has to change: ${JSON.stringify(body)}`);
+    assert.match(verdict.message, message);
+    assert.match(verdict.message, /Nothing was stored\.$/, "every refusal says what it did about the store");
+  }
+
+  // And what a shell may legitimately send: all three fields, one field, or none at all. An omitted
+  // field has to MEAN unchanged, or a panel that sends only what the person touched cannot save.
+  for (const body of [
+    { kinds: Object.fromEntries(PUSH_CARD_KINDS.map((kind) => [kind, false])), quietHours: { on: true, from: 23, to: 6 }, utcOffsetMinutes: -300 },
+    { kinds: { report: false } },
+    { quietHours: { on: false } },
+    { utcOffsetMinutes: 840 },
+    { utcOffsetMinutes: -840 },
+    {},
+  ]) {
+    const verdict = validateSettings(body);
+    assert.equal(verdict.ok, true, JSON.stringify(body));
+    // The patch carries exactly the fields the body named, which is the mechanism that makes an
+    // absent field an unchanged field rather than a reset one.
+    assert.deepEqual(Object.keys(verdict.patch).sort(), Object.keys(body).sort(), JSON.stringify(body));
+  }
 });
 
 test("the sent ledger survives a restart and is capped", async () => {
@@ -706,30 +777,155 @@ test("the Android collapse key folds six kinds onto four buckets, because four i
   assert.ok(made.message.android.collapse_key.length > 0);
 });
 
-test("a dead desktop token is pruned the same way a dead iPhone token is", () => {
-  // The desktop app is signed by the same Apple account and goes through the same APNs sender, so its
-  // 410 has to mean the same thing. Before this was written `prunesDevice` matched only "ios" and a
-  // dead Mac token fell through to the Firebase table, where a 410 means nothing: the row stayed and
-  // the relay kept addressing a machine that had uninstalled the app.
-  for (const platform of ["ios", "desktop"]) {
-    assert.ok(prunesDevice({ platform, status: 410, reason: "Unregistered" }).length > 0, `${platform} 410 prunes`);
-    assert.ok(prunesDevice({ platform, status: 400, reason: "ExpiredToken" }).length > 0, `${platform} ExpiredToken prunes`);
-    assert.equal(prunesDevice({ platform, status: 400, reason: "BadDeviceToken" }), "", `${platform} BadDeviceToken is ours to fix, not the device's fault`);
-    assert.equal(prunesDevice({ platform, status: 429, reason: "TooManyRequests" }), "", `${platform} 429 is waited out`);
-  }
+test("the Apple table stays a `not android` test, so a fourth platform cannot fall into the Firebase one", () => {
+  // This line read `=== "ios"` once, and a dead Mac token fell through to the Firebase table where a
+  // 410 means nothing: the row stayed and the relay kept addressing a machine that had uninstalled the
+  // app. PUSH-4 has since taken the desktop off every vendor path altogether, so nothing on this table
+  // ever answers about one -- but the SHAPE is what stopped the defect and it is what is pinned here,
+  // because the next platform somebody adds is the one that would fall through.
+  assert.ok(prunesDevice({ platform: "ios", status: 410, reason: "Unregistered" }).length > 0, "an iPhone's 410 prunes");
+  assert.ok(prunesDevice({ platform: "ios", status: 400, reason: "ExpiredToken" }).length > 0, "ExpiredToken prunes");
+  assert.equal(prunesDevice({ platform: "ios", status: 400, reason: "BadDeviceToken" }), "", "BadDeviceToken is ours to fix, not the device's fault");
+  assert.equal(prunesDevice({ platform: "ios", status: 429, reason: "TooManyRequests" }), "", "a 429 is waited out");
+  // A platform this file has never heard of gets the Apple table rather than the Firebase one, which
+  // is the only one of the two whose 410 is safe to read as "that app is gone".
+  assert.ok(prunesDevice({ platform: "watch", status: 410, reason: "Unregistered" }).length > 0);
   // And Android keeps its own table: a 410 means nothing to Firebase, and reading it as a prune would
   // drop a live phone.
   assert.equal(prunesDevice({ platform: "android", status: 410, reason: "Unregistered" }), "");
 });
 
-test("a desktop device is sent an APNs payload, not an FCM one", async () => {
+// ---- PUSH-4: the desktop transport, which reaches no vendor at all ------------------------------
+
+test("a desktop device reaches no vendor, and on its own it does not arm the sweep", async () => {
+  // THE DEFECT. `platform: desktop` was accepted and routed to the APNs sender, on the reasoning that
+  // a desktop app is signed by the same Apple account. Windows has no APNs and macOS needs a
+  // restricted entitlement, so the row held a device id where an APNs token belongs -- and Apple's
+  // answer for that is BadDeviceToken, which the table above deliberately does not prune. Every card
+  // burned six attempts and gave up, and the row stayed in push.json for ever. The desktop app was
+  // right to leave registration switched off and poll instead.
   const h = harness({ tail: () => [handoffEntry()], reports: () => [] });
-  await h.edge.storeFor(h.t).register({ deviceId: "mac-1", platform: "desktop", token: "apns-desktop", sub: "" });
-  await h.edge.sweepOnce("a desktop device");
+  await h.edge.storeFor(h.t).register({ deviceId: "mac-1", platform: "desktop", token: "a-device-id-not-a-token", sub: "" });
+
+  const answer = await h.edge.sweepOnce("a desktop device and nobody listening");
+  assert.equal(h.calls.length, 0, "one registered desktop and nobody connected reaches the box zero times");
+  assert.equal(h.edge.stats().gatewayCalls, 0);
+  assert.equal(h.sent.length, 0, "and nothing was handed to a vendor");
+  assert.equal(answer.swept[0].skipped, "only a desktop is registered and none is listening");
+  assert.equal(answer.swept[0].devices, 1);
+  assert.equal(answer.swept[0].carried, 1);
+  assert.equal(answer.swept[0].listening, 0);
+});
+
+test("a desktop beside a phone costs the phone's sweep and nothing more", async () => {
+  const h = harness({ tail: () => [handoffEntry()], reports: () => [] });
+  await h.edge.storeFor(h.t).register({ deviceId: "phone-1", platform: "ios", token: "apns-one", sub: "" });
+  await h.edge.storeFor(h.t).register({ deviceId: "mac-1", platform: "desktop", token: "a-device-id", sub: "" });
+
+  await h.edge.sweepOnce("one of each");
+  // ONE send, to the phone. The desktop row is skipped rather than counted as a refusal: a refusal
+  // earns a backoff and six attempts against a vendor that was never going to be asked.
   assert.equal(h.sent.length, 1);
-  assert.equal(h.sent[0].platform, "desktop");
-  assert.equal(h.sent[0].headers["apns-push-type"], "alert", "the desktop app rides APNs");
-  assert.ok(h.sent[0].payload.aps != null, "so the payload has an aps, not an android block");
+  assert.equal(h.sent[0].platform, "ios");
+  assert.ok(h.sent.every((row) => row.platform !== "desktop"), "no desktop row ever reaches a sender");
+});
+
+/**
+ * A response object with just the four things the stream touches, so the frames can be read as text
+ * without a socket. The relay's own server is exercised over a real port in
+ * tests/relay-push-routes.test.mjs; this is for the frames themselves.
+ */
+function fakeSse() {
+  const closers = [];
+  const out = {
+    status: 0,
+    headers: {},
+    written: [],
+    writeHead(status, headers) { out.status = status; out.headers = headers ?? {}; },
+    write(text) { out.written.push(String(text)); return true; },
+    end() { for (const fn of closers) fn(); },
+    on(name, fn) { if (name === "close") closers.push(fn); },
+    /** Every push-card frame, in order, with the comment heartbeats dropped. */
+    frames() {
+      return out.written
+        .filter((line) => line.startsWith("data: "))
+        .map((line) => JSON.parse(line.slice("data: ".length).trim()));
+    },
+  };
+  return out;
+}
+
+const streamOn = async (edge, t, sub = "") => {
+  const res = fakeSse();
+  const req = { method: "GET", headers: {}, on: () => {} };
+  const took = await edge.handle(req, res, new URL("http://127.0.0.1/push/events"), t);
+  assert.equal(took, true, "the module claims /push/events");
+  return res;
+};
+
+test("a connected tray gets the card it would have been alerted about, with the same fixed sentence", async () => {
+  const h = harness({ tail: () => [handoffEntry()], reports: () => [] });
+  await h.edge.storeFor(h.t).register({ deviceId: "mac-1", platform: "desktop", token: "a-device-id", sub: "" });
+
+  const stream = await streamOn(h.edge, h.t);
+  assert.equal(stream.status, 200);
+  // The header set relayEvents already proves through Cloudflare. A stream that invents its own
+  // passes locally and stalls live.
+  assert.equal(stream.headers["content-type"], "text/event-stream");
+  assert.equal(stream.headers["cache-control"], "no-cache");
+  assert.equal(stream.headers.connection, "keep-alive");
+  assert.equal(stream.headers["x-accel-buffering"], "no");
+
+  const frames = stream.frames();
+  assert.equal(frames.length, 1, "the picture as it stands, before anything has to change");
+  assert.equal(frames[0].channel, "push-card");
+  const card = frames[0].payload;
+  assert.equal(card.state, "pending");
+  assert.equal(card.kind, "box-handoff");
+  assert.equal(card.badge, 1);
+  assert.equal(card.agent.id, "agent-1");
+  assert.equal(card.entry, "t14s0");
+  assert.equal(card.title, "Take the keyboard for Books", "the relay's own title, never the agent-written instruction");
+  assert.equal(card.body, CARD_BODY["box-handoff"], "the same fixed sentence a lock screen would have shown");
+  assert.equal(card.link.app, `titaniumbot://card?tenant=demo&agent=agent-1&entry=t14s0&kind=box-handoff`);
+  assert.ok(card.link.web.endsWith("/?agent=agent-1&entry=t14s0"));
+  // RULE 5 AGAIN, ON A NEW SURFACE. The instruction is what the agent wrote and is the field the
+  // notification body deliberately never carries; a tray is a lock screen with a different shape.
+  assert.ok(!JSON.stringify(frames).includes("Sign in to the bank"));
+  assert.ok(!JSON.stringify(frames).includes("a-device-id"), "and no device token, id or credential rides a frame");
+
+  // AND IT NEVER WRITES THE SHARED LEDGER. `alerted` is terminal for every device, so a tray delivery
+  // recorded there would silence the same card for a phone that registers afterwards.
+  assert.equal(existsSync(h.t.file(PUSH_SENT_FILE)), false);
+});
+
+test("a tray connecting arms the pass, and nothing is sent to a vendor for it", async () => {
+  const h = harness({ tail: () => [handoffEntry()], reports: () => [] });
+  await h.edge.storeFor(h.t).register({ deviceId: "mac-1", platform: "desktop", token: "a-device-id", sub: "" });
+  const stream = await streamOn(h.edge, h.t);
+
+  const answer = await h.edge.sweepOnce("with a tray connected");
+  assert.equal(answer.swept[0].skipped, undefined, "a connected tray is a reason to look");
+  assert.equal(answer.swept[0].listening, 1);
+  assert.equal(h.sent.length, 0, "and still nothing reaches a vendor");
+
+  stream.end();
+  const after = await h.edge.sweepOnce("with the tray gone");
+  assert.equal(after.swept[0].skipped, "only a desktop is registered and none is listening");
+});
+
+test("the tray's dedupe is per connection, so a second tray gets the whole picture", async () => {
+  const h = harness({ tail: () => [handoffEntry(), widgetEntry()], reports: () => [] });
+  await h.edge.storeFor(h.t).register({ deviceId: "mac-1", platform: "desktop", token: "a-device-id", sub: "" });
+
+  const first = await streamOn(h.edge, h.t);
+  assert.equal(first.frames().length, 2);
+  const second = await streamOn(h.edge, h.t);
+  assert.equal(second.frames().length, 2, "a tray that connects later is not silenced by one that connected earlier");
+  assert.equal(h.edge.stats().streams, 2);
+  first.end();
+  second.end();
+  assert.equal(h.edge.stats().streams, 0);
 });
 
 test("no notification body carries a field a model wrote, in any of the six kinds", () => {

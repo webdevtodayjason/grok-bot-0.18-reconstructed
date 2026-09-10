@@ -54,6 +54,10 @@ async function loadFeedback({ messages = [], adapter = {}, contextId = "titan", 
   const body = between(source, "  // ---- FEEDBACK-1: report a problem", "  // ---- end FEEDBACK-1", "the feedback block");
   const escaper = between(source, "  function escapeHtml(value) {", "  function sameContext(", "escapeHtml");
   const masker = between(source, "  const SECRETISH = ", "  // Only shell_command receipts carry", "maskSecrets");
+  // CONSOLE-ATTR-1's helper, which the pending report card calls. The real one rather than a stub:
+  // what a shell reads off a pending report is part of that card's contract, and a report offer with
+  // no durable pendingId has to carry nothing at all.
+  const hook = between(source, "  function needsYouCardAttrs(", "  // ---- end CONSOLE-ATTR-1", "needsYouCardAttrs");
   const renders = { count: 0 };
   const exports = `return {
     PROBLEM_TIERS, REPORT_CUSTODY, SELF_TEST_PROMPT, offerProblemReport, problemOffers: () => problemOffers,
@@ -75,7 +79,7 @@ async function loadFeedback({ messages = [], adapter = {}, contextId = "titan", 
     "escapeHtmlSource", "maskSource", "activeContext", "contextMessages", "contextName", "adapter",
     "renderTranscript", "showToast", "fetch", "crypto", "TextEncoder", "pinTranscriptToBottom",
     "state", "workerById", "roomById",
-    `${escaper}\n${masker}\n${body}\n${exports}`,
+    `${escaper}\n${masker}\n${hook}\n${body}\n${exports}`,
   );
   const api = built(
     undefined, undefined, activeContext,

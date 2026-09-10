@@ -948,7 +948,17 @@ async function legDesktop() {
   check(geometry.column === "1440px", "1440x900: the shell's column is the viewport", geometry.column);
   check(overflow.real === 0, "1440x900: nothing is off the right edge", String(overflow.real));
   check(geometry.composerBottom === 856, "1440x900: the composer's bottom is where it was", `${geometry.composerBottom} (856 measured on this box before this ship)`);
-  check(geometry.sendX === 959 && geometry.sendRight === 1053, "1440x900: and Send is where it was", `x ${geometry.sendX}..${geometry.sendRight} (959..1053 before this ship)`);
+  // THIS NUMBER WENT STALE AND NOBODY RE-BASELINED IT, so it was a red leg about nothing for every
+  // wave that ran this gate. 959..1053 was measured at 3bfaca9 (2026-09-09 20:53). The Talk button
+  // landed beside the message box three hours later at c57dac3 (2026-09-09 23:23), left of Send in
+  // the same flex row, and moved Send 63 px right without anything here noticing: measured on
+  // grok-bot-local-vm 2026-09-10, x 1022..1116, the same 94 px wide. The width is what this leg is
+  // for, so the width is asserted as well as the position -- a Send that changes SIZE at a desktop
+  // width is the regression, and a Send that moved because a control was deliberately added beside it
+  // is a baseline somebody owed an update.
+  check(geometry.sendX === 1022 && geometry.sendRight === 1116,
+    "1440x900: and Send is where it was",
+    `x ${geometry.sendX}..${geometry.sendRight}, ${geometry.sendRight - geometry.sendX}px wide (1022..1116 since the Talk button landed at c57dac3; 959..1053 before it)`);
 
   // FEEDBACK-2b. The aside is out of flow again at this width, so the thing the row was protecting
   // against has to be measured rather than assumed: it floats at the shelf's right edge, and a
