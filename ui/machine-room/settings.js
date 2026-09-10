@@ -725,7 +725,18 @@
     if (body == null) return false;
     if (section.operatorOnly === true && facts.operator !== true) return paint("general", null);
     current = section.id;
-    body.innerHTML = bodyMarkup(section, facts);
+    // A SECTION WHOSE BODY BELONGS TO ANOTHER MODULE IS NOT REBUILT WHILE IT IS ON SCREEN, and this
+    // is a correctness rule rather than a saving. Notifications and Operator are empty shells that
+    // push-settings.js and app.js fill; throwing the shell away and mounting a fresh card throws away
+    // whatever the person had flipped or typed and NOT YET SAVED, and puts the stored value back
+    // under their hands with no sign anything happened. Measured on grok-bot-local-vm at 390x844,
+    // real Chrome, 2026-09-10: the account menu's own read of the facts 2.5 s after boot repainted
+    // the open section, and a notification switch turned off a moment earlier came back on and saved
+    // as on. Their fills below run either way, so live values still land -- fillEndpoints, fillJobBus
+    // and fillMail have always written into a card that was already there.
+    const standing = body.querySelector(`[data-settings-section="${section.id}"]`);
+    const keep = section.mounts != null && standing != null;
+    if (!keep) body.innerHTML = bodyMarkup(section, facts);
     for (const button of shell.querySelectorAll("[data-settings-nav]")) {
       const active = button.dataset.settingsNav === section.id;
       button.classList.toggle("is-active", active);
