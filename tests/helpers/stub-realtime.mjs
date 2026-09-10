@@ -122,7 +122,19 @@ export async function startStubRealtime({
   let phase = 0;
   let responseSeq = 0;
   const waiters = [];
-  const notify = () => { while (waiters.length > 0) waiters.shift()(); };
+  /**
+   * Wake every waiter ONCE per notification.
+   *
+   * The drain takes the whole list first. Written as `while (waiters.length > 0) waiters.shift()()`
+   * it never ends: a predicate that is still false re-registers itself, the loop sees a non-empty
+   * list again, and the event loop is held for the whole of waitFor's timeout. MEASURED at
+   * integration on this Mac: the browser leg waits up to 130 s for a real reply off the local box, and
+   * that spin blocked the gate's own socket reads until the backlog of forwarded audio exhausted the
+   * heap -- "Reached heap limit" inside the websocket parser, which reads as a leak in the bridge
+   * rather than a busy-wait in the harness. Splicing first is what makes a false predicate cost one
+   * call per notification instead of an infinite number.
+   */
+  const notify = () => { for (const waiter of waiters.splice(0, waiters.length)) waiter(); };
 
   const wss = new WebSocketServer({ port: 0, host: "127.0.0.1", handleProtocols: () => false });
 
@@ -158,8 +170,11 @@ export async function startStubRealtime({
     ws.on("message", (raw) => {
       const event = jsonOf(raw);
       if (event == null) return;
-      events.inbound.push(event);
       const type = String(event.type ?? "");
+      // Everything EXCEPT audio, which is counted below rather than kept. A minute of microphone is
+      // six hundred frames of base64 and holding them all is an unbounded hold for no assertion: the
+      // only reader of this list prints a slice of it in a failure message.
+      if (type !== "input_audio_buffer.append") events.inbound.push(event);
       if (type === "session.update") {
         const bad = checkSession(vendor, event.session);
         if (bad != null) return fail(bad.code, bad.message);
@@ -275,6 +290,9 @@ export async function startStubRealtime({
   function waitFor(predicate, { timeoutMs = 5000, label = "a stub condition" } = {}) {
     return new Promise((resolve, reject) => {
       const started = Date.now();
+      // The 20 ms re-tick below is the poll, so a condition that goes true with no further message
+      // arriving still resolves and a predicate that never matches still times out here rather than in
+      // the caller. One poll is enough; a second interval beside it only leaks a timer per wait.
       const tick = () => {
         let ok = false;
         try { ok = predicate(events) === true; } catch { ok = false; }

@@ -229,9 +229,25 @@ test("the control plane's numbers win, are cached, and a nonsense answer does no
 test("usage is reported to the relay door best-effort, and a cp outage costs a Spend line and never a cap", async () => {
   const seen = [];
   const policy = makeVoicePolicy({ relayBase: "http://cp", relayToken: "t", fetchImpl: (url, options) => { seen.push({ url: String(url), body: options.body }); return Promise.resolve({ ok: true, json: () => Promise.resolve({}) }); } });
+  // TWO PATHS AND NOT ONE, and it is the claim that makes it two: cp/server.mjs:1108 answers
+  // /usage/open and /usage/close, because the claim happens BEFORE the provider socket opens and the
+  // outcome is only known after. Reported at the parent path the control plane answered 404 and the
+  // operator's Spend line stayed empty while the minutes were really being spent -- found at
+  // integration against a real cp, not here, which is why this asserts the path and not just the body.
   assert.equal(await policy.report(voiceLedgerRow({ sessionId: "vs_1", slug: "acme", vendor: "xai" })), true);
-  assert.match(seen[0].url, /\/v1\/relay\/voice\/usage$/);
-  assert.equal(JSON.parse(seen[0].body).sessionId, "vs_1");
+  assert.match(seen[0].url, /\/v1\/relay\/voice\/usage\/open$/);
+  const opened = JSON.parse(seen[0].body);
+  assert.equal(opened.sessionId, "vs_1");
+  assert.equal(opened.slug, "acme", "the claim names the workspace, because that is what the cap is per");
+  assert.equal(opened.wallSeconds, undefined, "and carries no duration, because nothing has been spent yet");
+
+  assert.equal(await policy.report(voiceLedgerRow({ sessionId: "vs_1", slug: "acme", vendor: "xai", state: "closed", wallSeconds: 42, heldFrames: 7, closeReason: "the person pressed the button" })), true);
+  assert.match(seen[1].url, /\/v1\/relay\/voice\/usage\/close$/);
+  const closed = JSON.parse(seen[1].body);
+  assert.equal(closed.sessionId, "vs_1", "settled by the same id it was claimed under");
+  assert.equal(closed.wallSeconds, 42);
+  assert.equal(closed.heldFrames, 7);
+  assert.equal(closed.slug, undefined, "the settle names no workspace: the row it settles already knows");
   const broken = makeVoicePolicy({ relayBase: "http://cp", relayToken: "t", fetchImpl: () => Promise.reject(new Error("down")) });
   assert.equal(await broken.report(voiceLedgerRow({ sessionId: "vs_2", slug: "acme", vendor: "xai" })), false, "a refusal, never a throw");
 });

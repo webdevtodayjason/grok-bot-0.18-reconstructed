@@ -371,6 +371,8 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     settings: null,
     byeReason: "",
     available: null,
+    /** The relay's hop ledger for the last turn, when it sent one. Never drawn. */
+    hops: null,
   };
 
   function ui() { return global.__mrUi ?? null; }
@@ -500,6 +502,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     try { socket?.close(1000, "stopped"); } catch { /* already closed */ }
     state.on = false;
     state.ready = null;
+    state.hops = null;
     state.orb = "off";
     caption("");
     const reason = condition || state.byeReason;
@@ -596,6 +599,12 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       // and a frame with nothing to say paints no row rather than an empty one.
       case "note":
         if (String(frame.text ?? "").trim().length > 0) note(String(frame.reason ?? "relay"), frame.text);
+        break;
+      // The relay's own latency ledger for the turn just taken. Nothing on screen: it is for the gate
+      // and for a support question about why a reply felt slow, and the only number in it the page
+      // owns is how long the first sample took to become audible here.
+      case "hops":
+        state.hops = frame;
         break;
       case "bye":
         state.byeReason = String(frame.reason ?? "");
@@ -839,6 +848,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       caption: state.caption,
       notes: state.notes.map((one) => one.condition),
       ready: state.ready,
+      hops: state.hops,
     }),
     // Exposed so a test can pin the words and the arithmetic without a browser, which is the
     // contract marketplace-bots.js and cloud-browser.js already keep.

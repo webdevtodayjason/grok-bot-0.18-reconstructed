@@ -794,16 +794,40 @@ export function makeVoicePolicy({ relayBase = "", relayToken = "", fetchImpl = n
       cache.set(key, { at: now(), value: chosen });
       return chosen;
     },
-    /** Best-effort and never awaited into a dial: a cp outage costs a Spend line, never a cap. */
+    /**
+     * Best-effort and never awaited into a dial: a cp outage costs a Spend line, never a cap.
+     *
+     * TWO PATHS AND NOT ONE, which is the shape cp/server.mjs:1108 actually answers and the same
+     * shape the mail send pair next to it takes: the claim happens BEFORE the provider socket opens
+     * and the outcome is only known after. A single route taking a finished session would have no way
+     * to claim before the dial, which is the rule the whole ledger rests on. Posting the whole row at
+     * one path answered 404 and the operator's Spend line stayed empty while the minutes were really
+     * being spent -- measured on this Mac at integration.
+     *
+     * A refusal here is LOGGED AND NOT OBEYED. The relay holds the caps on its own clock against its
+     * own jsonl, which is the enforcement truth; this report is the operator's record. A cp that says
+     * no to a session the relay already authorised is a number to reconcile, not a line to cut.
+     */
     report(row) {
       if (relayBase.length === 0 || relayToken.length === 0) return Promise.resolve(false);
       const call = fetchImpl ?? fetch;
-      return call(`${relayBase}/v1/relay/voice/usage`, {
+      const closing = row?.state === "closed";
+      const body = closing
+        ? {
+          sessionId: row.sessionId, wallSeconds: row.wallSeconds, audioInSeconds: row.audioInSeconds,
+          audioOutSeconds: row.audioOutSeconds, billedItemEvents: row.billedItemEvents,
+          toolCalls: row.toolCalls, heldFrames: row.heldFrames, closeReason: row.closeReason,
+        }
+        : { slug: row.slug, sessionId: row.sessionId, agentId: row.agentId, vendor: row.vendor, model: row.model };
+      return call(`${relayBase}/v1/relay/voice/usage/${closing ? "close" : "open"}`, {
         method: "POST",
         headers: { authorization: `Bearer ${relayToken}`, "content-type": "application/json", "user-agent": "titanbot-relay/voice" },
-        body: JSON.stringify(row),
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(timeoutMs),
-      }).then((answer) => answer.ok).catch(() => false);
+      }).then((answer) => {
+        if (!answer.ok) log(`voice usage ${closing ? "close" : "open"} for ${row?.slug ?? "?"} answered HTTP ${answer.status}; the relay's own ledger is still the cap's truth`);
+        return answer.ok;
+      }).catch(() => false);
     },
   };
 }
@@ -1090,9 +1114,21 @@ function newerThan(entries, afterId, afterMs) {
  * anywhere in ui/, so both are accepted as aliases in case a newer bundle stamps them and
  * `isRunning` is what actually answers today.
  */
-async function stillWorking(call, agentId) {
+/**
+ * The roster, whatever shape the host answers in.
+ *
+ * MEASURED on grok-bot-local-vm 2026-09-10: POST /api/listAgents answers a BARE ARRAY of nine
+ * agents, not `{agents:[...]}`. Reading only the wrapped shape is how this bridge told a box with
+ * nine bots on it that there was nobody to talk to. ui/mail-edge.mjs:694 already had this exactly
+ * right and it is the only place in ui/ that did; this is that line, in one helper, used everywhere.
+ */
+async function rosterOf(call) {
   const answer = await call("listAgents", {}).catch(() => null);
-  const agents = Array.isArray(answer?.agents) ? answer.agents : Array.isArray(answer) ? answer : [];
+  return Array.isArray(answer) ? answer : Array.isArray(answer?.agents) ? answer.agents : [];
+}
+
+async function stillWorking(call, agentId) {
+  const agents = await rosterOf(call);
   const row = agents.find((agent) => String(agent?.id ?? "") === String(agentId));
   if (row == null) return false;
   return row.isRunning === true || row.isRunningTurn === true || row.isComposingMessage === true || row.isBusy === true;
@@ -1608,11 +1644,9 @@ export function makeVoiceEdge({
     const shapeNow = async (settings) => {
       const caps = await policy.for(t.slug);
       const rows = await readVoiceLedger(ledgerFile);
-      const agents = await call("listAgents", {})
-        .then((answer) => (Array.isArray(answer?.agents) ? answer.agents : [])
-          .filter((a) => a?.isGroup !== true)
-          .map((a) => ({ id: String(a.id), name: String(a.name ?? "") })))
-        .catch(() => []);
+      const agents = (await rosterOf(call))
+        .filter((a) => a?.isGroup !== true)
+        .map((a) => ({ id: String(a.id), name: String(a.name ?? "") }));
       return voiceSettingsShape(settings, {
         agents,
         sessionCapSeconds: caps.sessionCapSeconds,
@@ -1683,7 +1717,7 @@ export function makeVoiceEdge({
     const remaining = caps.dayCapSeconds - used;
     if (remaining <= 0) return acceptAndSay(socket, key, SENTENCE.dayCap, "the day cap", "day-cap");
 
-    const agents = await call("listAgents", {}).then((answer) => (Array.isArray(answer?.agents) ? answer.agents : [])).catch(() => []);
+    const agents = await rosterOf(call);
     const agent = resolveVoiceAgent(agents, settings);
     if (agent.agentId.length === 0) return acceptAndSay(socket, key, `${SENTENCE.noAgent} Reason: ${agent.why}.`, "no agent");
     log(`voice ${t.slug} talks to ${agent.agentName || agent.agentId}: ${agent.why}`);

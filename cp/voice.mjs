@@ -476,7 +476,12 @@ export function createVoiceLog({ store, config = null, now = () => Date.now() } 
           audio: "audio seconds in and out, which is what a vendor's invoice is built from",
           events: "billable text events, a flat fee each on the default provider and free for a tool result",
         },
-        why: "no voice session has been reported to this service yet",
+        // Only when there is nothing to say. Sent unconditionally it sat beside a populated tenant
+        // list saying nothing had ever been reported, which is the one sentence an operator would
+        // quote back -- and "not measured" has to mean not measured or it means nothing at all.
+        ...(store.countVoiceSessions() > 0
+          ? (byTenant.size === 0 ? { why: "nothing was spoken in this window" } : {})
+          : { why: "no voice session has been reported to this service yet" }),
         measuredAt: new Date(at).toISOString(),
       };
       if (tenant.length > 0) answer.policy = this.policy(tenant);
