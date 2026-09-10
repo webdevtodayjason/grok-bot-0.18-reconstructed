@@ -1143,24 +1143,36 @@ export function createCodeEdge({
    *  agree. A local task is read off the container; the file is the fallback and the history. */
   async function settleLocal(slug, row) {
     const taskId = String(row.taskId);
-    const got = await docker(["inspect", "--format", "{{.State.Status}}\t{{.State.ExitCode}}\t{{.State.OOMKilled}}", containerName(taskId)]);
+    // FinishedAt comes back too, because the minutes on the ledger row are what the operator bills
+    // from. A task that died in its first second and was closed by the next sweep was billed from its
+    // start to the moment somebody noticed: measured on the R750 2026-09-10, a container that exited
+    // after about a second went onto the ledger as 16.78 minutes. The clock stops when the container
+    // stopped, not when this process found out.
+    const got = await docker(["inspect", "--format",
+      "{{.State.Status}}\t{{.State.ExitCode}}\t{{.State.OOMKilled}}\t{{.State.FinishedAt}}", containerName(taskId)]);
     if (!got.ok) {
       // Gone, and the row still says running: the sweep took it, or somebody did. Either way this is
       // now a finished task and the honest state is what the row's detail already says.
       return { state: row.state === "running" ? "failed" : String(row.state), exit: -1 };
     }
-    const [status, exit, oom] = String(got.stdout ?? "").trim().split("\t");
+    const [status, exit, oom, finishedAt] = String(got.stdout ?? "").trim().split("\t");
     if (status === "running" || status === "created") return { state: "running", exit: 0 };
-    if (oom === "true") return { state: "failed", exit: Number(exit ?? 0), detail: "the task ran out of memory" };
+    // A zero time is docker's "never finished"; anything before the task started is not a clock this
+    // row can use either, so both fall back to now and the minutes are no worse than they were.
+    const stopped = Date.parse(String(finishedAt ?? ""));
+    const endedAt = Number.isFinite(stopped) && stopped > Number(row.startedAt ?? 0) ? stopped : undefined;
+    if (oom === "true") return { state: "failed", exit: Number(exit ?? 0), endedAt, detail: "the task ran out of memory" };
     // A --max-turns exit is a NORMAL outcome and not a failure: the agent stopped because it was
     // told how many turns it may take. CODE-8.
-    return { state: Number(exit ?? 0) === 0 ? "done" : "failed", exit: Number(exit ?? 0) };
+    return { state: Number(exit ?? 0) === 0 ? "done" : "failed", exit: Number(exit ?? 0), endedAt };
   }
 
-  async function finish(slug, row, state, detail = "") {
+  async function finish(slug, row, state, detail = "", { endedAt: when = 0 } = {}) {
     const taskId = String(row.taskId);
     const held = live.get(taskId);
-    const endedAt = now();
+    // The container's own stop time when there is one, so the billed minutes are the minutes the
+    // container really ran and not the minutes until something asked about it.
+    const endedAt = Number(when) > 0 ? Number(when) : now();
     const minutes = Math.max(0, Math.round(((endedAt - Number(row.startedAt ?? endedAt)) / 60_000) * 100) / 100);
     // The model spend, read from the per-task key at the control plane's close. /key/info was
     // immediate and correct in measurement; /spend/logs is batch written every 10 s and produced
@@ -1197,7 +1209,7 @@ export function createCodeEdge({
       const got = await docker(["logs", "--tail", String(CODE_LOG_LINES * 2), containerName(String(row.taskId))]);
       lines = logTail(`${got.stdout}\n${got.stderr}`, { secrets: [] });
       if (settled.state !== "running") {
-        await finish(slug, row, settled.state, String(settled.detail ?? ""));
+        await finish(slug, row, settled.state, String(settled.detail ?? ""), { endedAt: Number(settled.endedAt ?? 0) });
         state = settled.state;
       }
     } else if (state === "running") {
@@ -1238,7 +1250,7 @@ export function createCodeEdge({
       if (String(row.provider) === "local") {
         const settled = await settleLocal(slug, row);
         if (settled.state === "running") return sendJson(res, 200, { ready: false, message: CODE_REFUSALS.not_ready });
-        await finish(slug, row, settled.state, String(settled.detail ?? ""));
+        await finish(slug, row, settled.state, String(settled.detail ?? ""), { endedAt: Number(settled.endedAt ?? 0) });
         row.state = settled.state;
       } else return sendJson(res, 200, { ready: false, message: CODE_REFUSALS.not_ready });
     }
@@ -1412,7 +1424,7 @@ export function createCodeEdge({
       const got = await settleLocal(slug, row);
       if (got.state === "running") continue;
       log(`code  ${slug}/${taskId} stopped on its own (${got.state}, exit ${got.exit}); closing its row`);
-      await finish(slug, row, got.state, String(got.detail ?? ""));
+      await finish(slug, row, got.state, String(got.detail ?? ""), { endedAt: Number(got.endedAt ?? 0) });
       settled += 1;
     }
     log(`code  sweep (${why}) removed ${decided.remove.length} code container(s) and ${decided.removeNetworks.length} code network(s)`

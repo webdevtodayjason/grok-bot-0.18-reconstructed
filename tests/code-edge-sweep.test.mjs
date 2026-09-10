@@ -287,3 +287,33 @@ test("the label filter is what the sweep lists with, both times", async () => {
   assert.ok(!ps.includes("name=tbcode"));
   assert.ok(!nets.includes("name=tbcode"));
 });
+
+test("the billed minutes are the minutes the container ran, not the minutes until somebody asked", async () => {
+  // MEASURED ON THE R750 2026-09-10: a container that exited about a second after it started went
+  // onto the operator's ledger as 16.78 minutes, because the clock stopped when the next sweep found
+  // it rather than when it stopped. The operator bills from that number.
+  const { edge, seen } = sweepWith({
+    ps: `${psLine("eeeeeeeeeeee", NOW + 1_700_000)}\n`,
+    rows: [{ taskId: "eeeeeeeeeeee", state: "running", startedAt: NOW - 900_000, claimId: 15, provider: "local" }],
+    // Started fifteen minutes ago, stopped fourteen and a half minutes ago: 0.5 minutes of container.
+    inspect: `exited\t2\tfalse\t${new Date(NOW - 870_000).toISOString()}`,
+  });
+  edge.adopt("demo", [{ taskId: "eeeeeeeeeeee", state: "running", provider: "local", deadlineAt: NOW + 1_700_000 }]);
+  await edge.sweep("the timer");
+  assert.equal(seen.closed.length, 1);
+  assert.equal(seen.closed[0].minutes, 0.5, "half a minute of container, not fifteen minutes of waiting");
+  assert.equal(seen.rows.at(-1).endedAt, NOW - 870_000, "and the workspace's own row says the same time");
+});
+
+test("a stop time docker does not have falls back to now rather than to a nonsense figure", async () => {
+  for (const finishedAt of ["", "0001-01-01T00:00:00Z", "not a date"]) {
+    const { edge, seen } = sweepWith({
+      ps: `${psLine("ffffffffffff", NOW + 1_700_000)}\n`,
+      rows: [{ taskId: "ffffffffffff", state: "running", startedAt: NOW - 120_000, claimId: 16, provider: "local" }],
+      inspect: `exited\t1\tfalse\t${finishedAt}`,
+    });
+    edge.adopt("demo", [{ taskId: "ffffffffffff", state: "running", provider: "local", deadlineAt: NOW + 1_700_000 }]);
+    await edge.sweep("the timer");
+    assert.equal(seen.closed[0].minutes, 2, `a ${JSON.stringify(finishedAt)} stop time must not bill a negative or a zero`);
+  }
+});
