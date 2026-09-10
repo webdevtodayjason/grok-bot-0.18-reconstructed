@@ -120,6 +120,7 @@ import "./cp-server.test.mjs";
 // ADMIN-2. Adding a client from the console, and the rule that holds it to the same refusals the
 // customer's own sign-up door gives.
 import "./cp-signup.test.mjs";
+import "./cp-onboard.test.mjs";
 // SIGNIN-1. This operator's own verification gates, told apart from strangers.
 import "./cp-signins-gate.test.mjs";
 import "./control-plane-deploy.test.mjs";
