@@ -43,6 +43,15 @@
 //              registry holds exactly one entry and the console is what it has always been, which
 //              is what a developer Mac and a single-box install run.
 //
+//              SIGNIN-2 added a second door to that same workspace: an ACCOUNT on tenant
+//              "titanium". It needs that slug's derived session key, which only the control plane
+//              can produce, so the key travels on the registry row and the relay merges it onto the
+//              entry it built for itself. The leg signs such an account in and then proves the
+//              workspace it landed on is still the relay's own: the roster comes off the box named
+//              in this relay's environment, with that environment's bearer, and carries none of a
+//              customer's agents. Live, the account is a THROWAWAY minted through the control plane
+//              and removed in a finally; Jason's own account is never signed in to.
+//
 // Run it two ways.
 //
 //   node scripts/verify-one-console.mjs
@@ -90,12 +99,17 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
     "",
     "Credentials come from the environment, never the command line:",
     "  ONE_CONSOLE_RELAY_TOKEN     the value of CP_RELAY_TOKEN, for the registry suite",
-    "  ONE_CONSOLE_ADMIN_TOKEN     the value of CP_ADMIN_TOKEN, for the leg that proves it is refused",
+    "  ONE_CONSOLE_ADMIN_TOKEN     the value of CP_ADMIN_TOKEN. Two legs: the one that proves it is",
+    "                              refused at the registry route, and SIGNIN-2's, which mints a",
+    "                              throwaway account on the operator's own workspace, signs it in at",
+    "                              the console and removes it again. Needs --cp as well",
     "  ONE_CONSOLE_EMAIL_A         a customer account, and its password",
     "  ONE_CONSOLE_PASSWORD_A",
     "  ONE_CONSOLE_EMAIL_B         a DIFFERENT customer's account, and its password",
     "  ONE_CONSOLE_PASSWORD_B",
-    "  ONE_CONSOLE_INSTANCE_PASSWORD   the operator's own console password",
+    "  ONE_CONSOLE_INSTANCE_PASSWORD   the operator's own console password. Live, it also turns on",
+    "                              the cross-check that the throwaway account on the operator's",
+    "                              workspace sees the same agents the password session sees",
     "  ONE_CONSOLE_GATEWAY_TOKEN   the operator's box gateway bearer. With customer A and no",
     "                              customer B, this makes the OPERATOR the second party in the",
     "                              cross-check, which is a server with one customer on it and is",
@@ -175,6 +189,15 @@ const B = {
   token: randomBytes(32).toString("hex"),
   agents: ["Bolt Foreman"],
 };
+// SIGNIN-2. An account on the OPERATOR's own workspace, which is a door that did not work at all
+// before this wave: the relay had no key for that slug, so a correct password read 503. Local only;
+// live, the throwaway below is minted through the real control plane and removed again.
+const OPERATOR_ACCOUNT = {
+  slug: OPERATOR_SLUG, name: "Titanium",
+  email: `operator+${randomBytes(4).toString("hex")}@example.com`,
+  password: randomBytes(18).toString("base64url"),
+};
+
 // A tenant the control plane knows nothing about. The cookie for it is signed with a key the relay
 // can derive, so the session itself is perfectly valid: what is missing is the registry entry, which
 // is exactly the state a customer is in while their box is still being built.
@@ -289,11 +312,18 @@ let registryDown = false;
 const ACCOUNTS = new Map([
   [A.email.toLowerCase(), A],
   [B.email.toLowerCase(), B],
+  [OPERATOR_ACCOUNT.email.toLowerCase(), OPERATOR_ACCOUNT],
 ]);
 
 function registryBody(gateways) {
   return {
-    tenants: [A, B].map((tenant) => ({
+    tenants: [
+      // SIGNIN-2. The operator's own row in the shape the real control plane answers for an adopted
+      // workspace: its slug and that slug's own derived key, and not one field more. No box, no
+      // gateway, no token, no directories -- the relay builds all of those from its own environment
+      // and merges only this one, which is the one it cannot derive.
+      { slug: OPERATOR_SLUG, sessionKey: tenantKey(MASTER, OPERATOR_SLUG) },
+    ].concat([A, B].map((tenant) => ({
       slug: tenant.slug,
       name: tenant.name,
       status: "running",
@@ -303,10 +333,16 @@ function registryBody(gateways) {
       sessionKey: tenantKey(MASTER, tenant.slug),
       stateDir: `/data/titanbot/${tenant.slug}/state`,
       profileDir: `/data/titanbot/${tenant.slug}/profile`,
-    })),
+    }))),
     // A row the control plane holds but cannot serve is named rather than dropped, so the relay can
     // log why a customer is missing instead of answering them a bare 404.
-    skipped: [{ slug: "halfbuilt", why: "no gateway token on disk yet" }],
+    skipped: [
+      { slug: "halfbuilt", why: "no gateway token on disk yet" },
+      // The operator's own, and the reason the rest of its row is absent. The real control plane
+      // says exactly this for an adopted workspace whose token it does not hold, and the relay is
+      // deliberately silent about this one line rather than reading it as a fault every minute.
+      { slug: OPERATOR_SLUG, what: "tenant", why: "this workspace has no gateway token on this server" },
+    ],
   };
 }
 
@@ -488,6 +524,28 @@ async function apiCall(base, method, cookie) {
   try { json = JSON.parse(text); } catch { /* not json */ }
   return { status: res.status, text, json };
 }
+// The control plane's own admin routes, for the one leg that has to create something and remove it
+// again. `x-gate-self` keeps these out of the recorder that proves the RELAY called nothing else.
+async function planCall(base, method, pathname, { token, body } = {}) {
+  const headers = { "user-agent": GATE_AGENT, accept: "application/json", "x-gate-self": "1" };
+  if (token) headers.authorization = `Bearer ${token}`;
+  if (body !== undefined) headers["content-type"] = "application/json";
+  const res = await fetch(`${base}${pathname}`, {
+    method, redirect: "manual", headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* not json */ }
+  return { status: res.status, text, json };
+}
+
+// Every agent id a roster answer carries, whatever shape the box wrapped it in. This host answers
+// listAgents as a BARE ARRAY and other surfaces wrap it, so both are read rather than one assumed.
+const agentIds = (json) => {
+  const list = Array.isArray(json) ? json : (Array.isArray(json?.agents) ? json.agents : []);
+  return [...new Set(list.map((agent) => String(agent?.id ?? "")).filter((id) => id.length > 0))].sort();
+};
+
 const sessionCookie = (res) => /(?:^|,\s*)(gb_session=[^;]+)/.exec(res.headers.get("set-cookie") ?? "")?.[1] ?? "";
 // Every agent name a roster answer mentions, whatever shape the gateway wrapped it in. The gate is
 // looking for one customer's names inside another customer's answer, and for that the flat text is
@@ -628,16 +686,38 @@ if (RUN("registry")) {
       try { body = JSON.parse(raw); } catch { /* not json */ }
       const rows = Array.isArray(body?.tenants) ? body.tenants : [];
       check(rows.length > 0, "and it answers with a list of tenants", `${rows.length} row(s)`);
-      const incomplete = rows.filter((row) => !row.slug || !row.box || !row.gateway || !row.token || !row.sessionKey);
-      check(rows.length > 0 && incomplete.length === 0,
-        "every tenant row carries a box, a gateway, a token and a session key",
-        incomplete.length === 0 ? rows.map((row) => row.slug).join(", ") : `${incomplete.map((r) => r.slug ?? "?").join(", ")} is missing a field`);
+      // The operator's own row is a different shape from a customer's and is measured as its own
+      // leg below, so it comes out of the completeness count first. Both of these legs were wrong
+      // against the live control plane from PROXY-1 until SIGNIN-2: that service has answered a
+      // titanium row since PROXY-1 shipped, so a gate that counted it as incomplete and then
+      // asserted its absence reported FAIL twice for a console that was working.
+      const operatorRows = rows.filter((row) => row.slug === OPERATOR_SLUG);
+      const customerRows = rows.filter((row) => row.slug !== OPERATOR_SLUG);
+      const incomplete = customerRows.filter((row) => !row.box || !row.gateway || !row.token || !row.sessionKey);
+      check(customerRows.length > 0 && incomplete.length === 0,
+        "every customer row carries a box, a gateway, a token and a session key",
+        incomplete.length === 0 ? customerRows.map((row) => row.slug).join(", ") || "(no customers)" : `${incomplete.map((r) => r.slug ?? "?").join(", ")} is missing a field`);
       check(Array.isArray(body?.skipped), "and a skipped list, so a customer who is missing can be explained",
         Array.isArray(body?.skipped) ? `${body.skipped.length} skipped` : "there is no skipped list");
-      // The operator's own instance is never served from here. The relay builds it from its own
-      // environment, which is what keeps this console up when this service is not.
-      check(rows.every((row) => row.slug !== OPERATOR_SLUG),
-        `the operator's own instance is not one of these rows`, rows.map((row) => row.slug).join(", ") || "(none)");
+
+      // SIGNIN-2. The operator's own workspace is adopted, so this service holds no box, no gateway
+      // token and no directories for it: the relay builds every one of those from its own
+      // environment, which is what keeps this console up when this service is not. What the row
+      // carries is the two fields the relay cannot produce -- that slug's derived session key, and
+      // the included set when a plan is on -- and a row carrying anything more is a field that is
+      // ignored at best and points Jason's console at somebody else's box at worst.
+      if (operatorRows.length === 0) {
+        check(false, `the operator's own workspace carries its derived session key`,
+          `no row for ${OPERATOR_SLUG}, so an account on that workspace cannot sign in`);
+      } else {
+        const operatorRow = operatorRows[0];
+        check(operatorRows.length === 1 && typeof operatorRow.sessionKey === "string" && operatorRow.sessionKey.length === 64,
+          `the operator's own workspace carries its derived session key`,
+          `${operatorRows.length} row(s), key ${String(operatorRow.sessionKey ?? "").length} chars`);
+        const extra = Object.keys(operatorRow).filter((field) => !["slug", "sessionKey", "included"].includes(field));
+        check(extra.length === 0, "and nothing else: no box, no gateway, no token, no directories",
+          extra.join(", ") || "(slug and sessionKey only)");
+      }
 
       // CP-11, amended on purpose and gated here rather than only in a unit test. This route hands
       // out per-tenant DERIVED keys, and a derived key signs for one customer. The MASTER signs for
@@ -648,7 +728,8 @@ if (RUN("registry")) {
         check(!raw.includes(MASTER), "the control plane's master signing secret is not in the answer");
         const derived = rows.filter((row) => row.sessionKey === tenantKey(MASTER, row.slug));
         check(rows.length > 0 && derived.length === rows.length,
-          "each row's session key is that tenant's own derived key", `${derived.length} of ${rows.length}`);
+          "each row's session key is that tenant's own derived key, the operator's included",
+          `${derived.length} of ${rows.length}`);
         check(rows.every((row) => row.sessionKey !== MASTER), "and none of them is the master wearing a different name");
       }
     }
@@ -843,6 +924,97 @@ if (RUN("operator")) {
     }
   }
 
+  // ================================================================================================
+  // SIGNIN-2 -- an ACCOUNT on the operator's own workspace
+  // ================================================================================================
+  // The second door to the same workspace, and before this wave it did not work at all: the relay
+  // had no session key for tenant "titanium", so a correct password read 503 "That workspace is not
+  // available right now." while the identical account on a customer's workspace signed in at once.
+  // The key can only come from the control plane, so what is measured is that it arrived AND that
+  // nothing else did: the roster behind the cookie still comes off the box named in this relay's own
+  // environment, with that environment's bearer.
+  step("an account on the operator's own workspace");
+  if (!LIVE) {
+    const inOperator = await postForm(CONSOLE, "/login", { email: OPERATOR_ACCOUNT.email, password: OPERATOR_ACCOUNT.password });
+    check(inOperator.status === 302 && inOperator.headers.get("location") === "/",
+      "an account on the operator's workspace signs in", `status ${inOperator.status}`);
+    const cookie = sessionCookie(inOperator);
+    check(cookie.length > 0, "with a session cookie");
+    if (cookie.length > 0) {
+      const roster = await apiCall(CONSOLE, "listAgents", cookie);
+      // A 200 is itself the proof that the relay used its own environment: the fake operator gateway
+      // refuses every bearer but SAND_HOST_GATEWAY_TOKEN, so a roster that comes back at all came
+      // back from the box this relay was configured with and not from one the registry named.
+      check(roster.status === 200, "and lands on the operator's own box", `status ${roster.status}`);
+      check(roster.text.includes("Titan") && roster.text.includes("Scribe"),
+        "with the operator's own agents on it", roster.text.slice(0, 120));
+      const strays = namesIn(roster.text);
+      check(strays.length === 0, "and no customer's agent anywhere on it", strays.join(", ") || "(none)");
+    }
+  } else if (CRED.adminToken == null || cpBase == null) {
+    skip("a throwaway account on the operator's workspace signs in", "needs --cp and ONE_CONSOLE_ADMIN_TOKEN");
+    skip("and lands on the operator's own workspace", "needs --cp and ONE_CONSOLE_ADMIN_TOKEN");
+    skip("and the throwaway is removed again", "needs --cp and ONE_CONSOLE_ADMIN_TOKEN");
+  } else {
+    // A throwaway, never Jason's own account. An account on this slug IS an operator-level user --
+    // it gets the operator's box, agents, settings and connectors, because there is no lesser role
+    // on that workspace -- so the address is random, the password is random and never printed, the
+    // cookie stays in memory, and the removal runs in a finally and is asserted. The control plane
+    // says on its own DELETE that a session already minted keeps working until it expires, which is
+    // the other reason this is a throwaway and not a reused probe.
+    const probeEmail = `signin2-probe-${randomBytes(6).toString("hex")}@probe.invalid`;
+    const probePassword = randomBytes(18).toString("base64url");
+    let created = false;
+    try {
+      const add = await planCall(cpBase, "POST", "/v1/accounts", {
+        token: CRED.adminToken, body: { email: probeEmail, password: probePassword, tenant: OPERATOR_SLUG, name: "SIGNIN-2 probe" },
+      });
+      created = add.status === 201;
+      check(created, "a throwaway account on the operator's workspace is created", `status ${add.status}`);
+
+      if (created) {
+        const inProbe = await postForm(CONSOLE, "/login", { email: probeEmail, password: probePassword });
+        check(inProbe.status === 302 && inProbe.headers.get("location") === "/",
+          "a throwaway account on the operator's workspace signs in", `status ${inProbe.status}`);
+        const cookie = sessionCookie(inProbe);
+        check(cookie.length > 0, "with a session cookie");
+        if (cookie.length > 0) {
+          const roster = await apiCall(CONSOLE, "listAgents", cookie);
+          check(roster.status === 200, "and the console answers its roster", `status ${roster.status}`);
+          // The leg that proves WHICH workspace it landed on. The instance password resolves to the
+          // operator's own workspace by definition, so the same set of agent ids from both sessions
+          // is the evidence; a different set would mean the account landed somewhere else.
+          if (CRED.instance == null) {
+            skip("and lands on the operator's own workspace", "no ONE_CONSOLE_INSTANCE_PASSWORD to compare against");
+          } else {
+            const byPassword = await postForm(CONSOLE, "/login", { password: CRED.instance });
+            const operatorCookie = sessionCookie(byPassword);
+            const operatorRoster = operatorCookie.length > 0 ? await apiCall(CONSOLE, "listAgents", operatorCookie) : null;
+            const mine = agentIds(roster.json);
+            const theirs = operatorRoster == null ? [] : agentIds(operatorRoster.json);
+            check(theirs.length > 0 && mine.length === theirs.length && mine.every((id, at) => id === theirs[at]),
+              "and lands on the operator's own workspace",
+              `${mine.length} agent id(s) from the account, ${theirs.length} from the instance password`);
+          }
+        }
+      }
+    } finally {
+      if (created) {
+        const gone = await planCall(cpBase, "DELETE", `/v1/accounts/${encodeURIComponent(probeEmail)}`, {
+          token: CRED.adminToken, body: { confirm: probeEmail },
+        });
+        // A removal that did not happen is a FAIL, not a warning: what is left behind is a working
+        // operator-level sign-in on Jason's own workspace.
+        check(gone.status === 200, "and the throwaway is removed again", `status ${gone.status}`);
+        const list = await planCall(cpBase, "GET", "/v1/accounts", { token: CRED.adminToken });
+        const left = (Array.isArray(list.json?.accounts) ? list.json.accounts : [])
+          .filter((account) => String(account?.email ?? "").includes("signin2-probe-"));
+        check(list.status === 200 && left.length === 0, "and no probe account is left on the control plane",
+          left.length === 0 ? "(none)" : `${left.length} left`);
+      }
+    }
+  }
+
   if (LIVE) {
     skip("a console with no control plane behind it is unchanged", "that needs a relay this gate starts");
     skip("the relay asks the control plane for the registry and for sign-in, and nothing else", "the recorder is the fake plane's");
@@ -866,14 +1038,24 @@ if (RUN("operator")) {
 
     step("what the relay tells the control plane");
     const paths = [...new Set(cpCalls.map((call) => `${call.method} ${call.path}`))];
-    const allowed = new Set(["GET /v1/relay/tenants", "POST /v1/sessions"]);
-    check(paths.every((p) => allowed.has(p)), "the registry and sign-in, and nothing else", paths.join(", ") || "(no calls)");
+    // A PREFIX rule, and it replaces a two-path list that had been FAILing since MAIL-2 shipped:
+    // this relay legitimately calls the mail directory on the same credential, and an enumeration of
+    // exact paths goes stale every time the relay edge grows a route (mail, voice and code each added
+    // one). What is actually worth gating is that the relay never reaches a route outside its own
+    // door: /v1/relay/* is the relay credential's own side of the control plane, POST /v1/sessions is
+    // the sign-in, and anything else -- /v1/accounts, /v1/tenants, /v1/admin/* -- is a route only the
+    // ADMIN token opens and a relay has no business on.
+    const allowed = (one) => one === "POST /v1/sessions" || /^(GET|POST|DELETE) \/v1\/relay\//.test(one);
+    check(paths.every(allowed), "its own relay routes and the sign-in, and nothing a relay has no business on",
+      paths.join(", ") || "(no calls)");
     check(registryReads > 0, "and it did read the registry at least once", `${registryReads} read(s)`);
 
     const logs = `${relay.log()}${relay.errLog()}${soloRelay.log()}${soloRelay.errLog()}`;
     for (const [secret, what] of [[A.token, "customer A's gateway token"], [B.token, "customer B's gateway token"],
       [OPERATOR_TOKEN, "the operator's gateway token"], [RELAY_TOKEN, "the relay credential"],
       [MASTER, "the control plane's master"], [A.password, "customer A's password"],
+      [OPERATOR_ACCOUNT.password, "the operator account's password"],
+      [tenantKey(MASTER, OPERATOR_SLUG), "the operator's derived session key"],
       [INSTANCE_PASSWORD, "the instance password"]]) {
       check(!logs.includes(secret), `${what} is nowhere in the relay's log`);
     }

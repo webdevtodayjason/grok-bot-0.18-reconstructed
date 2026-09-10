@@ -6,8 +6,10 @@
 //
 //   - the operator is seeded from the environment, so a console with no control plane has exactly
 //     one workspace and behaves as it always did;
-//   - a control plane that returns a row for the operator is dropped, not merged, so a wrong field
-//     there can never point Jason's console at somebody else's box;
+//   - a control plane that returns a row for the operator has its box, token, gateway and
+//     directories dropped rather than merged, so a wrong field there can never point Jason's
+//     console at somebody else's box, while the two fields this relay cannot build for itself --
+//     the included set and the derived session key -- are merged on;
 //   - a refresh that fails keeps the last good answer instead of emptying the console;
 //   - a box name is verified against what is actually running, and never guessed;
 //   - the operator is exempt from being marked unavailable, because this console is the door a
@@ -77,15 +79,19 @@ test("the operator entry is built from the environment, not from anything a cont
   assert.equal(entry.slug, OPERATOR_SLUG);
   assert.equal(entry.box, "titanbot-box-p927");
   assert.equal(entry.gateway, "http://titanbot-box:1340", "a trailing slash would double every path");
-  // Empty on purpose: the operator signs in with the instance password, and the master key that
-  // would derive this one never leaves the control plane.
+  // Empty as a SEED, not as an answer (SIGNIN-2). The master that derives this key never leaves the
+  // control plane, so there is nothing here to derive it from and a refresh merges the one the
+  // control plane derived. Until then the instance password is the only door to this workspace.
   assert.equal(entry.sessionKey, "");
   // And with nothing set, the developer Mac's default, which is what it has always been.
   assert.equal(operatorEntry({ env: {}, gateway: "g", token: "t" }).box, "grok-bot-local-vm");
 });
 
 test("the control plane's workspaces join the operator's, and a row for the operator is dropped", async () => {
-  const cp = fakeCp([{ body: { tenants: [row("demo"), row(OPERATOR_SLUG, { box: "somebody-elses-box", token: "not-the-operators" })] } }]);
+  // sessionKey emptied on the operator's row on purpose, so this stays a test of the row being
+  // dropped and of the line that says so. A row carrying a key has something worth merging and is
+  // deliberately silent; that is SIGNIN-2's own test below.
+  const cp = fakeCp([{ body: { tenants: [row("demo"), row(OPERATOR_SLUG, { box: "somebody-elses-box", token: "not-the-operators", sessionKey: "" })] } }]);
   const said = [];
   const registry = createTenantRegistry({
     operator: OPERATOR, cpUrl: "https://api.titanium.bot", relayToken: "a-relay-token",
@@ -102,6 +108,7 @@ test("the control plane's workspaces join the operator's, and a row for the oper
   // console at a customer's box, holding a customer's token.
   assert.equal(registry.get(OPERATOR_SLUG).box, "titanbot-box-jason");
   assert.equal(registry.get(OPERATOR_SLUG).token, "operator-gateway-token");
+  assert.equal(registry.get(OPERATOR_SLUG).gateway, "http://titanbot-box:1340");
   assert.ok(said.some((line) => line.includes(`returned a row for ${OPERATOR_SLUG}`)), said.join("\n"));
 });
 
@@ -163,6 +170,33 @@ test("a box name is verified against what is running, and the operator is never 
   // in the log rather than answering the operator "not available" on every route.
   assert.equal(registry.get(OPERATOR_SLUG).reachable, true);
   assert.ok(said.some((line) => line.includes("Set SAND_BOX_CONTAINER")), said.join("\n"));
+});
+
+test("somebody else's adopted workspace, a slug and a key and no box, answers not available", async () => {
+  // SIGNIN-2 widened what the control plane answers: an ADOPTED workspace now gets a row carrying
+  // its slug and its derived key even when this server holds no token or box for it. The operator's
+  // own slug is the one that matters, but a second adopted workspace would arrive the same way, and
+  // it must not become an entry pointing at nothing. Its box normalises to "", which is not a
+  // container on this host, so it is marked unreachable and every route answers the sentence -- the
+  // same answer it gets today by being left out of the registry altogether.
+  const cp = fakeCp([{ body: { tenants: [{ slug: "second", sessionKey: "a-derived-key-for-second" }] } }]);
+  const said = [];
+  const registry = createTenantRegistry({
+    operator: OPERATOR, cpUrl: "https://api.titanium.bot", relayToken: "a-relay-token", ...cp,
+    dockerNames: async () => new Set(["titanbot-box-jason"]),
+    log: (line) => said.push(line),
+  });
+  await registry.refresh();
+
+  const second = registry.get("second");
+  assert.equal(second.box, "");
+  assert.equal(second.gateway, "", "a gateway built from an empty box name would be a nonsense URL");
+  assert.equal(second.token, "");
+  assert.equal(second.reachable, false, "a workspace with no container here must answer the sentence");
+  assert.ok(said.some((line) => line.includes("second: no container named (unset)")), said.join("\n"));
+  // The operator's own is untouched by the neighbour, and still reachable by the exemption.
+  assert.equal(registry.get(OPERATOR_SLUG).reachable, true);
+  assert.equal(registry.get(OPERATOR_SLUG).box, "titanbot-box-jason");
 });
 
 test("a docker that cannot be asked marks nothing unavailable", async () => {
@@ -405,15 +439,16 @@ test("a re-minted key rebuilds the entry, so the console stops handing out the o
   assert.equal(registry.get("demo").included, null);
 });
 
-test("the operator's row is still dropped, except for the included set, which is merged onto the seed", async () => {
+test("the operator's row is still dropped, except for the two fields this relay cannot build itself", async () => {
   const included = includedSet({ key: "sk-for-jason" });
   const cp = fakeCp([
     { body: { tenants: [row(OPERATOR_SLUG, {
       box: "somebody-elses-box", token: "not-the-operators", gateway: "http://somebody-else:1340",
-      sessionKey: "not-his", stateDir: "/somebody/else/state", profileDir: "/somebody/else/profile",
+      sessionKey: "the-key-only-the-control-plane-can-derive",
+      stateDir: "/somebody/else/state", profileDir: "/somebody/else/profile",
       included,
     })] } },
-    { body: { tenants: [row(OPERATOR_SLUG, { box: "somebody-elses-box" })] } },
+    { body: { tenants: [row(OPERATOR_SLUG, { box: "somebody-elses-box", sessionKey: "" })] } },
   ]);
   const said = [];
   const registry = createTenantRegistry({
@@ -427,21 +462,73 @@ test("the operator's row is still dropped, except for the included set, which is
   assert.equal(seed.box, "titanbot-box-jason");
   assert.equal(seed.token, "operator-gateway-token");
   assert.equal(seed.gateway, "http://titanbot-box:1340");
-  assert.equal(seed.sessionKey, "");
   assert.equal(seed.stateDir, "/state");
   assert.equal(seed.profileDir, "/profile");
-  // And the one field that could only have come from the control plane did.
+  // And the two fields that could only have come from the control plane did. `included` is minted
+  // at the proxy and `sessionKey` is derived from a master that never leaves that service, so there
+  // is nothing in this relay's environment to build either one from: they are the whole of what a
+  // row for this slug is allowed to move, and box, token, gateway and the two directories above are
+  // the whole of what it is not.
   assert.equal(seed.included.key, "sk-for-jason");
   assert.deepEqual(seed.included.models.map((m) => m.id), ["plan-zai", "plan-minimax", "plan-qwen"]);
+  assert.equal(seed.sessionKey, "the-key-only-the-control-plane-can-derive",
+    "SIGNIN-2: without this an account on the operator's own workspace cannot be verified at all");
+  assert.equal(registry.sessionKeyOf(OPERATOR_SLUG), "the-key-only-the-control-plane-can-derive",
+    "the lookup the sign-in actually calls is the one that has to answer");
   assert.equal(said.some((line) => line.includes("uses its own environment")), false,
     "a row carrying something worth merging is not a fault to report every sixty seconds");
 
-  // Turning the proxy off on the control plane turns the section off here, rather than leaving a
-  // dead key on Jason's console; and THAT row, with nothing on it, is the one worth a line.
+  // Turning either one off on the control plane turns it off here, rather than leaving a dead value
+  // on Jason's console; and THAT row, with nothing on it at all, is the one worth a line.
   await registry.refresh();
   assert.equal(registry.get(OPERATOR_SLUG).included, null);
+  assert.equal(registry.get(OPERATOR_SLUG).sessionKey, "");
   assert.equal(registry.get(OPERATOR_SLUG).box, "titanbot-box-jason");
   assert.equal(said.some((line) => line.includes("uses its own environment")), true);
+});
+
+test("a row for the operator carrying only a derived key merges it, says nothing, and moves no other field", async () => {
+  // SIGNIN-2, and this is the normal live shape: the control plane answers the operator's slug with
+  // {slug, sessionKey} and no included set, because the proxy is off on that server. The key has to
+  // arrive, and the sixty-second log line must NOT -- a line that reads as a fault on a console that
+  // is working perfectly is the exact failure PROXY-1 already fixed once.
+  const key = "a-derived-key-for-the-operators-own-workspace";
+  const customer = row("demo");
+  const cp = fakeCp([
+    { body: { tenants: [{ slug: OPERATOR_SLUG, sessionKey: key }, customer] } },
+    { body: { tenants: [{ slug: OPERATOR_SLUG }, customer] } },
+  ]);
+  const said = [];
+  const registry = createTenantRegistry({
+    operator: OPERATOR, cpUrl: "https://api.titanium.bot", relayToken: "a-relay-token", ...cp,
+    log: (line) => said.push(line),
+  });
+  await registry.refresh();
+
+  const seed = registry.get(OPERATOR_SLUG);
+  assert.equal(seed.sessionKey, key);
+  assert.equal(seed.included, null, "there was no included set on the row and none was invented");
+  // The env seed, field for field. A row this thin is exactly the one that could quietly blank them.
+  assert.equal(seed.box, "titanbot-box-jason");
+  assert.equal(seed.token, "operator-gateway-token");
+  assert.equal(seed.gateway, "http://titanbot-box:1340");
+  assert.equal(seed.stateDir, "/state");
+  assert.equal(seed.profileDir, "/profile");
+  assert.equal(seed.operator, true);
+  assert.deepEqual(said, [], `a working console logged something: ${said.join(" | ")}`);
+
+  // A later row with neither field clears both and says so, once.
+  await registry.refresh();
+  assert.equal(registry.get(OPERATOR_SLUG).sessionKey, "");
+  assert.equal(registry.get(OPERATOR_SLUG).included, null);
+  assert.equal(said.filter((line) => line.includes("uses its own environment")).length, 1);
+
+  // And the customer in the same answer is untouched by any of it, field for field.
+  const demo = registry.get("demo");
+  for (const field of ["slug", "name", "box", "gateway", "token", "sessionKey", "stateDir", "profileDir", "status"]) {
+    assert.equal(demo[field], customer[field], `the customer's ${field} moved`);
+  }
+  assert.equal(demo.operator, false);
 });
 
 test("a console with no control plane has no included set anywhere, and never asks for one", async () => {

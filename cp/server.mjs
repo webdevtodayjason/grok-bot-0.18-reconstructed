@@ -269,11 +269,13 @@ export function createApp(options = {}) {
   // any log to say why. What is skipped: a tenant Coolify has not built yet (no service uuid), one
   // whose token file is not on the disk, and one that is `failed`.
   //
-  // The operator's own instance is not in here. The relay seeds that entry from its own environment
-  // at boot, which is what keeps Jason's console working when this service is down or absent, and
-  // an adoption row holds neither a token nor directories to seed it from anyway. An adopted row IS
-  // returned when the adoption was given the box container name and the directories to read, which
-  // is what `tenant adopt --box` writes.
+  // The operator's own instance is not served from here, with two named exceptions. The relay seeds
+  // that entry from its own environment at boot, which is what keeps Jason's console working when
+  // this service is down or absent, and an adoption row holds neither a token nor directories to
+  // seed it from anyway. What an adopted row DOES carry is the two fields the relay cannot build for
+  // itself: the included set (PROXY-1) and that slug's own derived session key (SIGNIN-2). An
+  // adopted row is a full row like any other when the adoption was given the box container name and
+  // the directories to read, which is what `tenant adopt --box` writes.
   async function relayRegistry() {
     const tenants = [];
     const skipped = [];
@@ -299,16 +301,31 @@ export function createApp(options = {}) {
         // holding the copied operator key: the exact thing this wave exists to end, surviving in
         // the one place nobody would look.
         //
-        // So an ADOPTED tenant that has a plan key still gets a row, carrying its slug and its
-        // included set AND NOTHING ELSE. The relay drops every other field of the operator's row
-        // already (box, token, sessionKey and both directories come from its own environment and
-        // from nowhere else), and merges only this one, so a row shaped like this is exactly what
-        // it is built to read. Narrow to adopted on purpose: a normal customer whose token file is
+        // So an ADOPTED tenant still gets a row, carrying its slug, its derived session key and its
+        // included set when it has one, AND NOTHING ELSE. The relay drops every other field of the
+        // operator's row already (box, token and both directories come from its own environment and
+        // from nowhere else) and merges only these two, so a row shaped like this is exactly what it
+        // is built to read. Narrow to adopted on purpose: a normal customer whose token file is
         // missing stays skipped, because a row with no token would have the relay calling that
         // customer's gateway with an empty bearer instead of saying the workspace is not available.
+        //
+        // SIGNIN-2, MEASURED ON THE R750 2026-09-10. The session key is the second field, and it is
+        // the one that made an account on Jason's own workspace unable to sign in at all. This row
+        // carried `slug` and `included` and nothing else, so the relay's key for titanium was the
+        // empty string, the shared verdict path in ui/tenant-login.mjs answered `unknown`, and the
+        // console answered 503 "That workspace is not available right now." to a CORRECT password
+        // while the byte-identical account on demo was signed in at once. Nothing in the relay's own
+        // environment can derive this key -- the master that derives it is here and only here -- so
+        // it is the one other field that has to travel, and it travels the same way a customer's
+        // does: the tenant's own derived key, never the master, which signs for that one slug and
+        // does not walk back.
         if (wasAdopted(row.slug, row)) {
           const adoptedIncluded = await includedFor(row.slug, profileDir);
-          if (adoptedIncluded.row) tenants.push({ slug: row.slug, included: adoptedIncluded.row });
+          tenants.push({
+            slug: row.slug,
+            sessionKey: tenantSessionSecret(config.sessionSecret, row.slug),
+            ...(adoptedIncluded.row ? { included: adoptedIncluded.row } : {}),
+          });
         }
         continue;
       }
