@@ -483,8 +483,11 @@ const normalisePlatform = (value) => {
  * push.json for ever. There was no exit.
  *
  * So a desktop row is carried by GET /push/events instead: the same six sentences, the same collapse
- * key, the same fixed titles, over an SSE this module serves itself. It reaches no vendor, it is
- * skipped by both the alert and the silent badge update, and on its own it does not arm the sweep.
+ * key, the same titles a push carries -- which are the host's own summary line, written by the model,
+ * for auto-review, local-tool, widget and secret, and a template only for box-handoff and report (the
+ * builders above, and docs/APPS.md section 6) -- over an SSE this module serves itself. It reaches no
+ * vendor, it is skipped by both the alert and the silent badge update, and on its own it does not arm
+ * the sweep.
  */
 export const VENDOR_PLATFORMS = Object.freeze(["ios", "android"]);
 export const carriedByStream = (platform) => str(platform).trim().toLowerCase() === "desktop";
@@ -1054,6 +1057,13 @@ export function createPushEdge({
   tenants = () => [],
   contextOf = () => null,
   subOf = () => "",
+  // WHETHER THE CREDENTIAL THAT OPENED A LONG-LIVED CONNECTION IS STILL GOOD, asked again on the
+  // connection's own cadence rather than once at connect. `(req, {tenant, sub}) -> boolean`, wired in
+  // ui/server.mjs to a FRESH device-session read: `deviceSessionOf` memoises its answer on the request
+  // object, and an SSE request lives for as long as the tray is open, so the memo would answer with
+  // the row as it was at connect for ever. Absent, it answers true, which is what a test with no
+  // credentials at all wants and what every route below already assumes.
+  stillLive = () => true,
   gatewayCall = async () => ({ status: 0, text: "", type: "" }),
   credentials = () => ({}),
   hostOf = () => "",
@@ -1080,6 +1090,11 @@ export function createPushEdge({
   // refreshes on the sweep's own cadence rather than going quiet.
   streamRefreshMs = 15_000,
   streamHeartbeatMs = 25_000,
+  // Belt and braces beside the re-check below: a hard ceiling on how long ONE connection may live,
+  // after which it ends and the shell reopens through the door. A re-check depends on a reader being
+  // wired; a lifetime does not, so a relay whose `stillLive` is the default still bounds how long a
+  // credential's reach outlives the credential.
+  streamMaxMs = 15 * 60_000,
   stub = String(process.env.SAND_PUSH_STUB ?? "") === "1",
   log = () => {},
 } = {}) {
@@ -1472,11 +1487,26 @@ export function createPushEdge({
   // ONE ROW SHAPE, so a tray drawn off GET /push/pending and a tray updated off GET /push/events are
   // drawing the same thing. `body` is CARD_BODY's fixed sentence for the kind and never a field a
   // model wrote (rule 5) -- what a tray shows is what a lock screen would have shown. `title` is the
-  // same title a push carries, which for a hand-off is "Take the keyboard for <agent>" and never the
-  // agent-written instruction the console's own card displays. `muted` is decoration computed from
-  // the CALLER's own per-kind switches; it never changes `badge`, because a badge is the count of
-  // cards that are waiting and a switch only decides whether anybody was told.
-  function cardRow(t, card, { settings } = {}) {
+  // same title a push carries, which for box-handoff and report is a template and for the other four
+  // kinds is the host's own summary line that the MODEL wrote (the builders at the top of this file),
+  // so a shell that draws a title is drawing model prose four times out of six.
+  //
+  // THE THREE DECORATIONS, and why they are on the wire rather than left for a shell to re-derive.
+  // A vendor push is DECIDED by this relay -- `deliver` refuses a muted kind outright and holds a card
+  // inside a quiet window with exactly one catch-up when it ends -- but this stream is a data feed and
+  // not an alert: it carries the whole picture on connect, and a tray whose card list went silent
+  // inside a quiet window would be a tray disagreeing with GET /push/pending, which is the authority.
+  // So the row carries the two switches and the SHELL stays silent, and the wire says which of them
+  // is in force rather than the shell reading the settings route and re-implementing the window:
+  //
+  //   muted       this CALLER's per-kind switch says no. Never changes `badge`: a badge counts cards
+  //               that are waiting, and a switch only decides whether anybody was told about them.
+  //   quiet       this caller's quiet window is open right now, so a phone would have been held.
+  //   quietUntil  when that window ends, in ms, or 0 when none is open.
+  //
+  // A tray that makes a sound for a row with `muted` or `quiet` true is a customer getting a
+  // notification on their laptop that their phone deliberately did not make.
+  function cardRow(t, card, { settings, at = now() } = {}) {
     const link = deepLinks(card, { host: str(hostOf(t)) });
     return {
       key: str(card.key),
@@ -1491,10 +1521,12 @@ export function createPushEdge({
       deadlineMs: num(card.deadlineMs),
       pending: card.pending === true,
       muted: settings?.kinds?.[str(card.kind)] === false,
+      quiet: quietHoursHold(settings, at),
+      quietUntil: quietHoursEndMs(settings, at),
     };
   }
 
-  /** The caller's own switches, for the `muted` decoration and for nothing else. */
+  /** The caller's own switches, for the three decorations on a row and for nothing else. */
   async function settingsOf(t, sub) {
     const state = await storeFor(t).read();
     return normaliseSettings(state.settings[str(sub)] ?? {});
@@ -1527,9 +1559,29 @@ export function createPushEdge({
       "x-accel-buffering": "no",
     });
     const held = streams.get(key) ?? new Set();
-    const conn = { sub: str(sub), alive: true, sent: new Map() };
+    const conn = { sub: str(sub), alive: true, sent: new Map(), openedAt: now() };
     held.add(conn);
     streams.set(key, held);
+
+    // REVOKE HAS TO REACH A CONNECTION THAT IS ALREADY OPEN, and until this it did not. The stream
+    // authenticated once, at connect, and the 25 s heartbeat then kept it alive for ever: measured on
+    // the R750 through console.titanium.bot 2026-09-10, a bearer revoked at 15:36:03Z was answering
+    // 401 on GET /push/pending and still received a widget card -- title, agent, entry id and deep
+    // link -- on its held stream five seconds later. Revoke is the lost-laptop control and section 2
+    // of docs/APPS.md sells it as one, so the bound the cache window puts on an ordinary request has
+    // to hold here too.
+    //
+    // FAIL CLOSED. A reader that throws ends the connection rather than keeping it: the shell reopens
+    // through the door immediately, where the same credential is checked properly and either works or
+    // gets a 401, so the worst case of a disk hiccup is a reconnect and never a revoked laptop kept
+    // on the stream by an exception.
+    const credentialGone = () => {
+      try { return stillLive(req, { tenant: key, sub: conn.sub }) === false; }
+      catch (error) {
+        log(`push  a desktop stream for ${key} could not re-check its bearer, so it was closed: ${str(error?.message)}`);
+        return true;
+      }
+    };
 
     const write = (text) => {
       if (!conn.alive) return;
@@ -1543,6 +1595,9 @@ export function createPushEdge({
     let again = false;
     const project = async () => {
       if (!conn.alive) return;
+      // Before any card is read, let alone sent. A projection is the thing that leaks a revoked
+      // device's cards, so the check goes above it rather than beside it.
+      if (credentialGone()) { conn.close?.(); return; }
       // One projection at a time per connection, with a single trailing re-run: a box emitting frames
       // faster than a collection takes must not queue a collection per frame.
       if (busy) { again = true; return; }
@@ -1581,6 +1636,7 @@ export function createPushEdge({
     let debounce = null;
     let beat = null;
     let slow = null;
+    let cap = null;
     const bump = () => {
       if (debounce != null) return;
       debounce = setTimeout(() => { debounce = null; void project(); }, streamDebounceMs);
@@ -1594,6 +1650,7 @@ export function createPushEdge({
       if (debounce != null) { clearTimeout(debounce); debounce = null; }
       if (beat != null) { clearInterval(beat); beat = null; }
       if (slow != null) { clearInterval(slow); slow = null; }
+      if (cap != null) { clearTimeout(cap); cap = null; }
       try { controller.abort(); } catch { /* already gone */ }
     };
     res.on("close", shut);
@@ -1607,13 +1664,26 @@ export function createPushEdge({
     write(": open\n\n");
     await project();
 
-    beat = setInterval(() => write(": still here\n\n"), streamHeartbeatMs);
+    // The heartbeat is what keeps this connection alive, so it is also where the credential behind it
+    // is asked about again. A box that never moves projects nothing, so without this a tray on a quiet
+    // workspace would never be re-checked at all: the heartbeat is the only thing that runs on it.
+    beat = setInterval(() => {
+      if (credentialGone()) { write(": gone\n\n"); conn.close?.(); return; }
+      write(": still here\n\n");
+    }, streamHeartbeatMs);
     beat.unref?.();
     // The fallback, for a box whose /events this relay cannot hold: the connection still catches up on
     // the sweep's own cadence rather than going quiet. With an upstream it is a cheap backstop, because
     // the memo is shared and a collection it asks for was very likely just made.
     slow = setInterval(() => { void project(); }, streamRefreshMs);
     slow.unref?.();
+    // And the ceiling: this connection ends on its own after streamMaxMs whatever else happens, and
+    // the shell reopens through the door. `: time` rather than a silent end, so a reader of a live
+    // stream can tell a lifetime from a network drop.
+    if (streamMaxMs > 0) {
+      cap = setTimeout(() => { write(": time\n\n"); conn.close?.(); }, streamMaxMs);
+      cap.unref?.();
+    }
 
     const gateway = str(t?.gateway);
     if (gateway.length > 0 && typeof t?.headers === "function") {
@@ -1693,7 +1763,15 @@ export function createPushEdge({
       }
       if (req.method === "POST") {
         let body;
-        try { body = JSON.parse(str(await readBody(req)) || "{}"); } catch { return fail(res, 400, "that was not JSON") ?? true; }
+        // Through `json()` and not `fail()`, and it is the same rule the validator keeps below: EVERY
+        // refusal on these routes is {error:"bad_request", field, message}, because a shell switches on
+        // `error === "bad_request"` and points at the control `field` names. `fail()` answers
+        // {"error":"that was not JSON"} -- no field, and an `error` that is a sentence -- so the one
+        // refusal a client hits while it is still getting its serialiser right was the one refusal it
+        // could not parse. Measured on the R750 2026-09-10: every other refusal in the same run named
+        // its field; this one answered undefined.
+        try { body = JSON.parse(str(await readBody(req)) || "{}"); }
+        catch { return json(res, 400, { error: "bad_request", field: "body", message: "The body has to be a JSON object naming the platform as ios, android or desktop, with a deviceId and a token in it, and this was not JSON at all. Nothing was stored." }); }
         const answer = await store.register({ ...body, sub });
         if (!answer.ok) {
           return json(res, 400, { error: "bad_request", message: "Name the platform as ios, android or desktop, and send a deviceId and a token. Nothing was stored." });
@@ -1737,12 +1815,30 @@ export function createPushEdge({
       // contract notes -- three statements of a rule the code did not keep. It keeps it now.
       if (req.method === "PUT") {
         let body;
-        try { body = JSON.parse(str(await readBody(req)) || "{}"); } catch { return fail(res, 400, "that was not JSON") ?? true; }
+        // The same shape as every other refusal here, for the same reason as the device route above.
+        try { body = JSON.parse(str(await readBody(req)) || "{}"); }
+        catch { return json(res, 400, { error: "bad_request", field: "body", message: "The body has to be a JSON object with kinds, quietHours or utcOffsetMinutes in it, and this was not JSON at all. Nothing was stored." }); }
         // APPS-DOC-1. A shape this route cannot read is a 400 that NAMES the field, never a 200 that
         // stores something else. An empty object is a valid no-op save: every field is absent, so
         // every field is unchanged, which is what lets a panel PUT only what a person touched.
         const checked = validateSettings(body);
         if (!checked.ok) return json(res, 400, { error: "bad_request", field: checked.field, message: checked.message });
+        // AND THE ONE RULE THAT CANNOT BE CHECKED ON THE BODY ALONE. `quietHoursHold` answers false on
+        // from === to, which is the right reading of an ambiguous window, so a person who sets 9 to 9
+        // meaning "all day" gets no quiet hours at all and the wire tells them it saved. That is rule
+        // 3's own class -- a typo silently becoming a different, perfectly valid setting -- and the
+        // strictness pass missed it. It is checked HERE rather than inside `validateSettings` because
+        // `from` and `to` can arrive one at a time in a patch: what matters is the window that would be
+        // STORED, so the merge is computed first and nothing is written when it is refused.
+        // Only when this body touches the window. A row already on disk that reads 9 to 9 must not make
+        // every other save impossible: a panel turning one card kind off is not the caller who can fix
+        // it, and refusing them would be a lock-out rather than a correction.
+        const merged = Object.hasOwn(checked.patch, "quietHours")
+          ? mergeSettings(await store.settingsFor(sub), checked.patch)
+          : null;
+        if (merged != null && merged.quietHours.on === true && merged.quietHours.from === merged.quietHours.to) {
+          return json(res, 400, { error: "bad_request", field: "quietHours.to", message: `Quiet hours that start and end at the same hour (${merged.quietHours.from}) hold nothing. Use a window, or turn quiet hours off with quietHours.on false. Nothing was stored.` });
+        }
         const settings = await store.saveSettings(sub, checked.patch);
         // SAVING SETTINGS IS ONE OF THE TWO EVENTS THAT CAN CHANGE A TERMINAL ANSWER, so it is one of
         // the two that reopens one (registering a device is the other). A `muted` row is terminal on

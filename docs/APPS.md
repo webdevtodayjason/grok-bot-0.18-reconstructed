@@ -20,8 +20,9 @@ app halves of STORE-1 and PUSH-1 belong to the phone and desktop panes and are n
 ### Every gate, in one table
 
 All of these ran on **grok-bot-local-vm (this Mac)** on **2026-09-10**, against a relay spawned from the
-merged tree, one at a time behind the shared box lock, each inside the 300 s ceiling, each sending the
-user agent `titanbot-gate/<script>`. Phone legs at **390x844** and **430x932**, device scale 3, touch,
+**PUSH-1 merge (`b8c5efc`)** and recorded at `d0827bb` — section 15's numbers are a later tree and name
+their own commit, which is why the two `npm test` totals in this document differ — one at a time behind the shared box lock, each
+inside the 300 s ceiling, each sending the user agent `titanbot-gate/<script>`. Phone legs at **390x844** and **430x932**, device scale 3, touch,
 iPhone UA, real Chrome through playwright-core.
 
 | Gate | Result | What it is |
@@ -624,6 +625,18 @@ Quiet hours are whole hours plus one UTC offset per account, which the app uploa
 offset rather than a zone name is that a daylight-saving change is an hour out until the app next
 opens.
 
+**That holding is the vendor path's, and on the desktop transport the tray is the surface that has to
+stay silent.** `GET /push/events` and `GET /push/pending` carry every pending card whatever the
+switches say, because a card list that went quiet would disagree with itself; the two fields that
+decide whether a tray may make a sound are **`muted`** (the caller's per-kind switch) and **`quiet`**
+with **`quietUntil`** (the caller's quiet window, open now, and when it ends). A shell that draws the
+list but alerts on those rows is one customer getting a laptop notification their phone deliberately
+did not make.
+
+**A window that starts and ends at the same hour is refused at the wire**, 400 naming `quietHours.to`.
+`9` to `9` holds nothing — an ambiguous window reads as off — so a person who meant "all day" would
+otherwise be told it saved and get no quiet hours at all.
+
 The badge is the count of **pending cards**.
 
 ### The badge and the console's needs-you count will disagree
@@ -651,7 +664,7 @@ attributes are the contract for that, and they are the only three:
 | `data-needs-you-card` | every **pending** card in the open conversation | `<conversation id>:<entry id>`, and `data-card-id` carries the same string, so neither side parses anything |
 | `data-card-kind` | beside it | one of the six kinds, spelled the way the relay spells it |
 | `data-agent` | beside it | the conversation's display name, falling back to its id, never empty |
-| `data-title` | beside it | the relay's own fixed title for that card |
+| `data-title` | beside it | the relay's own title for that card, which is a **template** for `box-handoff` and `report` and the host's own summary line — **written by the model** — for `auto-review`, `local-tool`, `widget` and `secret`, exactly as section 6's "What a push carries" says. The **fixed** sentence is `data-card-kind`'s body, not the title |
 | `data-href` | beside it | `/?agent=<id>&entry=<id>` — a console path, which is the only shape the shell's reader accepts |
 | `data-talk-button` | the console's talk button | present |
 
@@ -671,9 +684,13 @@ be wrong quietly:
   active context alone, so `[data-needs-you-card]` is a partial list whose length changes when the
   person clicks around, while the count attribute is workspace-wide. **`GET /push/pending` is the
   authority** and these attributes are the fallback for a shell that has no bearer yet.
-- **`data-title` on a hand-off card is the relay's fixed sentence** — `Take the keyboard for <agent>` —
-  and never the agent-written instruction the card displays on screen. That instruction is the field
-  rule 5 exists to keep off a lock screen, and a tray is a lock screen with a different shape.
+- **`data-title` is the title a push carries, and only two of the six kinds template it.** On a
+  hand-off it is the relay's own sentence — `Take the keyboard for <agent>` — and
+  never the agent-written instruction the card displays on screen, which is the field rule 5 keeps off a
+  lock screen. **The other four kinds are the exception and not the rule**: `auto-review`, `local-tool`,
+  `widget` and `secret` all carry the host's own summary line, which a model wrote, so a shell rendering
+  `data-title` into a tray is rendering model prose four times out of six. The part rule 5 guarantees is
+  the **body** — one of six fixed sentences — and a tray is a lock screen with a different shape.
 - **A card with no durable id carries none of them.** An agent id the adapter could not resolve, an
   index-based `entry-<n>` id that is not stable across a re-read, and a page-local report offer that
   the relay will never push are all skipped outright rather than given a dead deep link. So the
@@ -812,7 +829,7 @@ at **390x844, device scale 3, touch, iPhone UA, real Chrome via playwright-core*
   conversation and revealing the entry (item B's boot parse); and the card being openable by a thumb
   at 390x844 — see the next section, which is the one thing this wave measured and did not fix.
 
-`node --test` over the whole suite — **2,719 pass, 0 fail** on the merged tree, including 29 tests of the decider, the
+`node --test` over the whole suite — **2,719 pass, 0 fail** at the PUSH-1 merge (`b8c5efc`), including 29 tests of the decider, the
 collapse rules, quiet hours, the expiry, the ledger's survival across a restart, the pruning table
 and the zero-gateway-call case, plus 11 of the four routes and the absent-module fallback, plus 7 of
 the two control-plane credential doors.
@@ -1144,6 +1161,8 @@ is a refusal rather than a quiet coercion — every line of this was measured on
 | `quietHours: {"to": -4}` | stored as **20** | 400, the same |
 | `quietHours: {"fromHour": 1}` | 200, silently dropped | 400 naming `quietHours.fromHour` and saying where the offset lives |
 | a `POST` instead of a `PUT` | **accepted and saved**, while the route's own refusal sentence said "GET or PUT" | 405 `{"error": "GET or PUT"}` |
+| a body that is **not JSON at all** (`{not json`) | 400 `{"error": "that was not JSON"}` — the one refusal with no `field` and an `error` that is not `bad_request`, so a shell switching on `error === "bad_request"` to point at a form control missed exactly the refusal it hits while its serialiser is still wrong | 400 `{"error": "bad_request", "field": "body", …}`, the same shape as every other refusal here. `POST /push/devices` answers the same way, with its own sentence |
+| `quietHours: {"on": true, "from": 9, "to": 9}` | **200, and stored** — and then held nothing, for ever, silently, because an ambiguous window reads as off | 400 naming `quietHours.to`. Checked on the **merged** result rather than the body, because `from` and `to` can arrive one at a time in a patch, and only when the body touches `quietHours`, so a row already on disk that reads 9 to 9 cannot lock a panel out of every other save |
 
 One loosely typed body used to produce three different outcomes — honoured, ignored, inverted — and
 the server complained about none of them. That is the thing the strictness is for. The store still
@@ -1171,7 +1190,9 @@ the next new one. Registering a device does the same thing, for the same reason.
             "at": 1789000290000,
             "deadlineMs": 0,
             "pending": true,
-            "muted": false}]}
+            "muted": false,
+            "quiet": false,
+            "quietUntil": 0}]}
 ```
 
 **PUSH-5.** No route answered this, so the badge and the card decision existed only inside a push
@@ -1185,12 +1206,23 @@ What each field means, and the three that are easy to misread:
   `notification.tag` carry for that card, so a tray and a lock screen are talking about one thing.
 - **`body` is one of the six fixed sentences**, chosen by kind, and never a field a model wrote. This
   route is a notification body with a different shape and it keeps the same rule.
-- **`title` is the title a push carries.** For a hand-off that is `Take the keyboard for <agent>`, and
-  **never** the agent-written instruction the console's own card displays on screen.
+- **`title` is the title a push carries, and for four of the six kinds a model wrote it.**
+  `box-handoff` and `report` are templates (`Take the keyboard for <agent>`); `auto-review`,
+  `local-tool`, `widget` and `secret` carry the host's own summary line, which is model prose — see
+  section 6's "What a push carries". It is **never** the agent-written *instruction* a hand-off card
+  displays on screen, which is the field rule 5 keeps off a lock screen. The **fixed** sentence is
+  `body`, not `title`.
 - **`pending`** is false for a card that has been answered, dismissed or has expired. The list carries
   those too, so a tray can take a notification down rather than waiting for it to vanish.
-- **`muted`** is computed from **the caller's own** per-kind switches. It decorates a row and never
-  changes `badge`.
+- **`muted`, `quiet` and `quietUntil` are the three decorations, and they are what decides whether a
+  tray may make a sound.** `muted` is the caller's own per-kind switch for this kind. `quiet` is true
+  while the caller's own quiet window is open, and `quietUntil` is when that window ends in ms, or 0.
+  All three decorate a row and **none of them changes `badge`**, because a badge counts cards that are
+  waiting and a switch only decides whether anybody was told about them. A tray that alerts on a row
+  carrying `muted` or `quiet` true is a notification on a laptop that the same customer's phone
+  deliberately did not make — the relay refuses a muted kind and holds a quiet one on the vendor path,
+  and this wire says so rather than leaving a shell to read the settings route and re-implement the
+  window.
 - **`deadlineMs`** is non-zero only for `auto-review` and `local-tool`, the two kinds that die in ten
   minutes. A card may already have expired by the time a thumb reaches it.
 - **`ageMs` and `memoMs`**: how old this picture is, and how long one stands in for the next request.
@@ -1283,7 +1315,8 @@ as a fallback for a box whose stream this relay cannot hold.
              "body": "Open it to read what it needs done.",
              "link": {"app": "titaniumbot://card?tenant=demo&agent=agent_7c1&entry=t14s0&kind=box-handoff",
                       "web": "https://console.titanium.bot/?agent=agent_7c1&entry=t14s0"},
-             "at": 1789000290000, "deadlineMs": 0, "pending": true, "muted": false}}
+             "at": 1789000290000, "deadlineMs": 0, "pending": true,
+             "muted": false, "quiet": false, "quietUntil": 0}}
 ```
 
 ##### `GET /push/events` — a closed frame
@@ -1300,7 +1333,7 @@ The payload inside a `pending` frame is the **same row** `GET /push/pending` ans
 `badge` on it, so a tray has one shape to draw and not two. A `closed` frame is the same `key`, so the
 notification it closes is the one that comes down rather than a second one appearing about it.
 
-Four rules a shell author should know about this stream:
+Six rules a shell author should know about this stream:
 
 1. **The dedupe is per connection, and this path never writes `push-sent.json`.** `alerted` is
    terminal for every device in that ledger, so recording a tray delivery there would silence the same
@@ -1312,6 +1345,19 @@ Four rules a shell author should know about this stream:
 4. **It is not the relay's `GET /events`.** That one is the box's own frame stream, piped through
    unchanged, and it carries no cards. This one is at `/push/events`, is answered by the push module
    itself, and carries nothing but cards.
+5. **This stream is a data feed and the tray is the surface that has to stay silent.** Every pending
+   card arrives here, a muted kind and a quiet window included, because a card list that went quiet
+   inside a quiet window would disagree with `GET /push/pending`, which is the authority. The two
+   fields that decide whether the shell may make a sound are **`muted`** (this caller's per-kind
+   switch) and **`quiet`** with **`quietUntil`** (this caller's quiet window, open now, and when it
+   ends). On the vendor path the relay itself refuses a muted kind and holds a quiet one with exactly
+   one catch-up; here it tells the shell instead, and a shell that ignores both gives one customer a
+   laptop notification their phone deliberately did not make.
+6. **The connection lives as long as its credential, not as long as its socket.** The bearer is
+   re-checked on the heartbeat and before every projection, so a revoked device's stream ends within
+   one heartbeat rather than running on. The stream also ends on its own after **15 minutes** whatever
+   else happens. Both endings look the same to a shell — the stream closes — so **reopen it**; a `:
+   gone` or `: time` comment says which it was for anybody reading a live stream by hand.
 
 ### What this section measured, on what, at what
 
@@ -1330,8 +1376,9 @@ that box, one gate at a time behind the shared box lock, gate user agent
 | the tray and the card | the pending frame **2 ms** after the connection opened, on channel `push-card`, carrying the same row the route answers; the **closed** frame on the same key **4 s** after the hand-back |
 | what was written down | 4 tray frames swept beside every recorded send and log line for a device token, a private key, a bearer and a gateway token: **clean**. Longest notification body 45 characters |
 
-`npm test` over the whole suite: **2,803 pass, 0 fail** in 33.4 s on the same machine at the merged
-commit, including the wire-shape round-trips through a real relay and the 35 that pin the three page
+`npm test` over the whole suite: **2,803 pass, 0 fail** in 33.4 s on the same machine at the app-contract
+merge (`77cf3f5`, the tree this section was measured at — the gate table near the top of this document
+is the earlier PUSH-1 merge and says so), including the wire-shape round-trips through a real relay and the 35 that pin the three page
 attributes out of the shipped files. The other gates on the same box, one at a time: `verify-push
 --console` real Chrome at 390x844 scale 3 touch **21 pass, 0 fail, 3 skip**; `verify-mobile --width
 --desktop` **27 pass, 0 fail, 1 skip**; `verify-door --door --cors --app` **93 pass, 0 fail, 1 skip**.

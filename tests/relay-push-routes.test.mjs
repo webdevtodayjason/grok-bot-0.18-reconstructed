@@ -35,16 +35,20 @@ const fail = (res, status, message) => {
 };
 
 /** One push edge on a real port, with one workspace and a sub the test can change. */
-async function standUp({ sub = "person-a", roster = null, tail = null, reports = null, boxAnswers = true } = {}) {
+async function standUp({ sub = "person-a", roster = null, tail = null, reports = null, boxAnswers = true, streamMaxMs } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "relay-push-"));
   const t = { slug: "demo", name: "demo", file: (name) => path.join(dir, name), ensureDir: () => {} };
   const subRef = { value: sub };
+  // What ui/server.mjs wires to a fresh device-session read. A test flips it to revoke the bearer a
+  // stream is already holding, which is the only way to reach the case the R750 measured.
+  const liveRef = { value: true };
   const sent = [];
   const handler = pushRoutes({
     readBody, fail,
     tenants: () => [t],
     contextOf: () => t,
     subOf: () => subRef.value,
+    stillLive: () => liveRef.value,
     // A box stands in, because the two routes a shell reads are the ones that project a real
     // transcript. `{}` for everything is the default, which is what an older host answers.
     gatewayCall: async (_t, command) => {
@@ -61,6 +65,7 @@ async function standUp({ sub = "person-a", roster = null, tail = null, reports =
     streamMinAgeMs: 50,
     streamRefreshMs: 150,
     streamHeartbeatMs: 60_000,
+    ...(streamMaxMs === undefined ? {} : { streamMaxMs }),
     senderFor: () => ({ async send(row) { sent.push(row); return { ok: true, status: 200 }; } }),
     log: () => {},
   });
@@ -115,10 +120,19 @@ async function standUp({ sub = "person-a", roster = null, tail = null, reports =
         }
       } catch { /* the caller hung up */ }
     })();
+    let ended = false;
+    void pump.then(() => { ended = true; });
     return {
       status: response.status,
       headers: response.headers,
       frames,
+      /** Whether the SERVER ended this stream, as opposed to the caller hanging up. */
+      get ended() { return ended; },
+      async waitForEnd(ms = 3000) {
+        const stop = Date.now() + ms;
+        while (!ended && Date.now() < stop) await new Promise((resolve) => setTimeout(resolve, 25));
+        return ended;
+      },
       /** Waits for at least `want` frames, or gives up, so a test never hangs on one that never comes. */
       async settle(want, ms = 3000) {
         const stop = Date.now() + ms;
@@ -136,7 +150,7 @@ async function standUp({ sub = "person-a", roster = null, tail = null, reports =
     server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
   };
-  return { dir, t, ask, askRaw, listen, sent, subRef, close, edge: handler.edge };
+  return { dir, t, ask, askRaw, listen, sent, subRef, liveRef, close, edge: handler.edge };
 }
 
 test("POST /push/devices registers, is idempotent per device, and answers no token", async (tt) => {
@@ -689,4 +703,88 @@ test("a DELETE only reaches the caller's own device, and saving settings reopens
   assert.equal(after.has("muted-key"), false, "the muted row is gone, so the card waiting is decided again");
   assert.equal(after.get("held-key").heldUntil, 0, "a quiet window somebody just changed releases its catch-up on the next pass");
   assert.equal(after.get("alerted-key").state, "alerted", "and a card already alerted is not alerted twice");
+});
+
+// ---- what the review pass found: a credential that stops being good, and the two switches ---------
+
+test("revoking the bearer ends a stream that is already open, and no card rides it after", async (tt) => {
+  // MEASURED ON THE R750 through console.titanium.bot 2026-09-10 15:36:01Z to 15:36:13Z, a throwaway
+  // customer account on demo: a device bearer opened GET /push/events (200), was revoked (DELETE
+  // /auth/devices/<id> -> 200, and the same bearer then got 401 on GET /push/pending), and the held
+  // stream STILL delivered a widget card five seconds later -- title, agent, entry id and deep link --
+  // because openStream authenticated once at connect and the 25 s heartbeat kept the connection alive
+  // for ever. Revoke is the lost-laptop control. It reaches this connection now.
+  const cards = [HANDOFF];
+  const relay = await standUp({ roster: ROSTER, tail: () => cards });
+  tt.after(() => relay.close());
+  await relay.ask("POST", "/push/devices", { platform: "desktop", token: "a-device-id", deviceId: "mac-1" });
+
+  const stream = await relay.listen();
+  tt.after(() => stream.close());
+  assert.equal(stream.status, 200);
+  await stream.settle(1);
+  assert.equal(stream.frames.length, 1, "the card that was waiting when the tray connected");
+
+  // Revoked. The bearer this connection was opened with is gone.
+  relay.liveRef.value = false;
+  const before = stream.frames.length;
+  // A second card is raised, which is exactly what leaked live.
+  cards.push(WIDGET);
+
+  assert.equal(await stream.waitForEnd(3000), true, "the server ended the stream rather than holding it");
+  assert.equal(stream.frames.length, before, "and nothing arrived on it after the revoke");
+  // And the connection stops arming the sweep, because the edge no longer counts it.
+  assert.equal(relay.edge.streamsFor(relay.t), 0, "a revoked connection is not a listening desktop");
+});
+
+test("a stream ends on its own after its lifetime, whatever else happens", async (tt) => {
+  // Belt and braces beside the re-check: a relay whose `stillLive` is the default still bounds how
+  // long one credential's reach outlives the credential. 15 minutes in production, turned down here.
+  const relay = await standUp({ roster: ROSTER, tail: () => [HANDOFF], streamMaxMs: 250 });
+  tt.after(() => relay.close());
+  await relay.ask("POST", "/push/devices", { platform: "desktop", token: "a-device-id", deviceId: "mac-1" });
+  const stream = await relay.listen();
+  tt.after(() => stream.close());
+  await stream.settle(1);
+  assert.equal(await stream.waitForEnd(3000), true, "the connection ended itself and the shell reopens");
+  assert.equal(relay.edge.streamsFor(relay.t), 0);
+});
+
+test("a row says whether a quiet window is open, so a tray knows to stay silent", async (tt) => {
+  // The desktop transport honoured neither switch: `project()` sent a frame for every card whatever
+  // the per-kind switch said (it only decorated the row `muted`) and never consulted quiet hours at
+  // all, while `deliver()` on the vendor path refuses a muted kind and holds a quiet one. One
+  // customer, one set of switches, two different answers -- and the wire gave the shell no way to do
+  // it itself, because nothing anywhere on either surface said a window was in force. Measured on the
+  // R750 2026-09-10: a pending frame with quietHours on 15 to 18 at UTC hour 15 carried 15 keys and
+  // none of them matched /quiet/i.
+  const relay = await standUp({ roster: ROSTER, tail: () => [HANDOFF, WIDGET] });
+  tt.after(() => relay.close());
+  await relay.ask("POST", "/push/devices", { platform: "desktop", token: "a-device-id", deviceId: "mac-1" });
+
+  // Nothing set: no window, and the fields say so rather than being absent.
+  const open = await relay.ask("GET", "/push/pending");
+  assert.equal(open.body.cards[0].quiet, false);
+  assert.equal(open.body.cards[0].quietUntil, 0);
+
+  // The window that covers THIS hour, whichever hour the suite runs in, with the offset at zero so
+  // the local hour is the UTC one. A fixed 0-to-23 window is open for 23 hours a day and red for one.
+  const hour = new Date().getUTCHours();
+  await relay.ask("PUT", "/push/settings", { kinds: { widget: false }, quietHours: { on: true, from: hour, to: (hour + 1) % 24 }, utcOffsetMinutes: 0 });
+  const held = await relay.ask("GET", "/push/pending");
+  const row = held.body.cards.find((card) => card.kind === "box-handoff");
+  assert.equal(row.quiet, true, "the caller's window is open, so a phone would have been held");
+  assert.ok(row.quietUntil > Date.now(), "and the wire says when it ends");
+  assert.equal(row.muted, false, "this kind's own switch is separate from the window");
+  assert.equal(held.body.cards.find((card) => card.kind === "widget").muted, true);
+  assert.equal(held.body.badge, 2, "and neither switch changes the badge");
+
+  // The stream carries the same row, which is the whole point of there being one row shape.
+  const stream = await relay.listen();
+  tt.after(() => stream.close());
+  const frames = await stream.settle(2);
+  const framed = frames.map((frame) => frame.payload).find((card) => card.kind === "box-handoff");
+  assert.equal(framed.quiet, true);
+  assert.equal(framed.quietUntil, row.quietUntil);
+  assert.equal(frames.length, 2, "every pending card still arrives: this stream is the list, not the alert");
 });

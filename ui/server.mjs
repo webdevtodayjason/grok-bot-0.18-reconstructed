@@ -4546,6 +4546,25 @@ const HOOKS = await loadRelayHooks({
     readBody,
     fail,
     subOf,
+    // WHETHER A LONG-LIVED CONNECTION'S CREDENTIAL IS STILL GOOD, asked again rather than once at
+    // connect. `readDeviceSession` and NOT `deviceSessionOf`: the latter memoises its answer on the
+    // request object, which is right for an ordinary request and wrong for an SSE request that lives
+    // as long as a tray is open -- it would answer with the row as it was at connect for ever.
+    //
+    // A request with no device bearer on it is not this function's business and answers true: a cookie
+    // session has its own expiry and the instance door has no row to revoke. With a bearer the row is
+    // re-read and the tenant and person it names have to be the ones the connection was opened as, so a
+    // revoked laptop's stream ends within one heartbeat instead of running until the socket drops.
+    stillLive: (req, want) => {
+      if (!looksLikeDeviceBearer(req?.headers?.authorization)) return true;
+      const live = readDeviceSession(req);
+      if (live == null) return false;
+      if (want == null) return true;
+      // The context's own slug rather than the raw claim, because that is the key the push edge files a
+      // connection under and the registry is what normalises one into the other.
+      const slug = String(live.context?.slug ?? live.tenant);
+      return slug === String(want.tenant ?? "") && live.sub === String(want.sub ?? "");
+    },
     // The control plane's address and credential, as two STRINGS rather than a reader. push-edge.mjs
     // builds its own reader out of them, because importing that reader into this file would make the
     // module mandatory and undo the one property the seam exists for.

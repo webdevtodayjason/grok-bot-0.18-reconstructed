@@ -174,6 +174,12 @@ async function pendingCardsOnTheBox(gwCall) {
 // handler is the real one, its dependencies are the real shapes, and every other request -- the
 // console's HTML, its modules, /api, /auth/state -- is forwarded to the relay untouched, so the page
 // the browser loads is the production page off the production relay.
+// Which trays this run has revoked, by the id each one sends on `x-gate-tray`. It stands in for the
+// relay's own fresh device-session read (ui/server.mjs's `stillLive`), and it is PER CONNECTION rather
+// than a global switch, because the thing worth proving is that a revoke reaches the one connection
+// whose bearer went and leaves every other tray on the same workspace alone.
+const revokedTrays = new Set();
+
 function standUpFront({ stateDir, nowRef, subRef }) {
   const t = {
     slug: "operator",
@@ -221,6 +227,11 @@ function standUpFront({ stateDir, nowRef, subRef }) {
     // The instance-password door has no person behind it, so it means the workspace. On a relay with
     // a control plane this is the session's `sub` claim, which is item A's.
     subOf: () => subRef.value,
+    // PUSH-4's review finding, MEASURED ON THE R750 2026-09-10: a revoked bearer's stream went on
+    // delivering cards, because openStream authenticated once at connect and the heartbeat kept the
+    // connection alive for ever. In production this is a fresh readDeviceSession; here it is the set
+    // above, asked on the same cadence.
+    stillLive: (req) => !revokedTrays.has(String(req?.headers?.["x-gate-tray"] ?? "")),
     hostOf: () => "console.titanium.bot",
     now: () => nowRef.at ?? Date.now(),
     credentials: () => ({}),
@@ -299,17 +310,20 @@ const recordedFrames = [];
  * One desktop connection to GET /push/events on the front, read as whole frames. PUSH-4: the transport
  * a desktop gets instead of a vendor, which means no APNs entitlement and no Firebase project.
  */
-async function openTray(front, label) {
+async function openTray(front, label, { trayId = "" } = {}) {
   const base = `http://127.0.0.1:${front.server.address().port}`;
   const controller = new AbortController();
   const at = Date.now();
   const response = await fetch(`${base}/push/events`, {
-    headers: { "user-agent": UA_GATE, accept: "text/event-stream" },
+    headers: { "user-agent": UA_GATE, accept: "text/event-stream", ...(trayId.length > 0 ? { "x-gate-tray": trayId } : {}) },
     signal: controller.signal,
   });
   const frames = [];
   const comments = [];
   let headersAt = Date.now() - at;
+  // Whether the SERVER ended this stream, which is what a revoke has to do and what nothing measured
+  // before. `false` while the connection is held; the gate closes its own trays at the end.
+  let ended = false;
   if (response.status === 200 && response.body != null) {
     void (async () => {
       const reader = response.body.getReader();
@@ -337,11 +351,20 @@ async function openTray(front, label) {
           }
         }
       } catch { /* the gate hung up, or the relay did */ }
+      ended = true;
     })();
   }
   return {
     label,
+    trayId,
     status: response.status,
+    get ended() { return ended; },
+    /** Waits for the server to end this stream, or gives up, so a leg never hangs on one that does not. */
+    async waitForEnd(ms) {
+      const stop = Date.now() + ms;
+      while (!ended && Date.now() < stop && budgetLeft() > 0) await sleep(250);
+      return ended;
+    },
     headers: response.headers,
     openedAt: at,
     headersAt,
@@ -455,6 +478,20 @@ try {
       method,
       headers: { "user-agent": UA_GATE, ...(body === undefined ? {} : { "content-type": "application/json" }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+    });
+    const text = await response.text();
+    let parsed = null;
+    try { parsed = text.length > 0 ? JSON.parse(text) : null; } catch { parsed = null; }
+    return { status: response.status, body: parsed, text };
+  };
+
+  /** The same request with the body untouched, for the bodies JSON.parse has to refuse. */
+  const askRaw = async (method, pathname, raw) => {
+    const response = await fetch(`${FRONT}${pathname}`, {
+      method,
+      headers: { "user-agent": UA_GATE, "content-type": "application/json" },
+      body: raw,
       signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
     });
     const text = await response.text();
@@ -761,6 +798,75 @@ try {
         quiet.edge.close();
         await new Promise((resolve) => quiet.server.close(resolve));
         rmSync(quietDir, { recursive: true, force: true });
+      }
+
+      // =========================================================================================
+      // THE REVIEW PASS'S BLOCKER, MEASURED. A bearer revoked while its stream is open kept getting
+      // every pending card in the workspace -- title, agent, entry id and deep link -- for as long as
+      // it held the connection, which the 25 s heartbeat kept alive indefinitely. Revoke is the
+      // lost-laptop control. A SECOND tray is opened for this, and the one already open is left alone,
+      // because a revoke that took down every tray on the workspace would pass this leg and be wrong.
+      // =========================================================================================
+      console.log("\n== a revoked bearer loses the stream it is already holding");
+      const doomed = await openTray(front, "the revoked tray", { trayId: "gate-doomed-tray" });
+      check(doomed.status === 200, "a second tray opens on the same workspace", `HTTP ${doomed.status}`);
+      await doomed.waitFor((card) => card.state === "pending", within(15_000));
+      const framesBeforeRevoke = doomed.frames.length;
+      const streamsBeforeRevoke = front.edge.streamsFor(front.t);
+      info(`the doomed tray held ${framesBeforeRevoke} frame(s) before the revoke, with ${streamsBeforeRevoke} stream(s) open on this workspace`);
+      revokedTrays.add("gate-doomed-tray");
+      // Long enough for the slow refresh (15 s) and the heartbeat (25 s), which are the two things
+      // that run on a connection nobody is talking to.
+      const gone = await doomed.waitForEnd(within(45_000));
+      check(gone, "the relay ends a stream whose bearer was revoked", gone
+        ? `the connection closed ${seconds(Date.now() - doomed.openedAt)} after it opened, ${doomed.comments.length} comment(s) on it (${doomed.comments.map((one) => one.trim()).join(" ")})`
+        : `still open after ${seconds(within(45_000))}, which is the defect the R750 measured`);
+      check(doomed.frames.length === framesBeforeRevoke, "and no card rode it after the revoke",
+        `${doomed.frames.length - framesBeforeRevoke} frame(s) arrived after the bearer went`);
+      const streamsAfterRevoke = front.edge.streamsFor(front.t);
+      check(streamsAfterRevoke === streamsBeforeRevoke - 1 && streamsAfterRevoke >= 1,
+        "the revoked connection stops arming the sweep, and the tray beside it does not",
+        `${streamsBeforeRevoke} stream(s) before, ${streamsAfterRevoke} after`);
+      check(tray != null && !tray.ended, "and the tray that was not revoked is still open", tray == null ? "no tray" : tray.ended ? "IT CLOSED TOO" : `${tray.frames.length} frame(s) on it`);
+      doomed.close();
+
+      // =========================================================================================
+      // THE OTHER REVIEW FINDING: the stream honoured neither switch the settings route exists to
+      // hold -- it sent a frame for every card whatever the per-kind switch said and never consulted
+      // quiet hours at all, while the vendor path refuses a muted kind and holds a quiet one. The
+      // decision this wave took is that the tray is the surface that stays silent, so the WIRE says
+      // which switch is in force rather than the shell re-implementing the window.
+      // =========================================================================================
+      console.log("\n== what a quiet window says on the wire");
+      const hourNow = new Date().getUTCHours();
+      await front.edge.storeFor(front.t).saveSettings(subRef.value, { quietHours: { on: true, from: hourNow, to: (hourNow + 1) % 24 }, utcOffsetMinutes: 0 });
+      try {
+        const inWindow = await ask("GET", "/push/pending");
+        const quietRow = (inWindow.body?.cards ?? []).find((card) => card.key === sent.cardKey) ?? (inWindow.body?.cards ?? [])[0] ?? {};
+        check(quietRow.quiet === true && Number(quietRow.quietUntil) > Date.now(),
+          "a row inside a quiet window says so, and says when the window ends",
+          `quiet ${quietRow.quiet}, quietUntil ${Number(quietRow.quietUntil) > 0 ? new Date(Number(quietRow.quietUntil)).toISOString() : "0"} (the window is ${hourNow}:00 to ${(hourNow + 1) % 24}:00 UTC)`);
+        check((inWindow.body?.cards ?? []).length > 0 && Number(inWindow.body?.badge) > 0,
+          "and every pending card is still on the wire, because this is the list and not the alert",
+          `${(inWindow.body?.cards ?? []).length} card(s), badge ${inWindow.body?.badge}`);
+        const quietTray = await openTray(front, "the quiet tray", { trayId: "gate-quiet-tray" });
+        try {
+          const quietFrame = await quietTray.waitFor((card) => card.state === "pending", within(15_000));
+          check(quietFrame != null && quietFrame.payload?.quiet === true && Number(quietFrame.payload?.quietUntil) === Number(quietRow.quietUntil),
+            "and the tray's frame carries the same two fields the route answers",
+            quietFrame == null ? "no frame inside 15s" : `quiet ${quietFrame.payload?.quiet}, quietUntil ${quietFrame.payload?.quietUntil === quietRow.quietUntil ? "the same value the route gave" : String(quietFrame.payload?.quietUntil)}`);
+        } finally { quietTray.close(); }
+        // And the refusal the wire grew: a window that starts and ends at the same hour holds nothing.
+        const zeroWidth = await ask("PUT", "/push/settings", { quietHours: { on: true, from: 9, to: 9 } });
+        check(zeroWidth.status === 400 && zeroWidth.body?.error === "bad_request" && zeroWidth.body?.field === "quietHours.to",
+          "a quiet window that starts and ends at the same hour is refused rather than stored",
+          `HTTP ${zeroWidth.status} ${String(zeroWidth.body?.error ?? "")} field ${String(zeroWidth.body?.field ?? "absent")}`);
+        const notJson = await askRaw("PUT", "/push/settings", "{not json");
+        check(notJson.status === 400 && notJson.body?.error === "bad_request" && notJson.body?.field === "body",
+          "and a body that is not JSON at all is refused in the same shape as every other refusal",
+          `HTTP ${notJson.status} ${String(notJson.body?.error ?? "")} field ${String(notJson.body?.field ?? "absent")}`);
+      } finally {
+        await front.edge.storeFor(front.t).saveSettings(subRef.value, { quietHours: { on: false } });
       }
 
       console.log("\n== answering it");

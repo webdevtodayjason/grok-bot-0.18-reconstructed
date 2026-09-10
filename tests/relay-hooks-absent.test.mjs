@@ -317,7 +317,10 @@ test("a module's create() is handed what it cannot reach for itself", async () =
     const body = await res.json();
     // The contract, named here so a module author reads it from a test rather than from a comment.
     assert.equal(body.names,
-      "contextOf,cpUrl,fail,file,gatewayCall,log,operatorSlug,ownLikeParent,publicHost,readBody,relayToken,subOf,tenants");
+      // `stillLive` is the newest of them, and the one a module with a long-lived connection cannot do
+      // without: it re-reads the caller's credential on the connection's own cadence, which a module
+      // handed only `subOf` cannot, because `subOf` answers what the request was at connect.
+      "contextOf,cpUrl,fail,file,gatewayCall,log,operatorSlug,ownLikeParent,publicHost,readBody,relayToken,stillLive,subOf,tenants");
     assert.deepEqual(body.tenants, ["titanium"], "tenants() answers live contexts, not registry rows");
   } finally { relay.stop(); }
 });

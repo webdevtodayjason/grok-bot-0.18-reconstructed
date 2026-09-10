@@ -279,7 +279,7 @@ test("the documented GET /push/pending row is the row the relay's own builder ma
   const documented = json("GET /push/pending — the answer");
   assert.deepEqual(Object.keys(documented).sort(), ["ageMs", "agents", "at", "badge", "cards", "memoMs"]);
   assert.deepEqual(Object.keys(documented.cards[0]).sort(),
-    ["agent", "at", "body", "deadlineMs", "entry", "key", "kind", "link", "muted", "pending", "requestId", "title"]);
+    ["agent", "at", "body", "deadlineMs", "entry", "key", "kind", "link", "muted", "pending", "quiet", "quietUntil", "requestId", "title"]);
   assert.deepEqual(Object.keys(documented.cards[0].agent).sort(), ["id", "name"]);
   assert.deepEqual(Object.keys(documented.cards[0].link).sort(), ["app", "web"]);
   assert.match(documented.cards[0].key, /^[0-9a-f]{32}$/, "the card key is the collapse key, 32 hex characters");
@@ -327,4 +327,63 @@ test("GET /push/events answers the header set relayEvents already proves through
       assert.equal(response.headers.get(name), value, `${name} is what the document says`);
     }
   } finally { controller.abort(); }
+});
+
+// ---- the refusals the review pass found were the wrong shape or missing --------------------------
+
+test("a body that is not JSON at all is refused in the SAME shape as every other refusal", async () => {
+  // Every validator refusal answers {error:"bad_request", field, message}, which is what the document
+  // shows and what a shell switches on to point at a form control. The parse failure answered
+  // {"error":"that was not JSON"} instead -- no field, and an `error` that is a sentence -- so the one
+  // refusal a client hits while its serialiser is still wrong was the one it could not parse.
+  // Measured on the R750 through console.titanium.bot 2026-09-10 as `{not json`.
+  const documented = json("PUT /push/settings — the refusal");
+  for (const [method, pathname] of [["PUT", "/push/settings"], ["POST", "/push/devices"]]) {
+    const response = await fetch(`${relay.base}${pathname}`, {
+      method,
+      headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+      body: "{not json",
+    });
+    const body = await response.json();
+    assert.equal(response.status, 400, `${method} ${pathname} refuses a body that is not JSON`);
+    sameShape(body, documented, `${method} ${pathname}, not JSON`);
+    assert.equal(body.error, "bad_request", `${method} ${pathname} says bad_request like the rest`);
+    assert.equal(body.field, "body", `${method} ${pathname} names the field`);
+    assert.match(body.message, /not JSON at all/);
+    assert.match(body.message, /Nothing was stored/);
+  }
+  // And nothing moved.
+  const after = await call("GET", "/push/settings");
+  assert.equal(after.status, 200);
+});
+
+test("a quiet window that starts and ends at the same hour is refused rather than stored", async () => {
+  // quietHoursHold answers false on from === to, which is the right reading of an ambiguous window,
+  // so 9 to 9 stored 200 and then held nothing, for ever, silently. Same class as rule 3's out-of-range
+  // hour: a typo becoming a different, perfectly valid setting with no complaint.
+  const before = await call("GET", "/push/settings");
+  const refused = await call("PUT", "/push/settings", { quietHours: { on: true, from: 9, to: 9 } });
+  assert.equal(refused.status, 400);
+  sameShape(refused.body, json("PUT /push/settings — the refusal"), "PUT /push/settings, a zero-width window");
+  assert.equal(refused.body.error, "bad_request");
+  assert.equal(refused.body.field, "quietHours.to", "the 400 names the hour that has to move");
+  assert.match(refused.body.message, /Nothing was stored/);
+  const after = await call("GET", "/push/settings");
+  assert.deepEqual(after.body.settings, before.body.settings, "and nothing was stored");
+
+  // It is the MERGED window that is refused, not the body: `from` and `to` arrive one at a time.
+  await call("PUT", "/push/settings", { quietHours: { on: true, from: 23, to: 6 } });
+  const half = await call("PUT", "/push/settings", { quietHours: { to: 23 } });
+  assert.equal(half.status, 400, "a patch that only moves `to` onto the stored `from` is refused too");
+  assert.equal(half.body.field, "quietHours.to");
+
+  // And a window that is off is not a window, so it is not refused.
+  const off = await call("PUT", "/push/settings", { quietHours: { on: false, from: 9, to: 9 } });
+  assert.equal(off.status, 200, "quiet hours turned off may say anything, because nothing reads it");
+
+  // A body that does not touch quietHours is never refused for a window it did not send: a row already
+  // on disk reading 9 to 9 must not lock a panel out of every other save.
+  const elsewhere = await call("PUT", "/push/settings", { kinds: { report: false } });
+  assert.equal(elsewhere.status, 200);
+  await call("PUT", "/push/settings", { kinds: { report: true }, quietHours: { on: true, from: 23, to: 6 } });
 });
