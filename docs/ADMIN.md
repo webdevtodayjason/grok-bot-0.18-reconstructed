@@ -964,6 +964,33 @@ admin's does not. Without that check, one customer's own key mints a super admin
 it: a token signed with another tenant's key carrying the super admin's account id is refused by
 every route, including promote.
 
+### Which guard a route the page calls has to use
+
+**Every route `cp/admin/admin.js` fetches has to be guarded by `admin.requireSuperAdmin`, and never
+by `cp/server.mjs`'s `requireAdmin`.**
+
+The two are not interchangeable. `requireAdmin` is a constant-time compare against `CP_ADMIN_TOKEN`
+and nothing else. That value lives in this service's environment; a browser has no way to learn it
+and never will. What a signed-in person's tab holds is a session token from `POST /v1/sessions`.
+`requireSuperAdmin` accepts **either** — the operator's bearer, so the CLI is unaffected, or a
+session whose account carries the flag, looked up in the store on every request.
+
+Anything under `/v1/admin/*` gets this for free: `cp/admin.mjs` runs `requireSuperAdmin` once at the
+top of `handle` before it matches a path. The routes to watch are the ones that live **outside** that
+prefix because `cp/admin.mjs` claims the whole prefix and answers 404 to anything it does not match
+itself, so a wave that cannot edit that file puts its route elsewhere. Today that is
+`GET /v1/code/tasks` and `GET /v1/voice/usage`.
+
+Getting it wrong does not show up as an empty panel. `api()` in `cp/admin/admin.js` treats **any**
+401 as a dead session and signs the person out with "That session is no longer valid. Sign in
+again." The Overview loads several panels at once, so one route behind the wrong guard throws the
+operator back to the door a couple of seconds after they sign in — which is exactly what
+`GET /v1/voice/usage` did on 2026-09-10 (ADMIN-4).
+
+`tests/cp-admin-page-routes.test.mjs` holds the rule: it reads `cp/admin/admin.js`, pulls out every
+`api(method, path)` literal, stands this service up in process, mints a super admin and probes all of
+them. 400, 404 and 405 pass. 401 fails the suite.
+
 The page itself at `/admin` is public, and it has to be, because it carries the sign-in form. There
 is no customer data in those three files: no count, no name, no hostname. Every byte the panel
 renders arrives from a route that refuses anything but a super admin. The page loads nothing from
