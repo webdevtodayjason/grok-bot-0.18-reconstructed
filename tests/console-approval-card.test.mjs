@@ -196,6 +196,22 @@ test("the host's 'on X's computer' clause never reaches the title, the request o
     approvalRequestSentence({ title: "Run a task on Titan's computer: “tidy the inbox”" }),
     "Run a task: “tidy the inbox”",
   );
+  // And the working directory, which the host writes AFTER the clause on the commonest card there is:
+  // describeSandShellAutoReviewAction builds `<what> <location> from <cwd>` whenever the agent passed
+  // a cwd, so a strip that only looked at the end of the sentence, or only for a colon or a comma,
+  // left the vendor's name on every shell approval that ran somewhere in particular.
+  assert.equal(
+    approvalRequestSentence({ title: "Echo hello-from-rac in shell on Grok Bot's computer from /home/sem/work" }),
+    "Echo hello-from-rac in shell from /home/sem/work",
+  );
+  assert.equal(
+    approvalRequestSentence({ title: "Run a command on Grok Bot's computer from /workspace" }),
+    "Run a command from /workspace",
+  );
+  assert.equal(
+    approvalRequestSentence({ title: "Run a command on your local computer from /Users/sem" }),
+    "Run a command from /Users/sem",
+  );
   // A comma is the same shape. Anything else keeps its words, since only a location comes off.
   assert.equal(approvalRequestSentence({ title: "Do a thing on Titan's computer, quietly" }), "Do a thing, quietly");
   assert.equal(approvalRequestSentence({ title: "Walk on Titan's computer floor" }), "Walk on Titan's computer floor");

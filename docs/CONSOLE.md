@@ -1406,18 +1406,24 @@ strips `on <someone>'s computer` (or `on your local computer`) off the summary t
 sentence, and draws the clause itself as the grey line with **this agent's** name in it. That is both
 the original's own shape and the console half of taking a dead vendor's name off a customer's screen.
 
-**It is not anchored at the end.** It was for one build, and the one summary that writes the location
-mid-sentence is `sand-auto-review-summaries.ts:249` — `Run a task on Grok Bot's computer: “<instruction>”`,
-the subagent surface, which this card knows by name as "Titan wants to start a task". So the card read
-"Run a task on Grok Bot's computer: “check the mail”" with the vendor's name in it. The clause now comes
-off wherever it is followed by a colon or a comma as well as at the end of the sentence, where it still
-takes its full stop with it:
+**It is not anchored at the end,** because two of the host's five summaries do not put the location
+there. The subagent one writes `Run a task on Grok Bot's computer: “<instruction>”`
+(`sand-auto-review-summaries.ts:249`), the surface this card knows by name as "Titan wants to start a
+task" — so an end anchor left the card reading "Run a task on Grok Bot's computer: “check the mail”".
+And the shell one, which is the commonest card there is, appends the working directory **after** the
+clause: `describeSandShellAutoReviewAction` builds `` `${head} ${location} from ${cwd}` `` whenever the
+agent passed a cwd, so "Echo hello on Grok Bot's computer from /workspace" walked past both the end
+anchor and the build after it that only looked for a colon or a comma. The clause comes off in the
+three shapes the host actually writes — at the end of the sentence, where it takes its full stop with
+it; before a colon or a comma; and before the ` from <cwd>` the host writes after it. A following word
+the host does **not** write is left alone, so nothing that merely contains those words is touched:
 
 | summary the host writes | request sentence |
 |---|---|
 | `Run a command on your local computer` | Run a command |
 | `Post an alert to Jason on Titan's computer.` | Post an alert to Jason |
 | `Run a task on Grok Bot's computer: “check the mail”` | Run a task: “check the mail” |
+| `Echo hello-from-rac in shell on Grok Bot's computer from /home/sem/work` | Echo hello-from-rac in shell from /home/sem/work |
 | `Walk on Titan's computer floor` | unchanged — only a location comes off, not any run of those words |
 
 **And the answer in flight is the same card's words.** While a press is on its way to the host,
@@ -1625,3 +1631,51 @@ it rather than a stale expectation — `forget()` and the plate that never came 
 The gate also learned to open a conversation with a second click, because Playwright's element click
 on a roster card silently does not take on this box and three runs read a plate off another agent's
 tile before that was named.
+
+### The review pass over this ship, and what it found (2026-09-10, after `be6d4b0`)
+
+A skeptic read the shipped files rather than the claims, and six things came back. Five were in the
+first pass, `280d412`:
+
+- **A chip holding asterisks was rewritten by the passes after it.** The chip replace ran first, so
+  the bold and italic patterns then ran over the chip's own contents: `` `chmod +x *.sh *.py` `` drew
+  as `chmod +x <em>.sh </em>.py` and a click put `chmod +x .sh .py` on the clipboard — a command a
+  person would paste and run. §8's promise that a click copies the chip's text and nothing else was
+  false for exactly the input the persona sentence asks for ("file names and quoted drafts"), and no
+  fixture in the gate had an asterisk in it. The code now comes out of the line as a NUL-delimited
+  placeholder before the emphasis passes and goes back after them.
+- **A chip's accessible name was "Copy this".** `aria-label` replaces an element's contents as its
+  name, so every chip in a transcript announced itself as the same anonymous button and the address,
+  channel or hostname inside it was unreachable. The name is built from the code now, and the gate
+  reads it out of Chrome's own accessibility tree over CDP.
+- **An approval nobody answered said they had refused it** — the pill table above, now honest about
+  `expired`.
+- **The answer in flight printed the host's raw summary**, which put "on Grok Bot's computer" back on
+  the screen on every press of Allow, Always allow and Refuse, and that sixth state was in no gate.
+- **The tile's cost table quoted single runs** of a quantity §3 had already measured swinging five- to
+  twenty-fold, and the gate's INFO line added a 1440x1000 figure to a 390x844 one to get an "all in"
+  number that described no machine. §10's table is ranges with the run that produced each, and
+  nothing is added across viewports.
+
+The sixth is this pass. **The clause strip was still leaving the old name on the commonest card there
+is.** The first fix let the clause come off before a colon or a comma as well as at the end, which
+covered the subagent summary — but `describeSandShellAutoReviewAction` appends the working directory
+*after* the location, `` `${head} ${location} from ${cwd}` ``, whenever the agent passed a cwd. So
+"Echo hello-from-rac in shell on Grok Bot's computer from /home/sem/work" kept the vendor's name in
+the request line of every shell approval that ran somewhere in particular, and the gate's five (then
+six) fixture states all used the no-cwd title, so it passed. The strip now also comes off before the
+` from <cwd>` the host writes, which is the third and last shape the host has; a following word the
+host does not write is still left alone, so "Walk on Titan's computer floor" keeps every word.
+
+**Measured on `grok-bot-local-vm`, this Mac, real Chrome through `playwright-core` at 1440x1000,
+2026-09-10 21:0x UTC:** `npm test` **3,112 passed, 0 failed, 0 skipped**; `verify-console-polish
+--approval` **60 passed, 0 failed, 0 skipped** — seven drawn states now (the seventh is `with-cwd`,
+512x218, whose request line reads "Echo hello-from-command-card in shell from /workspace"), the
+"dead upstream's name is on none of the seven" leg over all of them, plus one real forced approval
+end to end: the host raised a pending card in **24.1 s**, the console drew it at 498x242, Allow was
+hit-tested at 72x33 and pressed, and it came back "Allowed once" with the command still readable. The
+box was put back — 0 allow, 0 block, `SAND_AUTO_REVIEW_MODE` back to null, scratch agent deleted.
+`verify-console-polish --chips` **22 passed, 0 failed**, including Chrome computing the chip's name as
+`Copy chmod +x *.sh *.py` and a real mouse press putting that command on the clipboard whole. Without
+the one-line regex change `tests/console-approval-card.test.mjs` is 26 passed / **1 failed**, so the
+new cases are load-bearing rather than decorative.

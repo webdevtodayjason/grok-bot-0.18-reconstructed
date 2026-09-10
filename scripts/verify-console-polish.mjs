@@ -1574,6 +1574,14 @@ const APPROVAL_CASES = [
   // Allow and Refuse and three gateway calls on Always allow. It used to print the host's raw
   // summary, which is the one string the rest of this card exists to clean up.
   { label: "sending", allow: [], card: { status: "sending", rule: null } },
+  // The commonest shell card of all, and the one the clause strip used to walk past: whenever the
+  // agent passes a working directory the host writes it AFTER the location, so the clause is neither
+  // at the end of the sentence nor before a colon and the dead upstream's name stayed on the card.
+  {
+    label: "with-cwd",
+    allow: [],
+    card: { status: "pending", rule: null, title: "Echo hello-from-command-card in shell on Grok Bot's computer from /workspace" },
+  },
 ];
 
 async function legApproval(page) {
@@ -1670,8 +1678,14 @@ async function legApproval(page) {
   check(drawn.sending?.title === "Echo hello-from-command-card in shell",
     "the answer in flight drops the host's location clause too",
     `the in-flight card says ${JSON.stringify(drawn.sending?.title ?? null)}`);
+  check(drawn["with-cwd"]?.request === "Echo hello-from-command-card in shell from /workspace",
+    "a shell card that ran somewhere in particular keeps the directory and loses the location",
+    JSON.stringify(drawn["with-cwd"]?.request ?? null));
+  check(drawn["with-cwd"]?.where === "Runs on Titan's computer" && drawn["with-cwd"]?.disclosure === true,
+    "and it still says whose computer it runs on, with its command behind the disclosure",
+    JSON.stringify(drawn["with-cwd"]?.where ?? null));
   const noOldName = Object.values(drawn).every((one) => one != null && !one.text.includes("Grok Bot"));
-  check(noOldName, "the dead upstream's name is on none of the six states, drawn or in flight");
+  check(noOldName, "the dead upstream's name is on none of the seven states, drawn or in flight");
   check(drawn["pending-rule"]?.commandShown?.includes("[366 chars omitted]") === true,
     "a 766-character command is elided at 400 and the remainder counted",
     JSON.stringify((drawn["pending-rule"]?.commandShown ?? "").match(/\[[^\]]*omitted[^\]]*\]/)?.[0] ?? null));
@@ -1696,7 +1710,7 @@ async function legApproval(page) {
   check(toggled.closed.join("") === "Show the command" && toggled.open.join("") === "Hide the command",
     "the disclosure swaps its own two words with no script behind it", `closed ${JSON.stringify(toggled.closed)}, open ${JSON.stringify(toggled.open)}`);
   info(`the command block wraps (${toggled.preWrap}) and clips at ${toggled.preMax}`);
-  info(`the six states at 1440x1000: ${Object.entries(drawn).map(([k, v]) => `${k} ${v?.box ?? "-"}`).join(", ")}`);
+  info(`the seven states at 1440x1000: ${Object.entries(drawn).map(([k, v]) => `${k} ${v?.box ?? "-"}`).join(", ")}`);
   info(`pending pill colour ${drawn["pending-rule"]?.pillColour}, always-allowed ${drawn["always-allowed"]?.pillColour}, refused ${drawn["refused"]?.pillColour}`);
   await page.evaluate(() => {
     const first = document.querySelector('#gate-approval-states [data-state-case="pending-rule"] .approval-command');

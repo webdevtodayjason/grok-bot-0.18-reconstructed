@@ -1695,12 +1695,16 @@
   // title a push notification puts on a lock screen. The clause is the grey line's job here, so it
   // comes off the sentence, which both restores the original's shape and takes a dead vendor's name
   // off a customer's screen. The five host strings are their own row; this is the console half.
-  // Not end-anchored: the subagent summary writes the location MID-sentence -- "Run a task on Grok
-  // Bot's computer: “<instruction>”" (sand-auto-review-summaries.ts) -- so an anchor at the end left
-  // the dead vendor's name in the request line of the one card kind that names a task. The clause
-  // comes off wherever it is followed by a colon or a comma, and at the end it takes its full stop
-  // with it; what is left is "Run a task: “…”" with the grey line carrying this agent's name.
-  const APPROVAL_WHERE_CLAUSE = /\s+on\s+(?:your local computer|[A-Za-z0-9 ._-]{1,40}'s computer)(?:\.?$|(?=\s*[:,]))/i;
+  // Not end-anchored: TWO of the host's summaries write the location mid-sentence. The subagent one
+  // writes "Run a task on Grok Bot's computer: “<instruction>”", and the shell one appends the working
+  // directory AFTER the clause -- describeSandShellAutoReviewAction builds `${head} ${location} from
+  // ${cwd}` whenever the agent passed a cwd, which is the ordinary shell call, so the commonest card
+  // of all read "Echo hello on Grok Bot's computer from /workspace" while an end anchor, and then an
+  // anchor that only looked for a colon or a comma, both walked past it. The clause comes off at the
+  // end of the sentence (taking its full stop with it), before a colon or a comma, and before the
+  // " from <cwd>" the host writes after it. Those are the three shapes the host has; a following word
+  // it does NOT write is left alone, so "Walk on Titan's computer floor" keeps every word.
+  const APPROVAL_WHERE_CLAUSE = /\s+on\s+(?:your local computer|[A-Za-z0-9 ._-]{1,40}'s computer)(?:\.?$|(?=\s*[:,])|(?=\s+from\s))/i;
   const approvalRequestSentence = (card) => String(card.title ?? "").replace(APPROVAL_WHERE_CLAUSE, "").trim()
     || "This action needs your review";
 
