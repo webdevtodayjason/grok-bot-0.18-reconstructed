@@ -1289,3 +1289,47 @@ test("VOICE-7 panel: a long utterance keeps its newest words in view", async () 
   assert.match(paint, /panel\.scrollTop = panel\.scrollHeight/,
     "a long utterance would scroll its newest words out of sight with no way to reach them");
 });
+
+test("VOICE-7 row: the choice is on a card, in plain words, and it is the person's and not the workspace's", async () => {
+  const { voice } = await loadVoice();
+  const card = voice._voiceCardMarkup();
+  assert.match(card, /data-voice-talk-mode/, "there is no control for the talk mode, so nobody can change it");
+  assert.match(card, /Push to talk: hold the button while you speak/);
+  assert.match(card, /Always listening: press once to start, press again to stop/);
+  // Exactly the two, and no third state hiding in the markup.
+  assert.equal((card.match(/<option value="/g) ?? []).length, 2);
+  // NOT THE WORKSPACE'S. Everything else on this card is written to one settings file per workspace,
+  // and two people sharing one would fight over how their own button behaves. So the Save button
+  // cannot carry this field and the route never sees it.
+  const values = voice._cardValues({
+    querySelector: (selector) => (selector.includes("talk-mode") ? { value: "always" } : { value: "", getAttribute: () => "false" }),
+  });
+  assert.ok(!Object.keys(values).includes("talkMode"), "the talk mode reached the workspace's own settings file");
+  assert.deepEqual(Object.keys(values).sort(), ["agentId", "enabled", "model", "vendor", "voice"]);
+  // And nothing on the card names a service, a model or a protocol (the VOICE-1 rule, re-checked
+  // because this row adds copy).
+  for (const leak of ["xAI", "OpenAI", "Grok", "sendPrompt", "websocket", "VAD", "turn_detection"]) {
+    assert.ok(!card.includes(leak), `${leak} reached the card`);
+  }
+});
+
+test("VOICE-7 row: the card paints the mode this page is really in", async () => {
+  const box = new Map();
+  const storage = { getItem: (k) => box.get(k) ?? null, setItem: (k, v) => box.set(k, v) };
+  const { voice } = await loadVoice({ window: { localStorage: storage } });
+  const fields = new Map();
+  const root = {
+    querySelector: (selector) => {
+      if (!fields.has(selector)) fields.set(selector, { value: "", textContent: "", setAttribute: () => {}, innerHTML: "" });
+      return fields.get(selector);
+    },
+  };
+  voice._paintCard(root, {
+    enabled: true, vendor: "", model: "", voice: "", agentId: "", apiKeySet: false,
+    vendors: [], agents: [], dayUsedSeconds: 0, dayCapSeconds: 7200, sessionCapSeconds: 1800,
+  });
+  assert.equal(fields.get("[data-voice-talk-mode]").value, "push", "the card opened on a mode the page is not in");
+  voice.setTalkMode("always");
+  voice._paintCard(root, { enabled: true, vendor: "", model: "", voice: "", agentId: "", apiKeySet: false, vendors: [], agents: [], dayUsedSeconds: 0, dayCapSeconds: 7200, sessionCapSeconds: 1800 });
+  assert.equal(fields.get("[data-voice-talk-mode]").value, "always");
+});

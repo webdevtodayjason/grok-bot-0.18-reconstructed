@@ -563,7 +563,7 @@ that simply stops mid-way takes the panel away after eight seconds.
 
 ### The two ways to talk
 
-Under **Settings → General → System**, one row, **Talk mode**:
+In **Settings**, on the **Talking** card, one row, **Talk mode**:
 
 | | what it does |
 |---|---|
@@ -621,14 +621,27 @@ browser hands every keystroke to the machine on the other side. Measured while b
 scroll that put the focus in that frame, Escape never arrived. There is no fix for that and none is
 wanted — the way out then is the button, which is always on the screen.
 
-### Where the choice is stored
+### Where the choice is stored, and the one thing about it that is not finished
 
-The row writes it wherever the settings surface keeps a person's own preferences, and the page keeps
-its own copy as well — the button is live the moment the console paints, before any route has
-answered, and it has to know which of the two things it is before the first press. The page's copy is
-per browser; the row's is the durable one, and the row overwrites the page's with what its own door
-said. **If the settings surface has no per-person door, the choice is per browser and this document
-says so rather than implying otherwise.**
+**It is yours, not your workspace's, and today that means it is per browser.** Everything else on the
+Talking card is written to one settings file per workspace; two people sharing a workspace would then
+fight over how their own button behaves, so this one row deliberately never goes through that door.
+The Save button on that card cannot carry it and the route never sees it. What holds it instead is
+this browser, which means it does not follow you to your phone and it is gone if you clear site data.
+It falls back to holding when there is nothing stored, in a private window, and in a browser set to
+refuse site data.
+
+**That is the honest state and not the intended one.** The only per-person door on this product today
+is the one Notifications uses, and the settings surface being rebuilt in the wave beside this one is
+where a talk mode belongs. When that surface has a place for a person's own preferences, this row
+moves there and starts following the person rather than the browser; the page keeps its local copy
+either way, because the button is live the moment the console paints, before any route has answered,
+and it has to know which of the two things it is before the first press.
+
+Also on the card rather than under General because that surface had not landed when this shipped. The
+card is called Talking and it is where somebody looking for how talking works will open first, so it
+is not a bad home — but it is not the one that was specified, and the move is owned by whichever wave
+lands that surface.
 
 The desktop app's global hotkey is a later wave. It presses this same control through the same pair of
 entry points, so it inherits whichever mode is set rather than being a third behaviour to keep in
@@ -638,10 +651,19 @@ step.
 
 **On this Mac (MacBook-Pro.local, darwin arm64), 2026-09-10**, in headless Chrome through
 playwright-core against grok-bot-local-vm, user agent `titanbot-gate/verify-voice.mjs`.
-`--leg overlay`, **105 of 105 checks**, four combinations: each viewport in each mode, with a real
+`--leg overlay`, **113 of 113 checks**, four combinations: each viewport in each mode, with a real
 touch hold on the phone rather than a tap. The line opened in 40 to 657 ms; the words changed between
 reads rather than merely being present; and the spoken row landed exactly once per turn carrying text
-byte-identical to the panel's last words. `npm test` 2832 of 2832.
+byte-identical to the panel's last words. The Talk mode row was driven through the real control in the
+real panel at both widths — 764 px wide at 1440x900 and 266 px at 390x844 — opening on the mode the
+page was in and keeping the other one when it was chosen. `npm test` 2834 of 2834.
+
+One thing that leg had to work around, and it is **not** this wave's: at 390x844 the console hides the
+gear on the shelf outright, and that gear is the only thing in the console that opens the settings
+panel. So on a phone there is no visible way into Settings at all — not to the Talking card, not to
+Inference, not to a key field. A person gets there through the control on a voice note, which presses
+that same hidden button. Filed as CONSOLE-PHONE-SETTINGS-1 with its owner and its proof; the Voice
+card has been unreachable that way since voice first shipped.
 
 | | 1440x900 | 390x844 |
 |---|---|---|

@@ -421,6 +421,17 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     return `<section class="settings-section" ${CARD_ATTRIBUTE}><h3>Talking</h3>`
       + `<p>Press Talk beside the message box and say what you want. What you say goes into your agent's own conversation and he answers out loud, so it is the same thread you type in and the same memory. He is the only one who can act on it.</p>`
       + `<div class="setting-row"><div><strong>Talking</strong><small data-voice-enabled-note>Reading from the relay…</small></div><button class="switch" type="button" data-voice-enabled aria-pressed="false"></button></div>`
+      // VOICE-7: TALK MODE, and it is the one control on this card that is YOURS rather than the
+      // workspace's. Everything else here is written to /voice/settings, which is one file per
+      // workspace -- two people sharing one would fight over how their own button behaves. So this
+      // row never goes into cardValues() and never reaches that door; it goes through
+      // setTalkMode(), and the Save button below cannot touch it.
+      + `<div class="field"><label for="voice-talk-mode">Talk mode</label>`
+      + `<select id="voice-talk-mode" data-voice-talk-mode>`
+      + `<option value="push">Push to talk: hold the button while you speak</option>`
+      + `<option value="always">Always listening: press once to start, press again to stop</option>`
+      + `</select>`
+      + `<small class="field-hint">Holding is the default, and it is the only one that cannot leave a microphone open by accident. On a keyboard you can hold the space bar instead, as long as the message box is empty. This is yours and not the workspace's, and changing it ends the call you are in.</small></div>`
       + `<div class="field"><label for="voice-agent">Who you are talking to</label><select id="voice-agent" data-voice-agent></select><small class="field-hint">The head of your team, normally. Everything you say goes to this one agent.</small></div>`
       // Model and Voice are PLACEHOLDERS and are never prefilled. The relay falls back to the
       // service's own default when either is empty, so an empty field is the whole of "use theirs" --
@@ -870,11 +881,14 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
 
   // ------------------------------------------------------------- VOICE-7: where the choice lives
   //
-  // TWO COPIES, AND THAT IS ON PURPOSE. The page needs a talk mode before any route has answered --
-  // the button is live the moment the console paints -- so the choice is kept in this browser as well
-  // as wherever the settings row puts it. The row is the durable, per-person copy; this one is what
-  // the first press reads. They are reconciled by the row calling setTalkMode() with what its own
-  // door said, which overwrites the local copy.
+  // THIS BROWSER, AND TODAY THAT IS THE WHOLE OF IT. Not /voice/settings: that is one file per
+  // WORKSPACE, and two people sharing one would fight over how their own button behaves. The only
+  // per-person door on this product today is the one Notifications uses, and a talk mode belongs on
+  // the settings surface being rebuilt beside this wave -- when that surface has a place for a
+  // person's own preferences, the row moves there and this stays as the copy the FIRST PRESS reads,
+  // because the button is live the moment the console paints and before any route has answered. The
+  // row reconciles the two by calling setTalkMode() with whatever its own door said.
+  // docs/VOICE.md 13 says all of that in the words a person would read.
   const talkModeOf = (value) => (TALK_MODES.includes(String(value)) ? String(value) : TALK_MODE_DEFAULT);
 
   function readStoredTalkMode() {
@@ -1062,6 +1076,9 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     }
     set("[data-voice-model]", settings.model);
     set("[data-voice-voice]", settings.voice);
+    // VOICE-7: painted from this page's own choice, not from the relay's answer. The settings file the
+    // rest of this card reads is per workspace and this one is per person.
+    set("[data-voice-talk-mode]", talkMode());
     say("[data-voice-key-note]", settings.apiKeySet
       ? "A key is set. Paste a new one to replace it, or clear it."
       : "No key yet. Talking will say so in plain words until one is set.");
@@ -1283,6 +1300,18 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     document_.addEventListener("keyup", (event) => {
       if (event.key !== " " && event.code !== "Space") return;
       release();
+    });
+
+    // VOICE-7: the talk mode row. A <select> answers `change` and not `click`, and it is the one
+    // control on that card that never reaches /voice/settings -- that file is per workspace and this
+    // choice is per person, so it goes through setTalkMode() and the card's Save cannot touch it.
+    document_.addEventListener("change", (event) => {
+      const field = event.target?.closest?.("[data-voice-talk-mode]");
+      if (field == null) return;
+      setTalkMode(field.value);
+      // Painted back from the module rather than left as typed, so a value it refused shows what it
+      // really is rather than what was asked for.
+      field.value = talkMode();
     });
 
     // A tab nobody is looking at has no business holding a microphone open.

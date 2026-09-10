@@ -1377,6 +1377,54 @@ async function legOverlay() {
           focused: document.activeElement?.tagName ?? "",
         }));
         check(why.on === false, "Escape ends an always-listening call, which is the way out that needs no pointer", JSON.stringify(why));
+
+        // THE ROW ITSELF, through the control a person really uses, once at each width. Setting the
+        // mode with setTalkMode() everywhere else in this leg proves the behaviour; this proves there
+        // is something on screen to set it WITH, that it opens showing the mode the page is really in,
+        // and that choosing the other one takes.
+        // HOW SETTINGS IS OPENED, and at 390 px it is NOT the gear. The console's own phone layout
+        // hides .shelf-utilities outright below 690 px (styles.css), and that gear is the only thing
+        // in app.js that opens the settings panel -- so on a phone a person reaches this card through
+        // the control on the voice note instead, which calls the same handler on the hidden button.
+        // That is a pre-existing hole in the console's phone layout, not this wave's, and it is filed
+        // as CONSOLE-PHONE-SETTINGS-1. The leg measures the route a person really has at each width
+        // and says which one it used.
+        const gearVisible = await page.evaluate(() => {
+          const gear = document.getElementById("shelf-settings");
+          if (gear == null) return false;
+          const rect = gear.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        });
+        info(gearVisible
+          ? "Settings opens from the gear on the shelf at this width"
+          : "the gear is hidden by the console's own phone layout at this width, so Settings opens the way the voice note's own control opens it (CONSOLE-PHONE-SETTINGS-1)");
+        if (gearVisible) await page.click("#shelf-settings").catch(() => {});
+        else await page.evaluate(() => document.getElementById("shelf-settings")?.click());
+        await page.waitForFunction(() => document.querySelector("[data-voice-talk-mode]") != null, null, { timeout: 20_000 }).catch(() => {});
+        const row = await page.evaluate(() => {
+          const field = document.querySelector("[data-voice-talk-mode]");
+          if (field == null) return null;
+          const rect = field.getBoundingClientRect();
+          return {
+            value: field.value,
+            choices: [...field.options].map((one) => one.textContent.replace(/\s+/g, " ").trim()),
+            visible: rect.width > 0 && rect.height > 0,
+            width: Math.round(rect.width),
+          };
+        });
+        check(row != null && row.visible, "the talk mode row is on screen in Settings", JSON.stringify(row));
+        check(row?.value === "always", "opening it shows the mode this page is really in", JSON.stringify(row?.value));
+        check((row?.choices ?? []).length === 2 && row.choices.every((one) => one.length > 20),
+          "with the two ways to talk written out in plain words", JSON.stringify(row?.choices));
+        await page.selectOption("[data-voice-talk-mode]", "push").catch(() => {});
+        await page.waitForFunction(() => window.__voice?.getTalkMode?.() === "push", null, { timeout: 10_000 }).catch(() => {});
+        const round = await page.evaluate(() => ({
+          mode: window.__voice?.getTalkMode?.() ?? "",
+          field: document.querySelector("[data-voice-talk-mode]")?.value ?? "",
+          stored: (() => { try { return window.localStorage.getItem(window.__voice._TALK_MODE_KEY); } catch { return null; } })(),
+        }));
+        check(round.mode === "push" && round.field === "push" && round.stored === "push",
+          "choosing the other one takes, and is still there on the next load of this page", JSON.stringify(round));
       } else {
         await page.evaluate(() => window.__voice.stop());
       }
