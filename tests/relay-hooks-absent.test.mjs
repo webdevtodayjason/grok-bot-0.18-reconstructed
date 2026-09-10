@@ -317,7 +317,7 @@ test("a module's create() is handed what it cannot reach for itself", async () =
     const body = await res.json();
     // The contract, named here so a module author reads it from a test rather than from a comment.
     assert.equal(body.names,
-      "contextOf,cpUrl,fail,file,gatewayCall,operatorSlug,ownLikeParent,publicHost,readBody,relayToken,subOf,tenants");
+      "contextOf,cpUrl,fail,file,gatewayCall,log,operatorSlug,ownLikeParent,publicHost,readBody,relayToken,subOf,tenants");
     assert.deepEqual(body.tenants, ["titanium"], "tenants() answers live contexts, not registry rows");
   } finally { relay.stop(); }
 });

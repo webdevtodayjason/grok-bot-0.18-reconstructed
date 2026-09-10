@@ -61,7 +61,11 @@ export async function loadRelayHooks({ log = (line) => console.log(line), deps =
   const built = async (module) => {
     if (module == null) return null;
     if (typeof module.create !== "function") return module;
-    try { return await module.create(deps); }
+    // `log` FIRST, so `deps` can still override it, and so the comment above this function that says
+    // deps carries the log is TRUE. It was not: push-edge's credential reader takes a log and was
+    // getting the no-op default, which would have made a control plane that stopped handing over the
+    // Apple key a silent degrade to the stub rather than a line saying so.
+    try { return await module.create({ log, ...deps }); }
     catch (error) { log(`hook  a module would not start, so the relay runs without it: ${error?.message ?? error}`); return null; }
   };
   const D = await built(diet);
