@@ -62,6 +62,22 @@ whole point of this wave is the origin that is not the console's.
 | a card no device would alert on was recorded `held` for ever, re-decided every 15 s, keeping its agent in the open set | on this Mac: five passes, `held` every time, `heldUntil` 0 every time, one tail read per pass | `muted` / `held` / `failed` split out, with the open set and the backoff to match; two tests drive five passes and a refusing sender |
 | the ceilings are linear in conversation length, the break-even was written nowhere, and one stated figure was wrong | 1,239,452 bytes project to 40,707 over 1,578 items, **25.80 bytes an item**, so 250 KiB holds to about **9,900 items** | the break-even is beside the ceilings in section 5, asserted per item by `tests/api-diet.test.mjs`, printed with its break-even by `verify-cost --paint` (**25.80 bytes/item over 1,578 items, ceiling holds to 9,923**), and bounding the projection is filed as **COST-4** |
 
+#### And the same six on the R750, through console.titanium.bot
+
+Measured 2026-09-10 between 10:40Z and 10:58Z. Shipped with `deploy/r750/sync.sh --no-install` from a
+detached clean worktree at the merged commit, relay restarted last, **no box swapped** (no `source/`
+file changed) and **no control plane rebuilt** (no `cp/` file changed). The account legs ran as **two
+throwaway customer accounts** on the demo workspace, removed afterwards with every device row they
+made; never Jason's account and never Richard's.
+
+| Leg | Before, on the same live host | After |
+| --- | --- | --- |
+| the expose list | `access-control-expose-headers: x-relay-auth, etag` | `x-relay-auth, etag, x-titan-digest`, with `vary: origin` on both answers |
+| CORS on the rest of the relay | `OPTIONS /v1/jobs`, `/admin/login-ledger`, `/mail/send`, `/code/start` each **204 with `access-control-allow-origin: capacitor://localhost`** | **401 / 405 / 405 / 401 and zero access-control headers**, and `https://evil.example` still **403** with none |
+| one device id, two accounts | — | both registered; each list showed **one row, its own**; account B's `DELETE` took B's row and left A's (`removed: true` then `removed: false` on a second try); A's own `DELETE` then took A's. This is the take-over that was possible before |
+| the digest, cross-origin, on a real conversation | — | `x-titan-digest` readable under the new expose list; first read **38,735 decoded bytes**, second read carrying that digest **20 bytes** (`{"__unchanged":true}`) |
+| `verify-door --url https://console.titanium.bot --cors` | — | **25 pass, 0 fail, 0 skip** |
+
 **One thing to read carefully in section 5.** The idle figures, **56.1 KiB a minute local and 67.3 KiB
 on the R750**, were measured **same-origin**, which before the first row above was the only
 configuration where the digest memo worked at all. They are still same-origin numbers: what is proved
