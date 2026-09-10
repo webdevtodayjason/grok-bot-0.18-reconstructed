@@ -12,6 +12,11 @@
 //   "there's a broken image there"                                                       --tile
 //   "when there is a file and I click Files ... I can't do anything with it"             --files
 //
+// And one from 2026-09-10, which is SCREEN-TILE-1:
+//
+//   "the AI's desktop in the right-hand corner has a screenshot that does not stay up to
+//    date. It gets recorded once and stays that way. It never updates."                  --tile-live
+//
 // FOUR RULES THIS FILE IS WRITTEN UNDER, each one paid for by an earlier gate that lied.
 //
 //   A CLICK THAT RESOLVED IS NOT EVIDENCE. page.click() calls scrollIntoViewIfNeeded first and has
@@ -29,6 +34,19 @@
 //   POSTs /box/launch and opens an app on the agent's seat. So the leg that proves the tile opens
 //   the desktop runs on the local box ONLY and is refused outright in --url mode.
 //
+//   A CADENCE MEASURED THROUGH app.js's OWN RENDER LOOP IS NOT A CADENCE. renderBoxHandoffSurfaces
+//   calls window.__screenTile.sync on every heartbeat with the record's REAL status, and that
+//   retimes the reader underneath any probe holding it at another one -- measured while building
+//   this leg: a reader forced to the live cadence came back at the warm-up one seconds later. So
+//   --tile-live pins the state the module is driven with for the length of a measurement and puts
+//   it back afterwards, and says in its own output that the cadence was forced. The local box's
+//   model endpoint does not take turns (docs/APPS.md), so a forced cadence is the strongest claim
+//   this machine can make; the real-turn proof belongs on the R750 demo tenant.
+//
+//   WEBSOCKET BYTES ARE INVISIBLE TO scripts/verify-cost.mjs. That gate sums Network.dataReceived,
+//   which is HTTP only, so the whole cost of the tile's reader is uncounted anywhere else. This one
+//   counts Network.webSocketFrameReceived and prints it against the same ceilings docs/APPS.md set.
+//
 //   getForeverBoxStatus TAKES { id }, NEVER { agentId }. The host adds boxSeat only when it has an
 //   agent to add it for; the agentId form answers a stub with no boxSeat FIELD at all, and a probe
 //   using it would conclude the host cannot say which screen an agent is on. Measured on
@@ -38,6 +56,7 @@
 //
 // USAGE
 //   node scripts/verify-console-polish.mjs --tile            one leg against the local box
+//   node scripts/verify-console-polish.mjs --tile-live       the tile keeps up, and what that costs
 //   node scripts/verify-console-polish.mjs --all             every leg, in sequence, one browser
 //   node scripts/verify-console-polish.mjs --tile \
 //        --url https://console.titanium.bot                  read-only, with CONSOLE_BEARER set
@@ -51,9 +70,11 @@
 import { createRequire } from "node:module";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { execFile } from "node:child_process";
 import { acquireBoxLock } from "./lib/box-lock.mjs";
+import { gateUserAgent } from "./gate-agent.mjs";
 
-const LEGS = ["boot", "scroll", "picker", "badge", "tile", "files"];
+const LEGS = ["boot", "scroll", "picker", "badge", "tile", "tile-live", "files"];
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(`--${name}`);
 const value = (name) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : null; };
@@ -62,7 +83,7 @@ const URL_TARGET = value("url");
 const READ_ONLY = URL_TARGET != null || flag("read-only");
 const chosen = flag("all") ? [...LEGS] : LEGS.filter((leg) => flag(leg));
 if (chosen.length === 0) {
-  console.log("usage: node scripts/verify-console-polish.mjs (--boot | --scroll | --picker | --badge | --tile | --files | --all)");
+  console.log("usage: node scripts/verify-console-polish.mjs (--boot | --scroll | --picker | --badge | --tile | --tile-live | --files | --all)");
   console.log("       [--url https://console.titanium.bot]   read-only pass, CONSOLE_BEARER in the environment");
   console.log("");
   console.log("  --boot    the chosen background is on the page before first paint, and the cover lifts");
@@ -70,6 +91,7 @@ if (chosen.length === 0) {
   console.log("  --picker  the background picker has no tile-shaped blanks and defaults to Titan Nebula");
   console.log("  --badge   everything between two chat messages folds into one badge that opens again");
   console.log("  --tile    the rail's screen tile shows a picture or a plate, and never a broken image");
+  console.log("  --tile-live  the tile follows the agent's screen on its own, and what that costs");
   console.log("  --files   a file row opens a viewer and downloads");
   process.exit(2);
 }
@@ -79,6 +101,12 @@ const BEARER = process.env.CONSOLE_BEARER ?? "";
 const PW_DIR = process.env.GROK_BOT_PLAYWRIGHT_DIR ?? new URL("../.cache/playwright", import.meta.url).pathname;
 const CHROME = process.env.GROK_BOT_CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const SHOTS = process.env.GROK_BOT_SHOT_DIR ?? "/tmp/console-polish-shots";
+// The standing rule: every gate says who it is. This file sent nothing until SCREEN-TILE-1, which
+// is why a refused sign-in from it read on the admin panel as a stranger rather than as our own
+// gate spending the throttle on purpose (cp/admin.mjs matches on the prefix, at the start).
+const GATE_AGENT = gateUserAgent(import.meta.url);
+// The box whose screen this gate drives. Only --tile-live uses it, and only off the local box.
+const BOX = process.env.GROK_BOT_BOX ?? "grok-bot-local-vm";
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 // Well inside the 300 s these gates run under, so the summary is printed here rather than replaced
 // by a `timeout` kill with no tallies in it.
@@ -116,7 +144,7 @@ const shoot = async (page, name) => {
   return file;
 };
 
-const headers = BEARER ? { authorization: `Bearer ${BEARER}` } : {};
+const headers = { "user-agent": GATE_AGENT, ...(BEARER ? { authorization: `Bearer ${BEARER}` } : {}) };
 const api = async (method, args = {}, ms = 25_000) => {
   const res = await fetch(`${ORIGIN}/api/${method}`, {
     method: "POST",
@@ -148,6 +176,7 @@ const errors = [];
 async function newPage() {
   const context = await browser.newContext({
     viewport: { width: 1440, height: 1000 },
+    userAgent: GATE_AGENT,
     extraHTTPHeaders: headers,
   });
   const page = await context.newPage();
@@ -215,6 +244,30 @@ const openConversation = async (page, id) => {
   return (await until(() => page.evaluate((want) => (document.querySelector(".worker-card.is-active")?.dataset.contextId === want ? true : null), id), within(20_000), 500)) === true;
 };
 
+// ---- the seats on this box --------------------------------------------------------------------
+
+// Who has a screen of their own and who is on the shared one, asked of the host one agent at a time
+// and bounded, so a leg runs against a real seat rather than against a guess. Both tile legs use it.
+async function seatsOnThisBox(reserveMs = 60_000) {
+  const roster = await api("listAgents").then((r) => r.value).catch(() => null);
+  const workers = (Array.isArray(roster) ? roster : []).filter((a) => !a.isGroup);
+  const seats = [];
+  let shared = null;
+  for (const worker of workers.slice(0, 12)) {
+    if (budgetLeft() < reserveMs) break;
+    const status = await api("getForeverBoxStatus", { id: worker.id }).then((r) => r.value).catch(() => null);
+    if (!status) continue;
+    const seat = status.boxSeat;
+    if (typeof seat === "number" && seat > 1) seats.push({ ...worker, seat, vncUrl: status.vncUrl ?? null });
+    else if (!shared && seat === null) shared = { ...worker, seat: null };
+  }
+  // EVERY seated candidate, not the first one. The gates share this box and other waves leave probe
+  // agents on it; the first seated agent was one of those on a run of --tile-live, and its display
+  // never painted a frame, so the whole leg skipped on an unhealthy seat rather than measuring a
+  // healthy one. `seated` stays the first for the legs that only need one.
+  return { workers, seats, seated: seats[0] ?? null, shared };
+}
+
 // ---- --tile ---------------------------------------------------------------------------------------
 
 async function legTile(page) {
@@ -222,8 +275,7 @@ async function legTile(page) {
 
   // 1. THE ARGUMENT SHAPE. Asserted rather than trusted, because a probe that gets it wrong reports
   //    "this host cannot say which screen this agent is on" for every agent on a healthy box.
-  const roster = await api("listAgents").then((r) => r.value).catch(() => null);
-  const workers = (Array.isArray(roster) ? roster : []).filter((a) => !a.isGroup);
+  const { workers, seated, shared } = await seatsOnThisBox();
   if (workers.length === 0) {
     skip("getForeverBoxStatus answers boxSeat for { id } and not for { agentId }", "no worker agent on this box to ask about");
   } else {
@@ -236,19 +288,7 @@ async function legTile(page) {
       `{id} ${byId.bytes} B boxSeat=${idHas ? JSON.stringify(byId.value.boxSeat) : "ABSENT"} · {agentId} ${byAgentId.bytes} B boxSeat=${agentIdHas ? JSON.stringify(byAgentId.value.boxSeat) : "ABSENT"}`);
   }
 
-  // 2. WHO IS ON WHICH SCREEN. Read from the host, one agent at a time and bounded, so the leg runs
-  //    against a seated agent, a shared-seat agent and an idle one rather than against a guess.
-  let seated = null;
-  let shared = null;
-  for (const worker of workers.slice(0, 12)) {
-    if (seated && shared) break;
-    if (budgetLeft() < 60_000) break;
-    const status = await api("getForeverBoxStatus", { id: worker.id }).then((r) => r.value).catch(() => null);
-    if (!status) continue;
-    const seat = status.boxSeat;
-    if (!seated && typeof seat === "number" && seat > 1) seated = { ...worker, seat, vncUrl: status.vncUrl ?? null };
-    else if (!shared && seat === null) shared = { ...worker, seat: null };
-  }
+  // 2. WHO IS ON WHICH SCREEN, from seatsOnThisBox above.
   info(`seats on this box: seated=${seated ? `${seated.name} on :${seated.seat}` : "none"} · shared=${shared ? shared.name : "none"} · ${workers.length} workers`);
 
   const booted = await bootConsole(page);
@@ -457,6 +497,374 @@ async function legTile(page) {
       await shoot(page, `tile-desktop-${Date.now()}`);
       await page.evaluate(() => document.getElementById("desktop-dialog")?.close());
     }
+  }
+}
+
+// ---- --tile-live ------------------------------------------------------------------------------
+//
+// SCREEN-TILE-1. Jason, 2026-09-10 10:55: "the AI's desktop in the right-hand corner has a
+// screenshot that does not stay up to date. It gets recorded once and stays that way. It never
+// updates. For instance, Titan was on a different web page, but when I looked at it on my desktop, I
+// saw the original web page it loaded with."
+//
+// So this leg drives the box's own browser to one page, waits for the tile, drives it to a second,
+// and asserts the tile follows WITH NO CLICK. Then it prices it: websocket bytes per working minute
+// against the 600 KiB ceiling, per idle minute against the 100 KiB one, for one whole page change,
+// and with the tab hidden. Those bytes are uncounted anywhere else -- scripts/verify-cost.mjs sums
+// Network.dataReceived, which is HTTP only.
+
+// The box's own browser, driven the way an agent drives it. box-chrome is the box's launcher: it
+// derives the display from DISPLAY, uses the profile the computer-use tooling expects and opens the
+// CDP port the agent drives it through. Argv straight through docker exec and never a shell, so the
+// URL is never interpolated into a command line.
+const boxChrome = (display, url) => new Promise((resolve) => {
+  execFile("docker", ["exec", "-e", `DISPLAY=:${display}`, BOX, "box-chrome", url], { timeout: 25_000 }, (error) => resolve(error == null));
+});
+
+// Websocket bytes, which is the whole cost of this tile and is invisible to every other gate.
+// Binary frames arrive base64-encoded over CDP; a text frame is the string itself.
+async function websocketMeter(page) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Network.enable");
+  let bytes = 0;
+  let frames = 0;
+  const onFrame = ({ response }) => {
+    const payload = String(response?.payloadData ?? "");
+    bytes += response?.opcode === 1 ? Buffer.byteLength(payload, "utf8") : Buffer.from(payload, "base64").length;
+    frames += 1;
+  };
+  cdp.on("Network.webSocketFrameReceived", onFrame);
+  return {
+    reset() { bytes = 0; frames = 0; },
+    read() { return { bytes, frames, kib: bytes / 1024 }; },
+    async stop() { cdp.off("Network.webSocketFrameReceived", onFrame); await cdp.detach().catch(() => {}); },
+  };
+}
+
+// PIN THE STATE THE MODULE IS DRIVEN WITH. app.js calls sync on every heartbeat with the record's
+// real status, which retimes the reader underneath any probe -- measured while building this leg.
+// So sync is wrapped for the length of a measurement and the held state is what every caller gets,
+// app.js's own renders included. `visible` is deliberately left undefined so the module reads
+// document.visibilityState itself, which is what the hidden-tab measurement needs.
+const holdTile = (page, held) => page.evaluate((h) => {
+  const tile = window.__screenTile;
+  if (!tile.__gateRealSync) tile.__gateRealSync = tile.sync;
+  window.__gateTileHold = h;
+  tile.sync = () => tile.__gateRealSync({ ...window.__gateTileHold });
+  return true;
+}, held);
+
+const releaseTile = (page) => page.evaluate(() => {
+  const tile = window.__screenTile;
+  if (tile?.__gateRealSync) { tile.sync = tile.__gateRealSync; delete tile.__gateRealSync; }
+  if (window.__gateTileBeat) { clearInterval(window.__gateTileBeat); delete window.__gateTileBeat; }
+  if (window.__gateMountWatch) { clearInterval(window.__gateMountWatch); delete window.__gateMountWatch; }
+  delete window.__gateTileHold;
+  delete window.__gateMounts;
+});
+
+// A beat of its own, so the held state is asserted whether or not app.js happens to render.
+const beatTile = (page, ms = 1000) => page.evaluate((every) => {
+  if (window.__gateTileBeat) clearInterval(window.__gateTileBeat);
+  window.__gateTileBeat = setInterval(() => { try { window.__screenTile.sync(); } catch { /* the page is going away */ } }, every);
+}, ms);
+
+// Count mounts rather than infer them, and record how much of the window a client was up for. A
+// mount-grab-release cadence is 0 -> 1 -> 0 on this attribute a couple of times a minute; a HELD
+// client is 1 for the whole window. The duty cycle is the difference, and it is what "it holds no
+// client in between" actually means -- sampling the count at one instant fails the moment the window
+// ends mid-grab, which it did on the first run of this leg.
+const watchMounts = (page) => page.evaluate(() => {
+  window.__gateMounts = 0;
+  window.__gateSamples = 0;
+  window.__gateUp = 0;
+  let was = document.querySelectorAll("iframe[data-screen-tile-source]").length;
+  if (window.__gateMountWatch) clearInterval(window.__gateMountWatch);
+  window.__gateMountWatch = setInterval(() => {
+    const n = document.querySelectorAll("iframe[data-screen-tile-source]").length;
+    if (n > was) window.__gateMounts += 1;
+    window.__gateSamples += 1;
+    if (n > 0) window.__gateUp += 1;
+    was = n;
+  }, 200);
+});
+
+const readMounts = (page) => page.evaluate(() => ({
+  mounts: window.__gateMounts ?? 0,
+  samples: window.__gateSamples ?? 0,
+  up: window.__gateUp ?? 0,
+}));
+
+// "as of 3 s ago" -> 3. Minutes and hours answer in seconds, so one number can be compared.
+const ageSeconds = (words) => {
+  const text = String(words ?? "");
+  const m = text.match(/as of (\d+) (s|min|h) ago/);
+  if (m) return Number(m[1]) * (m[2] === "s" ? 1 : m[2] === "min" ? 60 : 3600);
+  if (/as of a minute ago/.test(text)) return 60;
+  if (/as of an hour ago/.test(text)) return 3600;
+  return null;
+};
+
+async function legTileLive(page) {
+  console.log("\n== --tile-live: the tile keeps up with the agent on its own, and what that costs");
+  if (READ_ONLY) {
+    skip("the tile follows the agent's screen", "read-only pass: this leg drives a real box's browser and holds a reader on a real seat");
+    return;
+  }
+
+  const { workers, seats } = await seatsOnThisBox(150_000);
+  if (seats.length === 0) {
+    skip("the tile follows the agent's screen", `no agent on this box has a seat of its own (${workers.length} workers, all boxSeat null or absent)`);
+    return;
+  }
+
+  const booted = await bootConsole(page);
+  check(booted === true, "the console boots and the gateway adapter is on the page", booted === true ? "window.__machineRoomAdapter present" : "no adapter");
+  if (booted !== true) return;
+  const hasModule = await page.evaluate(() => typeof window.__screenTile?.sync === "function");
+  if (!hasModule) { skip("the tile follows the agent's screen", "window.__screenTile is not on this page; the relay is serving a console without screen-tile.js"); return; }
+
+  const meter = await websocketMeter(page);
+  // THE TILE HAS TO BE SHOWING THIS AGENT, AND THE SEAT HAS TO ANSWER, or nothing below means
+  // anything. screen-tile.js refuses to paint into a tile carrying another agent's id, so a leg
+  // measuring agent A while the console has agent B open reads a stamp that moves and a picture that
+  // never changes. Both were measured while building this leg: Playwright's element click on a roster
+  // card silently did not take (so the card is also clicked in the page, and the tile's own
+  // data-agent-id is what gets asserted), and the first seated agent on this box was another wave's
+  // leftover probe whose display never painted anything (so every seated candidate is tried in turn
+  // rather than the first one being trusted).
+  let seated = null;
+  let firstFrame = null;
+  const tried = [];
+  for (const candidate of seats) {
+    if (budgetLeft() < 120_000) break;
+    let opened = await openConversation(page, candidate.id);
+    if (!opened) {
+      opened = await page.evaluate((id) => {
+        const card = document.querySelector(`.worker-card[data-context-id="${id}"]`);
+        if (!card) return false;
+        card.click();
+        return true;
+      }, candidate.id);
+      await sleep(2500);
+    }
+    const showing = await until(() => page.evaluate((id) => (document.querySelector(".rail-screen-button")?.dataset.agentId === id ? true : null), candidate.id), within(12_000), 500);
+    if (showing !== true) { tried.push(`${candidate.name} (:${candidate.seat}, its conversation would not open)`); continue; }
+    await holdTile(page, { agentId: candidate.id, seat: candidate.seat, status: "working" });
+    await beatTile(page, 1000);
+    // A cache-buster on both pages, so the box really navigates rather than raising a tab a previous
+    // run of this gate already rendered — measured once at 0.0 KiB and 1.38 s, which is a window
+    // raise and not a page load, and reads as a much cheaper change than one actually costs.
+    await boxChrome(candidate.seat, `https://example.com/?titanbot-gate=${Date.now()}`);
+    const frame = await until(() => page.evaluate((id) => {
+      const got = window.__screenTile.frameFor(id);
+      return got && got.length > 2048 ? got : null;
+    }, candidate.id), within(25_000), 400);
+    if (!frame) { tried.push(`${candidate.name} (:${candidate.seat}, no frame in 25 s)`); await releaseTile(page); continue; }
+    seated = candidate;
+    firstFrame = frame;
+    break;
+  }
+  if (!seated) {
+    check(false, "a seated agent on this box paints a frame into its tile",
+      `${seats.length} seated agent(s), none painted: ${tried.join("; ") || "none reached"}`);
+    await meter.stop();
+    return;
+  }
+  check(true, "the rail tile on screen belongs to the agent this leg measures, and its seat answers",
+    `#rail-screen carries ${seated.name}'s id, :${seated.seat}, first frame ${firstFrame.length} characters${tried.length ? ` (skipped ${tried.length}: ${tried.join("; ")})` : ""}`);
+
+  const held = { agentId: seated.id, seat: seated.seat, status: "working" };
+  try {
+    // 1. THE CADENCE THE MODULE PUBLISHES, read off state() rather than trusted: what a probe passed
+    //    in and what the module did with it are two different things, and the display it settled on
+    //    has to be the seat this agent is actually sitting on.
+    const live = await until(() => page.evaluate((want) => {
+      const s = window.__screenTile.state();
+      return s.live && s.display === want ? s : null;
+    }, seated.seat), within(15_000), 300);
+    check(live != null, "a working agent holds a reader at the live cadence, on its own seat",
+      live ? `every ${live.everyMs} ms on :${live.display}, held` : `the module never reported a held reader on :${seated.seat}`);
+    await shoot(page, `tile-live-page-one-${Date.now()}`);
+
+    // 3. PAGE TWO, AND THE WHOLE CLAIM. No click anywhere between here and the assertion.
+    //
+    //    THE SCREEN HAS TO BE SETTLED FIRST or "the frame changed" means nothing: a held client
+    //    re-encodes every 3 s, and a caret blinking in a URL bar changes the bytes on its own. Two
+    //    reads four seconds apart that come back identical are what make the change attributable to
+    //    the page. Whether it settled is printed either way rather than quietly assumed.
+    const frameNow = () => page.evaluate((id) => window.__screenTile.frameFor(id), seated.id);
+    const settleA = await frameNow();
+    await sleep(4000);
+    const settleB = await frameNow();
+    const settled = settleA === settleB && settleB.length > 2048;
+    info(`before the second page the screen was ${settled ? "settled" : "STILL MOVING"} — two reads 4 s apart, ${settleA.length} then ${settleB.length} characters`);
+    meter.reset();
+    const askedAt = Date.now();
+    const secondUrl = `https://en.wikipedia.org/wiki/Titanium?titanbot-gate=${Date.now()}`;
+    const pageTwo = await boxChrome(seated.seat, secondUrl);
+    // THE CLOCK STARTS WHEN THE LAUNCHER RETURNS, not when this gate reached for docker. `docker
+    // exec` from macOS into the box is this gate's own instrumentation -- an agent on the box calls
+    // box-chrome directly and pays none of it -- and it measured 1 to 3 s on this Mac, which is most
+    // of the difference between a 3 s reading and a 6 s one. Both numbers are printed.
+    const changedAt = Date.now();
+    check(pageTwo, "and then a second page", `box-chrome — en.wikipedia.org/wiki/Titanium, cache-busted so it is a real load; the launcher itself took ${((changedAt - askedAt) / 1000).toFixed(2)}s of docker exec`);
+    const moved = await until(() => page.evaluate((args) => {
+      const got = window.__screenTile.frameFor(args.id);
+      return got && got !== args.was ? { len: got.length } : null;
+    }, { id: seated.id, was: settleB }), within(20_000), 250);
+    const followedMs = Date.now() - changedAt;
+    // The LATENCY is measured above; the COST needs three more seconds of meter. CDP delivers
+    // websocket frame events in batches, and a 1.4 s window read 0 bytes on this Mac while the
+    // minute straight after it read 101.8 KiB — a short window under-counts rather than measuring a
+    // cheap change. So the tile's own latency claim and the byte claim have different windows, and
+    // the output says so.
+    await sleep(3000);
+    const changeCost = meter.read();
+    check(moved != null && followedMs <= 5000,
+      "the tile shows the second page within five seconds, with no click",
+      moved
+        ? `${(followedMs / 1000).toFixed(2)}s from the launcher returning (${((Date.now() - askedAt - 3000) / 1000).toFixed(2)}s counting this gate's own docker exec) to a ${moved.len}-character frame · ${changeCost.kib.toFixed(1)} KiB over the change and the 3 s after it · the screen was ${settled ? "settled beforehand, so the change is the page" : "still moving beforehand, so read the latency as an upper bound"}`
+        : `the frame never changed inside 20 s (${changeCost.kib.toFixed(1)} KiB read)`);
+    info(`one whole page change cost ${changeCost.kib.toFixed(1)} KiB over ${changeCost.frames} websocket frames on grok-bot-local-vm, counted across the change and the 3 s that follow it`);
+    await shoot(page, `tile-live-page-two-${Date.now()}`);
+
+    // 4. THE CAPTION. How old the picture is, in words, on the picture.
+    const caption = await until(() => page.evaluate(() => {
+      const note = document.querySelector("#rail-screen [data-rail-screen-age]");
+      if (!note) return null;
+      const rect = note.getBoundingClientRect();
+      return { words: (note.textContent ?? "").trim(), w: Math.round(rect.width), h: Math.round(rect.height) };
+    }), within(8000), 300);
+    const said = caption ? ageSeconds(caption.words) : null;
+    check(caption != null && said != null && said < 35,
+      "the tile says how old the picture is, and it is fresh",
+      caption ? `"${caption.words}" in a ${caption.w}x${caption.h} chip — ${said} s` : "no [data-rail-screen-age] on the tile");
+
+    // 5. THE WORKING MINUTE, against the 600 KiB ceiling docs/APPS.md set and has never exercised.
+    if (budgetLeft() > 110_000) {
+      meter.reset();
+      await sleep(60_000);
+      const working = meter.read();
+      check(working.kib < 600, "a working minute of the live tile is inside the 600 KiB working ceiling",
+        `${working.kib.toFixed(1)} KiB over ${working.frames} frames on grok-bot-local-vm at 1440x1000, forced cadence (the local box's model endpoint does not take turns)`);
+    } else {
+      skip("a working minute of the live tile is inside the 600 KiB working ceiling", `out of budget: ${seconds(budgetLeft())} left`);
+    }
+
+    // 6. THE IDLE MINUTE. Mount, grab, release, twice in sixty seconds.
+    if (budgetLeft() > 80_000) {
+      await page.evaluate(() => window.__screenTile.teardown());
+      await holdTile(page, { agentId: seated.id, seat: seated.seat, status: "idle" });
+      await watchMounts(page);
+      meter.reset();
+      const before = await page.evaluate(() => window.__screenTile.state().capturedAt);
+      await sleep(60_000);
+      const idle = meter.read();
+      const watched = await readMounts(page);
+      const mounts = watched.mounts;
+      const after = await page.evaluate(() => window.__screenTile.state().capturedAt);
+      const duty = watched.samples > 0 ? watched.up / watched.samples : 1;
+      // WHAT IS ASSERTED HERE AND WHAT IS ONLY PRINTED. A byte threshold on an idle grab would be a
+      // gate that passes or fails on somebody's wallpaper: one grab is a whole framebuffer, and it
+      // measured 17.5 KiB over a settled desktop and 75.0 KiB over a photo-heavy page on this same
+      // box within the hour. So the ASSERTION is the design property the code actually controls --
+      // it goes back for a new picture on its own, and it holds no client between grabs -- and the
+      // cost is printed with the machine it was measured on and what the ceiling it is compared
+      // against actually is. docs/APPS.md's 100 KiB idle ceiling is decoded API bytes at PHONE
+      // width and excludes noVNC by name as COST-2; the rail tile does not exist at phone width,
+      // where the rails are drawers, and the leg below proves it costs zero there.
+      const perMount = mounts > 0 ? idle.kib / mounts : idle.kib;
+      check(mounts >= 1 && after != null && before != null && after > before && duty < 0.25,
+        "the idle tile goes back for a new picture on its own and holds no client in between",
+        `${mounts} mount(s) in 60 s with no render asking for one, the picture's stamp moved ${(((after ?? 0) - (before ?? 0)) / 1000).toFixed(1)}s forward, a client was up for ${(duty * 100).toFixed(0)}% of the window (a held one would be 100%)`);
+      info(`the idle minute cost ${idle.kib.toFixed(1)} KiB over ${idle.frames} websocket frames, ${perMount.toFixed(1)} KiB a grab, on grok-bot-local-vm at 1440x1000. At the steady two grabs a minute that is ${(perMount * 2).toFixed(1)} KiB; with the adapter's own measured 56.1 KiB idle minute (docs/APPS.md) ${(perMount * 2 + 56.1).toFixed(1)} KiB all in. A grab is a whole framebuffer and costs whatever is on the screen: 17.5 KiB over a settled desktop, 51.9 KiB at the client's default quality, 75.0 KiB over a photo-heavy page. The 100 KiB idle ceiling is API bytes at phone width and excludes noVNC by name (COST-2); the lever for this number is the cadence.`);
+    } else {
+      skip("the idle tile goes back for a new picture on its own and holds no client in between", `out of budget: ${seconds(budgetLeft())} left`);
+    }
+
+    // 6b. THE PHONE, WHERE THAT CEILING ACTUALLY LIVES. At 390x844 the rails are drawers, so the
+    //     tile is laid out at zero size and the module must not open a websocket for a picture
+    //     nobody can see. Measured rather than reasoned: the viewport really is moved.
+    if (budgetLeft() > 30_000) {
+      await page.setViewportSize({ width: 390, height: 844 });
+      // The rail is held live here so the test is the strongest one available: a working agent at
+      // desktop width holds a client continuously, so any moment with no client at phone width is
+      // the drawer and nothing else.
+      await holdTile(page, held);
+      await beatTile(page, 1000);
+      await sleep(2500);
+      const box = await page.evaluate(() => {
+        const b = document.querySelector(".rail-screen-button");
+        if (!b) return { present: false, w: 0, h: 0, painted: null };
+        const r = b.getBoundingClientRect();
+        return {
+          present: true, w: Math.round(r.width), h: Math.round(r.height),
+          // The measured trap: the closed drawer is `visibility: hidden` and translated off the
+          // right edge, so the BOX is still a healthy 274x172 and only this answers honestly.
+          painted: typeof b.checkVisibility === "function" ? b.checkVisibility({ visibilityProperty: true, opacityProperty: true }) : null,
+        };
+      });
+      meter.reset();
+      await sleep(8000);
+      const phone = meter.read();
+      const phoneReaders = await page.evaluate(() => document.querySelectorAll("iframe[data-screen-tile-source]").length);
+      check(box.painted === false && phone.bytes === 0 && phoneReaders === 0,
+        "at phone width the rail is a closed drawer, so a working agent's tile costs nothing",
+        `the tile's box still measures ${box.w}x${box.h} and the browser says painted=${box.painted}; ${phone.bytes} B over 8 s, ${phoneReaders} reader(s) — held live throughout, which at 1440x1000 is a client up 100% of the time`);
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await sleep(2500);
+      const backOnDesktop = await until(() => page.evaluate(() => (document.querySelectorAll("iframe[data-screen-tile-source]").length > 0 ? true : null)), within(15_000), 500);
+      check(backOnDesktop === true, "and opening the console back up to desktop width starts it reading again", backOnDesktop === true ? "a reader is up within 15 s of the rail coming back" : "no reader came back");
+    } else {
+      skip("at phone width the tile is in a closed drawer and costs nothing", `out of budget: ${seconds(budgetLeft())} left`);
+    }
+
+    // 7. A HIDDEN TAB COSTS NOTHING. Real if the browser will hide the page for us, faked on the
+    //    signal the module actually reads if it will not, and the output says which.
+    const other = await page.context().newPage().catch(() => null);
+    let hiddenFor = "bringToFront on a second page";
+    if (other) { await other.bringToFront().catch(() => {}); }
+    let hidden = await page.evaluate(() => document.visibilityState === "hidden");
+    if (!hidden) {
+      hiddenFor = "document.visibilityState forced, which is the signal the module reads";
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+        Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      hidden = await page.evaluate(() => document.visibilityState === "hidden");
+    } else {
+      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    }
+    meter.reset();
+    await sleep(10_000);
+    const dark = meter.read();
+    const readers = await page.evaluate(() => document.querySelectorAll("iframe[data-screen-tile-source]").length);
+    check(hidden && dark.bytes === 0 && readers === 0,
+      "a hidden tab holds no reader and costs no bytes",
+      `${dark.bytes} B over 10 s, ${readers} reader(s) — hidden by ${hiddenFor}`);
+
+    // 8. AND COMING BACK PAINTS A FRESH ONE.
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await other?.close().catch(() => {});
+    const stale = await page.evaluate(() => window.__screenTile.state().capturedAt);
+    await holdTile(page, held);
+    await beatTile(page, 1000);
+    const back = await until(() => page.evaluate((was) => {
+      const at = window.__screenTile.state().capturedAt;
+      return at != null && at > was ? at : null;
+    }, stale ?? 0), within(30_000), 500);
+    check(back != null, "and coming back paints a fresh frame", back != null ? `the stamp moved ${(((back ?? 0) - (stale ?? 0)) / 1000).toFixed(1)}s forward` : "no new frame inside 30 s");
+    await shoot(page, `tile-live-back-${Date.now()}`);
+  } finally {
+    await releaseTile(page).catch(() => {});
+    await page.evaluate(() => window.__screenTile?.teardown?.()).catch(() => {});
+    await meter.stop();
   }
 }
 
@@ -756,7 +1164,7 @@ async function legFiles(page) {
 
 // ---- the run --------------------------------------------------------------------------------------
 
-const RUNNER = { boot: legBoot, scroll: legScroll, picker: legPicker, badge: legBadge, tile: legTile, files: legFiles };
+const RUNNER = { boot: legBoot, scroll: legScroll, picker: legPicker, badge: legBadge, tile: legTile, "tile-live": legTileLive, files: legFiles };
 
 try {
   console.log(`console-polish: ${chosen.join(", ")} against ${ORIGIN}${READ_ONLY ? " (read-only)" : ""}`);

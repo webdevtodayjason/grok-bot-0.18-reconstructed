@@ -4247,6 +4247,10 @@ body[data-composer-drop="1"] .composer {
 .rail-screen-button {
   display: grid;
   place-items: center;
+  /* SCREEN-TILE-1: the age caption is laid out against this box. It is `relative` rather than
+     anything else so the caption can sit over the bottom of the picture and come and go without
+     moving a pixel of the rail beneath it. */
+  position: relative;
   width: 100%;
   /* 390x244 is 16:10, the shape of the box's own framebuffer; the tile keeps it so a frame drawn
      into it is never letterboxed or stretched. */
@@ -4287,6 +4291,28 @@ body[data-composer-drop="1"] .composer {
   color: var(--text-tertiary);
   font-size: 11px;
   text-align: center;
+}
+
+/* SCREEN-TILE-1. How old the picture is, in plain words, on the picture. Jason's complaint was that
+   the tile was a photograph that never changed and nothing said so; the fix is that it changes, and
+   this is the line that lets a person tell the two apart at a glance without opening anything.
+
+   Absolutely positioned, so it appears with the first frame and disappears with the plate without
+   the rail moving. The wash under it exists because it sits on somebody's desktop, which can be any
+   colour at all -- 10 px of muted text straight onto a screenshot is unreadable about half the time.
+   screen-tile.js writes and updates it; nothing else on the page touches it. */
+.rail-screen-age {
+  position: absolute;
+  right: 6px;
+  bottom: 5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(7, 16, 20, 0.62);
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 15px;
+  letter-spacing: 0.01em;
+  pointer-events: none;
 }
 
 .rail-screen-caption,
@@ -4355,6 +4381,15 @@ body[data-composer-drop="1"] .composer {
 [data-theme="mist"] .rail-screen-button {
   border-color: rgba(16, 32, 40, 0.16);
   background: rgba(255, 255, 255, 0.6);
+}
+
+/* SCREEN-TILE-1 on mist. The picture underneath is the same screenshot either way -- it is a
+   photograph of somebody's desktop, not a themed surface -- so the chip keeps a dark ground and
+   light ink here too. A light chip on mist would vanish over any pale window on that desktop, which
+   is most of them. Only the ink is lifted, because mist's --text-secondary is dark. */
+[data-theme="mist"] .rail-screen-age {
+  background: rgba(7, 16, 20, 0.7);
+  color: rgba(255, 255, 255, 0.88);
 }
 
 /* The amber has to sit ON the island's light glass, not replace it: a bare 14% wash over the
