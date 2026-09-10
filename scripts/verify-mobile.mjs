@@ -59,7 +59,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireBoxLock } from "./lib/box-lock.mjs";
 
-const LEGS = ["width", "reach", "scroll", "send", "drawers", "panels", "attach", "card", "fonts", "land", "desktop"];
+const LEGS = ["width", "reach", "scroll", "send", "drawers", "panels", "attach", "card", "fonts", "land", "demo", "desktop"];
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(`--${name}`);
 const value = (name) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : null; };
@@ -68,7 +68,7 @@ const URL_TARGET = value("url");
 const READ_ONLY = URL_TARGET != null;
 const chosen = flag("all") ? [...LEGS] : LEGS.filter((leg) => flag(leg));
 if (chosen.length === 0) {
-  console.log("usage: node scripts/verify-mobile.mjs (--all | --width | --reach | --scroll | --send | --drawers | --panels | --attach | --card | --fonts | --land | --desktop)");
+  console.log("usage: node scripts/verify-mobile.mjs (--all | --width | --reach | --scroll | --send | --drawers | --panels | --attach | --card | --fonts | --land | --demo | --desktop)");
   console.log("       [--url https://console.titanium.bot]  read-only, CONSOLE_BEARER in the environment");
   console.log("");
   console.log("  --width    the shell's column is the viewport and nothing hangs off the right edge");
@@ -81,7 +81,10 @@ if (chosen.length === 0) {
   console.log("  --card     a report card opened by hand fits, and its Send is a real target");
   console.log("  --fonts    every text input is at least 16px and the viewport meta covers the notch");
   console.log("  --land     a phone turned sideways still has its composer on screen");
-  console.log("  --desktop  1440x900 does not move by one pixel");
+  console.log("  --demo     with the box down, both drawer handles are still pressable under the caption");
+  console.log("  --desktop  1440x900 does not move by one pixel, against a relay from --baseline <sha>");
+  console.log("");
+  console.log("  --baseline <sha>  the commit the --desktop leg A/Bs against; default the merge base with main");
   process.exit(2);
 }
 
@@ -125,11 +128,14 @@ const freePort = () => new Promise((resolve) => {
   s.listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => resolve(port)); });
 });
 
-async function startRelay() {
+// `tree` is a worktree root. The baseline relay is pointed at THIS worktree's ui/ for its writable
+// state (SAND_UI_STATE_DIR), so both relays read the same endpoints, the same account and the same
+// local box: the only difference between the two pages is the code.
+async function startRelay(tree = repoRoot, extraEnv = {}) {
   const port = await freePort();
   const child = spawn(process.execPath, ["ui/server.mjs"], {
-    cwd: repoRoot,
-    env: { ...process.env, SAND_UI_PORT: String(port), SAND_UI_BIND_HOST: "127.0.0.1" },
+    cwd: tree,
+    env: { ...process.env, SAND_UI_PORT: String(port), SAND_UI_BIND_HOST: "127.0.0.1", ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout?.resume();
@@ -138,7 +144,7 @@ async function startRelay() {
   const stop = Date.now() + 30_000;
   for (;;) {
     try { if ((await fetch(`${origin}/`, { signal: AbortSignal.timeout(2000) })).ok) break; } catch { /* not yet */ }
-    if (Date.now() > stop) { child.kill("SIGKILL"); throw new Error("the relay from this worktree did not come up"); }
+    if (Date.now() > stop) { child.kill("SIGKILL"); throw new Error(`the relay from ${tree} did not come up`); }
     await sleep(300);
   }
   return { origin, stop: () => { try { child.kill("SIGKILL"); } catch { /* gone */ } } };
@@ -184,7 +190,13 @@ const REACH = (sel) => {
     x: Math.round(r.x), right: Math.round(r.right), w: Math.round(r.width), h: Math.round(r.height),
     on: r.left >= -1 && r.top >= -1 && r.right <= window.innerWidth + 1 && r.bottom <= window.innerHeight + 1,
     big: r.width >= 44 && r.height >= 44,
-    hit: at != null && (at === el || el.contains(at) || at.contains(el)),
+    // MOBILE-1b. `at.contains(el)` USED TO BE HERE, and it made this test pass for a control under a
+    // full-screen overlay: body and html are ancestors of everything, so an element whose centre
+    // answered <body> reported hit true. Measured on this Mac at 390x844 in the demo-fallback state:
+    // elementFromPoint at #roster-drawer's centre answered body, this said hit, and page.click
+    // refused the same button with "<body> intercepts pointer events". A wrapper whose centre
+    // legitimately lands on a child is still covered by `el.contains(at)`.
+    hit: at != null && (at === el || el.contains(at)),
     under: at ? at.tagName.toLowerCase() + (at.id ? "#" + at.id : "") : "nothing",
   };
 };
@@ -258,6 +270,41 @@ async function legWidth(page, phone) {
   await shoot(page, `mobile-width-${phone.name}`);
 }
 
+// MOBILE-1b. EVERY visible control, not a list of eight. The list leg below only ever found what
+// somebody thought to name: a sweep of the same page at the same moment found the five capability
+// buttons at 32-40 px wide, both evidence chips 25 px tall, a secret field at 42 px, the dialog close
+// at 37x37 and the two hand-off buttons at 33 px tall. A control is anything a thumb is meant to
+// press, with a rect, at rest; `visibility: hidden` and zero rects are not on the page.
+const SWEEP = () => {
+  const sel = "button, a[href], input:not([type=hidden]), select, textarea, [role=button], [tabindex]:not([tabindex='-1'])";
+  const out = [];
+  for (const el of document.querySelectorAll(sel)) {
+    const cs = getComputedStyle(el);
+    if (cs.visibility === "hidden" || cs.display === "none" || cs.pointerEvents === "none") continue;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) continue;
+    if (el.disabled === true) continue;
+    const cls = String(el.className || "").split(" ").filter(Boolean)[0] ?? "";
+    out.push({
+      key: `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ""}${cls ? `.${cls}` : ""}`,
+      label: (el.getAttribute("aria-label") || el.textContent || "").trim().slice(0, 40),
+      w: Math.round(r.width * 100) / 100,
+      h: Math.round(r.height * 100) / 100,
+    });
+  }
+  return out;
+};
+
+async function sweepTargets(page, phone, where) {
+  const all = await page.evaluate(SWEEP);
+  const small = all.filter((one) => one.w < 44 || one.h < 44);
+  info(`${phone.name}: ${where} — ${all.length} visible controls swept, ${small.length} under 44x44`);
+  check(small.length === 0, `${phone.name}: every visible control ${where} is at least 44x44`,
+    small.length === 0
+      ? `${all.length} controls, smallest ${Math.min(...all.map((o) => Math.min(o.w, o.h)))} px on its short side`
+      : small.slice(0, 10).map((one) => `${one.key} "${one.label}" ${one.w}x${one.h}`).join(" | "));
+}
+
 async function legReach(page, phone) {
   const wanted = [
     [".send-button", "Send"],
@@ -277,6 +324,65 @@ async function legReach(page, phone) {
     check(got.hit === true, `${phone.name}: and nothing is drawn on top of ${name}`, `under it: ${got.under}`);
   }
   await shoot(page, `mobile-reach-${phone.name}`);
+
+  // MOBILE-1b: the same page, swept rather than listed, at rest and then in the two states that
+  // hold controls the list never reached -- the desktop view's own chrome, and the hand-off banner,
+  // whose two buttons are the only way to answer a hand-off from a phone.
+  await sweepTargets(page, phone, "at rest");
+
+  const opened = await page.evaluate(() => {
+    const dialog = document.querySelector("#desktop-dialog") ?? document.querySelector("[data-desktop-dialog]");
+    if (!dialog) return false;
+    dialog.hidden = false;
+    dialog.removeAttribute("hidden");
+    dialog.setAttribute("open", "");
+    const banner = document.querySelector(".handoff-banner");
+    if (banner) { banner.hidden = false; banner.removeAttribute("hidden"); }
+    return true;
+  });
+  if (!opened) { skip(`${phone.name}: every visible control in the desktop view is at least 44x44`, "this console draws no desktop dialog"); return; }
+  await sleep(400);
+  await sweepTargets(page, phone, "with the desktop view and the hand-off banner open");
+  await shoot(page, `mobile-reach-desktop-${phone.name}`);
+  await page.evaluate(() => {
+    const dialog = document.querySelector("#desktop-dialog") ?? document.querySelector("[data-desktop-dialog]");
+    if (dialog) { dialog.hidden = true; dialog.removeAttribute("open"); }
+    const banner = document.querySelector(".handoff-banner");
+    if (banner) banner.hidden = true;
+  });
+}
+
+// MOBILE-1b. THE STATE A CUSTOMER WITH A DOWN BOX SEES. gateway-adapter stamps data-demo on the root
+// when hydration fails, and backgrounds.css paints a fixed caption across the top at z 9999. On a
+// phone the window bar's first row is the two drawer handles, so both were underneath it: measured on
+// this Mac at 390x844 with touch, elementsFromPoint at each handle's centre answered body first,
+// three taps left body.dataset.drawer empty, and page.click timed out on "<body> intercepts pointer
+// events". The caption is a caption now (`pointer-events: none`) and the bar starts below it.
+async function legDemo(page, phone) {
+  await page.evaluate(() => { document.documentElement.setAttribute("data-demo", "true"); });
+  await sleep(500);
+  const caption = await page.evaluate(() => {
+    const cs = getComputedStyle(document.body, "::before");
+    return { events: cs.pointerEvents, height: cs.height, z: cs.zIndex };
+  });
+  info(`${phone.name}: the demo caption is ${caption.height} tall at z ${caption.z}, pointer-events ${caption.events}`);
+  check(caption.events === "none", `${phone.name}: the demo caption does not take the taps meant for the bar`, caption.events);
+  for (const [selector, name] of [["#roster-drawer", "the conversations handle"], ["#context-drawer", "the agent-panel handle"]]) {
+    const got = await page.evaluate(REACH, selector);
+    check(got.found === true && got.on === true, `${phone.name}: ${name} is on screen with the box down`, `x ${got.x}..${got.right}`);
+    check(got.big === true, `${phone.name}: and still a 44x44 target`, `${got.w}x${got.h}`);
+    check(got.hit === true, `${phone.name}: and the caption is not on top of it`, `under it: ${got.under}`);
+  }
+  // And a real thumb opens it, which is the claim a hit test on its own does not make.
+  await tap(page, "#roster-drawer");
+  const drawer = await page.evaluate(() => document.body.dataset.drawer ?? "");
+  check(drawer === "roster", `${phone.name}: a tap opens the conversations drawer with the box down`, `body data-drawer "${drawer}"`);
+  await shoot(page, `mobile-demo-${phone.name}`);
+  await page.evaluate(() => {
+    document.documentElement.removeAttribute("data-demo");
+    delete document.body.dataset.drawer;
+  });
+  await sleep(300);
 }
 
 async function legScroll(page, phone) {
@@ -593,9 +699,179 @@ async function legLand(phone) {
   await context.close();
 }
 
-// THE NO-CHANGE LEG. Two shots at 1440x900 in one browser: the console as shipped, and the console
-// with this ship's two base rules put back the way they were. Any differing pixel is a desktop
-// regression, and there is nowhere else it could have come from.
+// ---- the desktop A/B ---------------------------------------------------------------------------
+//
+// MOBILE-1b. THIS USED TO BE A SELF-COMPARISON AND IT COULD NOT SEE THE REGRESSION IT EXISTED FOR.
+//
+// The old leg fingerprinted the shipped page, drew the two drawer nodes, hid them again, and required
+// the shipped fingerprint back. That proves the fingerprint is deterministic and that the ONE base
+// rule it names is reversible; it says nothing at all about whether this tree's desktop matches the
+// tree before it, because both sides of the comparison are this tree. It reported "997 of 997 rects
+// identical" while .control-shelf was 31.94 px taller than it had been and .transcript 31.94 px
+// shorter -- FEEDBACK-2 moved .composer-aside into the shelf's grid and, unlike the status and the
+// tray, it never collapses, so it added a permanent row at every desktop width.
+//
+// So the claim is now measured the way the claim is worded: a second relay from a detached worktree
+// at the commit before the phone pass landed, the same local box behind both, one browser, and a
+// named list of the console's structural rects required equal across the two trees. The old
+// sensitivity-and-return check stays as a second claim, because a comparison that cannot see a
+// difference is still worth failing on.
+//
+// The rect list is NAMED rather than "every element in the document" on purpose: the shared branch
+// carries other waves between the baseline and the tip, and a whole-document diff across two trees
+// would report their rows and their panels as this wave's movement. These are the nodes this wave's
+// stylesheet could move.
+const DESKTOP_RECTS = [
+  ".app-shell", ".window-bar", ".window-identity", ".window-actions", ".capability-dock",
+  ".stage", ".roster-rail", ".transcript", ".conversation", ".room-capsule", ".context-rail",
+  ".control-shelf", ".composer", ".composer-plus", ".send-button", "#message-input",
+  ".workspace-list", ".shelf-utilities", ".composer-aside", "#report-problem", "#run-self-test",
+  "#composer-status", ".attachment-tray", ".transcript-older",
+];
+
+// The commit the desktop claim is made against: the parent of the commit that landed the phone pass.
+// "Nothing changes at desktop widths" is a claim about this wave, so this is the tree it is measured
+// against, and --baseline overrides it for anyone making the claim about something else.
+const DESKTOP_BASELINE = value("baseline") ?? process.env.GROK_BOT_DESKTOP_BASELINE ?? "2d58c8b";
+
+const rectsOf = (page) => page.evaluate((list) => {
+  const out = {};
+  for (const selector of list) {
+    const el = document.querySelector(selector);
+    if (!el) { out[selector] = "absent"; continue; }
+    const r = el.getBoundingClientRect();
+    // `position` rides along only for something that is actually laid out. #composer-status and
+    // .attachment-tray went from absolute to full-width rows in this pass -- that is the fix for the
+    // chip that sat on the report card -- and at rest both are hidden or empty with a 0x0 rect, so
+    // the keyword differs between the two trees while nothing on the page has moved by a pixel. A
+    // zero-rect element occupies nothing and can push nothing; the rect is the claim.
+    const laid = r.width > 0 && r.height > 0;
+    out[selector] = `${Math.round(r.x * 100) / 100},${Math.round(r.y * 100) / 100},${Math.round(r.width * 100) / 100},${Math.round(r.height * 100) / 100}${laid ? `,${getComputedStyle(el).position}` : ",not laid out"}`;
+  }
+  return out;
+}, DESKTOP_RECTS);
+
+// The three widths the review measured. 1440 is the claim everyone quotes; 900 is where the old
+// regression was worst -- fourteen of twenty-four named rects moved there, the composer, Send, the
+// message box, the composer plus and the room strip all by 4 px -- because the shelf is already
+// tighter at 940 and below and the extra row landed on top of that.
+const DESKTOP_SIZES = [{ w: 1440, h: 900 }, { w: 1100, h: 820 }, { w: 900, h: 800 }];
+
+async function desktopPage(origin, size = { w: 1440, h: 900 }) {
+  const context = await browser.newContext({
+    viewport: { width: size.w, height: size.h },
+    deviceScaleFactor: 1, isMobile: false, hasTouch: false, userAgent: DESKTOP_UA, extraHTTPHeaders: headers,
+  });
+  // THE TWO SIDES HAVE TO START FROM THE SAME STATE OR THE A/B MEASURES THE STATE. Two relays are two
+  // origins, so each page keeps its own localStorage: which conversation is selected, and which rooms
+  // are on the strip. Both of those are sized by their own content and both feed the layout -- the room
+  // strip is the shelf's first grid track, so one extra chip moved .composer 20.2 px and #message-input
+  // with it, and .room-capsule came out 227 px against 267.78. Clear the storage before the first paint
+  // and open the same conversation on both, and the only difference left is the code.
+  await context.addInitScript(() => { try { localStorage.clear(); sessionStorage.clear(); } catch { /* blocked */ } });
+  const page = await context.newPage();
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.goto(`${origin}/`, { waitUntil: "load", timeout: within(60_000) });
+  await page.waitForFunction(() => window.__machineRoomAdapter != null, { timeout: within(60_000) }).catch(() => {});
+  await page.waitForTimeout(3500);
+  await page.addStyleTag({ content: `*, *::before, *::after { animation: none !important; transition: none !important; caret-color: transparent !important; }` });
+  // BOTH SIDES OPEN THE SAME CONVERSATION. Two relays are two origins, so each page keeps its own
+  // localStorage and picks its own conversation, and .room-capsule sizes to its own title and status
+  // sentence: the first cut of this A/B failed at 1100x820 on the capsule alone, 227 px against
+  // 272.89, which is two pages looking at different agents rather than a layout difference. The first
+  // roster card on both, by the page's own click handler.
+  await page.waitForSelector(".worker-card[data-context-id]", { timeout: within(30_000) }).catch(() => {});
+  const opened = await page.evaluate(() => {
+    const first = document.querySelector(".worker-card[data-context-id]");
+    if (!first) return null;
+    first.click();
+    return first.dataset.contextId;
+  });
+  await sleep(2000);
+  const on = await page.evaluate(() => ({
+    id: document.querySelector(".worker-card.is-active")?.dataset.contextId ?? "",
+    title: document.getElementById("room-title")?.textContent ?? "",
+    chips: document.querySelectorAll(".workspace-chip").length,
+  }));
+  return { page, context, opened, on };
+}
+
+// THE REAL A/B. One browser, two relays, two trees, the same box behind both.
+async function legBaseline() {
+  if (READ_ONLY) { skip("every structural rect matches the tree before the phone pass", "this run reads a deployed console, so there is no baseline worktree to spawn"); return; }
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  let sha = "";
+  try { sha = execFileSync("git", ["rev-parse", DESKTOP_BASELINE], { cwd: repoRoot }).toString().trim(); }
+  catch { check(false, "1440x900: the baseline commit exists", `git could not resolve ${DESKTOP_BASELINE}`); return; }
+
+  const tree = mkdtempSync(path.join(os.tmpdir(), "mobile-baseline-"));
+  let baseline = null;
+  let shipped = null;
+  let base = null;
+  try {
+    execFileSync("git", ["worktree", "add", "--detach", tree, sha], { cwd: repoRoot, stdio: "ignore" });
+    // The baseline relay reads this worktree's own writable state, so both pages see the same box,
+    // the same account and the same conversations. Only the code differs.
+    base = await startRelay(tree, { SAND_UI_STATE_DIR: path.join(repoRoot, "ui") });
+    info(`baseline ${sha.slice(0, 7)} from ${tree}, its relay at ${base.origin}`);
+    for (const size of DESKTOP_SIZES) {
+      const name = `${size.w}x${size.h}`;
+      baseline = await desktopPage(base.origin, size);
+      shipped = await desktopPage(ORIGIN, size);
+      // Said before the rects are compared, because a comparison of two different conversations is not
+      // a comparison of two trees.
+      const same = baseline.on.id === shipped.on.id && baseline.on.title === shipped.on.title && baseline.on.chips === shipped.on.chips;
+      check(same, `${name}: both trees are looking at the same conversation, so the rects are comparable`,
+        `baseline ${baseline.on.id || "none"} "${baseline.on.title}" ${baseline.on.chips} chips; shipped ${shipped.on.id || "none"} "${shipped.on.title}" ${shipped.on.chips} chips`);
+      const before = await rectsOf(baseline.page);
+      const after = await rectsOf(shipped.page);
+      const file = path.join(SHOTS, `desktop-${name}-baseline-${sha.slice(0, 7)}.png`);
+      await baseline.page.screenshot({ path: file, fullPage: true }).catch(() => {});
+      shots.push(file);
+      const shippedFile = path.join(SHOTS, `desktop-${name}-shipped.png`);
+      await shipped.page.screenshot({ path: shippedFile, fullPage: true }).catch(() => {});
+      shots.push(shippedFile);
+      const moved = DESKTOP_RECTS.filter((one) => before[one] !== after[one]);
+      const present = DESKTOP_RECTS.filter((one) => before[one] !== "absent" || after[one] !== "absent");
+      info(`${name}: ${present.length} of ${DESKTOP_RECTS.length} named rects exist on both sides`);
+      check(moved.length === 0, `${name}: every structural rect matches ${sha.slice(0, 7)}, the tree before the phone pass`,
+        moved.length === 0
+          ? `${present.length} rects identical across the two trees, including .control-shelf, .transcript, .composer, .send-button and .composer-aside`
+          : moved.map((one) => `${one} ${before[one]} -> ${after[one]}`).join(" | "));
+      // SENSITIVITY, AT THE WIDTH THE CLAIM IS QUOTED AT. An A/B that agrees is only evidence if a
+      // disagreement would show. The regression this leg exists for was one grid row, so put that
+      // row back on the shipped page and require the rects to move. The old leg had no check of this
+      // shape against the baseline at all, which is why it could report "997 of 997 identical" while
+      // the shelf was 31.94 px taller than the tree it claimed to match.
+      if (size.w === 1440) {
+        await shipped.page.addStyleTag({ content: `.composer-aside { position: static !important; grid-column: 1 / -1 !important; justify-self: end !important; }` });
+        await sleep(700);
+        const regressed = await rectsOf(shipped.page);
+        const sees = DESKTOP_RECTS.filter((one) => before[one] !== regressed[one]);
+        check(sees.length > 0, `${name}: and the comparison would see the regression it exists for`,
+          sees.length > 0
+            ? `putting .composer-aside back in the shelf's grid moves ${sees.length} rects, including ${sees.slice(0, 3).join(", ")}`
+            : "putting the row back changed nothing, so this comparison proves nothing");
+      }
+      await baseline.context.close().catch(() => {});
+      await shipped.context.close().catch(() => {});
+      baseline = null;
+      shipped = null;
+    }
+  } finally {
+    await baseline?.context.close().catch(() => {});
+    await shipped?.context.close().catch(() => {});
+    base?.stop();
+    try { rmSync(tree, { recursive: true, force: true }); } catch { /* gone */ }
+    try { execFileSync("git", ["worktree", "prune"], { cwd: repoRoot, stdio: "ignore" }); } catch { /* fine */ }
+  }
+}
+
+// THE SENSITIVITY AND RETURN LEG. Not an A/B against anything: it says the fingerprint is
+// deterministic, that it can see a change at all, and that the one base rule this pass puts outside
+// the breakpoint is reversible. legBaseline above is the claim about the tree before this one.
 async function legDesktop() {
   const context = await browser.newContext({
     viewport: { width: 1440, height: 900 },
@@ -621,6 +897,24 @@ async function legDesktop() {
   check(overflow.real === 0, "1440x900: nothing is off the right edge", String(overflow.real));
   check(geometry.composerBottom === 856, "1440x900: the composer's bottom is where it was", `${geometry.composerBottom} (856 measured on this box before this ship)`);
   check(geometry.sendX === 959 && geometry.sendRight === 1053, "1440x900: and Send is where it was", `x ${geometry.sendX}..${geometry.sendRight} (959..1053 before this ship)`);
+
+  // FEEDBACK-2b. The aside is out of flow again at this width, so the thing the row was protecting
+  // against has to be measured rather than assumed: it floats at the shelf's right edge, and a
+  // report card is drawn in the transcript's own column. Open one and check they do not touch.
+  const overlap = await page.evaluate(async () => {
+    document.querySelector("#report-problem")?.click();
+    await new Promise((r) => setTimeout(r, 600));
+    const card = document.querySelector(".problem-report-card");
+    const aside = document.querySelector(".composer-aside");
+    if (!card || !aside) return null;
+    const a = card.getBoundingClientRect();
+    const b = aside.getBoundingClientRect();
+    const hit = !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+    const mid = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
+    return { hit, card: `${Math.round(a.x)}..${Math.round(a.right)} x ${Math.round(a.y)}..${Math.round(a.bottom)}`, aside: `${Math.round(b.x)}..${Math.round(b.right)} x ${Math.round(b.y)}..${Math.round(b.bottom)}`, under: mid ? mid.tagName.toLowerCase() + "." + String(mid.className || "").split(" ")[0] : "nothing" };
+  });
+  if (overlap == null) skip("1440x900: the floating aside is clear of a report card", "no report card could be opened on this page");
+  else check(overlap.hit === false, "1440x900: the floating aside is clear of a report card", `card ${overlap.card}, aside ${overlap.aside}, under the aside's centre ${overlap.under}`);
 
   // WHAT A PIXEL CLAIM CAN AND CANNOT BE ON THIS CONSOLE.
   //
@@ -781,11 +1075,19 @@ try {
       if (chosen.includes("card")) await legCard(page, phone);
       if (chosen.includes("fonts")) await legFonts(page, phone);
       if (chosen.includes("send")) await legSend(page, phone);
+      // The demo leg goes last of the phone legs: it stamps data-demo on the root, and it is the
+      // only leg that changes the page's own state rather than reading it.
+      if (chosen.includes("demo")) await legDemo(page, phone);
       await page.context().close();
     }
   }
   if (chosen.includes("land")) { console.log("\n== sideways =="); for (const phone of PHONES) await legLand(phone); }
-  if (chosen.includes("desktop")) { console.log("\n== 1440x900, the no-change leg =="); await legDesktop(); }
+  if (chosen.includes("desktop")) {
+    console.log("\n== 1440x900, against the tree before the phone pass ==");
+    await legBaseline();
+    console.log("\n== 1440x900, sensitivity and return ==");
+    await legDesktop();
+  }
 
   check(errors.length === 0, "the page threw nothing at any size", errors.slice(0, 3).join(" | "));
 } catch (error) {

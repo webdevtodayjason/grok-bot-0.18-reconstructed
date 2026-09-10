@@ -391,7 +391,10 @@ test("every seam is optional, so item A can merge before B, C and D exist", asyn
 
 test("the transcript gap seam still folds repeated rows before anything sees them", async () => {
   const app = await read("ui/machine-room/app.js");
-  assert.match(app, /const rows = foldRepeatedRows\(contextMessages\(\)\);/, "DASH-FOLD-1 runs first and stays inside the expanded view");
+  // FEEDBACK-2b splices the folded report rows into the message sequence first, so the inner call is
+  // withFoldedReportRows(contextMessages()). What is pinned is unchanged: foldRepeatedRows is the
+  // OUTERMOST call on the way to the render, and its argument is this conversation's own messages.
+  assert.match(app, /const rows = foldRepeatedRows\((?:withFoldedReportRows\()?contextMessages\(\)\)?\);/, "DASH-FOLD-1 runs first and stays inside the expanded view");
 });
 
 test("the rail tile emits no img it has nothing to put in", async () => {

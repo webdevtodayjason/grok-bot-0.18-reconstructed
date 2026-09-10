@@ -55,8 +55,13 @@ test("the transcript renders the count in plain words", async () => {
   // happens on the way to the render -- an unfolded transcript is the column of seventeen identical
   // rows this row exists to stop -- so both shapes are named here rather than the assertion being
   // loosened to something a transcript that never folds would also pass.
-  assert.match(source, /const rows = foldRepeatedRows\(contextMessages\(\)\);/);
-  const direct = /foldRepeatedRows\(contextMessages\(\)\)\.map\(messageMarkup\)/.test(source);
+  // FEEDBACK-2b wraps the message source: a folded report row is spliced into the sequence before the
+  // repeat fold sees it, so the inner call is withFoldedReportRows(contextMessages()) rather than
+  // contextMessages() bare. What is pinned is still the same thing -- foldRepeatedRows is the OUTERMOST
+  // call on the way to the render, and its argument is the conversation's own messages -- so an edit
+  // that dropped the fold, or moved it inside the splice, still fails here.
+  assert.match(source, /const rows = foldRepeatedRows\((?:withFoldedReportRows\()?contextMessages\(\)\)?\);/);
+  const direct = /foldRepeatedRows\((?:withFoldedReportRows\()?contextMessages\(\)\)?\)\.map\(messageMarkup\)/.test(source);
   const throughBadge = /__gapBadge/.test(source)
     && /\.render\(rows, messageMarkup/.test(source)
     && /rows\.map\(messageMarkup\)\.join\(""\)/.test(source);

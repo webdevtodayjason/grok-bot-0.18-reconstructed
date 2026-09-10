@@ -225,7 +225,7 @@ Now the card has four states and an end:
 | **pending** | the title, the tier chips, the editable body, the custody line, Send and Not now | waits |
 | **sending** | *"Sending this to the developers…"* | the POST |
 | **settled** | *"Sent. The developers have it."* or *"Kept to yourself. Nothing left this workspace."*, with a **Dismiss** | folds itself after `REPORT_FOLD_MS` (6 s), or when Dismiss is pressed |
-| **folded** | one quiet transcript row: *"Sent to the developers: &lt;title&gt;"* or *"Kept to yourself: &lt;title&gt;"* | nothing. It is a row like any other |
+| **folded** | one quiet transcript row, at the place the report happened: *"Sent to the developers: &lt;title&gt;"* or *"Kept to yourself: &lt;title&gt;"* | nothing more on this page, and it does not survive a reload |
 
 The settled copy changed with the fold, deliberately: it used to end *"…and you can see what you sent
 in your own copy above"*, which was only true while the card was on screen and stopped being true the
@@ -240,13 +240,32 @@ refuses it, the card stays up and says why — *"This box still holds its own co
 offered again next time you open the console"* — with its Dismiss still there for a person who would
 rather have the space back.
 
-**And the fold is drawn by the card path, not spliced into the transcript.** `contextMessages` is the
-box's own transcript and the adapter replaces it wholesale on every re-read, so a page-local row
-written into that array is wiped on the next tick. The offer cards survive precisely because they are
-appended outside it. There is also no per-report row to fold back into: `foldRepeatedRows` collapses
+**The folded row is spliced into the message sequence, and it is page-local.** Two claims, and the
+first of them was wrong when this shipped.
+
+`transcriptMarkup` was `rows.map(messageMarkup).join("") + reportCardsMarkup()`, and every folded
+offer came out of `reportCardsMarkup`. So a folded row was re-concatenated after the *newest* message
+on every render: it was the last row above the composer for the life of the tab, one of them
+accumulated per answered report, and "a row where the report happened" was not true. Measured on this
+Mac in real Chrome at 1440x900: a report sent and folded sat at index 5 of `#transcript`'s children,
+and after a further message and the agent's reply it was **still the last child** — a quieter version
+of exactly the complaint that started this item.
+
+Each offer now remembers the id of the last message in the conversation when it was offered
+(`afterMessageId`), and `withFoldedReportRows` splices its row back in there before `foldRepeatedRows`
+and the between-chats badge see it. So a later message lands below it, and a row whose anchor has
+since been paged out falls to the end rather than to the top. A message id rather than a clock,
+because chat rows carry a display time (*"5:38 PM"*) and nothing sortable, and the ids come from the
+host's own entries so they survive the adapter replacing `contextMessages` wholesale on every tick.
+The row carries `authorId: "system"`, which is what `gap-badge.js` reads to tell a thing said to the
+person from a step done for them, so neither fold swallows it.
+
+Nothing is written into `contextMessages` either way, because the adapter replaces that array on every
+re-read. **So the row is page-local and a reload does not bring it back.** What survives a reload is
+the agent's own *"Reported a problem to the developers"* row in the box's transcript and the report in
+the control plane. There is also no per-report tool row to fold back into: `foldRepeatedRows` collapses
 two consecutive tool rows with the same text into one — Jason's two reports drew a single
-*"Reported a problem to the developers · 2 steps"* — so the quiet row is minted by the card path, in
-the offers' own order.
+*"Reported a problem to the developers · 2 steps"*.
 
 **And the control takes you to the card.** The card is appended at the *end* of the transcript, and
 `renderTranscript` only follows a reader who is already at the bottom (CONSOLE-4). So pressing
@@ -261,8 +280,8 @@ yank someone who is reading history.
 
 Two reports used to be drawn as a stack of editable cards, each with its own Send. A person answering
 the second has already lost track of which body belongs to which title. The transcript now draws
-every folded row plus **at most one live card**; the rest wait, and the next one arrives as soon as
-the one in front of it is answered.
+each folded report as a row where it happened, plus **at most one live card** appended at the end; the
+rest wait, and the next one arrives as soon as the one in front of it is answered.
 
 One exception, and it is the same failure this item is about: a card the person opened themselves
 with **Report a problem** goes to the head. A button that draws nothing because an agent's report
@@ -293,6 +312,24 @@ pending file several times a second. `seenPendingReports` is what stops the same
 twice, and it deliberately survives the fold: anything that cleared it would re-offer the card the
 person just answered on the next tick.
 
+**And a report whose conversation is not on this page still reaches the person.** That is the same
+fault one step over, and it is why the watch alone did not close it: the report Jason lost happened to
+belong to the conversation he had open. A subagent writes one, a background worker does, or the agent
+it belongs to has since been deleted — `agentId` then matches no row of the roster. The drain marked
+the row seen at drain time, unconditionally, and the queue only drew offers whose `agentId` equalled
+the open context, so such a report was consumed into invisibility and **nothing drew it again for the
+rest of the session.** Measured on this Mac in real Chrome, with two rows in the box's pending file for
+`some-other-agent` and a deleted `deleted-agent-9`: zero cards, zero DOM nodes carrying either title,
+no count and no badge, `resolveProblemReport` never called, the box still holding both rows after 22 s,
+and switching conversations drew nothing either.
+
+Two changes. A row is marked seen by the render that actually **draws** it, not by the drain that read
+it — the guard against minting the same row twice is the offer list itself, which is the thing that
+knows. And an offer whose `agentId` matches nothing the roster knows is drawn in whatever conversation
+**is** open, with the agent's name in front of its title (*"Subagent 9: …"*), so the person can tell
+it did not happen in front of them. An empty roster is not an unknown agent: before `listAgents`
+answers, every offer would look homeless, so the fallback waits for a roster to exist.
+
 Two things fall out of the watch for free. A drained report's evidence is built at drain time, so
 watching makes it closer to the report's own moment (before, the second report of a turn carried the
 first report's tool rows as "what ran just before"). And **a reload now shows exactly what is still
@@ -321,11 +358,39 @@ at **384–738**, twenty-seven pixels of overlap, and `elementFromPoint` at the 
 the card's own Send / Not now row. `pointer-events: none` meant it did not block the click, only the
 reading.
 
-All three are rows in the shelf's own grid now, spanning its columns, collapsing to nothing when they
-are hidden or empty. The reason they were floated in the first place — an unstyled fourth item
-wrapping the utilities onto a second row and sliding the composer into their column — is answered by
-spanning the row rather than by leaving the flow. `.composer` bottom at 1440x900 is unchanged at
-**856**.
+**Two of the three are rows now. The third had to go back out of flow, and this is the correction.**
+
+`#composer-status` and `.attachment-tray` are full-width rows of the shelf's own grid, spanning its
+columns. Both are `[hidden]` or `:empty` when they have nothing to say, so an empty band collapses to
+nothing and the shelf is the height it always was. That is what fixed the overlap and it costs nothing
+at rest.
+
+`.composer-aside` — Report a problem and Run a self-test — was given the same treatment and it was
+wrong, because it **never** collapses: it added a permanent row at every desktop width. Measured on
+this Mac in real headless Chrome, two relays from two detached worktrees in one browser run, 2d58c8b
+against the tip, same local box behind both:
+
+| at 1440x900 | before the phone pass | with the aside in the shelf's grid |
+|---|---|---|
+| `.control-shelf` | 1392x106 at y 776 | 1392x**137.94** at y 744.06 |
+| `.transcript` | 693.81x**567.75** | 693.81x**535.81** |
+| `.stage` height | 708 | 676.06 |
+
+and at 900x800 fourteen of twenty-four named rects moved — the composer, Send, the message box, the
+composer plus and the room strip all by 4 px. The delta is the aside's own 23.94 px plus the shelf's
+new 8 px row gap. The claim *"desktop widths do not change"* rested on a gate leg that compared the
+shipped page against itself, which structurally cannot see this.
+
+So the base rule keeps `position: absolute; right: 16px; bottom: calc(100% + 6px)` and **only the
+phone gets the row**, where the shelf is one column and there is no room beside the composer. The
+overlap that the row was guarding against is measured rather than assumed: at 1440x900 with a report
+card open, the card runs **424–1029** and the aside **1170–1399**, 141 px clear, and `elementFromPoint`
+at the aside's centre answers its own button. `.composer` bottom at 1440x900 is unchanged at **856**.
+
+**And the desktop claim is now an A/B against the tree before the phone pass,** at 1440x900, 1100x820
+and 900x800, with a sensitivity check that puts the old grid row back and requires the rects to move
+(measured, it moves 6, including `.stage`, `.transcript` and `.control-shelf`). docs/CONSOLE.md §7 has
+the leg. All three widths: **20 of 24 named rects exist on both sides and all 20 are identical.**
 
 ### The console's own build number
 

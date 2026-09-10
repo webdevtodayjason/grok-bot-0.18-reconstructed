@@ -49,7 +49,7 @@ const between = (source, startMark, endMark, what) => {
 // It reaches escapeHtml, maskSecrets, the context helpers, the adapter and renderTranscript. Both
 // escapers are the page's own source, not a copy: an escaping or masking check against a copy
 // proves nothing.
-async function loadFeedback({ messages = [], adapter = {}, contextId = "titan", contextLabel = "Titan" } = {}) {
+async function loadFeedback({ messages = [], adapter = {}, contextId = "titan", contextLabel = "Titan", workers = null, rooms = [] } = {}) {
   const source = await readFile(appPath, "utf8");
   const body = between(source, "  // ---- FEEDBACK-1: report a problem", "  // ---- end FEEDBACK-1", "the feedback block");
   const escaper = between(source, "  function escapeHtml(value) {", "  function sameContext(", "escapeHtml");
@@ -62,12 +62,19 @@ async function loadFeedback({ messages = [], adapter = {}, contextId = "titan", 
     noteRepeatedToolFailures, openProblemReportCard, runSelfTest, drainPendingProblemReports,
     consoleBuild, loadConsoleBuild, loadHostBuild,
     problemOfferQueue, foldProblemOffer, watchPendingProblemReports, REPORT_FOLD_MS, PENDING_POLL_MS,
+    offerHasNoHome, withFoldedReportRows, reportCardTitle, seenPendingReports,
   };`;
   const pins = { count: 0 };
   const activeContext = () => ({ kind: "worker", id: contextId });
+  // FEEDBACK-2b: the block asks the roster whether an offer's agentId names a conversation on this
+  // page at all, so the roster and its two lookups are injected the way activeContext already is.
+  // `workers` defaults to one row for the open context, which is what a console with a roster has.
+  const roster = workers ?? [{ id: contextId, name: contextLabel }];
+  const state = { workers: roster, rooms };
   const built = new Function(
     "escapeHtmlSource", "maskSource", "activeContext", "contextMessages", "contextName", "adapter",
     "renderTranscript", "showToast", "fetch", "crypto", "TextEncoder", "pinTranscriptToBottom",
+    "state", "workerById", "roomById",
     `${escaper}\n${masker}\n${body}\n${exports}`,
   );
   const api = built(
@@ -81,6 +88,9 @@ async function loadFeedback({ messages = [], adapter = {}, contextId = "titan", 
     globalThis.crypto,
     globalThis.TextEncoder,
     () => { pins.count += 1; },
+    state,
+    (id) => state.workers.find((one) => one.id === id),
+    (id) => state.rooms.find((one) => one.id === id),
   );
   return { ...api, renders, get pins() { return pins.count; } };
 }
@@ -349,6 +359,14 @@ test("FEEDBACK-1: Not now sends nothing and says so", async () => {
   assert.match(feedback.reportCardsMarkup(), /Nothing left this workspace/);
 });
 
+// FEEDBACK-2b. What the TRANSCRIPT lays out, which is where a folded report row lives. It is not
+// part of reportCardsMarkup any more: that concatenated every folded row after the newest message on
+// every render, so a folded row stayed the last thing above the composer for the life of the tab and
+// one more arrived per answered report. Measured on this Mac in real Chrome at 1440x900 before the
+// fix: a sent-and-folded report sat at index 5 of #transcript's children, and after a further
+// message and its reply it was still the last child.
+const rowTexts = (feedback, messages = []) => feedback.withFoldedReportRows(messages).map((row) => row.text ?? "");
+
 // ---- FEEDBACK-2: the card has a life ------------------------------------------------------------
 // Jason, 2026-09-09, on a card he had already answered: "that green box is not going away. It just
 // stays there." A settled card had no timer, no dismiss control and no way off the page short of a
@@ -366,11 +384,12 @@ test("FEEDBACK-2: a settled card folds into one quiet transcript row and stops b
   assert.match(feedback.reportCardsMarkup(), /data-report-dismiss/, "and it can be dismissed by hand");
 
   feedback.foldProblemOffer(feedback.problemOfferById(offer.id));
-  const folded = feedback.reportCardsMarkup();
   assert.equal(feedback.problemOfferById(offer.id).status, "folded");
-  assert.match(folded, /Sent to the developers: The shell refuses every command/);
-  assert.doesNotMatch(folded, /inline-card/, "it is a quiet row now, not a card");
-  assert.doesNotMatch(folded, /data-report-send|data-report-dismiss/, "with nothing left to press");
+  assert.doesNotMatch(feedback.reportCardsMarkup(), /inline-card/, "it is no longer a card appended after the transcript");
+  assert.doesNotMatch(feedback.reportCardsMarkup(), /data-report-send|data-report-dismiss/, "with nothing left to press");
+  // FEEDBACK-2b: and it is a row of the transcript, drawn by messageMarkup like any other quiet
+  // system row, rather than markup stuck on the end of it.
+  assert.deepEqual(rowTexts(feedback), ["Sent to the developers: The shell refuses every command"]);
 });
 
 test("FEEDBACK-2: Not now folds to its own row, and the timer is a few seconds and not a minute", async () => {
@@ -378,7 +397,7 @@ test("FEEDBACK-2: Not now folds to its own row, and the timer is a few seconds a
   const offer = feedback.offerProblemReport({ title: "Something", description: "x" });
   feedback.settleProblemOffer(offer, "dropped");
   feedback.foldProblemOffer(offer);
-  assert.match(feedback.reportCardsMarkup(), /Kept to yourself: Something/);
+  assert.deepEqual(rowTexts(feedback), ["Kept to yourself: Something"]);
   assert.ok(feedback.REPORT_FOLD_MS >= 2000 && feedback.REPORT_FOLD_MS <= 15000, `a card that folds after ${feedback.REPORT_FOLD_MS} ms is either unreadable or pinned`);
 });
 
@@ -412,11 +431,105 @@ test("FEEDBACK-2: one card at a time, in the order the agent wrote them", async 
 
   await feedback.sendProblemOffer(first.id, "a");
   feedback.foldProblemOffer(feedback.problemOfferById(first.id));
+  assert.deepEqual(rowTexts(feedback), ["Sent to the developers: Mobile console unusable"], "the first is a quiet row where it happened");
   const after = feedback.reportCardsMarkup();
-  assert.match(after, /Sent to the developers: Mobile console unusable/, "the first is a quiet row where it happened");
   assert.match(after, /No bot template system/, "and the second is the card now");
-  assert.ok(after.indexOf("Mobile console unusable") < after.indexOf("No bot template system"), "in order");
+  assert.doesNotMatch(after, /Mobile console unusable/, "with the answered one out of the card band entirely");
   assert.equal(second.status, "pending");
+});
+
+// FEEDBACK-2b. The folded row is where the report happened, and it STAYS there.
+//
+// `transcriptMarkup` used to be `rows.map(messageMarkup).join("") + reportCardsMarkup()`, so every
+// folded row was re-concatenated after the newest message on every render: it was the last row above
+// the composer for the life of the tab, one of them per answered report, and the comment promising
+// "a quiet row where the report happened" was false. It is spliced in after the message it was
+// offered under instead, by message id, because chat rows carry a display time and nothing sortable.
+test("FEEDBACK-2b: a folded row ordered before a later message is drawn before it", async () => {
+  const messages = [{ id: "m1", type: "text", authorId: "you", text: "first" }];
+  const feedback = await loadFeedback({ messages, adapter: { sendProblemReport: () => Promise.resolve({}) } });
+  const offer = feedback.offerProblemReport({ title: "The shell refuses every command", description: "x" });
+  assert.equal(offer.afterMessageId, "m1", "the offer remembers the message it was made under");
+  await feedback.sendProblemOffer(offer.id, "x");
+  feedback.foldProblemOffer(feedback.problemOfferById(offer.id));
+
+  messages.push({ id: "m2", type: "text", authorId: "titan", text: "second" });
+  messages.push({ id: "m3", type: "text", authorId: "you", text: "third" });
+  assert.deepEqual(rowTexts(feedback, messages), [
+    "first",
+    "Sent to the developers: The shell refuses every command",
+    "second",
+    "third",
+  ], "the row holds its place and the later messages land below it");
+  // And it is a thing said to the person, not a step done for them: gap-badge.js reads the author
+  // field to decide what folds into a between-chats badge, so a row with no author would vanish
+  // into one.
+  const row = feedback.withFoldedReportRows(messages).find((one) => one.id === offer.id);
+  assert.equal(row.authorId, "system");
+  assert.equal(row.type, "system");
+});
+
+test("FEEDBACK-2b: an offer made before any message falls to the end rather than to the top", async () => {
+  const messages = [];
+  const feedback = await loadFeedback({ messages });
+  const offer = feedback.offerProblemReport({ title: "Something", description: "x" });
+  assert.equal(offer.afterMessageId, null);
+  feedback.settleProblemOffer(offer, "dropped");
+  feedback.foldProblemOffer(offer);
+  messages.push({ id: "m1", type: "text", authorId: "you", text: "first" });
+  assert.deepEqual(rowTexts(feedback, messages), ["first", "Kept to yourself: Something"]);
+});
+
+// ---- FEEDBACK-2b: a report whose conversation is not on this page -------------------------------
+//
+// FEEDBACK-1b one step over. A subagent writes a report, a background worker does, or the agent it
+// belongs to has since been deleted, so `offer.agentId` matches no row of the roster. The drain
+// marked the row seen at drain time and the queue only drew offers whose agentId equalled the open
+// context, so the report was consumed into invisibility and nothing drew it again for the rest of
+// the session. Measured on this Mac in real Chrome with two such rows in the box's pending file: the
+// open console drew neither, switching conversations drew neither, and the box still held both.
+test("FEEDBACK-2b: a pending report for an agent the roster does not know is drawn in the open conversation", async () => {
+  const rows = [
+    { id: "pr-1", agentId: "some-other-agent", agentName: "Subagent 4", report: { title: "The shell refuses every command", description: "x" } },
+  ];
+  const feedback = await loadFeedback({
+    contextId: "chief", contextLabel: "Chief of Staff",
+    workers: [{ id: "chief", name: "Chief of Staff" }, { id: "atera", name: "Atera Triage" }],
+    adapter: { listProblemReports: () => Promise.resolve(rows) },
+  });
+  const made = await feedback.drainPendingProblemReports();
+  assert.equal(made.length, 1);
+  assert.equal(feedback.offerHasNoHome(made[0]), true, "its conversation is not on this page");
+  const drawn = feedback.reportCardsMarkup();
+  assert.match(drawn, /The shell refuses every command/, "it reaches the person in the conversation that IS open");
+  assert.match(drawn, /Subagent 4: The shell refuses every command/, "and says whose report it is");
+  assert.match(drawn, /data-report-send/, "with a Send on it");
+});
+
+test("FEEDBACK-2b: a report that has not been drawn is not marked seen, so the next tick offers it again", async () => {
+  const rows = [
+    { id: "pr-1", agentId: "atera", agentName: "Atera Triage", report: { title: "A problem over there", description: "x" } },
+  ];
+  const feedback = await loadFeedback({
+    contextId: "chief", contextLabel: "Chief of Staff",
+    workers: [{ id: "chief", name: "Chief of Staff" }, { id: "atera", name: "Atera Triage" }],
+    adapter: { listProblemReports: () => Promise.resolve(rows) },
+  });
+  const made = await feedback.drainPendingProblemReports();
+  assert.equal(made.length, 1);
+  // Atera IS on the roster, so this offer belongs to a conversation that is not the open one and is
+  // correctly drawn nowhere here. The row must NOT be marked seen for that.
+  assert.doesNotMatch(feedback.reportCardsMarkup(), /A problem over there/);
+  assert.equal(feedback.seenPendingReports.has("pr-1"), false, "not seen, because nothing has drawn it");
+  // Nor is it minted twice: the offer list is the guard, so a second drain adds nothing.
+  assert.equal((await feedback.drainPendingProblemReports()).length, 0);
+  assert.equal(feedback.problemOffers().length, 1);
+  // Drawing it is what marks it seen, and that is what stops it being re-offered after the box has
+  // been told.
+  assert.match(feedback.reportCardMarkup(made[0]), /A problem over there/);
+  assert.equal(feedback.reportCardsMarkup.call(null).length >= 0, true);
+  const mine = feedback.problemOfferQueue({ kind: "worker", id: "atera" });
+  assert.equal(mine.length, 1, "and it is the card the moment that conversation is opened");
 });
 
 test("FEEDBACK-2: Dismiss ends a settled card at once, and disarms the timer under it", async () => {

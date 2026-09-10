@@ -852,7 +852,31 @@
 
   let problemOffers = [];
   let problemOfferSeq = 0;
-  const problemOffersFor = (context = activeContext()) => problemOffers.filter((offer) => offer.agentId === context.id);
+  /**
+   * FEEDBACK-2b. An offer whose conversation does not exist on this page is drawn in whatever
+   * conversation IS open, not nowhere.
+   *
+   * A subagent writes a report, a background worker does, or the agent it belongs to has since
+   * been deleted: `offer.agentId` then matches no row of the roster, so the old filter -- agentId
+   * equals the open context, and nothing else -- drew it in no conversation at all. Measured on
+   * grok-bot-local-vm in real Chrome, with two rows in the box's pending file for "some-other-agent"
+   * and a deleted "deleted-agent-9": the open console drew neither, switching conversations drew
+   * neither, and the drain had already marked both seen, so nothing drew them for the rest of the
+   * session. That is FEEDBACK-1b one step over -- the report Jason lost happened to belong to the
+   * conversation he had open.
+   *
+   * An empty roster is not the same thing as an unknown agent. Before listAgents answers, every
+   * offer would look homeless and land in whatever context the page booted with, so the fallback
+   * waits for a roster to exist.
+   */
+  function offerHasNoHome(offer) {
+    if (!offer.agentId) return true;
+    if (state.workers.length === 0 && state.rooms.length === 0) return false;
+    return !workerById(offer.agentId) && !roomById(offer.agentId);
+  }
+
+  const problemOffersFor = (context = activeContext()) =>
+    problemOffers.filter((offer) => offer.agentId === context.id || offerHasNoHome(offer));
 
   // FEEDBACK-2. How long a settled card says what happened before it folds itself into the
   // transcript. Jason, 2026-09-09, on a card he had already answered: "that green box is not going
@@ -861,8 +885,11 @@
   const REPORT_FOLD_MS = 6000;
 
   /**
-   * FEEDBACK-2. What the transcript draws for this conversation: every report that has already
-   * folded, as a quiet row where it happened, and then AT MOST ONE live card.
+   * FEEDBACK-2. What this conversation's report band holds: the offers that have already folded, for
+   * ordering, and then AT MOST ONE live card. reportCardsMarkup draws only the live one -- a folded
+   * offer's row is spliced into the message sequence at the place the report happened, by
+   * withFoldedReportRows, because appending it here left it pinned above the composer for the life of
+   * the tab (FEEDBACK-2b).
    *
    * One at a time is the whole point. Two reports drawn as a stack of editable cards is what a
    * reload used to show -- measured on grok-bot-local-vm, a page reloaded with two pending rows
@@ -938,6 +965,12 @@
    */
   function offerProblemReport(seed) {
     const context = seed.agentId ? { kind: "worker", id: seed.agentId } : activeContext();
+    // FEEDBACK-2b. Where this report happened, as a message id rather than a clock: chat rows carry
+    // a display time ("5:38 PM") and nothing sortable, and the ids come from the host's own entries
+    // so they survive the adapter replacing `record.messages` wholesale on every tick. A transient
+    // "working" row is skipped -- it is replaced by the reply and would take the anchor with it.
+    const timeline = contextMessages(context).filter((row) => row.type !== "working");
+    const afterMessageId = timeline.length ? timeline[timeline.length - 1].id : null;
     const evidence = seed.calls || seed.messages
       ? {
         calls: (seed.calls ?? []).map((call) => ({ ...call, summary: reportRedact(call.summary), output: reportRedact(call.output) })),
@@ -974,6 +1007,7 @@
       status: "pending",
       note: "",
       source: seed.source ?? "console",
+      afterMessageId,
     };
     problemOffers.push(offer);
     return offer;
@@ -1011,17 +1045,22 @@
 
   // The four honest states, in the manner of the decision card: sending, settled, pending with
   // buttons, and pending again with one sentence saying why the last try did not land.
+  // FEEDBACK-2b: a report drawn in a conversation that is not its own says whose it was. Without
+  // the name the person reads a card about a failure that looks like it happened in front of them.
+  const reportCardTitle = (offer) => (offerHasNoHome(offer) && String(offer.agentName ?? "").trim()
+    ? `${String(offer.agentName).trim()}: ${offer.title}`
+    : offer.title);
+
   function reportCardMarkup(offer) {
+    const title = reportCardTitle(offer);
     const chip = `<span class="tag">${escapeHtml(tierLabel(offer.tier))}</span><span class="tag">${escapeHtml(offer.category)}</span>`;
     if (offer.status === "sending") {
-      return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card" style="--card-accent:var(--teal-500)"><div class="inline-card-header"><span class="inline-card-icon">◌</span><span class="inline-card-copy"><strong>${escapeHtml(offer.title)}</strong><small class="approval-result">Sending this to the developers…</small></span></div></div></article>`;
+      return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card" style="--card-accent:var(--teal-500)"><div class="inline-card-header"><span class="inline-card-icon">◌</span><span class="inline-card-copy"><strong>${escapeHtml(title)}</strong><small class="approval-result">Sending this to the developers…</small></span></div></div></article>`;
     }
-    // FEEDBACK-2: the end of the card's life. One quiet row where the report happened, drawn the
-    // same way every other detail-less system row is drawn, so scrolling back tomorrow shows what
-    // was decided and nothing is pinned above the composer.
-    if (offer.status === "folded") {
-      return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="message-bubble">${escapeHtml(offer.foldText)}</div></article>`;
-    }
+    // FEEDBACK-2b: a folded offer is not drawn from here at all. It is spliced into the message
+    // sequence at the place the report happened (withFoldedReportRows) and rendered by
+    // messageMarkup like any other quiet system row, which is what "a row like any other" has to
+    // mean if a later message is to land below it.
     if (offer.status === "sent" || offer.status === "dropped") {
       // Not "you can see what you sent in your own copy above": that sentence was only true while
       // this card was on screen, and this card is about to fold itself away.
@@ -1034,13 +1073,64 @@
       // the page explaining why.
       const held = offer.boxKept ? " This box still holds its own copy, so it will be offered again next time you open the console." : "";
       const accent = offer.status === "sent" ? "var(--green-500)" : "var(--amber-500)";
-      return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card" style="--card-accent:${accent}"><div class="inline-card-header"><span class="inline-card-icon">${offer.status === "sent" ? "✓" : "✕"}</span><span class="inline-card-copy"><strong>${escapeHtml(offer.title)}</strong><small class="approval-result">${escapeHtml(settled + held)}</small></span></div><div class="inline-card-actions"><button class="card-action" type="button" data-report-dismiss="${escapeHtml(offer.id)}">Dismiss</button></div></div></article>`;
+      return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card" style="--card-accent:${accent}"><div class="inline-card-header"><span class="inline-card-icon">${offer.status === "sent" ? "✓" : "✕"}</span><span class="inline-card-copy"><strong>${escapeHtml(title)}</strong><small class="approval-result">${escapeHtml(settled + held)}</small></span></div><div class="inline-card-actions"><button class="card-action" type="button" data-report-dismiss="${escapeHtml(offer.id)}">Dismiss</button></div></div></article>`;
     }
     const note = offer.note ? `<small class="field-hint">${escapeHtml(offer.note)}</small>` : "";
-    return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card problem-report-card" style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(offer.title)}</strong><small>Would you like to send this to the developers?</small></span></div><div class="tag-list">${chip}</div><div class="field"><label class="sr-only" for="report-body-${escapeHtml(offer.id)}">What is sent to the developers</label><textarea id="report-body-${escapeHtml(offer.id)}" data-report-body="${escapeHtml(offer.id)}" rows="8" aria-describedby="report-custody-${escapeHtml(offer.id)}">${escapeHtml(offer.body)}</textarea><small class="field-hint" id="report-custody-${escapeHtml(offer.id)}">${escapeHtml(REPORT_CUSTODY)}</small>${note}</div><div class="inline-card-actions"><button class="card-action primary" type="button" data-report-send="${escapeHtml(offer.id)}">Send</button><button class="card-action" type="button" data-report-drop="${escapeHtml(offer.id)}">Not now</button></div></div></article>`;
+    return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card problem-report-card" style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(title)}</strong><small>Would you like to send this to the developers?</small></span></div><div class="tag-list">${chip}</div><div class="field"><label class="sr-only" for="report-body-${escapeHtml(offer.id)}">What is sent to the developers</label><textarea id="report-body-${escapeHtml(offer.id)}" data-report-body="${escapeHtml(offer.id)}" rows="8" aria-describedby="report-custody-${escapeHtml(offer.id)}">${escapeHtml(offer.body)}</textarea><small class="field-hint" id="report-custody-${escapeHtml(offer.id)}">${escapeHtml(REPORT_CUSTODY)}</small>${note}</div><div class="inline-card-actions"><button class="card-action primary" type="button" data-report-send="${escapeHtml(offer.id)}">Send</button><button class="card-action" type="button" data-report-drop="${escapeHtml(offer.id)}">Not now</button></div></div></article>`;
   }
 
-  const reportCardsMarkup = () => problemOfferQueue().map(reportCardMarkup).join("");
+  // FEEDBACK-2b: drawing is what marks a pending row seen, and the only card appended after the
+  // last message is the live one -- every folded row is spliced back into the transcript where it
+  // happened (withFoldedReportRows).
+  const reportCardsMarkup = () => problemOfferQueue()
+    .filter((offer) => offer.status !== "folded")
+    .map((offer) => {
+      if (offer.pendingId) seenPendingReports.add(offer.pendingId);
+      return reportCardMarkup(offer);
+    })
+    .join("");
+
+  /**
+   * FEEDBACK-2b. A folded report is a row OF the transcript, not a tail stuck after it.
+   *
+   * It used to be concatenated after every message on every render, so it stayed the last row above
+   * the composer for the life of the tab and one more arrived per answered report -- a quieter form
+   * of the card that would not go away. Measured on this Mac in real Chrome at 1440x900: a report
+   * sent and folded sat at index 5 of #transcript's children, and after a further message and its
+   * reply it was STILL the last child.
+   *
+   * Each offer remembers the message it was offered after, and its row is spliced back in there, so
+   * a later message lands below it. An offer whose anchor is not in the window any more -- paged
+   * out, or a working row that has since been replaced -- falls to the end, which is the truthful
+   * place for a row whose neighbours are not on the page.
+   *
+   * The row is PAGE-LOCAL either way. It is not a transcript entry, the box has no record of it,
+   * and a reload does not bring it back; what survives a reload is the agent's own "Reported a
+   * problem to the developers" row and the report in the control plane.
+   */
+  const foldedReportRow = (offer) => ({
+    id: offer.id,
+    authorId: "system",
+    authorName: "Machine Room",
+    type: "system",
+    text: offer.foldText,
+  });
+
+  function withFoldedReportRows(rows, context = activeContext()) {
+    const left = problemOffersFor(context).filter((offer) => offer.status === "folded" && offer.foldText);
+    if (left.length === 0) return rows;
+    const out = [];
+    const take = (id) => {
+      if (id == null) return;
+      for (let i = 0; i < left.length;) {
+        if (left[i].afterMessageId === id) out.push(foldedReportRow(left.splice(i, 1)[0]));
+        else i += 1;
+      }
+    };
+    for (const row of rows) { out.push(row); take(row.id); }
+    for (const offer of left) out.push(foldedReportRow(offer));
+    return out;
+  }
 
   /**
    * FEEDBACK-2. Settling is not the end of the card, it is the start of the last few seconds of it.
@@ -1083,9 +1173,10 @@
     if (!offer) return;
     if (offer.foldTimer != null) { clearTimeout(offer.foldTimer); offer.foldTimer = null; }
     if (offer.status !== "sent" && offer.status !== "dropped") return;
+    const title = reportCardTitle(offer);
     offer.foldText = offer.status === "sent"
-      ? `Sent to the developers: ${offer.title}`
-      : `Kept to yourself: ${offer.title}`;
+      ? `Sent to the developers: ${title}`
+      : `Kept to yourself: ${title}`;
     offer.status = "folded";
     renderTranscript();
   }
@@ -1244,9 +1335,15 @@
   function drainPendingProblemReports() {
     if (typeof adapter.listProblemReports !== "function") return Promise.resolve([]);
     return Promise.resolve(adapter.listProblemReports())
-      .then((rows) => (Array.isArray(rows) ? rows : []).filter((row) => row?.id && !seenPendingReports.has(row.id)))
+      // FEEDBACK-2b. A row is SEEN once it has been drawn, not once it has been read off the box.
+      // `seenPendingReports.add` used to run here, unconditionally, so a report whose conversation
+      // was not the one on screen was consumed into invisibility and nothing offered it again for
+      // the rest of the session. The guard against minting the same row twice is the offer list
+      // itself, which is the thing that actually knows.
+      .then((rows) => (Array.isArray(rows) ? rows : []).filter((row) => row?.id
+        && !seenPendingReports.has(row.id)
+        && !problemOffers.some((offer) => offer.pendingId === row.id)))
       .then((rows) => rows.map((row) => {
-        seenPendingReports.add(row.id);
         const report = row.report ?? {};
         return offerProblemReport({
           agentId: row.agentId,
@@ -1722,7 +1819,11 @@
     // CONSOLE-4 seam: everything between two chat messages folds into one badge per gap
     // (gap-badge.js, item B). DASH-FOLD-1's step-count folding runs first and stays inside the
     // expanded view. With the module absent this is today's transcript, row for row.
-    const rows = foldRepeatedRows(contextMessages());
+    // FEEDBACK-2b: the folded report rows go in with the messages, before the repeat fold and the
+    // gap badge see them, so each is laid out where the report happened and a later message lands
+    // below it. They carry an authorId, which is what gap-badge.js reads to tell a thing said to
+    // the person from a step done for them, so neither folds one into a gap.
+    const rows = foldRepeatedRows(withFoldedReportRows(contextMessages()));
     const gaps = window.__gapBadge;
     // FEEDBACK-1: the offer cards for this conversation sit at the end, under the message that
     // caused them. They are page-local and are not transcript entries, which is the honest cost of

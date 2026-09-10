@@ -123,6 +123,17 @@ html[data-demo="true"] body::before {
   position: fixed;
   z-index: 9999;
   inset: 0 0 auto 0;
+  /* MOBILE-1b. A CAPTION, NOT A CONTROL. At 9999 and inset across the top it is the only fixed
+     overlay the console paints, and on a phone the window bar's first row -- both drawer handles --
+     is under it. Measured on this Mac in real headless Chrome at 390x844 with touch and no gateway
+     credential, so the page fell back to the demo adapter: the caption computed 47.6 px tall,
+     #roster-drawer and #context-drawer are laid out at y 8 with a 44 px box, elementsFromPoint at
+     each handle's centre answered body first, three consecutive touch taps left body.dataset.drawer
+     empty, and page.click("#roster-drawer") timed out with "<body> intercepts pointer events". A
+     person whose box is down is exactly the person who wants to switch conversations to see what
+     else is broken. The phone block in styles.css also drops the bar past it, so the handles are
+     not merely clickable-but-covered. */
+  pointer-events: none;
   padding: 7px 16px;
   font: 600 12px/1.4 system-ui, sans-serif;
   letter-spacing: 0.04em;

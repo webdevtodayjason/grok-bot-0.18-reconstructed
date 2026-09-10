@@ -623,10 +623,45 @@ So at a 390 px viewport the whole console laid itself out at 515.406 px and `.ap
 | the roster and the agent rail | `display: none` | drawers, behind a handle each |
 | `#message-input` font | 15px — iOS zooms the layout viewport on focus | 16px, line 22, eight-line cap 176 |
 | `env(safe-area-inset-*)` in the whole console | none, anywhere | on the bar and the shelf |
-| controls under 44 px in the visible band | 15, including Send at 75x42 and the room menu at 29x29 | 0, and the report card's own Send went 58x34 → 44 with them |
+| controls under 44 px in the visible band | 24, swept rather than listed — see the note below | **0** at both device sizes, at rest and with the desktop view open |
 | a report card opened by hand | 442 px wide at x 0, an 11px box to type into | 333 px, 0 descendants past the edge, 16px |
 | settings panel, descendants past the edge | 31, worst right edge 692 px | 43 rects, **0** of them outside a sideways scroller |
 | sideways, at 844x390 | shell 650 px tall, composer bottom 394 in a 390 px viewport | shell 390, composer on screen |
+
+**The 44 px floor is swept, not listed, and the first pass of it was a list.** The phone block named
+nine selectors, and nine selectors is as good as whoever wrote them. A sweep of every visible button,
+link, input, select and `[role=button]` with a non-zero rect, at the same moment on the same page,
+found eight more: the **five capability buttons** at 39x44, 40x44, 32x44, 39x44 and 36x44 — the whole
+of the phone's navigation, given `min-height` with `min-width: 0`, so tall enough and too narrow to
+hit; the **evidence chip** at 159x25 and 200x25, the second of those being the *"1 detail not backed by
+a tool result"* chip in Jason's own screenshot of 2026-09-09; a **secret-request field** at 228x42; and
+in the desktop view the **dialog close** at 37x37 and the hand-off banner's **"Skip this step"** and
+**"I'm done, continue"** at 103x33 and 130x33 — the only two controls that answer a hand-off, which is
+the one thing a person must be able to do from a phone.
+
+Seven more came with them, all inside the conversation and all older than the phone pass: *"Show
+earlier messages"* 155.89x34, the between-chats badge **43.34** tall (0.66 px short, which is the kind
+of miss only a sweep finds), a peer-exchange row 178.02x29.94 (it carries `role="button"` and opens the
+exchange, so it is a control), and **Open**, **Download** and **Show more** on an attachment at
+49.08x34, 74.11x34 and 251.16x34 — the three ways a person gets at a file from a phone.
+
+`verify-mobile --reach` sweeps now, at both device sizes, at rest and again with the desktop view and
+the hand-off banner open: **42 and 48 visible controls, 0 under 44x44**. The leg's own hit test lost a
+clause while this was being fixed — `at.contains(el)` was true whenever the element under a target's
+centre was an *ancestor* of it, and `body` and `html` are ancestors of everything, so a control under a
+full-screen overlay reported a clean hit. That is the exact trap the file's header says it exists to
+close.
+
+**With the box down, both drawer handles were unpressable.** `gateway-adapter` stamps `data-demo` on
+the root when hydration fails and `backgrounds.css` paints a fixed caption across the top at
+`z-index: 9999` — the only fixed overlay this console draws. On a phone the window bar's first row *is*
+the two drawer handles. Measured on this Mac at 390x844 with touch and no gateway credential: the
+caption computed 47.6 px tall, both handles are laid out at y 8 with a 44 px box, `elementsFromPoint`
+at each centre answered `body` first, three consecutive touch taps left `body.dataset.drawer` empty,
+and `page.click("#roster-drawer")` timed out with *"&lt;body&gt; intercepts pointer events"*. A person
+whose box is down is exactly the person who wants to switch conversations to see what else is broken.
+The caption is a caption now (`pointer-events: none`) and the bar starts below it, and
+`verify-mobile --demo` forces that state and taps a handle for real.
 
 **The transcript was never the thing that could not scroll.** It is the only scroller in the chain
 and it worked: 14,527 px of content in a 625 px band, and a real CDP thumb drag moved it 447 px. What
@@ -659,11 +694,42 @@ nothing about how the track below it resolves. The rule is inside `@media (max-w
 desktop widths cannot be reached by it at all, and the claim is structural rather than a measurement
 that has to be repeated.
 
-`verify-mobile --desktop` holds the remaining line by an **A/B in one browser** rather than against a
-committed baseline, so the comparison isolates *this* ship instead of carrying every other wave's
-changes: load the console at 1440x900, fingerprint every rect, put the drawer nodes back (which
-**must** move rects, or the comparison is not evidence of anything), hide them again, and require the
-document to come back to the shipped fingerprint rect for rect.
+**THE FIRST CUT OF THIS CLAIM WAS NOT EVIDENCE FOR IT, AND THE SHIP MOVED THE DESKTOP BY 31.94 px.**
+Said first because it is the lesson. The leg fingerprinted the shipped page, drew the two drawer nodes,
+hid them again, and required the shipped fingerprint back. Both sides of that comparison are the same
+tree: it proves the fingerprint is deterministic and that the one base rule it names is reversible, and
+it says nothing whatever about whether this tree's desktop matches the tree before it. It reported
+*"997 of 997 rects identical"* while `.control-shelf` was **31.94 px taller** than it had been and
+`.transcript` 31.94 px shorter, because FEEDBACK-2 moved `.composer-aside` into the shelf's grid and,
+unlike the send status and the attachment tray, it never collapses. At 900x800 fourteen of
+twenty-four named rects had moved. docs/FEEDBACK.md §6 carries the numbers and the fix.
+
+So the claim is measured the way the claim is worded. `verify-mobile --desktop` runs **two legs**:
+
+- **The A/B across two trees.** A second relay is spawned from a detached worktree at `--baseline
+  <sha>` (default `2d58c8b`, the commit before the phone pass landed), pointed at this worktree's own
+  writable state so both pages see the same local box, the same account and the same conversations —
+  the only difference between them is the code. One browser, three viewports (1440x900, 1100x820 and
+  900x800), and a **named list of 24 structural rects** required equal rect for rect. Named rather than
+  "every element in the document", because the shared branch carries other waves between the baseline
+  and the tip and a whole-document diff across two trees would report their rows as this wave's
+  movement. Both sides open the same conversation first, by the page's own click on the first roster
+  card: two relays are two origins, each keeps its own `localStorage` and picks its own agent, and
+  `.room-capsule` sizes to its own title and status sentence — the first cut of this failed at 1100x820
+  on the capsule alone, 227 px against 272.89, which is two pages looking at different agents and not a
+  layout difference. `localStorage` is cleared before the first paint on both for the same reason: the
+  room strip is the shelf's **first grid track**, so one extra chip of page-local "open rooms" moved
+  `.composer` 20.2 px and `#message-input` with it. Each width asserts the two pages are on the same
+  conversation, by id, room title and chip count, **before** it compares a single rect. Measured on this
+  Mac: **20 of 24 exist on both sides and all 20 are identical at all three widths**, including `.control-shelf`, `.transcript`, `.composer`, `.send-button` and
+  `.composer-aside`. A zero-rect element's `position` keyword is excluded on purpose: the status and
+  the tray went from `absolute` to full-width rows in this pass, and at rest both are hidden with a
+  0x0 rect, so the keyword differs while nothing has moved by a pixel. **And the A/B proves its own
+  sensitivity:** the old grid row is injected back into the shipped page and the rects must move —
+  measured, it moves 6, including `.stage`, `.transcript` and `.control-shelf`.
+- **Sensitivity and return, within one tree.** The old leg, kept for what it actually proves: that the
+  fingerprint is deterministic, that it can see a change at all, and that the one base rule this pass
+  puts outside the breakpoint is reversible.
 
 **What a pixel claim can be on this console, and what it cannot.** The first cut of that leg
 screenshotted the full page twice a few seconds apart and failed by 11 KB on a page nobody had
@@ -678,8 +744,8 @@ the other direction.
 So the leg makes two claims instead of one bad one:
 
 - **The geometry, exactly.** Every element in the document, by tag, id, class and rounded rect. One
-  element moving one pixel changes it. That is what "the phone pass changes nothing at desktop"
-  actually means, and it is deterministic — with one honest subtraction, measured in the same run:
+  element moving one pixel changes it. This is what says the fingerprint itself does not drift, and it
+  is deterministic — with one honest subtraction, measured in the same run:
   the fingerprint is taken **twice in the same state first**, and anything that moved on its own
   with nothing changed is named, counted and left out. On a busy box that is the agent rail
   redrawing its screen tile and its browser strip on the adapter's beat, which is not evidence
@@ -688,12 +754,13 @@ So the leg makes two claims instead of one bad one:
   and compared byte for byte, and each region's own noise floor is measured first, in the same run.
   A region that will not hold still is named and skipped rather than quietly dropped.
 
-Reverting **both** base rules first is part of the leg: the drawer handles coming back must change
+Reverting the base rule first is part of the second leg: the drawer handles coming back must change
 the fingerprint, which is what shows the comparison can see a change at all. Measured on
 `grok-bot-local-vm`, 1440x900: drawing the drawer nodes changed **13** rects; hiding them again
-returned **every** rect in the document to the shipped one — **997 of 997**, with **0** moving on
-their own in the same state. `.window-bar` and `#transcript` came
-back byte-identical in both states (88,886 and 308,265 bytes; the counts move with the conversation on screen, so the
+returned **every** rect in the document to the shipped one — **1,196 of 1,196**, with **0** moving on
+their own in the same state. That is a claim about determinism, not about the tree before this one;
+the A/B above is the claim about the tree before this one. `.window-bar` and `#transcript` came
+back byte-identical in both states (88,886 and 317,964 bytes; the counts move with the conversation on screen, so the
 claim is the equality, not the number). The leg also re-reads the three numbers the same box
 gave before the ship: shell column `1440px`, `.composer` bottom **856**, `.send-button` x
 **959..1053**. Both full-page screenshots are saved anyway, for a person to look at.

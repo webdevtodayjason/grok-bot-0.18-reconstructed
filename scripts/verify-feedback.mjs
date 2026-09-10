@@ -345,6 +345,52 @@ async function consoleLeg() {
     check(!/Sent to the developers:|Kept to yourself:/.test(afterReload.text),
       "and no settled card and no fold row survive the reload: they were page-local by construction");
 
+    // ---- FEEDBACK-2b: a report whose conversation is not on this page at all --------------------
+    // FEEDBACK-1b one step over, and the reason that fix did not cover it: the report Jason lost
+    // happened to belong to the conversation he had open. A subagent writes one, a background worker
+    // does, or the agent it belongs to has since been deleted -- `agentId` then matches no row of the
+    // roster. The drain marked the row seen at drain time and the queue only drew offers whose
+    // agentId equalled the open context, so the report was consumed into invisibility and nothing
+    // drew it again for the rest of the session. Measured on this Mac before the fix: zero cards,
+    // zero DOM nodes carrying either title, and the box still holding both rows after 22 s.
+    relay.addPending({
+      id: "pr-gate-orphan", at: new Date().toISOString(), agentId: "subagent-9", agentName: "Subagent 9",
+      report: {
+        version: 1, tier: "quality", category: "console",
+        title: "A report from a conversation that is not on this page",
+        description: "Written by a subagent the roster does not list.",
+        at: new Date().toISOString(),
+      },
+    });
+    const orphan = await page.waitForFunction(
+      () => [...document.querySelectorAll(".problem-report-card")]
+        .find((el) => el.textContent.includes("A report from a conversation that is not on this page")) != null,
+      { timeout: 25_000 },
+    ).then(() => true).catch(() => false);
+    check(orphan, "a report for an agent the roster does not know reaches the person in the conversation that IS open");
+    if (orphan) {
+      const whose = await page.evaluate(() => [...document.querySelectorAll(".problem-report-card strong")]
+        .map((el) => el.textContent).find((text) => text.includes("not on this page")) ?? "");
+      check(/^Subagent 9: /.test(whose), "and the card says whose report it is", whose);
+      const sendable = await page.evaluate(() => {
+        const node = [...document.querySelectorAll(".problem-report-card")]
+          .find((el) => el.textContent.includes("A report from a conversation that is not on this page"));
+        const button = node?.querySelector("[data-report-send]");
+        if (!button) return null;
+        const box = button.getBoundingClientRect();
+        const at = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+        return { hit: at === button || button.contains(at), x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      });
+      check(sendable?.hit === true, "with a Send a mouse can actually reach", JSON.stringify(sendable));
+      if (sendable?.hit) {
+        await page.mouse.click(sendable.x, sendable.y);
+        await page.waitForTimeout(1500);
+        check(relay.posted.some((body) => /not on this page/.test(String(body?.title ?? ""))),
+          "and sending it reaches the developers with the subagent named as the source",
+          JSON.stringify(relay.posted.map((body) => [body.title, body?.evidence?.agent])));
+      }
+    }
+
     // ---- a send the relay refused, in the relay's own words ------------------------------------
     // The sentence is ui/server.mjs forwardFeedback's, verbatim. A status code in front of a
     // customer is the presentation host-notes-read-as-errors.md bans, and it is what the person

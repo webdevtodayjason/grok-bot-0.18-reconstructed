@@ -162,6 +162,58 @@ test("MOBILE-1: the viewport meta is what makes the safe-area insets resolve to 
   }
 });
 
+// ---- MOBILE-1b: what the review measured -------------------------------------------------------
+
+test("MOBILE-1b: the shelf's two always-present controls are out of flow at desktop and a row on the phone", async () => {
+  const source = await readFile(cssPath, "utf8");
+  const { base, blocks } = splitSheet(source);
+  const baseAside = ruleFor(base, ".composer-aside").join("\n");
+  assert.match(baseAside, /position:\s*absolute/,
+    "in the shelf's grid it adds a PERMANENT row -- unlike the status and the tray it never collapses -- and measured on this Mac that made .control-shelf 31.94 px taller and .transcript 31.94 px shorter at 1440x900");
+  assert.doesNotMatch(baseAside, /grid-column/, "a full-width grid item is a row, and a row at desktop is the regression");
+  const phoneAside = ruleFor(phoneBody(blocks), ".composer-aside").join("\n");
+  assert.match(phoneAside, /position:\s*static/, "the phone has one column and no room beside the composer, so down there it is a row");
+  assert.match(phoneAside, /grid-column:\s*1 \/ -1/);
+});
+
+test("MOBILE-1b: the phone's 44px floor covers what a sweep found, not what a list remembered", async () => {
+  const source = await readFile(cssPath, "utf8");
+  const phone = phoneBody(splitSheet(source).blocks);
+  // The five capability buttons are the phone's whole navigation and measured 32-40 px wide: the
+  // old rule gave them min-height with min-width: 0, so they were tall enough and too narrow.
+  const capability = ruleFor(phone, ".capability-button").join("\n");
+  assert.match(capability, /min-width:\s*44px/, "39x44, 40x44, 32x44, 39x44 and 36x44 measured at both device sizes");
+  assert.match(capability, /min-height:\s*44px/);
+  // The chip in Jason's own 2026-09-09 screenshot, measured 200x25.
+  const chip = ruleFor(phone, "button.evidence-chip").join("\n");
+  assert.match(chip, /min-height:\s*44px/);
+  assert.match(chip, /display:\s*inline-flex/, "or its one line of text sits at the top of a taller box");
+  // The only two controls that answer a hand-off from a phone, measured 103x33 and 130x33.
+  assert.match(phone, /\.handoff-banner-actions button/);
+  assert.match(phone, /\.dialog-close/, "the desktop view's close button measured 37x37");
+});
+
+test("MOBILE-1b: the demo caption is a caption and not a control", async () => {
+  const bg = await readFile(path.join(repoRoot, "ui/machine-room/backgrounds.css"), "utf8");
+  const rule = /html\[data-demo="true"\] body::before \{([\s\S]*?)\}/.exec(bg)?.[1] ?? "";
+  assert.ok(rule.length > 0, "the caption rule is findable");
+  assert.match(rule, /pointer-events:\s*none/,
+    "it is fixed across the top at z 9999 and computed 47.6 px tall, so on a phone it covered both drawer handles: three taps left body.dataset.drawer empty and page.click timed out on \"<body> intercepts pointer events\"");
+  // And the bar is moved out from under it rather than merely made clickable through it.
+  const phone = phoneBody(splitSheet(await readFile(cssPath, "utf8")).blocks);
+  assert.match(phone, /html\[data-demo="true"\] \.window-bar/, "the handles have to be visible, not only pressable");
+});
+
+test("MOBILE-1b: the gate's own hit test cannot be passed by an overlay", async () => {
+  const gate = await readFile(path.join(repoRoot, "scripts/verify-mobile.mjs"), "utf8");
+  const reach = /const REACH = \(sel\) => \{([\s\S]*?)\n\};/.exec(gate)?.[1] ?? "";
+  assert.ok(reach.length > 0, "the hit test is findable");
+  assert.doesNotMatch(reach.replace(/\/\/[^\n]*/g, ""), /at\.contains\(el\)/,
+    "body and html are ancestors of everything, so that clause reported hit true for a control under a full-screen overlay");
+  assert.match(reach, /el\.contains\(at\)/, "a wrapper whose centre lands on its own child is still a hit");
+  assert.match(gate, /const SWEEP =/, "the reach leg sweeps every visible control rather than checking a list of eight");
+});
+
 test("MOBILE-1: app.js's share of the drawers is small enough to name", async () => {
   const source = await readFile(appPath, "utf8");
   const start = source.indexOf("  // ---- MOBILE-1: the two drawers");

@@ -1811,9 +1811,23 @@ dialog[open] {
   resize: vertical;
 }
 
+/* FEEDBACK-2b. The aside stays OUT OF FLOW at desktop widths, and only the phone gets a row.
+   FEEDBACK-2 made all three pieces of shelf furniture full-width rows. #composer-status and
+   .attachment-tray collapse to nothing when they are empty or hidden, which is what fixed the chip
+   sitting on the report card and costs nothing at rest. This one never collapses -- it holds Report
+   a problem and Run a self-test -- so it added a permanent row at EVERY desktop width. Measured on
+   this Mac in real headless Chrome, two relays from two detached worktrees in one browser run,
+   2d58c8b against f3f51f3: at 1440x900 .control-shelf went 1392x106 at y776 to 1392x137.94 at
+   y744.06 and .transcript lost 31.94 px of height; at 900x800 fourteen of twenty-four named rects
+   moved, the composer, Send, the message box, the composer plus and the room strip all by 4 px. The
+   gate's old --desktop leg could not see any of it: it compared the shipped page against itself.
+   The card's own overlap is not back with it -- the aside is at the shelf's right edge, clear of the
+   transcript column where the card is drawn, and the --desktop leg asserts that rather than
+   assuming it. */
 .composer-aside {
-  grid-column: 1 / -1;
-  justify-self: end;
+  position: absolute;
+  right: 16px;
+  bottom: calc(100% + 6px);
   display: flex;
   gap: 6px;
 }
@@ -4638,10 +4652,98 @@ body[data-composer-drop="1"] .composer {
     min-height: 44px;
   }
 
+  /* MOBILE-1b. EIGHT MORE, found by sweeping every visible control rather than by checking a list.
+     The list above was written from a list, and a list only finds what somebody thought of. Measured
+     on this Mac in real headless Chrome at 390x844 and 430x932, device scale 3, touch, iPhone UA,
+     identical at both widths:
+
+       the five capability buttons 39x44, 40x44, 32x44, 39x44 and 36x44 -- the whole of the phone's
+         navigation, given `min-height: 44px` with `min-width: 0` above, so tall enough and too
+         narrow to hit;
+       the evidence chip 159x25 and 200x25 -- the second of those is the "1 detail not backed by a
+         tool result" chip in Jason's own screenshot of 2026-09-09;
+       a secret-request field 228x42, and every other text input with it;
+       in the desktop view, the dialog's close button 37x37 and the hand-off banner's "Skip this
+         step" 103x33 and "I'm done, continue" 130x33 -- the only two controls that answer a
+         hand-off, which is the one thing a person must be able to do from a phone.
+
+     The gate sweeps now, with the desktop view open and the hand-off banner up as well as at rest,
+     so the next control that lands under 44 px is caught by measurement and not by whoever
+     remembers to add a selector. */
+  .capability-button {
+    min-width: 44px;
+  }
+
+  .handoff-banner-actions button,
+  .desktop-header button,
+  .desktop-header-actions button,
+  .desktop-footer button,
+  .dialog-close {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* The chip is a control that opens the claim-provenance panel, so it is a target like any other.
+     inline-flex keeps its one line of text centred inside the taller box. */
+  button.evidence-chip {
+    display: inline-flex;
+    align-items: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* MOBILE-1b. And the bar starts BELOW the demo caption when there is one. The caption is fixed
+     across the top at z 9999 and measured 47.6 px tall at 390; the bar's first row is the two drawer
+     handles, so they sat underneath it. `pointer-events: none` on the caption (backgrounds.css) is
+     what makes them pressable; this is what makes them visible. Scoped to the demo state, so a
+     console with a box it can reach is not given 34 px of empty bar. */
+  html[data-demo="true"] .window-bar {
+    padding-top: calc(8px + env(safe-area-inset-top) + 34px);
+  }
+
+  /* MOBILE-1b, the rest of what the sweep found, all of it inside the conversation. These were
+     already under 44 px before the phone pass and the list leg never looked at them; a sweep is how
+     they were found and this is the boy-scout pass that closes them. Measured at both device sizes:
+     "Show earlier messages" 155.89x34, the between-chats badge 43.34 tall (0.66 px short, which is
+     the kind of miss only a sweep finds), a peer-exchange row 178.02x29.94 -- it carries
+     role="button" and opens the exchange, so it is a control -- and Open and Download on an
+     attachment at 49.08x34 and 74.11x34, with "Show more" on a text preview at 251.16x34 -- the three
+     ways a person gets at a file from a phone. */
+  .transcript-older .ghost-button,
+  .gap-badge-head,
+  .message-row.is-exchange,
+  .attachment-open,
+  .attachment-download,
+  .attachment-more {
+    min-height: 44px;
+  }
+
+  /* A field is a target too: tapping a 42 px input to type into it is the same miss. */
+  .panel-dialog input[type="text"],
+  .panel-dialog input[type="password"],
+  .panel-dialog input[type="email"],
+  .panel-dialog input[type="url"],
+  .panel-dialog select,
+  .inline-card input,
+  .field input,
+  .field select {
+    min-height: 44px;
+  }
+
   #report-problem,
   #run-self-test {
     display: inline-flex;
     align-items: center;
+  }
+
+  /* FEEDBACK-2b. THE ROW IS THE PHONE'S, not the desktop's. At this width the shelf is one column
+     and there is no room beside the composer for two floating pill buttons; out of flow they sat
+     over the transcript's last row, which is where a report card is drawn. In flow as a row of the
+     shelf they cost 44 px of a phone's shelf and nothing at 1440 (see the base rule's note). */
+  .composer-aside {
+    position: static;
+    grid-column: 1 / -1;
+    justify-self: end;
   }
 
   /* Boy-scout, bounded: the settings panel's own overflow. The Job Bus table is 631 px wide and
