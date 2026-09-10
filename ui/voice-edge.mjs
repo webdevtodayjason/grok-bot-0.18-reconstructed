@@ -34,11 +34,16 @@
  *      real silence, and the finished reply is split into sentences here. Nothing in this file,
  *      its copy or its doc claims streaming. True sentence streaming is one host-side projection
  *      and is filed as VOICE-3.
- *   3. The key does NOT come from the super-admin Providers panel. That panel is global, its keys
- *      live at LiteLLM as credentials and read back masked, and there is no per-workspace provider
- *      row at all. The realtime key is a PER-WORKSPACE secret in the tenant's own voice.json,
- *      written through the ordinary console session and never readable back -- mail's door, which
- *      already works in production -- and it reaches the vendor as an Authorization HEADER only.
+ *   3. The key is the OPERATOR's, and KEYS-1 moved it. It used to be a per-workspace secret a
+ *      customer typed into their own Voice card; Jason, 2026-09-10, over that panel: "A user is
+ *      never going to put a resend key in. That's on the backend." So the super admin pastes it once
+ *      at api.titanium.bot/admin under "Keys the product uses", the relay reads it from
+ *      GET /v1/relay/keys behind CP_RELAY_TOKEN and holds it in memory (ui/relay-secrets.mjs), and
+ *      keyFor() below prefers that over this workspace's own voice.json -- the file second, nothing
+ *      third, which is the whole of the migration. It still reaches the vendor as an Authorization
+ *      HEADER only. It is still NOT on the super-admin Providers panel: those keys are global, they
+ *      live at LiteLLM as credentials and read back masked, and a realtime key is not a LiteLLM
+ *      deployment. That is PROVIDERS-10, and the two cosmetic realtime rows there are now deleted.
  *
  * THE SILENT-SOCKET RULE, which the whole refusal path is built around. Measured: an unknown
  * upgrade path answers zero bytes with no status line, and real Chrome reports only `onerror` at
@@ -575,11 +580,15 @@ export function splitSentences(text, { max = 320 } = {}) {
 
 // ---- the settings door: voice.json --------------------------------------------------------------
 //
-// Custody, decided: the realtime key is a PER-WORKSPACE secret in the tenant's own state file,
-// written through the ordinary console session and never readable back. That is mail's door
-// (ui/mail-edge.mjs), which already works in production, and it is the only door in this wave that
-// touches a secret. The super-admin Providers panel is global and its keys read back masked; there
-// is no per-workspace provider row to put this on.
+// Custody, as KEYS-1 left it: the realtime key is the OPERATOR's. It is pasted once at the super
+// admin console, held in this process's memory by ui/relay-secrets.mjs, and keyFor() prefers it over
+// anything on disk. `apiKey` on this file is the FALLBACK and it is the migration: a relay whose
+// control plane holds nothing keeps dialling with the value it always dialled with, so there is no
+// window in which voice is broken and there is no code that moves a byte from here to there.
+//
+// Nothing writes this field from a customer's session any more. mergeVoiceSettings refuses a key
+// from every workspace but the operator's own, in words, because a 200 that silently drops a field
+// the caller sent is the failure where the caller believes it worked.
 
 const asString = (value) => (typeof value === "string" ? value.trim() : "");
 
@@ -1367,19 +1376,25 @@ export function dialProviderSocket({ vendorId, apiKey, model, url, WebSocketImpl
 // for one condition.
 const SENTENCE = {
   noKey: "Voice is not switched on for this workspace yet.",
-  notEnabled: "Talking is switched off for this workspace. Turn it on in Settings.",
+  notEnabled: "Talking is switched off in Settings.",
   badOrigin: "That came from a page this console does not serve, so I did not open the microphone.",
   noAgent: "There is no bot in this workspace to talk to yet.",
   sessionCap: "That is the time limit for one conversation. Press the button again to start a fresh one.",
   dayCap: "This workspace has used its voice time for today. It resets at midnight UTC.",
-  providerRefused: "The voice service would not start this call. Tell your operator if it keeps happening.",
-  // A DIAL THAT NEVER OPENED, which is what a wrong key and an unreachable address BOTH look like
-  // from here. MEASURED on this Mac (node v22.23.1): a vendor answering 401 to the upgrade and a
-  // vendor with nothing listening produce the same single error event, "Received network error or
-  // non-101 status code", with no close event and no status code of any kind; a black-holed address
-  // produces nothing at all for at least four seconds. So one sentence covers both causes and names
-  // the thing a person can actually check. It was silence until 2026-09-10.
-  providerSilent: "The voice service did not answer. Try again in a moment, and tell your operator if it keeps happening.",
+  // ONE SENTENCE FOR BOTH, and it is deliberate rather than lazy.
+  //
+  // MEASURED on this Mac (node v22.23.1): a vendor answering 401 to the upgrade and a vendor with
+  // nothing listening produce the same single error event, "Received network error or non-101 status
+  // code", with no close event and no status code of any kind; a black-holed address produces
+  // nothing at all for at least four seconds. So this edge genuinely cannot tell a refusal from an
+  // outage, and two sentences would be this process guessing which one in front of a customer.
+  //
+  // WHAT THEY LOST is the word "voice service", because under KEYS-1 there is nothing a customer can
+  // do about either cause: the key is the operator's and the vendor is the operator's choice. What
+  // is left is the fact and who can see the reason. The operator's own diagnosis is not lost -- it is
+  // in the relay log and in the ledger row's closeReason, where an operator looks.
+  providerRefused: "Talking is not working right now. Your operator can see why.",
+  providerSilent: "Talking is not working right now. Your operator can see why.",
   providerGone: "The voice line dropped. Press the button again.",
   // One call at a time per workspace. The day cap is a number read from the ledger, so N sockets
   // opened together each read the same remaining day and the cap multiplies by N.
@@ -1947,7 +1962,21 @@ export function makeVoiceEdge({
     // plane, else this workspace's file. Everything below -- the refusal, the session, the wire --
     // reads this one object, so there is no second place the choice could be made differently.
     const settings = { ...onFile, apiKey: await keyFor(onFile) };
-    if (settings.apiKey.length === 0) return acceptAndSay(socket, key, SENTENCE.noKey, "no realtime key", "no-key");
+    if (settings.apiKey.length === 0) {
+      // NO KEY AND CANNOT SEE ARE DIFFERENT SENTENCES. `blind` is true only when there IS a control
+      // plane, a read has been attempted, the last one did not get through, and nothing is cached
+      // from one that did -- so a relay holding a good copy of a control plane that has since gone
+      // down never lands here, and a deployment with no control plane at all never does either.
+      //
+      // It matters because the two are acted on by different people. "Voice is not switched on for
+      // this workspace yet" sends the operator to paste a key; if the key is already pasted and this
+      // relay simply cannot reach the control plane for a minute, that sends him to do a thing he
+      // has already done over a fault that clears itself. `busy` says try again, which is true.
+      if (secrets != null && secrets.blind === true) {
+        return acceptAndSay(socket, key, SENTENCE.busy, "the keys the product uses could not be read", "no-key");
+      }
+      return acceptAndSay(socket, key, SENTENCE.noKey, "no realtime key", "no-key");
+    }
     if (!settings.enabled) return acceptAndSay(socket, key, SENTENCE.notEnabled, "voice is switched off");
 
     // ONE CALL AT A TIME FOR A WORKSPACE, and the reservation is taken HERE, in the same tick as the

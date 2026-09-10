@@ -787,6 +787,51 @@ test("the operator's key beats the workspace's file, and the file beats nothing"
   }
 });
 
+test("a relay that cannot read the keys the product uses says try again, not you have no key", async () => {
+  // The two conditions arrive at this branch as the same empty string. "Voice is not switched on for
+  // this workspace yet" sends the OPERATOR to paste a key; if he already pasted one and this relay
+  // simply cannot reach the control plane for a minute, that sends him to do a thing he has done
+  // already, over a fault that clears itself. So a blind reader says busy, which is true.
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-blind-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  let session = null;
+  try {
+    session = await openSocket({
+      dir, stub,
+      settings: { enabled: true, vendor: "xai", apiKey: "" },
+      secrets: { ...secretsHolding({}), blind: true },
+    });
+    await session.settle(() => session.of("note").length > 0, "the refusal");
+    const said = session.of("note")[0].text;
+    assert.match(said, /^I could not start a voice session just now\. Try again in a moment\.$/);
+    assert.equal(/switched on|key|operator/i.test(said), false, said);
+    assert.equal(stub.events.requests.length, 0, "nothing was dialled");
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a reader that is NOT blind still gets the plain no-key sentence, which is every single-box install", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-notblind-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  let session = null;
+  try {
+    session = await openSocket({
+      dir, stub,
+      settings: { enabled: true, vendor: "xai", apiKey: "" },
+      secrets: secretsHolding({}),
+    });
+    await session.settle(() => session.of("note").length > 0, "the refusal");
+    assert.match(session.of("note")[0].text, /^Voice is not switched on for this workspace yet\.$/);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a workspace set to a service the operator has no key for is refused in words, never dialled with the other one", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "voice-wrong-service-"));
   const stub = await startStubRealtime({ vendor: "openai" });
@@ -853,7 +898,12 @@ test("a vendor that refuses the dial is one plain sentence, a clean close and a 
     assert.equal(closed.code, 1000, "closed cleanly, because a destroyed socket reads as the relay being down");
     const note = session.of("note")[0];
     assert.ok(note != null, `no sentence reached the page: ${JSON.stringify(session.frames.json)}`);
-    assert.match(note.text, /did not answer/i);
+    // KEYS-1 merged the refused and silent sentences: this edge genuinely cannot tell a 401 on the
+    // upgrade from a vendor with nothing listening -- both are one error event with no code -- and
+    // under KEYS-1 there is nothing a customer can do about either cause, because the key and the
+    // vendor are both the operator's. So the sentence names the fact and who can see the reason.
+    assert.match(note.text, /^Talking is not working right now\. Your operator can see why\.$/);
+    assert.equal(/key|vendor|xai|openai|websocket/i.test(note.text), false, note.text);
     assert.equal(note.reason, "no-key", "so the row still draws the control that opens the Voice card");
     assert.deepEqual(session.of("state").map((one) => one.value).slice(-1), ["off"], "and the orb stops saying it is listening");
     // The settle is a file write and the close frame does not wait for it, so this waits for the row.
@@ -879,7 +929,7 @@ test("a dial that says nothing at all is caught by the watchdog, not by the sess
     });
     const closed = await session.closed;
     assert.equal(closed.code, 1000);
-    assert.match(session.of("note")[0]?.text ?? "", /did not answer/i);
+    assert.match(session.of("note")[0]?.text ?? "", /^Talking is not working right now\. Your operator can see why\.$/);
     await session.settle(() => (session.ledger().match(/"state":"closed"/g) ?? []).length > 0, "the settled row");
     const rows = await readVoiceLedger(session.ledgerFile);
     assert.equal(rows[0].state, "closed");

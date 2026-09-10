@@ -89,13 +89,24 @@ export function signSession(payload, secretHex) {
 // Absent reads back as the operator, exactly the way an absent tenant claim does, so a cookie minted
 // before this deploy keeps working and a session from the INSTANCE password -- which is the machine's
 // door and names no person -- carries none on purpose.
-export function createSession(secretHex, { nowMs = Date.now(), lifetimeMs = SESSION_LIFETIME_MS, tenant = "", sub = "" } = {}) {
+// SETTINGS-2 adds the third, `email`, and it is the same shape and the same argument as `sub`: it is
+// already on the verified token the control plane hands back, mintAccountSession was already holding
+// it and throwing it away, and the settings surface has to be able to draw "Signed in as" without
+// asking the control plane a question on every page load.
+//
+// It is a DISPLAY claim and nothing keys on it. Every decision in this process reads `tenant` or
+// `sub`; a forged email would change one line of text on the screen of somebody who already holds a
+// valid signature over their own session. Absent -- an old cookie, or the instance-password door,
+// which names no person -- draws no row at all rather than a blank one.
+export function createSession(secretHex, { nowMs = Date.now(), lifetimeMs = SESSION_LIFETIME_MS, tenant = "", sub = "", email = "" } = {}) {
   const slug = String(tenant ?? "").trim();
   const who = String(sub ?? "").trim();
+  const address = String(email ?? "").trim().slice(0, 254);
   return signSession({
     iat: nowMs, exp: nowMs + lifetimeMs,
     ...(slug.length > 0 ? { tenant: slug } : {}),
     ...(who.length > 0 ? { sub: who } : {}),
+    ...(address.length > 0 ? { email: address } : {}),
   }, secretHex);
 }
 

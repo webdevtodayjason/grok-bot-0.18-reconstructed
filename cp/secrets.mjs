@@ -30,7 +30,7 @@
 // else's morning. The proof is one cheap authenticated GET with a ten second timeout; a non-2xx is
 // 409 and stores nothing.
 //
-// NOTHING HERE EVER ANSWERS WITH A VALUE except GET /v1/relay/secrets, which is behind the relay's
+// NOTHING HERE EVER ANSWERS WITH A VALUE except GET /v1/relay/keys, which is behind the relay's
 // own credential and is the only reason any of this exists. Everything else -- the ledger row, the
 // admin console's presence line, the POST's own answer -- carries `keyEvidence`: a length and eight
 // hex characters of a sha256.

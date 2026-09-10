@@ -1216,6 +1216,10 @@ function mintAccountSession(req, res, payload, location) {
       nowMs: now, lifetimeMs,
       tenant: String(payload.tenant ?? ""),
       sub: String(payload.sub ?? ""),
+      // SETTINGS-2. The third claim, off the same verified token, for the same reason `sub` is
+      // here: the settings surface draws "Signed in as <address>" and this relay holds no account
+      // table to look one up in. Nothing decides anything on it -- see ui/auth.mjs.
+      email: String(payload.email ?? ""),
     }),
     { maxAgeSeconds: lifetimeMs / 1000, secure: secureOf(req) });
   res.writeHead(302, { location, "set-cookie": cookie, "cache-control": "no-store" });
@@ -2826,6 +2830,12 @@ function mailEdgeFor(t) {
     // the sending one is on its way out of files entirely. Every customer's save that carries either
     // is refused in words.
     isOperator: () => t.operator === true,
+    // KEYS-1. Whether a sending key exists somewhere other than this workspace's own file, which is
+    // the control plane holding the operator's. Without it the Email card on a workspace whose key
+    // has moved draws "not set" while its mail sends perfectly, and the first screenshot of a
+    // working instance is a screenshot of an apparently broken one. The cached copy, so this costs
+    // no network: `current()` never fetches.
+    keyElsewhere: () => String(secretsReader.current()["keys.mail.send"] ?? "").length > 0,
     log: (line) => console.log(line),
   });
   mailEdges.set(t.slug, { settingsFile: t.mailSettingsFile, edge });
@@ -3307,6 +3317,11 @@ function mailSendRoute() {
       t.ensureDir();
       await appendMailLedger(row, { file: t.mailSentLedgerFile, ownLikeParent });
     },
+    // KEYS-1. "Nobody pasted a sending key" and "this relay cannot see the control plane" are the
+    // same empty string by the time ownerSettings answers, and they are not the same event. See the
+    // refusal in ui/mail-edge.mjs: the first settles `no_key` and stays until the operator acts, the
+    // second settles `key_unreachable` and clears on its own.
+    keysBlind: () => secretsReader.blind === true,
     log: (line) => console.log(line),
   });
   return mailSendRouteBuilt;
@@ -3937,9 +3952,40 @@ const server = createServer(async (req, res) => {
     }
     // Whether a password is configured is not a secret: the login page announces it to anyone who
     // asks for it. The console reads this to decide whether to draw a Log out control.
+    //
+    // SETTINGS-2 grew three fields on it, and the rule is that they are answered ONLY to a request
+    // that is already signed in. To anyone else this route says exactly what it always said, which
+    // is the two booleans, because it sits above the gate and answers strangers.
+    //
+    //   operator   WHO GETS THE OPERATOR SECTION, and the relay decides it rather than the page.
+    //              It is tenantOf's own answer, so it is the same rule the rest of this file runs
+    //              on: no control plane, no tenant claim, or a session minted by the INSTANCE
+    //              password. A console that inferred this from a slug or a hostname would be a
+    //              console one customer could talk into drawing the operator's endpoints.
+    //   workspace  the slug and the display name, so the account strip at the foot of the roster
+    //              can name what you are signed in to without a second request.
+    //   person     the address on the session, or null. Null is the instance-password door, which
+    //              names nobody on purpose, and an old cookie minted before the claim existed.
+    //
+    // An absent field means false or null and the page must read it that way; that is what keeps a
+    // console served by an older relay from drawing an operator section it should not have.
     if (req.method === "GET" && url.pathname === "/auth/state") {
+      const authenticated = isAuthorized(req);
+      const answer = { required: AUTH != null, authenticated };
+      if (authenticated) {
+        const slug = tenantOf(req);
+        // registry.get and NOT contextOf, which answers null for a workspace whose box is not
+        // running. Naming the workspace you are signed in to does not need a box to be up, and a
+        // strip that loses its own name the moment a box restarts is the kind of thing a person
+        // reads as being signed out.
+        const entry = slug == null ? null : registry.get(slug);
+        answer.operator = slug === OPERATOR_SLUG;
+        answer.workspace = entry == null ? null : { slug: String(entry.slug), name: String(entry.name || entry.slug) };
+        const email = String(sessionPayload(req)?.email ?? "").trim();
+        answer.person = email.length > 0 ? { email } : null;
+      }
       res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
-      return res.end(JSON.stringify({ required: AUTH != null, authenticated: isAuthorized(req) }));
+      return res.end(JSON.stringify(answer));
     }
     // STORE-1. The token door, beside /auth/state and above the login gate for the same reason the
     // preflight is: the caller minting a token has no credential this console would recognise yet.

@@ -731,8 +731,12 @@ async function legRefused() {
     // operator's, pasted once at the super admin console, and the Voice card is gone. So what is
     // asserted is that the sentence still names the cause and still says who can act on it -- and
     // the word "key" is now BANNED from it rather than required, which the loop below checks.
-    check(/did not answer/i.test(sentence) && /operator/i.test(sentence),
-      "saying in plain words that the service did not answer, and who can do something about it", JSON.stringify(sentence));
+    // And KEYS-1 merged the two refusal sentences into one, because this edge cannot tell them
+    // apart: MEASURED on this Mac, a 401 on the upgrade and an address with nothing listening are
+    // the same single error event with no close and no status code. Two sentences would be the relay
+    // guessing which in front of a customer. What is asserted is the fact and who can act.
+    check(/^Talking is not working right now\. Your operator can see why\.$/.test(sentence),
+      "saying in plain words that talking is not working, and who can see the reason", JSON.stringify(sentence));
     for (const word of ["xai", "openai", "grok", "websocket", "socket", "401", "upgrade", "undefined", "null", "key", "voice card"]) {
       check(!sentence.toLowerCase().includes(word), `the sentence does not say ${word}`, JSON.stringify(sentence));
     }

@@ -569,7 +569,7 @@ printed on the forms themselves:
   length and eight hex characters of a sha256, which is the same string the record keeps for ever. The
   field is cleared on the way **out**, so a failed request leaves nothing in it either. Every one of
   the three names is in `SECRET_SETTINGS`, so `listSettings` hands back `""` with `redacted: true`.
-- **One reader, and it is not a box.** `GET /v1/relay/secrets`, behind `CP_RELAY_TOKEN`, method
+- **One reader, and it is not a box.** `GET /v1/relay/keys`, behind `CP_RELAY_TOKEN`, method
   refusal first so a wrong method charges nobody. The relay holds them in memory, refreshes every five
   minutes, keeps its last good copy through an outage, and never writes one beside a state file or
   pushes one into a container — every exec daemon in a customer's box runs as uid 0, so a key inside

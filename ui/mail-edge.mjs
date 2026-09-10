@@ -160,7 +160,13 @@ export function mergeMailSettings(current, patch) {
  * never as a value: this shape is the only thing either route returns, so there is no route on
  * this server that can read a key back out once it is set.
  */
-export function mailSettingsShape(settings, { webhookUrl = null, addresses = [], recent = [], sends = [] } = {}) {
+// KEYS-1 added `keyElsewhere`, and it is the difference between a card that tells the truth and one
+// that reads "not set" over a production workspace that has been sending mail all week. The sending
+// key is the OPERATOR's now: it lives at the control plane and the relay holds a copy in memory, so
+// this workspace's own file is only one of the two places it can be. `apiKeySet` has to mean "there
+// is a key that would send", wherever it is, because it is what the Email card draws and what the
+// first screenshot of a working instance shows.
+export function mailSettingsShape(settings, { webhookUrl = null, addresses = [], recent = [], sends = [], keyElsewhere = false } = {}) {
   const value = normalizeMailSettings(settings);
   return {
     enabled: value.enabled,
@@ -169,7 +175,7 @@ export function mailSettingsShape(settings, { webhookUrl = null, addresses = [],
     apiBase: resendApiBase(),
     catchAllAgentId: value.catchAllAgentId,
     routes: value.routes,
-    apiKeySet: value.apiKey.length > 0,
+    apiKeySet: value.apiKey.length > 0 || keyElsewhere === true,
     webhookSecretSet: value.webhookSecret.length > 0,
     webhookUrl,
     addresses,
@@ -665,6 +671,12 @@ export function createMailEdge({
   // operator's business now, so a customer's save that carries one is refused in words rather than
   // written. False -- the default and every customer -- is the closed door.
   isOperator = false,
+  // KEYS-1. () -> true when a sending key exists somewhere OTHER than this workspace's own file,
+  // which today means the operator pasted one at the admin console and the relay is holding it. The
+  // Email card reads `apiKeySet` off this edge, so without it a production workspace whose key has
+  // moved to the control plane draws "not set" while its mail sends perfectly. Absent on a console
+  // with no control plane, which is every single-box install and every gate on a laptop.
+  keyElsewhere = () => false,
   legacyNoticeUntil = MAIL_LEGACY_STOP,
   now = () => Date.now(),
   log = (line) => console.log(line),
@@ -710,6 +722,8 @@ export function createMailEdge({
       addresses: mailAddresses(agents, settings.domain),
       recent: recentMail(await readMailLedger(ledgerFile, { maxBytes: MAIL_LEDGER_TAIL_BYTES })),
       sends: recentMail(await readMailLedger(sentLedgerFile, { maxBytes: MAIL_LEDGER_TAIL_BYTES })),
+      // EFFECTIVE presence, never file presence. See the note over mailSettingsShape.
+      keyElsewhere: await Promise.resolve().then(() => keyElsewhere()).catch(() => false) === true,
     });
   }
 
@@ -1153,6 +1167,10 @@ export function createMailSendRoute({
   closeSend,
   // async (slug, row) -> void. The workspace's own readable ledger line.
   appendSent = null,
+  // KEYS-1. () -> true when this relay HAS a control plane, has tried to read the keys the product
+  // uses, and could not. See the note over the refusal below: it is the whole of the difference
+  // between `no_key` and `key_unreachable`.
+  keysBlind = () => false,
   fetchImpl = fetch,
   log = (line) => console.log(line),
 } = {}) {
@@ -1270,10 +1288,25 @@ export function createMailSendRoute({
     const settings = await Promise.resolve().then(() => ownerSettings()).catch(() => null);
     const apiKey = asString(settings?.apiKey);
     if (apiKey.length === 0) {
-      await settle("no_key", "", "the directory owner has no Resend key stored");
-      // KEYS-1. A BOT READS THIS SENTENCE ALOUD to a person who cannot act on it. It used to end
-      // "The operator sets one on the Email card", which is a card the customer cannot open and a
-      // thing they are not allowed to do. What is left is the fact and who to ask.
+      // KEYS-1. TWO CONDITIONS ARRIVE HERE AS THE SAME EMPTY STRING and they are not the same
+      // event. Nobody has pasted a sending key yet is a thing the OPERATOR does, once, and the row
+      // reads `no_key` for ever until he does it. This relay cannot see the control plane right now
+      // is a thing that is BROKEN, it clears on its own, and a row reading `no_key` over it sends
+      // the operator to paste a key he already pasted. So they settle different words.
+      //
+      // The order matters: `blind` is only true when nothing is cached from a read that did get
+      // through, so a relay holding a good copy of a control plane that has since gone down still
+      // sends, and a relay whose control plane simply has no key falls to `no_key` as before.
+      const blind = await Promise.resolve().then(() => keysBlind()).catch(() => false) === true;
+      if (blind) {
+        await settle("key_unreachable", "", "this relay could not read the keys the product uses from the control plane");
+        // A BOT READS THIS SENTENCE ALOUD to a person who cannot act on it, so it names the fact and
+        // who can see the cause and nothing else. No route, no service name, no key.
+        return refuse(res, 503, "Mail is not working right now. Try again in a few minutes, and tell your operator if it keeps happening.", "key_unreachable");
+      }
+      await settle("no_key", "", "the directory owner has no sending key stored");
+      // It used to end "The operator sets one on the Email card", which is a card the customer
+      // cannot open and a thing they are not allowed to do. What is left is the fact and who to ask.
       return refuse(res, 503, "This console cannot send mail yet. Ask your operator to switch sending on.", "no_key");
     }
 

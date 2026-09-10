@@ -84,8 +84,14 @@ per-workspace choice and it decides which key dials. A workspace set to a servic
 key for gets the plain refusal, never the other service's key aimed at the wrong vendor: that would
 be a 401 a person reads as a broken product.
 
-The relay reads them from `GET /v1/relay/secrets` behind `CP_RELAY_TOKEN`, keeps them **in memory
-only**, refreshes every five minutes, and degrades to the last good copy on an outage. It sends the
+The relay reads them from `GET /v1/relay/keys` behind `CP_RELAY_TOKEN`, keeps them **in memory
+only**, refreshes every **60 seconds** with a hard **6 second** timeout, and degrades to the last good
+copy on an outage. Both numbers are shorter than the push credential reader's five minutes and ten
+seconds, and the reason is that this one is woken by a person holding a button: a rotation that takes
+five minutes to reach the relay is five minutes of a dial refused on a key the operator has already
+replaced, and a ten second timeout on the upgrade path is ten seconds of a lit Talk button with
+nothing said. Six seconds is thirty times the 194 ms relay-to-control-plane round trip measured on the
+R750 on 2026-09-10, so it fires on an outage and never on a slow answer. It sends the
 key to the vendor as an `Authorization` header — never in a URL, never in a websocket subprotocol
 (proxies log those), never in a log line, never in a ledger row. Tests plant a key and sweep the wire,
 the ledger, every log line, every frame the browser was sent, and the workspace's own settings file
@@ -101,13 +107,25 @@ Measured on the R750 on 2026-09-10: no `voice.json` exists anywhere on that mach
 has ever pasted a realtime key and the door starts empty. Paste it once at the admin console and
 talking works; until then it is off, and it was off before too.
 
+**Cannot see is not the same as not set.** The reader answers `blind` when there *is* a control plane,
+a read has been attempted, the last one did not get through, and nothing is cached from one that did.
+On that condition the press answers *"I could not start a voice session just now. Try again in a
+moment."* rather than the no-key sentence — because the no-key sentence sends the operator to paste a
+key, and if he has already pasted one and this relay simply cannot reach the control plane for a
+minute, that sends him to do a thing he has done already over a fault that clears itself. A console
+with no control plane is never blind (there is nothing there to be unable to reach), a control plane
+that answers with no key at all is never blind (an empty answer is an answer), and a control plane too
+old to have the route is never blind either (its files are the right home, and its mail sends
+perfectly).
+
 ### Three places it still deliberately does not go
 
 - **Not the super-admin Providers panel.** Those keys are global to the whole install, they live at
   the metering proxy as credentials, they read back masked, and that file's own rules forbid a key
   value in any answer with a test that plants one and sweeps every route for it. The realtime key is
-  now global too, but it is not a *chat* credential and has no row there. The panel does carry two
-  realtime cards, and they are **labels only** — see section 10.
+  now global too, but it is not a *chat* credential and has no row there. The panel used to carry two
+  cosmetic realtime cards; they are **deleted** — see section 10 for what pasting a key on one really
+  did.
 - **Not the endpoints catalog.** That is the input to the *chat* model resolver: it fetches a model
   list against every row and pins the winner into your box. A realtime row there would be offered to
   you as a chat model and would fail every message you sent.
@@ -396,27 +414,36 @@ already states.
 
 ---
 
-## 10. The two realtime cards on the Providers panel
+## 10. The two realtime cards on the Providers panel are GONE
 
-The super-admin Providers panel lists `xai-realtime` and `openai-realtime`. **They are labels.** They
-offer no model, hold no key, mint nothing at the metering proxy, and feed nothing the relay reads.
-They exist so the one panel an operator goes to when they want to know what this product can talk to
-does not look like it has never heard of realtime, and so the key-file slot names are written down
-where every other vendor's are.
+They used to be there as labels: `xai-realtime` and `openai-realtime`, offering no model, holding no
+key, minting nothing at the metering proxy, feeding nothing the relay reads. The idea was that the one
+panel an operator goes to should not look like it has never heard of realtime.
 
-Measured on this Mac 2026-09-09: both rows answer **zero models and zero keys**, and a key pasted into
-one is **refused and not stored** — the address is a websocket, so the panel's proof step cannot
-complete against it:
+**Jason measured what that actually cost, on 2026-09-10 at 07:49, in the live admin console.** He
+pasted a real xAI realtime key on the "xAI realtime (voice)" row and read back:
 
 ```
 xai-realtime     409  xAI realtime (voice) would not accept that key, so nothing was stored.
                       xAI realtime (voice) could not be reached (fetch failed)
 ```
 
-Nothing is stored and nothing leaks, which is what matters. But "could not be reached" is a misleading
-reason for a control that can never succeed, and a realtime key does not belong there anyway.
-**VOICE-4** makes those two cards read-only and says where the key actually goes. Since KEYS-1 the
-answer is the "Keys the product uses" block on the same console's System health panel — section 2.
+Nothing was stored and nothing leaked, which was the part the old tests checked. What they did not
+check is that the one person who holds the key had been sent to a control that can never succeed and
+then told the vendor was down. That is worse than a cosmetic row: it is a wrong diagnosis printed in
+the operator's own console.
+
+The panel proves a key before storing it by fetching that row's catalog over HTTP. A realtime address
+is a websocket, so with `catalogPath` empty the proof falls through to POSTing `wss://` — hence "fetch
+failed". Both rows are **deleted** (PROVIDERS-10, closing VOICE-4), `tests/cp-voice.test.mjs` asserts
+they are gone *and* that no row on that panel carries a `wss://` address or the word `realtime`, and
+the panel carries one line saying where the key does go: the **"Keys the product uses"** block on the
+same console's System health panel — section 2 — which proves an xAI key against
+`https://api.x.ai/v1/models` and an OpenAI key against `https://api.openai.com/v1/models`. The same
+key serves chat and realtime at both vendors.
+
+`REALTIME_VENDORS` in `cp/voice.mjs` is, and always was, the authoritative table of what this product
+can talk to. It is untouched.
 
 ---
 
@@ -510,20 +537,25 @@ From the relay, on the socket it accepted:
   and no card, because after KEYS-1 a customer cannot act on either, and it deliberately does **not**
   end "press the button again" — that clause is what instructed the loop he got stuck in on
   2026-09-10, pressing Talk over and over into an identical refusal.
-- Talking switched off by the workspace itself: **"Talking is switched off for this workspace. Turn it
-  on in Settings."** This one a person *can* act on: it is the switch in Settings under General.
+- Talking switched off by the workspace itself: **"Talking is switched off in Settings."** This one a
+  person *can* act on, and the sentence names exactly where: the switch in Settings under General.
 - An upgrade from somewhere else: **"That came from a page this console does not serve, so I did not
   open the microphone."**
 - Nobody to talk to: **"There is no bot in this workspace to talk to yet."**
 - The session cap: **"That is the time limit for one conversation. Press the button again to start a
   fresh one."**
 - The day is spent: **"This workspace has used its voice time for today. It resets at midnight UTC."**
-- The service would not start the call: **"The voice service would not start this call. Tell your
-  operator if it keeps happening."** This is a vendor that accepted the line and then dropped it
-  without a word. Naming a key here would be pointing a person at something only the operator holds.
-- The line never opened at all, which a wrong key and an unreachable service both look like from here:
-  **"The voice service did not answer. Try again in a moment, and tell your operator if it keeps
-  happening."**
+- The call would not start, however it failed: **"Talking is not working right now. Your operator can
+  see why."** ONE sentence covers the vendor refusing the line and the line never opening at all,
+  because this edge genuinely cannot tell them apart — MEASURED on a Mac (node v22.23.1): a vendor
+  answering 401 to the upgrade and a vendor with nothing listening produce the same single error
+  event, no close and no status code. Two sentences would be the relay guessing which in front of a
+  customer. And there is nothing a customer could act on either way after KEYS-1: the key and the
+  choice of vendor are both the operator's. The operator's own diagnosis is not lost — it is in the
+  relay log and in the ledger row's `closeReason`, which is where an operator looks.
+- The relay could not read the keys the product uses: **"I could not start a voice session just now.
+  Try again in a moment."** Not the no-key sentence, which would send the operator to paste a key he
+  has already pasted over a fault that clears itself. See §2 on `blind`.
 - Already talking in another tab: **"This workspace is already in a call. Stop that one and press the
   button again."**
 - The line went away: **"The voice line dropped. Press the button again."**

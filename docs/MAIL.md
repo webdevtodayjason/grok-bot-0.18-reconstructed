@@ -86,7 +86,7 @@ wave moved exactly one of them.
 It is a vendor credential the product uses on a customer's behalf, so it belongs to whoever pays the
 vendor. The super admin pastes it once at `api.titanium.bot/admin` under "Keys the product uses". It
 is proved with Resend before it is stored, stored write-only, and read by the one relay through
-`GET /v1/relay/secrets` behind `CP_RELAY_TOKEN` — in memory, never written beside a state file, never
+`GET /v1/relay/keys` behind `CP_RELAY_TOKEN` — in memory, never written beside a state file, never
 pushed into a box. Every exec daemon in a customer's container runs as uid 0, so a key inside one is
 readable by that customer's own agents.
 
@@ -419,6 +419,12 @@ Behind the console session (or the relay bearer), like every other console route
 Neither secret is ever in this shape. `apiKeySet` and `webhookSecretSet` are the whole answer about
 them.
 
+`apiKeySet` reports **effective** presence, not file presence: it is true when there is a key that
+would send, whether that is the operator's at the control plane or this workspace's own file. Reading
+the file alone would draw "not set" over a production workspace that has been sending mail all week,
+which is exactly what the first screenshot of a migrated instance would have shown. `webhookSecretSet`
+is file presence and stays that way, because the signing secret never moved (§1a).
+
 `sends` is MAIL-3 and it is that workspace's own sent ledger: `{at, agentId, agentName, code, to,
 subject, outcome, resendId}`, newest first, the same order `recent` is in. **Newest first matters
 to the person, not to the code**: the card paints the array as it arrives and the operator reads the
@@ -537,6 +543,17 @@ IGNORED rather than refused, and a test asserts it never appears in the body tha
    sentence *"This console cannot send mail yet. Ask your operator to switch sending on."* — a bot
    reads that aloud to a person, so it names the fact and who to ask and nothing a customer cannot
    act on.
+
+   **Unless this relay could not see the control plane**, in which case the row closes
+   `key_unreachable` and the sentence is *"Mail is not working right now. Try again in a few minutes,
+   and tell your operator if it keeps happening."* Both conditions arrive here as the same empty
+   string and they are acted on by different people: nobody-pasted-one is a thing the operator does
+   once, and cannot-reach is broken and clears itself. A row reading `no_key` over the second sends
+   him to paste a key he already pasted. The reader only reports itself blind when there *is* a
+   control plane, a read was attempted, the last one did not get through, and nothing is cached from
+   one that did — so a relay holding a good copy of a control plane that has since gone down still
+   sends, and a control plane too old to have the route (404) is never blind, because its files are
+   the right home.
 9. `POST <apiBase>/emails` with the stored key. The address is the relay's own environment
    (`GROK_BOT_MAIL_API_BASE`, §1), never a request field, for the same reason it is fixed on the way
    in: the stored key travels on it.

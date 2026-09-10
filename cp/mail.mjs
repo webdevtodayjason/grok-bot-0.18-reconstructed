@@ -282,7 +282,9 @@ export function createMailSends({ store, now = () => Date.now() } = {}) {
       return { ok: true, id, caps };
     },
 
-    /** What happened to a claimed row. `sent`, `failed` or `no_key`, with Resend's id when there is one. */
+    /** What happened to a claimed row: `sent`, `failed`, `no_key` or `key_unreachable`, with the
+     *  provider's id when there is one. KEYS-1 added the last: the sending key is the operator's and
+     *  lives here now, so "nobody pasted one" and "the relay could not read it" are different rows. */
     closeSend(id, outcome = "", resendId = "", detail = "") {
       const row = Number(id);
       if (!Number.isFinite(row) || row <= 0) return { ok: false, error: "bad_request", message: "Name the row to settle." };

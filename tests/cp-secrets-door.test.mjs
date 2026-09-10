@@ -215,7 +215,7 @@ test("the relay's read refuses a wrong method BEFORE it looks at the credential"
     // No credential at all, and the answer is still about the method. A wrong method charges nobody
     // and learns nothing, which is how the mail and push routes beside it already behave.
     for (const method of ["POST", "PUT", "DELETE", "PATCH"]) {
-      const answer = await plane.request(method, "/v1/relay/secrets", { body: {} });
+      const answer = await plane.request(method, "/v1/relay/keys", { body: {} });
       assert.equal(answer.status, 405, `${method}: ${answer.text}`);
       assert.equal(answer.body.error, "method_not_allowed");
     }
@@ -224,11 +224,11 @@ test("the relay's read refuses a wrong method BEFORE it looks at the credential"
 
 test("the relay's read is 401 and NOT 404 without the relay credential, which is the void-route class this exists to rule out", async () => {
   await withPlane(async (plane) => {
-    const none = await plane.request("GET", "/v1/relay/secrets");
+    const none = await plane.request("GET", "/v1/relay/keys");
     assert.equal(none.status, 401, none.text);
     assert.deepEqual(none.body, { error: "unauthorized" });
     // The operator's own bearer does not open it. Two doors, neither doing the other's job.
-    const admin = await plane.admin("GET", "/v1/relay/secrets");
+    const admin = await plane.admin("GET", "/v1/relay/keys");
     assert.equal(admin.status, 401, admin.text);
   });
 });
@@ -237,12 +237,12 @@ test("the relay reads values, and a key nobody pasted is OMITTED rather than ans
   const vendor = await startTakingVendor();
   try {
     await withPlane(async (plane) => {
-      const empty = await plane.request("GET", "/v1/relay/secrets", { token: RELAY_TOKEN });
+      const empty = await plane.request("GET", "/v1/relay/keys", { token: RELAY_TOKEN });
       assert.equal(empty.status, 200, empty.text);
       assert.deepEqual(empty.body, { keys: {} }, "a control plane with nothing pasted answers nothing");
 
       await plane.admin("POST", "/v1/keys/keys.voice.xai", { value: PLANTED });
-      const one = await plane.request("GET", "/v1/relay/secrets", { token: RELAY_TOKEN });
+      const one = await plane.request("GET", "/v1/relay/keys", { token: RELAY_TOKEN });
       assert.equal(one.status, 200, one.text);
       assert.deepEqual(Object.keys(one.body.keys), ["keys.voice.xai"]);
       assert.equal(one.body.keys["keys.voice.xai"], PLANTED);

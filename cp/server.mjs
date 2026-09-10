@@ -1222,14 +1222,23 @@ export function createApp(options = {}) {
     // Three relay routes and two operator routes, and the split is the whole design: the relay is
     // told NUMBERS and reports ROWS, and the operator is the only one who can change a number.
     //
-    // WHAT DOES NOT CROSS THIS LINE IN EITHER DIRECTION: the workspace's realtime key. It is written
-    // through the customer's own console into that workspace's own state file and read off the
-    // relay's own disk when it dials, and it travels to the vendor as an Authorization header and
-    // nowhere else. No route here takes one, answers one or could be made to log one. That is why the
-    // key is NOT on the super-admin Providers panel: those keys are global, they live at LiteLLM as
-    // credentials, they read back masked, and cp/PROVIDERS-ROUTES.md section 5 has a test that sweeps
-    // every GET route in that file for a planted key's bytes. A per-workspace realtime key has no row
-    // there to live in.
+    // WHAT DOES NOT CROSS THIS LINE IN EITHER DIRECTION: the realtime key. NONE of the five routes
+    // in this section takes one, answers one or could be made to log one, and that is still true and
+    // still tested.
+    //
+    // KEYS-1 AMENDED WHAT THAT SENTENCE MEANS, the way TENANT-5 amended the rule at the top of this
+    // file rather than deleting it. It used to be true of the whole SERVICE: the key was a
+    // per-workspace secret a customer typed into their own console and it never reached here at all.
+    // It is the operator's now, it is held in admin_settings write-only, and there is exactly one
+    // route on this service that answers with it -- GET /v1/relay/keys, behind CP_RELAY_TOKEN, at the
+    // bottom of this dispatcher with its own reasoning on it. Not this one, and not any voice route:
+    // the split below is unchanged, the relay is still told NUMBERS and still reports ROWS, and the
+    // caps are still the only thing an operator changes here.
+    //
+    // The key is still NOT on the super-admin Providers panel: those keys are global, they live at
+    // LiteLLM as credentials, they read back masked, and a realtime address is a websocket a proxy
+    // has no deployment shape for. PROVIDERS-10; the two cosmetic realtime rows that used to sit
+    // there are deleted, and "Keys the product uses" is where an operator pastes this one.
     //
     // The method refusal comes first on every one of them, the way the mail send pair does: a wrong
     // method charges nobody and learns nothing.
@@ -1713,7 +1722,7 @@ export function createApp(options = {}) {
     //
     // A name with nothing behind it is left out rather than answered empty, because the relay's
     // fallback to a workspace's own file is decided by absence.
-    if (segments[1] === "relay" && segments[2] === "secrets" && segments.length === 3) {
+    if (segments[1] === "relay" && segments[2] === "keys" && segments.length === 3) {
       if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
       if (!requireRelay(request, response)) return undefined;
       return json(response, 200, relaySecrets(store));

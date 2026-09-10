@@ -323,22 +323,22 @@ const cp = await startControlPlane({ vendorUrl: vendor.url, resendUrl: resend.ur
 
 step("the relay's key door refuses a wrong method before it looks at a credential");
 for (const method of ["POST", "PUT", "DELETE"]) {
-  const answer = await ask(`${cp.base}/v1/relay/secrets`, { method, headers: { "content-type": "application/json" }, body: "{}" });
-  check(answer.status === 405, `${method} /v1/relay/secrets with NO credential answers 405`, `HTTP ${answer.status} ${answer.text.slice(0, 80)}`);
+  const answer = await ask(`${cp.base}/v1/relay/keys`, { method, headers: { "content-type": "application/json" }, body: "{}" });
+  check(answer.status === 405, `${method} /v1/relay/keys with NO credential answers 405`, `HTTP ${answer.status} ${answer.text.slice(0, 80)}`);
 }
 
 step("and 401 without the relay's credential, and NOT 404");
 {
-  const none = await ask(`${cp.base}/v1/relay/secrets`);
+  const none = await ask(`${cp.base}/v1/relay/keys`);
   // 404 IS THE FAILURE THIS DESIGN EXISTS TO RULE OUT. A route that is not there and a route that
   // refuses you look identical to a caller that only checks for 200, and this product has already
   // shipped one of the first kind that nobody noticed for weeks.
   check(none.status === 401, "no credential answers 401 and not 404", `HTTP ${none.status} ${none.text.slice(0, 80)}`);
-  const wrong = await ask(`${cp.base}/v1/relay/secrets`, { headers: { authorization: `Bearer ${randomBytes(24).toString("hex")}` } });
+  const wrong = await ask(`${cp.base}/v1/relay/keys`, { headers: { authorization: `Bearer ${randomBytes(24).toString("hex")}` } });
   check(wrong.status === 401, "a wrong credential answers 401", `HTTP ${wrong.status}`);
-  const operator = await ask(`${cp.base}/v1/relay/secrets`, { headers: { authorization: `Bearer ${cp.adminToken}` } });
+  const operator = await ask(`${cp.base}/v1/relay/keys`, { headers: { authorization: `Bearer ${cp.adminToken}` } });
   check(operator.status === 401, "the OPERATOR's own bearer does not open the relay's door either", `HTTP ${operator.status}`);
-  const relay = await ask(`${cp.base}/v1/relay/secrets`, { headers: { authorization: `Bearer ${cp.relayToken}` } });
+  const relay = await ask(`${cp.base}/v1/relay/keys`, { headers: { authorization: `Bearer ${cp.relayToken}` } });
   check(relay.status === 200 && relay.body?.keys != null, "the relay's credential answers 200", `HTTP ${relay.status} ${relay.text.slice(0, 80)}`);
   check(JSON.stringify(relay.body?.keys ?? {}) === "{}", "and a control plane with nothing pasted answers nothing", relay.text.slice(0, 120));
 }
@@ -366,7 +366,7 @@ step("the operator pastes the two keys, and nothing reads either one back");
   const stored = (door.body?.keys ?? []).filter((one) => one.stored).map((one) => one.name);
   check(stored.length === 2, "two of the three names are set", stored.join(", "));
 
-  const relay = await ask(`${cp.base}/v1/relay/secrets`, { headers: { authorization: `Bearer ${cp.relayToken}` } });
+  const relay = await ask(`${cp.base}/v1/relay/keys`, { headers: { authorization: `Bearer ${cp.relayToken}` } });
   check(relay.body?.keys?.["keys.mail.send"] === CP_MAIL_KEY, "the relay is handed the value, which is the one route that answers with one");
   check(relay.body?.keys?.["keys.voice.openai"] === undefined, "and a name nobody pasted is OMITTED rather than answered empty", relay.text.slice(0, 160));
   info(`the vendor was asked ${vendor.seen.length} time(s) and Resend ${resend.seen.filter((one) => one.url.includes("domains")).length} time(s), each before anything was stored`);

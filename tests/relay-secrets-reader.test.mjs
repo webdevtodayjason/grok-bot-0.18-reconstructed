@@ -11,6 +11,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -69,7 +70,7 @@ test("it reads the door with the relay credential as a header, and never in the 
   const reader = createSecretsReader({ env: ENV, fetchImpl: fake.impl });
   assert.equal(await reader.value("keys.voice.xai"), PLANTED);
   assert.equal(fake.calls.length, 1);
-  assert.equal(fake.calls[0].url, `${CP}/v1/relay/secrets`);
+  assert.equal(fake.calls[0].url, `${CP}/v1/relay/keys`);
   assert.equal(fake.calls[0].authorization, `Bearer ${TOKEN}`);
   assert.ok(!fake.calls[0].url.includes(TOKEN), "the credential is in the URL");
 });
@@ -187,4 +188,77 @@ test("the refresh timer is unref'd, so a relay holding one still exits", async (
   await new Promise((resolve) => setTimeout(resolve, 20));
   stop();
   assert.ok(fake.calls.length >= 1);
+});
+
+// ---- blind: cannot see, as against nobody has pasted one -----------------------------------------
+//
+// The two conditions hand every caller the same empty string and they are acted on by different
+// people. "Nobody pasted a key" is a thing the OPERATOR does, once. "This relay cannot reach the
+// control plane" is a thing that is broken and clears itself. mail settles a different outcome word
+// on each and voice says a different sentence, so the reader has to be able to tell them apart.
+
+test("blind is false with no control plane, because there is nothing there to be unable to reach", async () => {
+  const fake = fakeFetch([{ status: 200, body: { keys: {} } }]);
+  const reader = createSecretsReader({ env: {}, fetchImpl: fake.impl });
+  assert.equal(reader.blind, false);
+  await reader.refresh();
+  assert.equal(reader.blind, false, "a single-box install must never read as an outage");
+});
+
+test("blind is false before anything has been asked, so a relay that has just booted refuses nothing", () => {
+  const fake = fakeFetch([{ status: 200, body: { keys: {} } }]);
+  const reader = createSecretsReader({ env: ENV, fetchImpl: fake.impl });
+  assert.equal(reader.blind, false, "an unasked reader is not a failed reader");
+});
+
+test("blind is true after a read that did not get through with nothing cached", async () => {
+  const fake = fakeFetch([() => { throw new Error("connect ECONNREFUSED"); }]);
+  const reader = createSecretsReader({ env: ENV, fetchImpl: fake.impl, log: () => {} });
+  assert.equal(await reader.value("keys.mail.send"), "");
+  assert.equal(reader.blind, true, "an unreachable control plane with no copy is not an empty one");
+});
+
+test("a control plane that answers with no key at all is NOT blind: that is an operator who has pasted nothing", async () => {
+  const fake = fakeFetch([{ status: 200, body: { keys: {} } }]);
+  const reader = createSecretsReader({ env: ENV, fetchImpl: fake.impl });
+  assert.equal(await reader.value("keys.mail.send"), "");
+  assert.equal(reader.blind, false, "an empty answer is an answer");
+});
+
+test("an older control plane with no door at all is NOT blind, because its files are the right home", async () => {
+  // 404 is a DEPLOY fact: that deployment keeps its keys on its own files and its mail sends
+  // perfectly. Calling it unreachable would settle key_unreachable over a key sitting right there.
+  const fake = fakeFetch([{ status: 404, body: {} }]);
+  const reader = createSecretsReader({ env: ENV, fetchImpl: fake.impl, log: () => {} });
+  assert.equal(await reader.value("keys.mail.send"), "");
+  assert.equal(reader.blind, false);
+});
+
+test("a good copy already held survives an outage, and blind stays false while it does", async () => {
+  const fake = fakeFetch([
+    { status: 200, body: { keys: { "keys.mail.send": PLANTED } } },
+    () => { throw new Error("connect ECONNREFUSED"); },
+  ]);
+  const reader = createSecretsReader({ env: ENV, fetchImpl: fake.impl, log: () => {} });
+  assert.equal(await reader.value("keys.mail.send"), PLANTED);
+  await reader.refresh();
+  assert.equal(await reader.value("keys.mail.send"), PLANTED, "the last good copy is what keeps mail sending");
+  assert.equal(reader.blind, false, "a live copy is a live copy however the last refresh went");
+});
+
+test("every read carries a deadline, and the two numbers are the shorter pair", async () => {
+  // A fetch with no deadline is the hang this exists to prevent: a black-holed control plane would
+  // hold a websocket upgrade open with a lit Talk button and nothing said.
+  let sawSignal = false;
+  const impl = async (_url, init) => { sawSignal = init?.signal != null; return { status: 200, json: async () => ({ keys: {} }) }; };
+  await createSecretsReader({ env: ENV, fetchImpl: impl }).refresh();
+  assert.equal(sawSignal, true, "the read carries no deadline");
+
+  // AbortSignal.timeout carries no readable millisecond count, so the numbers are pinned at the
+  // source. MEASURED on the R750 2026-09-10: the relay-to-control-plane round trip is 194 ms with
+  // the bearer, so six seconds is thirty times the real answer and fires only on an outage.
+  const here = path.dirname(new URL(import.meta.url).pathname);
+  const source = await readFile(path.join(here, "..", "ui", "relay-secrets.mjs"), "utf8");
+  assert.match(source, /refreshMs = 60_000/, "the refresh is no longer a minute, so a rotated key takes longer to land");
+  assert.match(source, /timeoutMs = 6_000/, "the timeout is no longer six seconds, so a press waits longer on an outage");
 });

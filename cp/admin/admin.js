@@ -2647,6 +2647,14 @@
         note.push(String(answer.db.why));
       }
     }
+    // WHERE THE VOICE KEY WENT, said on the panel somebody would look for it on. This page used to
+    // carry two rows called "xAI realtime (voice)" and "OpenAI realtime (voice)", and pasting a key
+    // on one of them answered that the vendor could not be reached -- MEASURED by Jason at 07:49 on
+    // 2026-09-10 -- because this panel proves a key by fetching the row's catalog and a realtime
+    // address is a websocket. Those rows are deleted (cp/proxy.mjs says why). One line here so the
+    // operator who goes looking is sent to the block that does take it, rather than concluding the
+    // feature is broken.
+    note.push("the key the product talks with is under Keys the product uses, on the System health panel, not here");
     $("providersNote").textContent = note.join(" - ");
 
     const host = $("providers");

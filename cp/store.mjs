@@ -286,7 +286,8 @@ CREATE TABLE IF NOT EXISTS mail_senders (
 -- it is, never any of the mail). The readable row with the subject on it belongs to the workspace,
 -- in its own mail-sent.jsonl on its own volume, read by its own console.
 --
--- outcome is "sending" from the moment the row is claimed, then "sent", "failed" or "no_key".
+-- outcome is "sending" from the moment the row is claimed, then "sent", "failed", "no_key" or
+-- "key_unreachable" (KEYS-1: the relay has a control plane and could not read the sending key).
 -- The claim comes BEFORE the mail goes: an unsent mail is recoverable and an unlogged send is not,
 -- so a crash in between leaves a row reading "sending", which counts toward the cap and reads as
 -- "we do not know", which is the safe direction.

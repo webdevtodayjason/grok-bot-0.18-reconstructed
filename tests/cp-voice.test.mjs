@@ -31,9 +31,11 @@
 //   the Spend block says not-measured IN WORDS when nothing has ever reported, and never 0 minutes.
 //   That rule is written at cp/admin/admin.js:1303 after a real screenshot bug;
 //
-//   and the two realtime rows on the Providers panel are INERT: providerList() offers no model from
-//   them and no key pasted into one reaches LiteLLM. This is the prove-or-drop test the wave's design
-//   asks for, and a leak means the rows are deleted rather than cp/admin.mjs patched.
+//   and the two realtime rows on the Providers panel are GONE. That was written here as a
+//   prove-or-drop test with deletion named as the answer if they ever became more than cosmetic, and
+//   KEYS-1 dropped them: a row whose address is a websocket cannot be proved by a panel that proves
+//   a key by fetching a catalog, so pasting a real key on one answered "could not be reached" and
+//   read as a vendor outage. The key the product talks with has its own door now (cp/secrets.mjs).
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
@@ -57,7 +59,7 @@ import {
   parseVendors,
   voiceSetting,
 } from "../cp/voice.mjs";
-import { PROVIDER_PRESETS, REALTIME_PRESET_IDS } from "../cp/proxy.mjs";
+import { PROVIDER_PRESETS } from "../cp/proxy.mjs";
 // The relay's own copy of the vendor table, imported for ONE purpose: to pin the two tables
 // together. The relay does not import this file at runtime and must not -- they are two services.
 import { VENDORS as RELAY_VENDORS } from "../ui/voice-edge.mjs";
@@ -670,67 +672,47 @@ test("the Spend block says not-measured in words when nothing was ever reported,
   assert.equal(html.includes("voiceSpend"), false, "the block makes its own nodes rather than needing markup");
 });
 
-// ---- the two realtime preset rows: prove or drop ---------------------------------------------------
+// ---- the two realtime preset rows: DROPPED ---------------------------------------------------------
+//
+// This file was written so that either outcome was assertable, and it asked for deletion by name if
+// the rows ever became more than cosmetic. They did, and Jason found it before this test did.
+//
+// MEASURED BY HIM in the live admin console 2026-09-10 07:49: he pasted a real xAI realtime key on
+// the "xAI realtime (voice)" row and read back "xAI realtime (voice) would not accept that key, so
+// nothing was stored. xAI realtime (voice) could not be reached (fetch failed)". The panel proves a
+// key by fetching the row's catalog, this row's address is a websocket, and with catalogPath empty
+// the proof falls through to POSTing wss:// over HTTP. So the control could never succeed and it
+// read as a vendor outage. That is worse than cosmetic: it sends the one person who holds the key to
+// the wrong screen and then blames the vendor. PROVIDERS-10, VOICE-4.
+//
+// The rows are gone from cp/proxy.mjs and the key has a door of its own (cp/secrets.mjs), which
+// proves an xAI key against https://api.x.ai/v1/models rather than a realtime address.
 
-test("the realtime preset rows exist, offer no model, and carry no catalog to read", () => {
-  for (const id of REALTIME_PRESET_IDS) {
-    const preset = PROVIDER_PRESETS[id];
-    assert.notEqual(preset, undefined, `${id} is not in PROVIDER_PRESETS`);
-    assert.equal(preset.kind, "realtime", "and kind is not a LiteLLM prefix here, which is why it is its own word");
-    assert.deepEqual([...preset.curated], [], `${id} must offer no model: a spoken session does not go through the proxy`);
-    assert.equal(String(preset.catalogPath ?? ""), "", `${id} must have no catalog to read`);
-    assert.equal(preset.bootstrapEnv.length > 0, true, `${id} names its ~/.api_keys slot`);
+test("no realtime row is on the Providers panel's preset table any more", () => {
+  for (const id of ["xai-realtime", "openai-realtime"]) {
+    assert.equal(PROVIDER_PRESETS[id], undefined, `${id} is back on the Providers panel, where its key cannot be proved`);
   }
-  // The authoritative table is cp/voice.mjs, not this one. These rows feed nothing the relay reads.
-  assert.equal(REALTIME_PRESET_IDS.length, Object.keys(REALTIME_VENDORS).length);
+  // AND NOT BY NAME EITHER, so a row re-added under a different id is caught too. `kind: "realtime"`
+  // was this table's own word for a row that is not a LiteLLM deployment; nothing on this panel may
+  // wear it, because everything on this panel is proved by fetching a catalog over HTTP.
+  for (const [id, preset] of Object.entries(PROVIDER_PRESETS)) {
+    assert.notEqual(String(preset.kind ?? ""), "realtime", `${id} is a realtime row on a panel that proves keys over HTTP`);
+    assert.equal(String(preset.baseUrl ?? "").startsWith("wss:"), false, `${id} has a websocket address, which no proof on this panel can reach`);
+  }
+  // The authoritative table for what this product can talk to is cp/voice.mjs, and it is untouched:
+  // deleting the cosmetic rows must not delete a vendor.
+  assert.equal(Object.keys(REALTIME_VENDORS).length, 2, "the vendor table lost a vendor");
 });
 
-test("providerList offers no model from the realtime rows and nothing mints a credential for them", async () => {
-  // THE PROVE-OR-DROP TEST. If either of these leaks the answer is to DELETE both rows rather than
-  // patch cp/admin.mjs, which belongs to another wave: the rows are cosmetic, because the key a spoken
-  // session dials with is per workspace and lives in that workspace's own state file.
-  // A configured proxy, because with none the panel answers `providers: []` and says why -- so a run
-  // against an unconfigured one would pass this test by proving nothing at all.
-  const proxy = await startFakeProxy({ models: [] });
-  const cp = await startControlPlane({
-    env: { CP_RELAY_TOKEN: RELAY_TOKEN, CP_PROXY_URL: proxy.url, CP_PROXY_MASTER_KEY: proxy.masterKey },
-  });
-  try {
-    const answer = await cp.admin("GET", "/v1/admin/providers");
-    assert.equal(answer.status, 200, answer.text);
-    assert.notEqual(answer.body.providers?.length ?? 0, 0, "the panel answered no providers at all, so nothing below is a measurement");
-    const rows = Array.isArray(answer.body.providers) ? answer.body.providers : [];
-    for (const id of REALTIME_PRESET_IDS) {
-      const row = rows.find((one) => one.id === id);
-      assert.notEqual(row, undefined, `${id} is not on the panel`);
-      // NOT ONE MODEL, from the curated list or from a catalog. This is the assertion the design asks
-      // for against providerList(): a realtime model offered as a chat model would be picked, pinned
-      // into a box and would fail every request.
-      assert.deepEqual(row.catalog.models, [], `${id} offered a model: ${JSON.stringify(row.catalog.models)}`);
-      assert.equal(row.keys.length, 0, `${id} holds no key`);
-    }
-
-    // And nothing anywhere turns one of these rows into a LiteLLM deployment or credential. The
-    // plan-model list is what a customer's box is ever pointed at.
-    const aliases = (Array.isArray(answer.body.planModels) ? answer.body.planModels : []).map((one) => String(one.alias ?? ""));
-    for (const id of REALTIME_PRESET_IDS) {
-      assert.equal(aliases.some((alias) => alias.includes(id)), false, `${id} has a plan model, which it must not`);
-    }
-
-    // THE FENCE, MEASURED. A key pasted into one of these cards must not reach LiteLLM. It does not:
-    // the realtime endpoint is a websocket address, so the proof step cannot complete against it and
-    // the route refuses before it stores anything. The residual sharp edge -- a panel control that can
-    // never succeed, refusing with a sentence about reachability -- is filed as VOICE-4, whose fix is
-    // a read-only card and lives in cp/admin.mjs.
-    const pasted = await cp.admin("POST", `/v1/admin/providers/${REALTIME_PRESET_IDS[0]}/keys`, { apiKey: "xai-not-a-real-key-0123456789" });
-    assert.equal([409, 502].includes(pasted.status), true, `a realtime key must not be stored, got ${pasted.status}: ${pasted.text}`);
-    const after = await cp.admin("GET", "/v1/admin/providers");
-    const realtimeRow = (Array.isArray(after.body.providers) ? after.body.providers : []).find((one) => one.id === REALTIME_PRESET_IDS[0]);
-    assert.deepEqual(realtimeRow?.keys ?? [], [], "nothing was stored");
-    // And the value appears in no answer, which is cp/PROVIDERS-ROUTES.md section 5's rule.
-    assert.equal(pasted.text.includes("xai-not-a-real-key-0123456789"), false);
-    assert.equal(after.text.includes("xai-not-a-real-key-0123456789"), false);
-  } finally { await cp.dispose(); await proxy.close(); }
+test("the Providers panel says where the voice key goes instead of offering a row that cannot take one", async () => {
+  // The one line that replaces the two rows. Without it the operator who goes looking on this panel
+  // -- which is where the rows used to be -- finds nothing at all and concludes the feature is gone.
+  const source = await readFile(path.join(repoRoot, "cp/admin/admin.js"), "utf8");
+  assert.match(source, /Keys the product uses, on the System health panel, not here/,
+    "the Providers panel no longer points anywhere for the key the product talks with");
+  // In plain words on the operator's side: no vendor name, no route, no setting name.
+  const line = /note\.push\("([^"]*Keys the product uses[^"]*)"\)/.exec(source)?.[1] ?? "";
+  assert.equal(/xAI|OpenAI|Resend|wss:|\/v1\//.test(line), false, `the line names a vendor or a route: ${line}`);
 });
 
 // ---- the two tables cannot drift -----------------------------------------------------------------
