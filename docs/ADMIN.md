@@ -1134,6 +1134,41 @@ interview for ever. Measured on this Mac 2026-09-10: **30 PASS 0 FAIL**, the pre
 The separate end-to-end gate, `scripts/verify-onboard.mjs`, drives the sequence and the removal
 against a control plane with no browser at all.
 
+### The one that uses a real console
+
+`scripts/verify-onboard-r750.mjs` runs the whole thing **on a live control plane** and is the only
+gate in the tree that creates and destroys a real customer. It is not part of `npm test` and it
+refuses to start without being told, by name, where to do it and who to be:
+
+```sh
+CONSOLE=https://api.titanium.bot BOSS_EMAIL=<a throwaway super admin> BOSS_PASSWORD=<theirs> WELCOME_TO=<the one real address the welcome goes to> SHOTS=/some/empty/directory node scripts/verify-onboard-r750.mjs
+```
+
+Make the super admin with `node cp/cli.mjs account add` then `account promote`, and remove it with
+`account remove` when the run is done. **Never a real person's account**: the gate posts a password at
+the live door and writes a real row on the Sign-in attempts panel, which is why it says its own name
+there through `scripts/gate-agent.mjs`.
+
+What it proves, in order: the console opens; Add a client answers without waiting for the box; the
+temporary password is on the card; all five steps reach done with a screenshot at every transition and
+the wall clock read off the ledger's own timestamps; the welcome is a send row with a provider id and
+**no password and no link in it**; one sign-in link is minted, opened in a **cookie-less** browser,
+and lands the customer signed in; the first-run dialog is on their screen and **Titan has said
+something on it**, read off the screen rather than out of a gateway call; Titan holds a live address in
+the directory; and then Remove with the data switch on leaves the service, the container, the data and
+every address gone, the slug free, and every other workspace byte-identical to how it was found.
+
+Two habits it keeps that matter more than any single check. **It never prompts a box** -- every box
+read is `listAgents` and `getOnboardingState`, because `onboarding-state.ts` marks a box done for ever
+on the first read that finds a prompted conversation and `resetOnboarding` is 403 without
+`SAND_TEST_HOOKS`. And **the sign-in link never lands anywhere**: it is read out of a fresh mint, used
+once, and dropped, and every screenshot has the password and the link blanked out of the DOM before
+the picture is taken.
+
+If the run stops half way, the recovery is the product's own: press Retry on the row, and if it cannot
+be finished, Remove it with the data switch on. No hand cleanup on the box -- a hand cleanup means the
+product is missing a mechanism, and that is a gap row rather than an ssh session.
+
 It starts a control plane of its own on a free port with a throwaway data directory, a fake Coolify,
 a fake relay serving a built-in login-attempts fixture, and a fake GitHub. It needs no box, no docker
 and no network. The fixture has three stories in it because those are the three the panel exists to

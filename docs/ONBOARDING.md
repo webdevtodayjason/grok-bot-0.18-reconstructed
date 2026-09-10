@@ -797,6 +797,19 @@ prune, image prune, a broader image prune, `builder prune -af`. The R750 also ru
 Coolify's own stack, every other customer's box and about twenty more services, plus Jason's images.
 Fixed to `false` in ONBOARD-2.
 
+**A relay 401 does not mean a route exists.** The pre-flight for the R750 run was written to prove
+`POST /mail/product` and `POST /tenant/purge` were mounted by watching them answer 401
+unauthenticated. They do — and so does `/definitely-not-a-route-xyz` (measured on the R750
+2026-09-10, from inside the relay container). The relay refuses every unauthenticated request before
+it routes, so that probe proves only that the relay is up. A route's presence is proved with a
+credential, or by the thing it does.
+
+**A cp restart during an invite wrote into a closed database.** The invite is the first piece of work
+on this control plane that outlives the response that started it, and the shutdown closed the store
+under it: `statement has been finalized` on stderr with nothing an operator could act on, and the
+job's last ledger row — the row that says where it got to — lost. `createApp` hands out its
+`onboarding` handle now and the shutdown settles it under a five second cap before closing the store.
+
 **The control plane cannot delete a tenant's data.** Measured from inside `titanbot-cp` on the R750
 2026-09-10: cp runs as uid 1001, the box's `volumes/{data,workspace,chrome}` are 0700 owned by uid 1000,
 and both `ls` and `touch` answer Permission denied. Only the relay (root, `/data/titanbot` read-write,
@@ -869,6 +882,55 @@ Two things the gate is built to catch rather than to confirm:
 failed**; `tests/cp-provision.test.mjs` **35 passed, 0 failed**. A delete whose remote half landed
 150 ms late was waited for and reported `provedBy=docker` after 175 ms.
 
-The whole-sequence arm reports **not measured** with the reason on a tip where `POST
-/v1/admin/clients` is not the job-shaped route yet, so this file is green before the sequencer lands
-and measures the wave once it has.
+The whole-sequence arm reported **not measured** with the reason on a tip where `POST
+/v1/admin/clients` was not yet the job-shaped route. On the merged tip it measures: **26 passed, 0
+failed, 0 not measured** on this Mac, 2026-09-10, node v22.23.1.
+
+Three things had to be true for that arm to measure anything at all, and none of them was obvious:
+
+- **`CP_BOX_URL_OVERRIDE`** is how a gate points the sequence's box reads at a stub. A box answers at
+  `http://titanbot-box-<uuid>:1340` on the docker bridge, which a gate running its own control-plane
+  process has no route to. It goes through `loadConfig`, **not** `process.env`, because the gate builds
+  its control plane in-process and never sets the ambient environment. It is empty on the R750 and the
+  install never writes it; a production value would send every customer's box read to one address.
+- **`tests/cp-support.mjs`'s fake relay answers `read: true`** on the ceiling and running routes,
+  because the real relay does (`ui/server.mjs`, the ceiling route and the running route both carry
+  it). It means THE BOX ANSWERED, as against the route merely working. Without it the fake looked
+  healthy while the sequence correctly read every answer as "nothing could be read back" and stopped
+  amber before the welcome.
+- **That fake's sweep mints through the control plane's own door.** The real relay mints nothing
+  itself: it reads the roster and POSTs it to `/v1/relay/mail/mint`, which writes the row that
+  `cp/mail.mjs directory(slug)` later reads. A sweep that only answered 200 left step 4 retrying to
+  its budget, which is right — step 4's green is a directory read and never the sweep's own answer.
+
+### 14.1 The seam, and why it has its own file
+
+`tests/onboard-seam.test.mjs` runs the real sequencer against the **real** welcome sender and the
+**real** removal library, with nothing stubbed between them.
+
+It exists because of what happened on the first merged tip. The wave was built as three items that
+merge topologically, and each one's suite passes standalone by injecting a double for the other two.
+All three were green and **both of the things this wave is for were broken**:
+
+- `cp/onboard.mjs` looked for a flat `sendWelcome(asked)`; `cp/welcome.mjs` ships a `createWelcome()`
+  factory whose `send()` takes the owner's address as `email` and returns the link as `signInUrl`.
+  Every customer's welcome step would have gone amber.
+- `cp/admin.mjs` looked for `removeClient`/`plan`; `cp/decommission.mjs` ships a
+  `createDecommission()` factory returning `remove`/`plan`. Remove would have answered "this control
+  plane has no removal in it" on every press.
+
+Both call sites now accept the factory shape and the flat shape, so the doubles still work and the
+product works. Three more spellings had drifted the same way: the state route emitted `key`/`state`
+while `cp/cli.mjs`'s printer and the gate read `name`/`status` (both are carried now, or `signup add`
+prints `undefined` five times and collapses the rows into one); the gate asked for `welcome: true`
+where the route reads `sendWelcome`, so it ran five steps and mailed nobody; and the gate read the
+**first** `ready` ledger row rather than the last, which is the provisioner's older opinion rather
+than the box answering.
+
+And one that a double could never have shown: the adapter's first cut took the person's name from
+`plan.name`, which is the **company** — the invite route passes `name: company` when it starts the
+job. The first line of the first thing the product ever sends a customer read **"Hi Acme,"**. The
+greeting comes off the account row now.
+
+The rule this leaves behind: **a wave built as parallel items needs one test that uses none of their
+doubles.** Three green suites proved each item correct and proved nothing about the product.
