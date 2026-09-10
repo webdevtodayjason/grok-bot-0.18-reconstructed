@@ -690,10 +690,10 @@ So the leg makes two claims instead of one bad one:
 
 Reverting **both** base rules first is part of the leg: the drawer handles coming back must change
 the fingerprint, which is what shows the comparison can see a change at all. Measured on
-`grok-bot-local-vm`, 1440x900: reverting both changed **13** rects; reverting the column rule alone
-changed **none** — 931 of 933 elements with identical rects, the two left out being the agent rail's
-screen plate and its image, which redraw on the adapter's beat. `.window-bar` and `#transcript` came
-back byte-identical in both states (their byte counts move with the conversation on screen, so the
+`grok-bot-local-vm`, 1440x900: drawing the drawer nodes changed **13** rects; hiding them again
+returned **every** rect in the document to the shipped one — **997 of 997**, with **0** moving on
+their own in the same state. `.window-bar` and `#transcript` came
+back byte-identical in both states (88,886 and 308,265 bytes; the counts move with the conversation on screen, so the
 claim is the equality, not the number). The leg also re-reads the three numbers the same box
 gave before the ship: shell column `1440px`, `.composer` bottom **856**, `.send-button` x
 **959..1053**. Both full-page screenshots are saved anyway, for a person to look at.
@@ -790,10 +790,34 @@ Two things the gate does deliberately, and says so in its own header:
   to be where they can press it, and "it works once you scroll to it" is the failure this gate
   exists to catch.
 
-Measured on `grok-bot-local-vm`, this Mac, 2026-09-09: `verify-mobile --all` **135 passed, 0
-failed**, eleven legs at both device sizes.
+**The budget is the ceiling, and the tail legs can run into it.** Eleven legs at two device sizes do
+not always fit the 260 s that keeps the gate inside the 300 s run ceiling, and the two that wait on
+the box — attach and send — are the last before the desktop leg. On the first full run they were
+handed a 1 ms wait and reported a tray that never rendered and a message that never landed: a failure
+about the product for a fault in the gate's own clock. Both now say how much budget is left and skip,
+and they are measured in a run of their own.
+
+Measured on `grok-bot-local-vm`, this Mac, 2026-09-10: `verify-mobile --all` **133 passed, 0 failed,
+1 skipped** (at 430x932 that conversation was shorter than the viewport, so there was nothing to
+scroll), and `verify-mobile --attach --send` **13 passed, 0 failed** with the budget to itself. Two
+runs, each inside the ceiling.
+
+**On the R750 demo tenant through https://console.titanium.bot**, real Chrome, 2026-09-10 01:57Z,
+signed in as a throwaway customer account minted in the cp container and removed afterwards. At
+**1440x900**: shell column `1440px`, `.composer` bottom **856**, `.send-button` x **959..1053** — the
+same three numbers the local box gives; both drawer handles in the DOM and **neither laid out**; the
+scrim inside the stage; 0 unreachable past the right edge. At **390x844**, device scale 3, touch,
+iPhone UA: shell column **390px**, **0** unreachable, document exactly the viewport wide, the viewport
+meta carrying `viewport-fit=cover` and `interactive-widget=resizes-content`, the composer at **16px**,
+every control on screen at ≥ 44x44 hit-testing to itself, a real thumb drag moving a **21,453 px**
+transcript in a 512 px band while the document stayed at 0, both drawers opening with a thumb landing
+in the drawer rather than on the shelf above it, the uncovered sliver beside each really being the
+scrim and closing on a tap, and the marketplace 354 px wide with 24 rows and 0 unreachable. **21
+checks at the phone size, 6 at desktop, 0 failures.** One thing that run corrected about the gate
+rather than the product: a scrim tap aimed at the scrim's own centre lands on the open drawer, so the
+point has to be the sliver on the far side — which is what `verify-mobile` already does.
 
 | Gate | What it covers |
 |---|---|
-| `node --test tests/machine-room-mobile.test.mjs` | that the phone pass stayed inside its breakpoint: exactly two base rules, the dock really shrinkable, the composer's font and its eight-line cap moving together, the viewport meta, the scrim inside the stage, and a line-count ceiling on `app.js`'s share |
+| `node --test tests/machine-room-mobile.test.mjs` | that the phone pass stayed inside its breakpoint: exactly one base rule, the shell's column track inside it and not outside, the dock really shrinkable, the composer's font and its eight-line cap moving together, the viewport meta, the scrim inside the stage, and a line-count ceiling on `app.js`'s share |
 | `node scripts/verify-mobile.mjs --all` | the browser legs at both device sizes on `grok-bot-local-vm`, then read-only on `console.titanium.bot` |

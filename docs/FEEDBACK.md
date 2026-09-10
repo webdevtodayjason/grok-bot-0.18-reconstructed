@@ -452,10 +452,37 @@ Mac, 2026-09-09:**
   the page open and never reloaded** draws its own card, waits its turn behind the one already
   there, and clears the box's row when answered; and a reload draws exactly what is still pending,
   with no settled card and no fold row.
-- `node --test tests/machine-room-feedback.test.mjs`: **23 passed, 0 failed** (16 before). Seven new
-  cases, including that the fold is not scheduled until `resolveProblemReport` has answered, that
-  three SSE ticks inside the 4 s floor read the box once, and that the id set which stops a report
-  being offered twice survives the fold.
+- `node --test tests/machine-room-feedback.test.mjs`: **28 passed, 0 failed** (16 before). Twelve new
+  cases, including that the fold is not scheduled until `resolveProblemReport` has **succeeded** and
+  that a resolve the box refused leaves the card drawn saying so, that a stray Dismiss never folds a
+  pending card, that three SSE ticks inside the 4 s floor read the box once **and that the standing
+  beat exists as well as the subscribe one**, that a card the person opened themselves goes to the
+  head of the queue, and that the id set which stops a report being offered twice survives the fold.
+- `verify-feedback --agent` on grok-bot-local-vm: **10 passed, 0 failed**. A real scratch agent was
+  asked for **two** reports in one turn and wrote both; the box handed them back oldest first
+  (`01:22:43.666Z` then `01:22:43.669Z`), each with an id of its own, each ProblemReport v1 with the
+  agent's own title; both were resolved and the box was put back the way the leg found it.
+
+**The green Sent state, on the R750 demo tenant through https://console.titanium.bot, real Chrome at
+1440x900, 2026-09-10 01:59Z, signed in as a throwaway customer account minted in the cp container and
+removed afterwards.** This is the only place it can be measured: the local relay has no control plane
+wired, so the local proof of the settled arc goes through the identical drop branch. **14 checks, 0
+failures.** Report a problem drew exactly one pending card with its Send on screen; Send settled it in
+**0.1 s** to *"Sent. The developers have it."*, with a Dismiss, no "copy above" promise and no "still
+holds its own copy" line; it folded itself into *"Sent to the developers: A problem with this
+product"* **5.8 s** after the settle; a reload showed neither the settled card nor its fold row and
+nothing still pending. The report is **#7** in the control plane and was suppressed afterwards.
+**Report #4 was not touched** and still reads `new`.
+
+**And the watch proved itself in production inside five minutes of the ship.** The relay was restarted
+at about 01:52Z on 2026-09-10. At **01:56:56Z** the control plane took report **#5**, `titanium`, *"No
+bot template system visible to Titan — BOTS-1 not yet landed"* — the exact report that never drew a
+card on Jason's screen. At **01:57:21Z**, twenty-five seconds later, report **#6**, *"No X/Twitter API
+connector available"*, a **third** stranded report nobody knew was in that box's pending file. Both
+had been sitting there since 2026-09-09. A send only ever happens when a person presses Send on a
+card, so those two rows are the watch drawing cards that did not exist before this ship, one at a
+time in the box's own order, and somebody answering them. The control plane had one of Titan's three
+reports before the ship. It has all three now.
 - `verify-mobile --card` on a phone (390x844 and 430x932): the card a person opens by hand is **333
   px** wide with **0** descendants past the edge and a 16px box to type into (442 px wide at x 0 and
   an 11px box before this ship), its Send is a 44x44 target with nothing on top of it, and **Not now
