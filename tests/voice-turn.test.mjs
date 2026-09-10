@@ -607,36 +607,42 @@ test("VOICE-7: a turn reaches the page as open, partials, then ONE final carryin
     await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
 
     stub.emitSpeechStart();
-    await session.settle(() => session.of("heard").some((f) => f.phase === "open"), "the panel being opened");
-    const opened = session.of("heard").find((f) => f.phase === "open");
-    assert.equal(opened.text, "", "the panel opens with no words, which is also all a service that sends none ever gives");
-    assert.equal(opened.turn, 1, "and it is stamped with the utterance it belongs to");
+    await session.settle(() => session.of("hear-begin").length > 0, "the panel being opened");
+    const opened = session.of("hear-begin").at(-1);
+    assert.equal(opened.turn, 1, "the panel opens stamped with the utterance it belongs to");
+    assert.equal(session.of("hear").length, 0, "and with no words, which is also all a service that sends none ever gives");
 
     // xAI's transcript is CUMULATIVE and self-correcting, so each of these carries the whole sentence
     // so far. The relay normalises it to replace-whole before it reaches the page.
     stub.emitUserTranscript("what is");
     stub.emitUserTranscript("what is the team");
     stub.emitUserTranscript("what is the team working on");
-    await session.settle(() => session.of("heard").filter((f) => f.phase === "partial").length >= 3, "three partials");
-    const partials = session.of("heard").filter((f) => f.phase === "partial").map((f) => f.text);
+    await session.settle(() => session.of("hear").length >= 3, "three partials");
+    const partials = session.of("hear").map((f) => f.text);
     assert.deepEqual(partials.slice(0, 3), ["what is", "what is the team", "what is the team working on"],
       "the words arrive as whole sentences to replace, not as pieces to append");
-    assert.ok(session.of("heard").filter((f) => f.phase === "partial").every((f) => f.turn === 1));
+    assert.ok(session.of("hear").every((f) => f.turn === 1));
+    assert.ok(session.of("hear").slice(0, 3).every((f) => f.final === false), "none of those is the settled one");
 
     // The settled transcript is ANOTHER PARTIAL on purpose: it races the tool call below, and a panel
     // that dissolved here would flash back open a moment later.
     stub.emitUserTranscriptDone("what is the team working on");
-    await session.settle(() => session.of("heard").filter((f) => f.phase === "partial").length >= 4, "the settled transcript");
-    assert.equal(session.of("heard").filter((f) => f.phase === "final").length, 0,
+    await session.settle(() => session.of("hear").some((f) => f.final === true), "the settled transcript");
+    assert.equal(session.of("hear-end").length, 0,
       "the settled transcript must not end the turn: the tool call does");
+    assert.equal(session.of("heard-confirmed").length, 0);
 
     stub.emitSpeechStop();
     stub.emitToolCall({ name: "titan", args: { message: "what is the team working on" }, triple: true });
-    await session.settle(() => session.of("heard").some((f) => f.phase === "final"), "the final frame");
-    const finals = session.of("heard").filter((f) => f.phase === "final");
-    assert.equal(finals.length, 1, "one call_id on three surfaces is still ONE final, or the panel would dissolve twice");
-    assert.equal(finals[0].lands, true, "these bytes become a row in the conversation");
+    await session.settle(() => session.of("heard-confirmed").length > 0, "the confirmation");
+    const finals = session.of("heard-confirmed");
+    assert.equal(finals.length, 1, "one call_id on three surfaces is still ONE confirmation, or the panel would dissolve twice");
+    assert.equal(finals[0].landed, true, "these bytes become a row in the conversation");
     assert.equal(finals[0].text, "what is the team working on");
+    // And the turn is closed exactly once, which is what actually takes the panel away.
+    await session.settle(() => session.of("hear-end").length > 0, "the turn being closed");
+    assert.equal(session.of("hear-end").length, 1);
+    assert.equal(session.of("hear-end")[0].reason, "sent");
 
     // THE SAME BYTES. This is the whole promise: the last words the panel shows are the string the
     // relay handed to Titan, under the id the durable row will carry.
@@ -673,13 +679,13 @@ test("VOICE-7: one utterance's words never bleed into the next one", async () =>
     stub.emitSpeechStart();
     stub.emitUserTranscript("open ");
     stub.emitUserTranscript("the box");
-    await session.settle(() => session.of("heard").some((f) => f.text === "open the box"), "the first utterance");
+    await session.settle(() => session.of("hear").some((f) => f.text === "open the box"), "the first utterance");
     // No settled transcript at all for that one, which is the case the defect needed.
     stub.emitSpeechStart();
     stub.emitUserTranscript("what ");
     stub.emitUserTranscript("time is it");
-    await session.settle(() => session.of("heard").some((f) => f.turn === 2 && f.phase === "partial" && f.text.length > 0), "the second utterance");
-    const second = session.of("heard").filter((f) => f.turn === 2 && f.phase === "partial").map((f) => f.text);
+    await session.settle(() => session.of("hear").some((f) => f.turn === 2 && f.text.length > 0), "the second utterance");
+    const second = session.of("hear").filter((f) => f.turn === 2).map((f) => f.text);
     assert.deepEqual(second, ["what ", "what time is it"], `the second utterance read ${JSON.stringify(second)}`);
     assert.ok(!second.some((one) => one.includes("box")), "the first utterance bled into the second");
   } finally {
@@ -703,12 +709,12 @@ test("VOICE-7: a transcription that gives up takes the panel away instead of lea
     await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
     stub.emitSpeechStart();
     stub.emitUserTranscript("half a sent");
-    await session.settle(() => session.of("heard").some((f) => f.phase === "partial"), "a partial");
+    await session.settle(() => session.of("hear").length > 0, "a partial");
     stub.emitUserTranscriptFailed();
-    await session.settle(() => session.of("heard").some((f) => f.phase === "final"), "the panel being taken away");
-    const final = session.of("heard").filter((f) => f.phase === "final").at(-1);
-    assert.equal(final.lands, false, "there is no row, and saying there is one would leave the page waiting for it");
-    assert.equal(final.text, "", "and no words, because none were heard");
+    await session.settle(() => session.of("hear-end").length > 0, "the panel being taken away");
+    const final = session.of("hear-end").at(-1);
+    assert.equal(final.reason, "no-words", "the turn ends, and says which of the ways it could end this was");
+    assert.equal(session.of("heard-confirmed").length, 0, "nothing was confirmed, so the panel has no row to wait for");
     assert.equal(gateway.of("sendPrompt").length, 0, "nothing reached Titan's conversation");
   } finally {
     await session?.close();
@@ -736,17 +742,27 @@ test("VOICE-7: a spoken yes that closes a card says plainly that no row is comin
     stub.emitSpeechStart();
     stub.emitToolCall({ name: "titan", args: { message: "deploy the relay" }, callId: "call_one", triple: false });
     await session.settle(() => session.of("said").length > 0, "the card read out as a question");
-    const firstFinal = session.of("heard").filter((f) => f.phase === "final").at(-1);
-    assert.equal(firstFinal.lands, true, "turn one did become a row");
+    const firstFinal = session.of("heard-confirmed").at(-1);
+    assert.equal(firstFinal.landed, true, "turn one did become a row");
+
+    // TURN TWO WAITS FOR THE MICROPHONE TO BE OPEN AGAIN, which is not ceremony: the relay holds the
+    // microphone shut for the whole of Titan reading the card out plus the echo tail, and refuses to
+    // open a panel in that window, because words arriving then are his own coming back through the
+    // speaker. So a yes spoken over the top of him is not heard by anybody, here or in a real room.
+    // Measured on this Mac: without this wait the second turn's frames were suppressed and the test
+    // was asserting against a panel the relay had correctly never opened.
+    await session.settle(() => session.of("speak-end").length > 0, "Titan finishing the question");
+    const holdUntil = Number(session.of("speak-end").at(-1).holdUntilMs ?? 0);
+    await new Promise((resolve) => { const t = setTimeout(resolve, Math.max(0, holdUntil - Date.now()) + 60); t.unref(); });
 
     // Turn two is the answer, and it closes the card rather than becoming prose.
     stub.emitSpeechStart();
+    await session.settle(() => session.of("hear-begin").length >= 2, "the panel opening for the answer");
     stub.emitToolCall({ name: "titan", args: { message: "yes" }, callId: "call_two", triple: false });
-    await session.settle(() => session.of("heard").filter((f) => f.phase === "final").length >= 2, "the answer's own final frame");
-    const answer = session.of("heard").filter((f) => f.phase === "final").at(-1);
-    assert.equal(answer.text, "yes", "the panel still shows what was said");
-    assert.equal(answer.lands, false, "but no row is coming, and the panel must not wait for one");
-    assert.equal(answer.why, "answered-a-card");
+    await session.settle(() => session.of("hear-end").length >= 2, "the answer's own closing frame");
+    const answer = session.of("hear-end").at(-1);
+    assert.equal(answer.reason, "answered-card", "no row is coming, and the panel must not wait for one");
+    assert.equal(session.of("heard-confirmed").length, 1, "the yes was not confirmed as a row, because it never became one");
   } finally {
     await session?.close();
     await stub.close();
@@ -765,10 +781,10 @@ test("VOICE-7: an empty utterance is a turn that ends, not a panel left open", a
     await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
     stub.emitSpeechStart();
     stub.emitToolCall({ name: "titan", args: { message: "   " }, triple: false });
-    await session.settle(() => session.of("heard").some((f) => f.phase === "final"), "the turn ending");
-    const final = session.of("heard").filter((f) => f.phase === "final").at(-1);
-    assert.equal(final.lands, false);
-    assert.equal(final.why, "not-caught");
+    await session.settle(() => session.of("hear-end").length > 0, "the turn ending");
+    const final = session.of("hear-end").at(-1);
+    assert.equal(final.reason, "empty");
+    assert.equal(session.of("heard-confirmed").length, 0);
     assert.equal(gateway.of("sendPrompt").length, 0);
   } finally {
     await session?.close();

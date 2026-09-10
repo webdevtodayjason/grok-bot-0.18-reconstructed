@@ -735,7 +735,8 @@ that simply stops mid-way takes the panel away after eight seconds.
 
 ### The two ways to talk
 
-In **Settings**, on the **Talking** card, one row, **Talk mode**:
+In **Settings**, under **General** in the **System** group, beside Microphone and the talking
+switch, one row, **Talk mode**:
 
 | | what it does |
 |---|---|
@@ -795,25 +796,24 @@ wanted — the way out then is the button, which is always on the screen.
 
 ### Where the choice is stored, and the one thing about it that is not finished
 
-**It is yours, not your workspace's, and today that means it is per browser.** Everything else on the
-Talking card is written to one settings file per workspace; two people sharing a workspace would then
-fight over how their own button behaves, so this one row deliberately never goes through that door.
-The Save button on that card cannot carry it and the route never sees it. What holds it instead is
-this browser, which means it does not follow you to your phone and it is gone if you clear site data.
-It falls back to holding when there is nothing stored, in a private window, and in a browser set to
-refuse site data.
+**It is yours, not your workspace's, and today that means it is per browser.** Everything else about
+talking is written to one settings file per workspace; two people sharing a workspace would then fight
+over how their own button behaves, so this one row deliberately never goes through that door. No
+request body in the page carries it. What holds it instead is this browser — the same place the
+settings surface keeps Theme and the microphone choice, which are the two rows either side of it — so
+it does not follow you to your phone and it is gone if you clear site data. It falls back to holding
+when there is nothing stored, in a private window, and in a browser set to refuse site data.
 
-**That is the honest state and not the intended one.** The only per-person door on this product today
-is the one Notifications uses, and the settings surface being rebuilt in the wave beside this one is
-where a talk mode belongs. When that surface has a place for a person's own preferences, this row
-moves there and starts following the person rather than the browser; the page keeps its local copy
-either way, because the button is live the moment the console paints, before any route has answered,
-and it has to know which of the two things it is before the first press.
+**Per browser is not per person, and that is the unfinished part.** A person who sets always-listening
+on their laptop gets holding again on their phone. The only per-person door on this product today is
+the one Notifications uses; moving this row onto it is a later wave's, and it is written here rather
+than left to be discovered on a second device.
 
-Also on the card rather than under General because that surface had not landed when this shipped. The
-card is called Talking and it is where somebody looking for how talking works will open first, so it
-is not a bad home — but it is not the one that was specified, and the move is owned by whichever wave
-lands that surface.
+The page keeps its own copy whatever happens to that, because the button is live the moment the
+console paints, before any route has answered, and it has to know which of the two things it is before
+the first press. The settings row reaches it through one door, `setTalkMode`, and that door is also
+what ends the call you are in when you change the mode — the alternative is a live microphone whose
+control has changed meaning underneath you.
 
 The desktop app's global hotkey is a later wave. It presses this same control through the same pair of
 entry points, so it inherits whichever mode is set rather than being a third behaviour to keep in
@@ -823,19 +823,20 @@ step.
 
 **On this Mac (MacBook-Pro.local, darwin arm64), 2026-09-10**, in headless Chrome through
 playwright-core against grok-bot-local-vm, user agent `titanbot-gate/verify-voice.mjs`.
-`--leg overlay`, **113 of 113 checks**, four combinations: each viewport in each mode, with a real
-touch hold on the phone rather than a tap. The line opened in 40 to 657 ms; the words changed between
-reads rather than merely being present; and the spoken row landed exactly once per turn carrying text
-byte-identical to the panel's last words. The Talk mode row was driven through the real control in the
-real panel at both widths — 764 px wide at 1440x900 and 266 px at 390x844 — opening on the mode the
-page was in and keeping the other one when it was chosen. `npm test` 2834 of 2834.
+Two legs, run one at a time. `--leg overlay` drives the panel and the two modes in four
+combinations — each viewport in each mode, with a real touch hold on the phone rather than a tap —
+and measures the footer's rects before, during and after every turn. `--leg frames` reads the
+labelled frames off the page's own voice socket at both viewports and proves the confirmed bytes and
+the durable row are the same string. The line opened in tens to hundreds of milliseconds; the words
+changed between reads rather than merely being present; and the spoken row landed exactly once per
+turn carrying text byte-identical to the panel's last words, under a `voice:<session>:<n>` id.
 
-One thing that leg had to work around, and it is **not** this wave's: at 390x844 the console hides the
-gear on the shelf outright, and that gear is the only thing in the console that opens the settings
-panel. So on a phone there is no visible way into Settings at all — not to the Talking card, not to
-Inference, not to a key field. A person gets there through the control on a voice note, which presses
-that same hidden button. Filed as CONSOLE-PHONE-SETTINGS-1 with its owner and its proof; the Voice
-card has been unreachable that way since voice first shipped.
+One thing those legs had to work around, and it is **not** this wave's: at 390x844 the console hides
+the gear on the shelf outright, and that gear is the only thing in the console a person can press to
+open Settings. So on a phone there is no visible way into Settings at all — not to this row, not to
+Inference, not to anything else on that surface. The legs open it by naming the section instead, and
+each one reports which route a person really had at that width. Filed as CONSOLE-PHONE-SETTINGS-1 with
+its owner and its proof; every settings card has been unreachable that way since voice first shipped.
 
 | | 1440x900 | 390x844 |
 |---|---|---|

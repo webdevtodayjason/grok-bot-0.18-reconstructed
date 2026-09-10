@@ -1014,6 +1014,12 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   // Push to talk. The first hold opens the line; later holds are instant because it is still up.
   async function holdStart() {
     if (state.held) return;
+    // A NOTE ON SCREEN IS THE MODE, which is the same rule the toggle keeps and for the same reason.
+    // While a refusal is standing the first press CLEARS it rather than dialling into the refusal
+    // again; without this, holding the button on a workspace with talking switched off redials every
+    // time and there is no way out of it. That loop is what Jason was stuck in: "you can't exit out of
+    // this talk mode" (VOICE-6). The press after this one opens a line normally.
+    if (!state.on && state.notes.length > 0) { clearNotes(); return; }
     state.held = true;
     state.talking = true;
     clearIdleClose();
