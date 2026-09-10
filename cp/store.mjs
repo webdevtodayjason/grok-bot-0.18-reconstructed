@@ -392,6 +392,41 @@ CREATE INDEX IF NOT EXISTS voice_sessions_tenant ON voice_sessions (tenant, star
 -- UNIQUE, so a relay that retries its claim after a timeout gets the row it already has rather than
 -- a second row counting the same minutes twice. The relay mints the session id, so it is the handle.
 CREATE UNIQUE INDEX IF NOT EXISTS voice_sessions_session ON voice_sessions (session_id);
+-- ONBOARD-2. One row per welcome mail the PRODUCT sent a customer: who it went to, when, whether it
+-- went, and the provider's id. Shown on that client's row in the Clients panel beside Send again.
+--
+-- No TENANT_MIGRATIONS entry, for the reason written over admin_actions, feedback and voice_sessions
+-- above: db.exec(SCHEMA) runs on every open and CREATE TABLE IF NOT EXISTS makes a table that is not
+-- there. Only a new COLUMN on a table that already exists needs an ALTER.
+--
+-- WHY THIS IS NOT mail_send_log, which already holds "a mail went out". Three reasons and each one
+-- alone is enough. That table is a BOT's send: cp/mail.mjs openSend refuses an empty agentId and
+-- every product mail has one, so a welcome cannot be claimed there at all. Its rows count toward
+-- the workspace's 30-an-hour and 200-a-day caps, so a customer's own welcome would eat their first
+-- hour's allowance. And it is what the customer's own Mail card lists, so a welcome in it is a
+-- bot-less row in their Sent list on their first morning. docs/MAIL.md keeps the split.
+--
+-- WHAT IS NOT IN HERE AND NEVER WILL BE: no subject, no body, no html, no sign-in link and no
+-- password. The link is an unrevocable bearer credential in a URL (cp/welcome.mjs mintSignInLink)
+-- and the password is shown once on the card and stored only as a scrypt hash. A row is a receipt,
+-- not a copy of the mail.
+--
+-- instead_of is the OWNER's address when the operator sent the welcome somewhere else, which is
+-- what the R750 measurement does and what a card has to be able to say in plain words. Empty on
+-- an ordinary send.
+CREATE TABLE IF NOT EXISTS welcome_sends (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant     TEXT NOT NULL,
+  email      TEXT NOT NULL,
+  instead_of TEXT NOT NULL DEFAULT '',
+  at         INTEGER NOT NULL,
+  actor      TEXT NOT NULL DEFAULT '',
+  outcome    TEXT NOT NULL,
+  resend_id  TEXT NOT NULL DEFAULT '',
+  shape      TEXT NOT NULL DEFAULT 'link+password',
+  detail     TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS welcome_sends_tenant ON welcome_sends (tenant, id);
 `;
 
 /**
@@ -675,6 +710,24 @@ export function openStore(options = {}) {
   const selectVoiceByPrefix = statement("SELECT * FROM voice_sessions WHERE started_at LIKE ? ORDER BY tenant, started_at, id");
   const selectVoiceAll = statement("SELECT * FROM voice_sessions ORDER BY tenant, started_at, id");
   const countVoiceRows = statement("SELECT COUNT(*) AS n FROM voice_sessions");
+  // ONBOARD-2. The welcome mail's receipt. Ten columns, none of which is a secret: see the DDL for
+  // what is deliberately not in here and why this is not mail_send_log.
+  const insertWelcomeSend = statement(
+    "INSERT INTO welcome_sends (tenant, email, instead_of, at, actor, outcome, resend_id, shape, detail)"
+    + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  const selectWelcomeSends = statement("SELECT * FROM welcome_sends WHERE tenant = ? ORDER BY id DESC LIMIT ?");
+  const welcomeSendRow = (record) => (record == null ? null : {
+    id: Number(record.id),
+    tenant: String(record.tenant ?? ""),
+    email: String(record.email ?? ""),
+    insteadOf: String(record.instead_of ?? ""),
+    at: Number(record.at ?? 0),
+    actor: String(record.actor ?? ""),
+    outcome: String(record.outcome ?? ""),
+    resendId: String(record.resend_id ?? ""),
+    shape: String(record.shape ?? ""),
+    detail: String(record.detail ?? ""),
+  });
   const voiceRow = (record) => (record == null ? null : {
     id: Number(record.id),
     sessionId: String(record.session_id ?? ""),
@@ -1240,6 +1293,36 @@ export function openStore(options = {}) {
     },
     countAgentMailSends(tenant, agentId, since = "") {
       return sendWindow(countAgentSendRows.get(String(tenant ?? ""), String(agentId ?? ""), String(since))).count;
+    },
+
+    // ---- the welcome mail's receipt (ONBOARD-2) ---------------------------------------------------
+
+    /**
+     * One row per welcome the product sent. Who, whom, when, what happened and the provider's id.
+     *
+     * `at` is milliseconds, the same unit admin_actions uses and the unit a card renders from,
+     * rather than the ISO string mail_send_log holds. A caller passing an ISO string gets it parsed
+     * rather than a zero, because "when did this customer get their welcome" answered as 1970 is a
+     * bug nobody notices until somebody is asked to prove a mail went.
+     *
+     * NEVER a password, NEVER the sign-in link, NEVER the subject or the body. `detail` is a plain
+     * sentence about a failure, capped, and the relay's product-mail route is what keeps a provider's
+     * response body out of it.
+     */
+    recordWelcomeSend({ tenant, email = "", insteadOf = "", at = now(), actor = "", outcome = "sent", resendId = "", shape = "link+password", detail = "" } = {}) {
+      const when = Number.isFinite(Number(at)) ? Number(at) : Date.parse(String(at));
+      const answer = insertWelcomeSend.run(
+        String(tenant ?? ""), normalizeEmail(email), String(insteadOf ?? "").trim().toLowerCase(),
+        Number.isFinite(when) ? when : now(), String(actor ?? ""), String(outcome ?? ""),
+        String(resendId ?? ""), String(shape ?? ""), String(detail ?? "").slice(0, 500));
+      return Number(answer?.lastInsertRowid ?? 0);
+    },
+
+    /** One workspace's welcomes, newest first. The panel shows the first of these on the client row. */
+    listWelcomeSends(tenant, limit = 20) {
+      return selectWelcomeSends
+        .all(String(tenant ?? ""), Math.max(1, Math.min(200, Number(limit) || 20)))
+        .map(welcomeSendRow);
     },
 
     // ---- spoken sessions (VOICE-1) ---------------------------------------------------------------

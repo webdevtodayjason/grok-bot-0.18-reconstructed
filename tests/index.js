@@ -266,3 +266,11 @@ import "./asset-cache.test.mjs";
 import "./apps-wire-shapes.test.mjs";
 import "./console-app-hooks.test.mjs";
 import "./console-needs-you-attributes.test.mjs";
+
+// ONBOARD-2: the welcome mail the product sends a new customer, and the relay's two new doors.
+// The link, the words, the send and the receipt on the control plane side; the product-mail door
+// and the per-slug address sweep on the relay; and the purge, which is the only route in the
+// product that can delete a customer's data.
+import "./cp-welcome.test.mjs";
+import "./relay-product-mail.test.mjs";
+import "./relay-purge.test.mjs";
