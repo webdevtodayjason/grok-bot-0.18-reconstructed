@@ -79,6 +79,7 @@ import type {
   TurnMcpManagementToolFactoryInput,
   TurnProblemReportToolFactoryInput,
   TurnSendEmailToolFactoryInput,
+  TurnCodeTaskToolFactoryInput,
   TurnReadToolFactoryInput,
   TurnSubagentManagementToolFactoryInput,
   TurnWebFetchToolFactoryInput,
@@ -106,6 +107,8 @@ import { connectorCardEmissionToMessage, type BoxHelpOutcome } from "./runner/to
 import { appendProblemReport } from "./extensions/feedback/problem-reports.js";
 import { readAgentMailFor } from "./extensions/mail/agent-mail-store.js";
 import { postMailSend, resolveRelaySend } from "./extensions/mail/relay-send-client.js";
+import { postCode, resolveRelayCode } from "./extensions/code-sandbox/relay-code-client.js";
+import { ensureCodeTaskWatch } from "./extensions/code-sandbox/extension.js";
 import { createAgentPromptSession } from "./extensions/inference/extension.js";
 import { CONNECTOR_MANIFESTS } from "../shared/channels.js";
 import { parseStoredTrigger } from "./automations/automation-trigger.js";
@@ -1231,6 +1234,37 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
     const remoteBox = foreverBox.box as DynamicApi;
     const transcriptsDir = method(sessionApi, "transcriptsDir")?.() ??
       dirname(dirname(session.dbPath));
+
+    /**
+     * CODE-1. The box's ONE coding-task watcher, and the seam that tells an agent its task is done.
+     *
+     * `ensureCodeTaskWatch` is idempotent and returns the same object forever, which is the point: the
+     * watcher holds a timer and one file of bookkeeping at the sand root, and a box with four busy
+     * agents must not end up with four timers polling the same route and four copies of the
+     * announced-ids list racing over one file.
+     *
+     * The announce rides `resumeWithHiddenPrompt` -- the same entry a box hand-off, an MCP
+     * authorization and a listener connect already wake an agent through -- and is NEVER AWAITED:
+     * HANDBACK-1 measured that awaiting a revived turn made the call that triggered it answer
+     * 58,917 ms late. A facade without the method resolves to undefined, and the agent polls `status`
+     * itself, which is the named fallback rather than a broken tool.
+     */
+    const codeTaskWatcher = () => ensureCodeTaskWatch({
+      announce: (agentId, prompt) => {
+        void Promise.resolve(
+          method(transcript, "resumeWithHiddenPrompt")?.(
+            agentId,
+            prompt,
+            "Agent failed to resume after a coding task finished",
+          ),
+        ).catch(() => { /* the resume path reports its own failures to the tray */ });
+      },
+    });
+    // ONE guarded call, and the only thing that re-arms a watch across a host swap: `updateHostNow`
+    // restarts this process mid-task, and without this the open task would sit unwatched until the
+    // agent happened to start another one. Guarded on the relay resolving so a box with none -- a
+    // customer's own install -- reads no file, arms no timer and polls nothing.
+    if (resolveRelayCode() !== undefined) codeTaskWatcher();
 
     const actionAuditor = deps.decorateActionAuditor?.(
       extensions.api("action-audit"),
@@ -2822,6 +2856,29 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           readMail: agentId => readAgentMailFor(agentId, getSandRootDir()),
           resolveRelay: () => resolveRelaySend(),
           post: (target, body, timeoutMs) => postMailSend(target, body, timeoutMs),
+        },
+      }),
+      /**
+       * CODE-1. The coding tool's dependencies, and what is deliberately not among them: a model key,
+       * a model name, a spend cap, a docker socket, and any way to name any of them. The box asks the
+       * relay with the bearer it already presents for everything else; the relay mints a per-task key
+       * with a hard cap, revokes it when the task ends, and decides every limit. `resolveRelayCode`
+       * reads the relay's address and that bearer out of SAND_HOST_BUNDLE_S3_BASE_URL -- mail's own
+       * parse, imported rather than copied -- so a box with no relay in front of it resolves nothing
+       * and buildTurnTools withholds the tool with reason "no_relay".
+       *
+       * `watch` hands a started task to the box's ONE watcher, made lazily here, so the agent is told
+       * when a long task finishes instead of having to poll. The announce goes through the transcript
+       * facade's `resumeWithHiddenPrompt`, which is exactly how a box hand-off, an MCP authorization
+       * and a listener connect already wake an agent, and it is NEVER AWAITED: HANDBACK-1 measured
+       * that awaiting a revived turn made the call that triggered it answer 58,917 ms late.
+       */
+      createCodeTaskToolInputs: (): TurnCodeTaskToolFactoryInput => ({
+        dependencies: {
+          getAgentId: () => session.id,
+          resolveRelay: () => resolveRelayCode(),
+          post: (target, route, body, timeoutMs) => postCode(target, route, body, timeoutMs),
+          watch: (agentId, taskId, title) => codeTaskWatcher().watch(agentId, taskId, title),
         },
       }),
       createReactionToolInputs: turn => ({

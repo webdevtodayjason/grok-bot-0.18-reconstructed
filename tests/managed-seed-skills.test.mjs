@@ -49,12 +49,15 @@ const service = (cacheDir, fetch) => new SandManagedSkillsService({ getCacheDir:
 
 const SEEDS = unionWithSeedSkills([]).map((skill) => skill.id).sort();
 
-test("the bundle carries the four real managed skills, frontmatter and all", () => {
+test("the bundle carries the five real managed skills, frontmatter and all", () => {
   // email joined them with MAIL-1: an agent that is handed mail needs the recipe for answering it,
   // and this box fetches nothing from a dashboard, so a skill it is not shipped is a skill it
   // never has. onboarding joined them with ONBOARD-1, for the same reason: it is the recipe Titan
   // runs on a box's very first conversation, and it has to be there before anyone can log in.
-  assert.deepEqual(SEEDS, ["add-connector", "email", "learn-from-demonstration", "onboarding"]);
+  // code joined them with CODE-1, for the same reason again: it is the recipe that tells an agent
+  // when to hand real coding work to a throwaway machine, what that machine cannot do (it has no
+  // internet, so no clone and no install), and that it must read the result before reporting.
+  assert.deepEqual(SEEDS, ["add-connector", "code", "email", "learn-from-demonstration", "onboarding"]);
   const learn = unionWithSeedSkills([]).find((skill) => skill.id === "learn-from-demonstration");
   assert.equal(learn.name, "learn-from-demonstration", "the name comes from the file's frontmatter");
   // The frontmatter folds the description onto several lines (`description: >-`), which the

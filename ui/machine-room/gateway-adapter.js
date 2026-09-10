@@ -239,7 +239,17 @@
   const CATALOG_SETUP_TOOL_CALL = "createAgentToolCall";
   const CATALOG_LIST_ROW_TEXT = "Looked at the catalog";
   const CATALOG_READ_ROW_TEXT = "Read a template";
-  const TOOL_LABELS = { shellToolCall: "Shell", readToolCall: "Read", communicateUpdateToolCall: "Update", computerUseToolCall: "Computer", Task: "Task", [PROBLEM_REPORT_TOOL_CALL]: "Report", [MAIL_SEND_TOOL_CALL]: "Email", [CATALOG_LIST_TOOL_CALL]: "Catalog", [CATALOG_READ_TOOL_CALL]: "Catalog", [CATALOG_SETUP_TOOL_CALL]: "Catalog" };
+  // CODE-1. The coding sandbox rides `sendFinalSummaryToolCall`, whose args are a single string, and
+  // it gets an entry here for the same reason the rows above do: a name that is not in this table is
+  // headlined with the raw proto name, and a person must never read a tool name on their own screen.
+  // That one string is the VERB and the TITLE -- never the instructions, which are the customer's own
+  // job description and which the outline would serialize whole onto this page. On a refusal the
+  // marker sits in front of it, because the outline carries no result this page can read (a non-shell
+  // row is {kind, id, name, status, summary}), so without it a task the relay REFUSED would have
+  // drawn "Started a coding task" over a job that never began.
+  const CODE_TASK_TOOL_CALL = "sendFinalSummaryToolCall";
+  const CODE_TASK_FAILED_PREFIX = "not done: ";
+  const TOOL_LABELS = { shellToolCall: "Shell", readToolCall: "Read", communicateUpdateToolCall: "Update", computerUseToolCall: "Computer", Task: "Task", [PROBLEM_REPORT_TOOL_CALL]: "Report", [MAIL_SEND_TOOL_CALL]: "Email", [CATALOG_LIST_TOOL_CALL]: "Catalog", [CATALOG_READ_TOOL_CALL]: "Catalog", [CATALOG_SETUP_TOOL_CALL]: "Catalog", [CODE_TASK_TOOL_CALL]: "Coding" };
   const oneLine = (value, max) => {
     const text = String(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(" · ");
     return text.length > max ? `${text.slice(0, max - 1)}…` : text;
@@ -303,6 +313,41 @@
     if (item?.status === "failed") return name ? `Tried to set up ${name} from the catalog · it did not finish` : "A setup from the catalog did not finish";
     return name ? `Set up ${name} from the catalog` : "Set up a bot from the catalog";
   }
+  // CODE-1. The verb and the title out of the args JSON, the way mailSendRowText takes an address out
+  // of one. An unparseable row falls back to a sentence with no title in it rather than to the proto
+  // name, and an EMPTY verb does the same: neither is ever allowed to become "Coding" on its own.
+  function codeRowText(item) {
+    const found = String(item?.summary ?? "").match(/"finalSummary"\s*:\s*"([^"]*)"/);
+    const raw = found ? found[1].trim() : "";
+    // The marker is matched WITHOUT its trailing space, because serializeError mints it alone: the
+    // args of a tool call that threw are exactly "not done: ", the trim above takes the space off,
+    // and a startsWith on the full marker would have missed it and headlined the row "Started a
+    // coding task" over a call that never ran -- which is the one thing the marker exists to stop.
+    const marker = CODE_TASK_FAILED_PREFIX.trim();
+    const failed = raw === marker || raw.startsWith(CODE_TASK_FAILED_PREFIX);
+    const value = failed ? raw.slice(marker.length).trim() : raw;
+    const split = value.indexOf(" · ");
+    const verb = (split === -1 ? value : value.slice(0, split)).trim();
+    const title = split === -1 ? "" : value.slice(split + 3).trim();
+    const detail = title;
+    const say = (text) => ({ text, detail });
+    if (item?.status === "pending") {
+      if (verb === "status") return say("Checking on the coding task");
+      if (verb === "stop") return say("Stopping the coding task");
+      if (verb === "result") return say("Reading what the coding task did");
+      return say("Starting a coding task");
+    }
+    if (failed || item?.status === "failed") {
+      if (verb === "status") return say("Could not check the coding task");
+      if (verb === "stop") return say("Could not stop the coding task");
+      if (verb === "result") return say("The coding task's result is not ready");
+      return say("A coding task did not start");
+    }
+    if (verb === "status") return say("Checked on the coding task");
+    if (verb === "stop") return say("Stopped the coding task");
+    if (verb === "result") return say("Coding task finished");
+    return say("Started a coding task");
+  }
   function toolRowText(item) {
     const label = TOOL_LABELS[item.name] ?? String(item.name ?? "Tool").replace(/ToolCall$/, "");
     // FEEDBACK-1. The one row in this table that is not a receipt of work done for the person, and
@@ -322,6 +367,14 @@
     if (item.name === CATALOG_LIST_TOOL_CALL) return { text: CATALOG_LIST_ROW_TEXT, detail: "", kind: label };
     if (item.name === CATALOG_READ_TOOL_CALL) return { text: CATALOG_READ_ROW_TEXT, detail: "", kind: label };
     if (item.name === CATALOG_SETUP_TOOL_CALL) return { text: catalogSetupRowText(item), detail: "", kind: label };
+    // CODE-1. One plain sentence, and the TITLE as its detail -- which is the one difference from the
+    // rows above. The title is the agent's own short name for the job, written for the person and
+    // already shown on the Coding strip, so it is the one part of a coding task that belongs on screen.
+    // The instructions and the log never reach here; see codeRowText.
+    if (item.name === CODE_TASK_TOOL_CALL) {
+      const row = codeRowText(item);
+      return { text: row.text, detail: row.detail, kind: label };
+    }
     const headline = item.name === "shellToolCall" ? shellHeadline(item.summary, item.output)
       : item.name === "readToolCall" ? readHeadline(item.summary)
       : null;

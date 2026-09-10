@@ -91,6 +91,12 @@ import {
   type SendEmailDependencies,
 } from "./send-email-tool.js";
 import {
+  CODE_TASK_TOOL_HINT,
+  CODE_TASK_TOOL_ID,
+  createCodeTaskTool,
+  type CodeTaskDependencies,
+} from "./code-task-tool.js";
+import {
   CATALOG_SEARCH_TOOL_HINT,
   CATALOG_SEARCH_TOOL_ID,
   CATALOG_SETUP_TOOL_HINT,
@@ -102,6 +108,7 @@ import {
 } from "./sand-catalog-tools.js";
 import { readAgentMail } from "../../extensions/mail/agent-mail-store.js";
 import { resolveRelaySend } from "../../extensions/mail/relay-send-client.js";
+import { resolveRelayCode } from "../../extensions/code-sandbox/relay-code-client.js";
 import {
   createGenerateImageTool,
   type GenerateImageToolDependencies,
@@ -217,6 +224,7 @@ export const SAND_DYNAMIC_TOOL_HINTS: Readonly<Record<string, string>> = {
   REQUEST_BOX_HELP: "Hand your box's desktop to the user for a sign-in or manual step.",
   [PROBLEM_REPORT_TOOL_ID]: PROBLEM_REPORT_TOOL_HINT,
   [SEND_EMAIL_TOOL_ID]: SEND_EMAIL_TOOL_HINT,
+  [CODE_TASK_TOOL_ID]: CODE_TASK_TOOL_HINT,
   [CATALOG_SEARCH_TOOL_ID]: CATALOG_SEARCH_TOOL_HINT,
   [CATALOG_TEMPLATE_TOOL_ID]: CATALOG_TEMPLATE_TOOL_HINT,
   [CATALOG_SETUP_TOOL_ID]: CATALOG_SETUP_TOOL_HINT,
@@ -622,6 +630,8 @@ export interface TurnToolFactories {
   problemReport?(): TurnTool;
   /** MAIL-3. Guarded, unlike problemReport: see the push in buildTurnTools for the four facts. */
   sendEmail?(): TurnTool;
+  /** CODE-1. Guarded on the relay resolving, and never offered to a subagent runner. */
+  codeTask?(): TurnTool;
   mcpMeta?(dynamicToolRegistry?: DynamicToolRegistry): readonly TurnTool[];
   mcpManagement?(): readonly TurnTool[];
   /** TITAN-CATALOG-1. The bots half of the Marketplace: search it, read one, set one up. */
@@ -687,6 +697,10 @@ export interface TurnProblemReportToolFactoryInput {
 
 export interface TurnSendEmailToolFactoryInput {
   readonly dependencies: SendEmailDependencies;
+}
+
+export interface TurnCodeTaskToolFactoryInput {
+  readonly dependencies: CodeTaskDependencies;
 }
 
 export interface TurnCatalogToolFactoryInput {
@@ -771,6 +785,7 @@ export interface TurnToolsetFactoryInputs {
   readonly requestBoxHelp?: TurnBoxHelpToolFactoryInput;
   readonly problemReport?: TurnProblemReportToolFactoryInput;
   readonly sendEmail?: TurnSendEmailToolFactoryInput;
+  readonly codeTask?: TurnCodeTaskToolFactoryInput;
   readonly generateImage?: TurnGenerateImageToolFactoryInput;
   readonly webSearch?: TurnWebSearchToolFactoryInput;
   readonly webFetch?: TurnWebFetchToolFactoryInput;
@@ -833,6 +848,10 @@ export interface TurnToolsetHostFactoryProvider {
     turn: TurnToolsetTurnInput,
     props: TurnToolsetBuildProps,
   ) => TurnSendEmailToolFactoryInput;
+  readonly createCodeTaskToolInputs?: (
+    turn: TurnToolsetTurnInput,
+    props: TurnToolsetBuildProps,
+  ) => TurnCodeTaskToolFactoryInput;
   readonly createGenerateImageToolInputs?: (
     turn: TurnToolsetTurnInput,
     props: TurnToolsetBuildProps,
@@ -1202,6 +1221,12 @@ export function createTurnSendEmailToolFactory(
   return () => asTurnTool(createSendEmailTool(input.dependencies));
 }
 
+export function createTurnCodeTaskToolFactory(
+  input: TurnCodeTaskToolFactoryInput,
+): () => TurnTool {
+  return () => asTurnTool(createCodeTaskTool(input.dependencies));
+}
+
 export function createTurnGenerateImageToolFactory(
   input: TurnGenerateImageToolFactoryInput,
 ): () => TurnTool {
@@ -1329,7 +1354,7 @@ export function createTurnToolsetFactories(
 ): Pick<
   TurnToolFactories,
   "task" | "mcpMeta" | "computer" | "browser" | "browserDirect" | "screenshot"
-  | "fileTransfer" | "requestBoxHelp" | "problemReport" | "sendEmail" | "generateImage" | "webSearch" | "webFetch" | "externalAwait"
+  | "fileTransfer" | "requestBoxHelp" | "problemReport" | "sendEmail" | "codeTask" | "generateImage" | "webSearch" | "webFetch" | "externalAwait"
   | "boxAwait" | "externalShell" | "externalRead" | "boxShell" | "boxRead"
   | "sendMessage" | "sendToAgent" | "reaction" | "createAgent" | "updateAgent" | "updateState"
   | "subagentManagement"
@@ -1372,6 +1397,9 @@ export function createTurnToolsetFactories(
     ...(input.sendEmail === undefined
       ? {}
       : { sendEmail: createTurnSendEmailToolFactory(input.sendEmail) }),
+    ...(input.codeTask === undefined
+      ? {}
+      : { codeTask: createTurnCodeTaskToolFactory(input.codeTask) }),
     ...(input.generateImage === undefined
       ? {}
       : { generateImage: createTurnGenerateImageToolFactory(input.generateImage) }),
@@ -1478,6 +1506,9 @@ export function createTurnToolsetFactoriesForTurn(
     ...(provider.createSendEmailToolInputs === undefined
       ? {}
       : { sendEmail: provider.createSendEmailToolInputs(turn, props) }),
+    ...(provider.createCodeTaskToolInputs === undefined
+      ? {}
+      : { codeTask: provider.createCodeTaskToolInputs(turn, props) }),
     ...(provider.createGenerateImageToolInputs === undefined
       ? {}
       : { generateImage: provider.createGenerateImageToolInputs(turn, props) }),
@@ -1924,6 +1955,34 @@ export function buildTurnTools(
           && relay.token.length > 0;
         if (offered) tools.push(sendEmail);
         else withheld.push({ tool: "SendEmail", reason: "mail_send_off" });
+      }
+    }
+  }
+
+  // CODE-1. The coding sandbox, and two guards rather than four.
+  //
+  // NO RELAY, NO TOOL. `resolveRelayCode` is mail's parse of SAND_HOST_BUNDLE_S3_BASE_URL: it answers
+  // only on a box a relay serves its bundle to, because the relay is the process that holds the docker
+  // socket and mints the per-task model key. On a customer's own install, or a loopback dev host with
+  // no pin, it resolves nothing -- and the tool is WITHHELD rather than offered. An offered tool that
+  // can only refuse teaches the model a capability the product does not have on that box, and the
+  // model then promises it to a person. That is the same rule that keeps `repo` off the schema.
+  //
+  // A SUBAGENT never gets it. This guard is not about the chip, though the chip is a reason: it is
+  // about the proto carrier. `sendFinalSummaryToolCall` is the case task-client.ts:62 scans a
+  // subagent's own steps for, to pull out the subagent's final summary, so a code-task row inside a
+  // subagent run could be read back as that subagent's summary. Withholding it there means the two
+  // uses of the case can never share a conversation. The guard copies SendEmail's, including its own
+  // word in the trace so an operator can tell this apart from a box with no relay.
+  {
+    const codeTask = factories.codeTask?.();
+    if (codeTask !== undefined) {
+      if (host.isSubagentRunner) {
+        withheld.push({ tool: "CodeTask", reason: "subagent_runner" });
+      } else if (resolveRelayCode() === undefined) {
+        withheld.push({ tool: "CodeTask", reason: "no_relay" });
+      } else {
+        tools.push(codeTask);
       }
     }
   }

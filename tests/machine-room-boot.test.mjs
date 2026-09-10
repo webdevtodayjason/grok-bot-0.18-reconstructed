@@ -445,6 +445,8 @@ async function adapterHelpers() {
     ${grab("CATALOG_SETUP_TOOL_CALL", "const")}
     ${grab("CATALOG_LIST_ROW_TEXT", "const")}
     ${grab("CATALOG_READ_ROW_TEXT", "const")}
+    ${grab("CODE_TASK_TOOL_CALL", "const")}
+    ${grab("CODE_TASK_FAILED_PREFIX", "const")}
     ${TOOL_LABELS}
     ${grab("oneLine", "arrow-block")}
     ${grab("baseName", "const")}
@@ -452,6 +454,7 @@ async function adapterHelpers() {
     ${grab("readHeadline")}
     ${grab("mailSendRowText")}
     ${grab("catalogSetupRowText")}
+    ${grab("codeRowText")}
     ${grab("toolRowText")}
     ${grab("localPathOf")}
     ${grab("imagesOf", "const")}
