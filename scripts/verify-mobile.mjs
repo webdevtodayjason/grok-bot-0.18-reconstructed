@@ -20,12 +20,20 @@
 //   own scrollWidth against innerWidth: 125 px of console used to hang off the right edge with no
 //   scrollbar and no pan.
 //
-//   THE DESKTOP LEG IS AN A/B, NOT A COMMITTED PNG. The phone pass adds exactly two rules outside
-//   `@media (max-width: 690px)`: the shell's column track and the hide on the drawer nodes. The leg
-//   screenshots 1440x900 as shipped, then puts the console back the way it was (implicit column,
-//   drawer nodes laid out) and screenshots again, and fails on any differing pixel. That isolates
-//   this ship's own base rules instead of comparing against a baseline that would also carry every
-//   other wave's changes.
+//   THE DESKTOP LEG IS AN A/B, NOT A COMMITTED PNG. The phone pass adds exactly ONE rule outside
+//   `@media (max-width: 690px)`: the hide on the two drawer handles and the scrim, nodes that exist
+//   only at phone widths. The leg fingerprints every rect at 1440x900 as shipped, puts those nodes
+//   back (which must move rects, or the comparison is not evidence), hides them again, and requires
+//   the document to return to the shipped fingerprint rect for rect. That isolates this ship's own
+//   base rule instead of comparing against a baseline that would also carry every other wave's
+//   changes.
+//
+//   THE SHELL'S COLUMN TRACK WAS THE SECOND BASE RULE UNTIL THIS LEG CAUGHT IT. It was read as a
+//   no-op at a width where the implicit column already computes to 1440px. Measured here, it moved
+//   five rects -- the mascot and the room capsule with its title and subtitle, the capsule 227 px
+//   wide with the rule against 268 px and 20 px further left without it -- because an `auto` column
+//   lets a child's own intrinsic width feed back into the window bar's `1fr` track. It lives inside
+//   the breakpoint now, which is the whole reason this leg is an A/B and not an assertion.
 //
 // USAGE
 //   node scripts/verify-mobile.mjs --all                     every leg, one browser, one relay
@@ -36,6 +44,13 @@
 // The default target is a relay spawned from THIS worktree against grok-bot-local-vm, so the gate
 // always measures the tree it lives in rather than whatever tree the 7777 server was started from.
 // It takes the shared box lock while it does, and the whole run fits inside the 300 s ceiling.
+//
+// THE BUDGET IS THE CEILING, AND THE TAIL LEGS CAN RUN INTO IT. Eleven legs at two device sizes do
+// not always fit in 260 s on a busy box, and the two that wait on the box -- attach and send -- are
+// the last ones before the desktop leg. Rather than report a fault it did not see, each says how much
+// budget was left and skips. Measured on this Mac: `--all` 131 PASS / 0 FAIL / 3 SKIP with the three
+// named as out of budget, and `--attach --send` in its own run, with the whole budget to itself,
+// 13 PASS / 0 FAIL at both widths. Two runs, each inside the ceiling.
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
@@ -292,6 +307,17 @@ async function legSend(page, phone) {
   // The transcript is the box's, re-read on the adapter's own beat, so this waits for the box
   // rather than for a fixed pause: at 2.5 s one of the two widths landed and the other did not,
   // which is a busy box and not a layout fault.
+  // The transcript is the box's, re-read on the adapter's beat, so a slow box is not a layout fault
+  // and neither is a run that has no time left. Measured on this Mac: the second width's send is the
+  // last thing before the desktop leg, and on a 260 s budget `within()` handed it 1 ms and the leg
+  // reported "the message is not in the transcript" -- a failure about the product for a fault in
+  // the gate's own clock. A window too short to wait in is named as that and skipped.
+  const room = budgetLeft();
+  if (room < 8000) {
+    skip(`${phone.name}: and the message is in the transcript`, `only ${Math.max(0, Math.round(room / 1000))}s of this run's budget is left, which is not long enough to wait for the box`);
+    await shoot(page, `mobile-send-${phone.name}`);
+    return;
+  }
   const landed = await page.waitForFunction(
     (text) => (document.querySelector(".transcript")?.innerText ?? "").includes(text),
     line,
@@ -419,6 +445,14 @@ async function legPanels(page, phone) {
 
 async function legAttach(page, phone) {
   if (READ_ONLY) { skip(`${phone.name}: a staged picture shows an unclipped chip`, "staging a file is a write, and --url runs read-only"); return; }
+  // Same honesty as the send leg below it: staging a file waits on the page's own upload handler,
+  // and a run with no budget left reads that as an unclipped chip that is not there. Measured on
+  // this Mac: on a 260 s budget the second width's attach leg reported "tray top 0, shelf top 799",
+  // which is a tray that never rendered, not a tray over the conversation.
+  if (budgetLeft() < 6000) {
+    skip(`${phone.name}: a staged picture shows an unclipped chip`, `only ${Math.max(0, Math.round(budgetLeft() / 1000))}s of this run's budget is left, which is not long enough to stage a file and read it back`);
+    return;
+  }
   const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
   await page.setInputFiles("#composer-file", { name: "one-pixel.png", mimeType: "image/png", buffer: png });
   await page.waitForTimeout(1200);
@@ -656,38 +690,61 @@ async function legDesktop() {
   shots.push(path.join(SHOTS, "desktop-as-shipped.png"));
   info(`1440x900: ${Object.keys(shippedGeometry).length} elements fingerprinted, ${moving.size} of them moving on their own with nothing changed${moving.size ? ` (${[...moving].slice(0, 4).join(", ")})` : ""}; still regions ${STABLE.map((one) => `${one}=${noise[one] ? "yes" : "no"}`).join(", ")}`);
 
-  // Both base rules back the way they were. The drawer nodes coming back MUST change the geometry:
-  // that is what shows the comparison can see a change at all.
+  // WHAT THE PHONE PASS CAN REACH AT 1440x900, AND HOW THIS LEG KNOWS.
+  //
+  // Exactly one of its rules lives outside a media query: the hide on the two drawer handles and
+  // the scrim. Everything else is inside `@media (max-width: 690px)` or the sideways height block,
+  // neither of which 1440x900 matches -- and tests/machine-room-mobile.test.mjs reads the
+  // stylesheet and fails if a later edit puts a phone rule back in the base sheet.
+  //
+  // The shell's column track was the second base rule until this leg caught it. `minmax(0, 1fr)`
+  // was read as a no-op at a width where the implicit column already computes to 1440px; measured
+  // here, it moved five rects -- TITAN-MASCOT and the room capsule with its title and subtitle, the
+  // capsule 227 px wide with the rule against 268 px and 20 px further left without it -- because an
+  // `auto` column lets a child's own intrinsic width feed back into the window bar's `1fr` track in
+  // a way a `1fr` column does not. The rule is inside the breakpoint now. THAT IS WHY THE CLAIM
+  // BELOW IS A/B'd RATHER THAN ASSERTED.
+  //
+  // So the leg makes the only two claims that are true and checkable here:
+  //
+  //   SENSITIVITY. Put the drawer nodes back on the page and the fingerprint MUST change. A
+  //   comparison that cannot see that change is not evidence of anything.
+  //
+  //   DETERMINISM AND RETURN. Hide them again and the fingerprint MUST come back to the shipped one
+  //   rect for rect, which is what says the one base rule is the whole of the phone pass's
+  //   desktop-visible delta and that the fingerprint itself does not drift.
   await page.addStyleTag({ content: `
-    .app-shell { grid-template-columns: none !important; }
     .icon-button.drawer-toggle { display: grid !important; }
     .drawer-scrim { display: block !important; }
   ` });
   await sleep(800);
   const revertedGeometry = await fingerprint();
-  await page.screenshot({ path: path.join(SHOTS, "desktop-base-rules-reverted.png"), fullPage: true });
-  shots.push(path.join(SHOTS, "desktop-base-rules-reverted.png"));
+  await page.screenshot({ path: path.join(SHOTS, "desktop-base-rule-reverted.png"), fullPage: true });
+  shots.push(path.join(SHOTS, "desktop-base-rule-reverted.png"));
   const revertMoved = compare(shippedGeometry, revertedGeometry, moving);
   check(revertMoved.length > 0, "1440x900: the comparison can see a difference at all",
     `the revert draws the two drawer handles and the scrim, and ${revertMoved.length} rects change`);
 
-  // Now only the shell's column rule is reverted. This is the claim.
   await page.addStyleTag({ content: `.icon-button.drawer-toggle, .drawer-scrim { display: none !important; }` });
   await sleep(800);
-  const columnOnlyGeometry = await fingerprint();
-  await page.screenshot({ path: path.join(SHOTS, "desktop-column-rule-reverted.png"), fullPage: true });
-  shots.push(path.join(SHOTS, "desktop-column-rule-reverted.png"));
-  const moved = compare(shippedGeometry, columnOnlyGeometry, moving);
+  const backGeometry = await fingerprint();
+  await page.screenshot({ path: path.join(SHOTS, "desktop-base-rule-restored.png"), fullPage: true });
+  shots.push(path.join(SHOTS, "desktop-base-rule-restored.png"));
+  const moved = compare(shippedGeometry, backGeometry, moving);
   const held = Object.keys(shippedGeometry).length - moving.size;
-  check(moved.length === 0, "1440x900: the shell's column rule moves nothing, to the pixel, across the whole document",
+  check(moved.length === 0, "1440x900: hiding the drawer nodes again returns every rect in the document to the shipped one",
     moved.length === 0
       ? `${held} elements with identical rects, ${moving.size} left out because they move on their own`
-      : moved.slice(0, 5).map((key) => `${key} ${shippedGeometry[key]} -> ${columnOnlyGeometry[key]}`).join(" | "));
+      : moved.slice(0, 5).map((key) => `${key} ${shippedGeometry[key]} -> ${backGeometry[key]}`).join(" | "));
+
+  // And the shell's column really is the viewport's, decided by a rule this width does not match.
+  const columnAtDesktop = await page.evaluate(() => getComputedStyle(document.querySelector(".app-shell")).gridTemplateColumns);
+  check(columnAtDesktop === "1440px", "1440x900: the shell's column is the viewport with no rule of this pass setting it", columnAtDesktop);
 
   for (const selector of STABLE) {
-    if (!noise[selector]) { skip(`1440x900: ${selector} is pixel-identical with the column rule reverted`, "this region did not hold still in the same state, so a comparison of it would prove nothing"); continue; }
+    if (!noise[selector]) { skip(`1440x900: ${selector} is pixel-identical after the base rule is put back`, "this region did not hold still in the same state, so a comparison of it would prove nothing"); continue; }
     const now = await region(selector);
-    check(now != null && shippedPixels[selector].equals(now), `1440x900: ${selector} is pixel-identical with the column rule reverted`,
+    check(now != null && shippedPixels[selector].equals(now), `1440x900: ${selector} is pixel-identical after the base rule is put back`,
       `${shippedPixels[selector]?.length ?? 0} bytes against ${now?.length ?? 0}`);
   }
   info(`1440x900: the full page is NOT byte-compared — every backdrop-filter panel re-rasterises by ~100 bytes in ~100 KB between two shots of the same unchanged page (${wholePage.length} bytes). The geometry above is the claim; desktop-as-shipped.png and desktop-column-rule-reverted.png are saved for a human to look at`);

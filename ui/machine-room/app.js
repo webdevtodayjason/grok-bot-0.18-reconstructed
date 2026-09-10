@@ -869,16 +869,18 @@
    * drew both at once, each with its own Send -- and a person answering the second has already
    * lost track of which body belongs to which title. The rest wait their turn and arrive as soon
    * as the one in front of them is answered.
+   *
+   * One exception, and it is the same failure this item is about: a card the person opened
+   * themselves with "Report a problem" goes first. A button that draws nothing because an agent's
+   * report happens to be queued in front of it is exactly the "I pressed it and nothing happened"
+   * that started this.
    */
   function problemOfferQueue(context = activeContext()) {
-    const rows = [];
-    let live = false;
-    for (const offer of problemOffersFor(context)) {
-      if (offer.status === "folded") { rows.push(offer); continue; }
-      if (live) continue;
-      live = true;
-      rows.push(offer);
-    }
+    const mine = problemOffersFor(context);
+    const rows = mine.filter((offer) => offer.status === "folded");
+    const waiting = mine.filter((offer) => offer.status !== "folded");
+    const head = waiting.find((offer) => offer.source === "manual") ?? waiting[0];
+    if (head) rows.push(head);
     return rows;
   }
 
@@ -1026,8 +1028,13 @@
       const settled = offer.status === "sent"
         ? "Sent. The developers have it."
         : "Kept to yourself. Nothing left this workspace.";
+      // And when the box refused to take the row back, say so instead of folding on a promise it
+      // never heard. A card that folds while the box still holds its copy shows a decision the box
+      // has no record of, and the same report is offered again on the next load with nothing on
+      // the page explaining why.
+      const held = offer.boxKept ? " This box still holds its own copy, so it will be offered again next time you open the console." : "";
       const accent = offer.status === "sent" ? "var(--green-500)" : "var(--amber-500)";
-      return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card" style="--card-accent:${accent}"><div class="inline-card-header"><span class="inline-card-icon">${offer.status === "sent" ? "✓" : "✕"}</span><span class="inline-card-copy"><strong>${escapeHtml(offer.title)}</strong><small class="approval-result">${escapeHtml(settled)}</small></span></div><div class="inline-card-actions"><button class="card-action" type="button" data-report-dismiss="${escapeHtml(offer.id)}">Dismiss</button></div></div></article>`;
+      return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card" style="--card-accent:${accent}"><div class="inline-card-header"><span class="inline-card-icon">${offer.status === "sent" ? "✓" : "✕"}</span><span class="inline-card-copy"><strong>${escapeHtml(offer.title)}</strong><small class="approval-result">${escapeHtml(settled + held)}</small></span></div><div class="inline-card-actions"><button class="card-action" type="button" data-report-dismiss="${escapeHtml(offer.id)}">Dismiss</button></div></div></article>`;
     }
     const note = offer.note ? `<small class="field-hint">${escapeHtml(offer.note)}</small>` : "";
     return `<article class="message-row is-system" data-message-id="${escapeHtml(offer.id)}"><div class="inline-card problem-report-card" style="--card-accent:var(--amber-500)"><div class="inline-card-header"><span class="inline-card-icon">▣</span><span class="inline-card-copy"><strong>${escapeHtml(offer.title)}</strong><small>Would you like to send this to the developers?</small></span></div><div class="tag-list">${chip}</div><div class="field"><label class="sr-only" for="report-body-${escapeHtml(offer.id)}">What is sent to the developers</label><textarea id="report-body-${escapeHtml(offer.id)}" data-report-body="${escapeHtml(offer.id)}" rows="8" aria-describedby="report-custody-${escapeHtml(offer.id)}">${escapeHtml(offer.body)}</textarea><small class="field-hint" id="report-custody-${escapeHtml(offer.id)}">${escapeHtml(REPORT_CUSTODY)}</small>${note}</div><div class="inline-card-actions"><button class="card-action primary" type="button" data-report-send="${escapeHtml(offer.id)}">Send</button><button class="card-action" type="button" data-report-drop="${escapeHtml(offer.id)}">Not now</button></div></div></article>`;
@@ -1047,11 +1054,22 @@
     offer.status = status;
     offer.note = note ?? "";
     const told = offer.pendingId && (status === "sent" || status === "dropped") && typeof adapter.resolveProblemReport === "function"
-      ? Promise.resolve(adapter.resolveProblemReport(offer.pendingId, status)).catch(() => null)
-      : Promise.resolve(null);
+      ? Promise.resolve(adapter.resolveProblemReport(offer.pendingId, status)).then(() => true, () => false)
+      : Promise.resolve(true);
     renderTranscript();
-    told.then(() => scheduleProblemOfferFold(offer));
-    return told;
+    return told.then((cleared) => {
+      // Dismissed by hand, or answered again, while the box was being told.
+      if (offer.status !== status) return offer;
+      if (!cleared) {
+        // The box kept its row. The card stays up saying so; folding here would take the decision
+        // off the screen and then hand the same report back on the next load.
+        offer.boxKept = true;
+        renderTranscript();
+        return offer;
+      }
+      scheduleProblemOfferFold(offer);
+      return offer;
+    });
   }
 
   function scheduleProblemOfferFold(offer) {
@@ -1086,7 +1104,7 @@
     renderTranscript();
     // No toast: the card reports what happened, once it has happened.
     return Promise.resolve(adapter.sendProblemReport(payload))
-      .then((answer) => { settleProblemOffer(offer, "sent"); return answer; })
+      .then((answer) => settleProblemOffer(offer, "sent").then(() => answer))
       .catch((error) => {
         offer.status = "pending";
         // The relay's sentences end in a full stop of their own, so one is taken off before this
@@ -1262,8 +1280,17 @@
    * drain is a gateway round trip and a busy conversation would otherwise ask the box for its
    * pending file several times a second. The floor is what makes this cheap; the cards are still
    * drawn one at a time, in the order the agent wrote them.
+   *
+   * The subscribe beat ALONE is not enough, and this was measured rather than reasoned: the
+   * adapter's heartbeat re-reads the box every 15 s but only EMITS when something changed, so on
+   * an idle console -- a person reading, nobody typing, the agent's turn already over -- no event
+   * fires at all. Instrumented on grok-bot-local-vm in real Chrome, the subscribe handler on its
+   * own made exactly ONE listProblemReports call in the forty seconds after a second report landed
+   * in the box's file, and drew no card. So there is a standing beat at the adapter's own cadence
+   * as well, and both paths go through the one floor below rather than asking twice.
    */
   const PENDING_POLL_MS = 4000;
+  const PENDING_BEAT_MS = 15000;
   let pendingPolledAt = 0;
   let pendingPolling = false;
   function watchPendingProblemReports(now = Date.now()) {
@@ -7354,6 +7381,10 @@
   loadConsoleBuild();
   loadHostBuild();
   // FEEDBACK-1b: the same drain the subscribe beat runs, so the first read and the watch share one
-  // floor and the page does not ask the box twice in the first second.
+  // floor and the page does not ask the box twice in the first second. Then a standing beat, which
+  // is the half the subscribe handler cannot cover: an idle console emits no events at all, so
+  // without this a report written while the person is sitting still would wait for the next thing
+  // that happened to change.
   watchPendingProblemReports();
+  setInterval(() => { watchPendingProblemReports(); }, PENDING_BEAT_MS);
 })();

@@ -528,9 +528,12 @@ async function agentLeg() {
     created = answer?.agent?.id ?? null;
     check(created != null, "a scratch agent was created", created ?? "none");
     if (!created) return;
+    // TWO reports in one turn, which is what Titan was asked for on Jason's own console and what
+    // the queue in FEEDBACK-2 exists to draw one at a time. It is also how the box's own ordering
+    // is measured: the file has to hand them back oldest first.
     await call("sendPrompt", {
       agentId: created,
-      prompt: "Your Shell tool just answered 'exec daemon not reachable' for every command. Use your reporting tool once, at tier critical, category shell, to write that down for me. Do not do anything else.",
+      prompt: "Two separate faults, and I want both written down. First: your Shell tool answers 'exec daemon not reachable' for every command \u2014 report that at tier critical, category shell. Then, as a SECOND report: there is no bot template system visible to you \u2014 report that at tier quality, category bots. Use your reporting tool twice, once for each, in that order, and do nothing else.",
     }, TOKEN);
     let rows = [];
     for (let attempt = 0; attempt < 40; attempt += 1) {
@@ -538,14 +541,23 @@ async function agentLeg() {
       const listed = await call("listProblemReports", {}, TOKEN).catch((error) => (error.unknownCommand ? { reports: [], unknown: true } : { reports: [] }));
       if (listed.unknown) { skip("a real agent's call to the tool lands in the pending file", "this box runs a bundle without the tool"); return; }
       rows = (listed?.reports ?? []).filter((row) => row.agentId === created);
-      if (rows.length) break;
+      if (rows.length >= 2) break;
     }
     check(rows.length > 0, "a real agent's call to the tool lands in the pending file", `${rows.length} report(s)`);
-    if (rows[0]) {
-      check(rows[0].report?.version === 1, "as ProblemReport v1");
-      check(typeof rows[0].report?.title === "string" && rows[0].report.title.length > 0, "with a title in the agent's own words", rows[0].report?.title ?? "");
-      await call("resolveProblemReport", { id: rows[0].id, outcome: "dropped" }, TOKEN).catch(() => {});
+    check(rows.length >= 2, "both reports of one turn are in the box's file", `${rows.length} report(s): ${rows.map((row) => row.report?.title ?? "?").join(" | ")}`);
+    if (rows.length >= 2) {
+      // Oldest first is what the console's queue reads as "in the order the box returned them".
+      const times = rows.map((row) => Date.parse(row.at ?? row.report?.at ?? 0));
+      check(times.every((at, i) => i === 0 || at >= times[i - 1]), "in the order they were written", JSON.stringify(rows.map((row) => row.at)));
+      check(new Set(rows.map((row) => row.id)).size === rows.length, "each with an id of its own");
     }
+    for (const row of rows) {
+      check(row.report?.version === 1, "as ProblemReport v1");
+      check(typeof row.report?.title === "string" && row.report.title.length > 0, "with a title in the agent's own words", row.report?.title ?? "");
+      await call("resolveProblemReport", { id: row.id, outcome: "dropped" }, TOKEN).catch(() => {});
+    }
+    const left = await call("listProblemReports", {}, TOKEN).catch(() => ({ reports: [] }));
+    check(!(left?.reports ?? []).some((row) => row.agentId === created), "and the box is put back the way this leg found it");
   } finally {
     // Agent-lifecycle hygiene: a roster that grows during a gate run is a bug.
     if (created) await call("deleteAgent", { id: created }, token()).catch(() => {});

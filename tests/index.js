@@ -214,3 +214,7 @@ import "./cp-mail-send.test.mjs";
 // off, and asks for the introduction last.
 import "./agent-memory-seed.test.mjs";
 import "./bot-setup.test.mjs";
+
+// MOBILE-1: the console at phone widths. What the stylesheet has to say for the shell's column
+// track, the two drawers and the scrim, and where those rules are allowed to live.
+import "./machine-room-mobile.test.mjs";

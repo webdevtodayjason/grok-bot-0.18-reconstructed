@@ -231,10 +231,14 @@ The settled copy changed with the fold, deliberately: it used to end *"…and yo
 in your own copy above"*, which was only true while the card was on screen and stopped being true the
 moment the card left.
 
-**The fold waits for the box.** `resolveProblemReport` used to be fire-and-forget, which was harmless
-while a settled card sat there for ever. With a fold it is not: taking the row off the screen while
-the box still held the report would show a decision the box has no record of. The fold is scheduled
-when that call settles, and not before.
+**The fold waits for the box, and a refusal cancels it.** `resolveProblemReport` used to be
+fire-and-forget, which was harmless while a settled card sat there for ever. With a fold it is not:
+taking the row off the screen while the box still held the report would show a decision the box has
+no record of, and the same report would be handed back on the next load with nothing on the page
+explaining it. So the fold is scheduled when that call *succeeds*, and not before. When the box
+refuses it, the card stays up and says why — *"This box still holds its own copy, so it will be
+offered again next time you open the console"* — with its Dismiss still there for a person who would
+rather have the space back.
 
 **And the fold is drawn by the card path, not spliced into the transcript.** `contextMessages` is the
 box's own transcript and the adapter replaces it wholesale on every re-read, so a page-local row
@@ -259,6 +263,11 @@ Two reports used to be drawn as a stack of editable cards, each with its own Sen
 the second has already lost track of which body belongs to which title. The transcript now draws
 every folded row plus **at most one live card**; the rest wait, and the next one arrives as soon as
 the one in front of it is answered.
+
+One exception, and it is the same failure this item is about: a card the person opened themselves
+with **Report a problem** goes to the head. A button that draws nothing because an agent's report
+happens to be queued in front of it is exactly the "I pressed it and nothing happened" that started
+this.
 
 ### The pending file is watched, not read once
 

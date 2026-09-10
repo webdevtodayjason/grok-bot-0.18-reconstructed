@@ -1,16 +1,22 @@
 // MOBILE-1, the half a browser cannot prove: that the phone pass stayed inside its breakpoint.
 //
 // scripts/verify-mobile.mjs measures what a person sees at 390x844 and 430x932, and its --desktop
-// leg screenshots 1440x900 twice to show the two base rules change nothing. What it cannot show is
-// that a LATER edit did not quietly put a phone rule in the base sheet, where the next desktop ship
-// would inherit it. These cases read the three files and hold that line.
+// leg fingerprints every rect at 1440x900 to show the one base rule changes nothing it should not.
+// What it cannot show is that a LATER edit did not quietly put a phone rule in the base sheet, where
+// the next desktop ship would inherit it. These cases read the three files and hold that line.
 //
 // The rule, written once and pinned here: everything the phone pass changes lives inside
 // `@media (max-width: 690px)`, or in the `@media (max-height: 500px)` block for a phone turned
-// sideways, EXCEPT two base rules that are named below and nowhere else:
+// sideways, EXCEPT ONE base rule, named below and nowhere else:
 //
-//   .app-shell { grid-template-columns: minmax(0, 1fr) }   the cause of the whole report
 //   .icon-button.drawer-toggle, .drawer-scrim { display: none }   nodes that only exist on a phone
+//
+// The shell's column track -- the cause of the whole report -- used to be the second one, on the
+// reading that `minmax(0, 1fr)` is a no-op at a width where the implicit column already computes to
+// the viewport. The --desktop leg measured that reading wrong: at 1440x900 the room capsule came out
+// 227 px wide with the rule and 268 px without it, because an `auto` column lets a child's intrinsic
+// width feed back into the window bar's `1fr` track. It is inside the breakpoint now, and these
+// cases are what stop it drifting back out.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -59,16 +65,19 @@ function ruleFor(body, selector) {
   return rules;
 }
 
-test("MOBILE-1: the cause is fixed in exactly one base rule, and it is the shell's column track", async () => {
+test("MOBILE-1: the cause is fixed by the shell's column track, inside the breakpoint and not outside it", async () => {
   const source = await readFile(cssPath, "utf8");
   const { base, blocks } = splitSheet(source);
   const shell = ruleFor(base, ".app-shell");
   assert.equal(shell.length, 1, "there is one base .app-shell rule");
-  assert.match(shell[0], /grid-template-columns:\s*minmax\(0,\s*1fr\)/,
-    "the shell's implicit column sized to the window bar's min-content -- 515.406px at every viewport, measured on grok-bot-local-vm");
-  // And no breakpoint sets it a second time, so there is no second copy to drift from this one.
+  assert.ok(!/grid-template-columns/.test(shell[0]),
+    "the base rule must NOT set the column: at 1440x900 minmax(0,1fr) moved the room capsule 227 -> 268 px wide, measured by the gate's --desktop leg");
+  const phoneShell = ruleFor(phoneBody(blocks), ".app-shell").join("\n");
+  assert.match(phoneShell, /grid-template-columns:\s*minmax\(0,\s*1fr\)/,
+    "the shell's implicit column sized to the window bar's min-content -- 515.406px, measured on grok-bot-local-vm at 390 and at 430");
+  // And exactly one breakpoint sets it, so there is no second copy to drift from this one.
   const elsewhere = blocks.filter((b) => ruleFor(b.body, ".app-shell").some((body) => /grid-template-columns/.test(body)));
-  assert.deepEqual(elsewhere.map((b) => b.query), [], "the shell's column is decided once, in the base rule");
+  assert.deepEqual(elsewhere.map((b) => b.query), ["@media (max-width: 690px)"], "the shell's column is decided once, in the phone block");
   assert.equal(ruleFor(landscapeBody(blocks), ".app-shell").length, 1, "and the sideways case has its own rule");
   assert.match(ruleFor(landscapeBody(blocks), ".app-shell")[0], /min-height:\s*0/,
     "at 844x390 the width breakpoint is missed and min-height: 650px put the composer 4 px below the viewport");

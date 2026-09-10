@@ -419,6 +419,57 @@ test("FEEDBACK-2: one card at a time, in the order the agent wrote them", async 
   assert.equal(second.status, "pending");
 });
 
+test("FEEDBACK-2: Dismiss ends a settled card at once, and disarms the timer under it", async () => {
+  const feedback = await loadFeedback();
+  const offer = feedback.offerProblemReport({ title: "Something", description: "x" });
+  await feedback.settleProblemOffer(offer, "dropped");
+  assert.notEqual(offer.foldTimer, undefined, "the fold was armed by the settle");
+  feedback.foldProblemOffer(offer);
+  assert.equal(offer.status, "folded");
+  assert.equal(offer.foldTimer, null, "and the armed timer is cleared, so nothing folds twice under the person");
+  assert.doesNotMatch(feedback.reportCardsMarkup(), /inline-card/);
+});
+
+test("FEEDBACK-2: a pending card is never folded by a stray Dismiss", async () => {
+  const feedback = await loadFeedback();
+  const offer = feedback.offerProblemReport({ title: "Still to answer", description: "x" });
+  feedback.foldProblemOffer(offer);
+  assert.equal(feedback.problemOfferById(offer.id).status, "pending");
+  assert.match(feedback.reportCardsMarkup(), /data-report-send/, "it is still a card with a Send on it");
+});
+
+test("FEEDBACK-2: a resolve the box refused leaves the card drawn and says the box still holds it", async () => {
+  // Folding on a promise the box never heard is worse than not folding at all: the decision comes
+  // off the screen and the same report is handed back on the next load with nothing explaining it.
+  const feedback = await loadFeedback({
+    adapter: {
+      listProblemReports: () => Promise.resolve([{ id: "pr-1", agentId: "titan", agentName: "Titan", report: { version: 1, tier: "quality", category: "console", title: "A thing", description: "x" } }]),
+      resolveProblemReport: () => Promise.reject(new Error("the gateway is not answering")),
+      sendProblemReport: () => Promise.resolve({ id: "fb-1" }),
+    },
+  });
+  const made = await feedback.drainPendingProblemReports();
+  await feedback.sendProblemOffer(made[0].id, "x");
+  const drawn = feedback.reportCardsMarkup();
+  assert.match(drawn, /Sent\. The developers have it\./);
+  assert.match(drawn, /still holds its own copy/, "and says why it is still on the page");
+  assert.equal(made[0].foldTimer, undefined, "nothing is armed to fold it away");
+  assert.match(drawn, /data-report-dismiss/, "the person can still end it by hand");
+});
+
+test("FEEDBACK-2: a card the person opened themselves goes to the head of the queue", async () => {
+  // A button that draws nothing because an agent's report happens to be queued in front of it is
+  // the same "I pressed it and nothing happened" this whole item is about.
+  const feedback = await loadFeedback();
+  feedback.offerProblemReport({ title: "What the agent filed", description: "a" });
+  feedback.openProblemReportCard();
+  const drawn = feedback.reportCardsMarkup();
+  assert.match(drawn, /A problem with this product/, "the card the person asked for is the one drawn");
+  assert.doesNotMatch(drawn, /What the agent filed/, "and the agent's report waits its turn behind it");
+  assert.equal(feedback.problemOfferQueue().length, 1);
+  assert.equal(feedback.problemOfferQueue()[0].source, "manual");
+});
+
 // ---- FEEDBACK-1b: the pending file is watched -----------------------------------------------------
 // It used to be read exactly once, after first paint. An agent that filed while the person was
 // sitting in front of the console drew its quiet row and no card, until a reload. Measured on
@@ -450,6 +501,18 @@ test("FEEDBACK-1b: the watch has a floor under it, so a busy conversation does n
   await feedback.watchPendingProblemReports(1_000_000 + feedback.PENDING_POLL_MS + 1);
   assert.equal(asked, 2, "and one more once the floor has passed");
   assert.ok(feedback.PENDING_POLL_MS >= 1000 && feedback.PENDING_POLL_MS <= 20000, `a ${feedback.PENDING_POLL_MS} ms floor is either a hammer or a reload in disguise`);
+});
+
+test("FEEDBACK-1b: the drain has a standing beat, not only the events that fire when something changed", async () => {
+  // Measured on grok-bot-local-vm in real Chrome: with the drain on the subscribe handler alone,
+  // the page made exactly ONE listProblemReports call in the forty seconds after a second report
+  // landed in the box's file, and drew no card. The adapter's heartbeat re-reads every 15 s but
+  // only EMITS on a change, so an idle console -- a person reading, the agent's turn over -- fires
+  // nothing at all. Both call sites have to exist, and both go through the one floor.
+  const source = await readFile(appPath, "utf8");
+  assert.match(source, /setInterval\(\(\) => \{ watchPendingProblemReports\(\); \}, PENDING_BEAT_MS\)/, "a standing beat");
+  assert.match(source, /drainFailedTurnOffers\(\);\n\s*noteRepeatedToolFailures\(\);\n[\s\S]{0,200}?watchPendingProblemReports\(\);/, "and the subscribe beat");
+  assert.ok(!/drainPendingProblemReports\(\)\.then\(\(made\)/.test(source), "and the one-shot boot call site is gone");
 });
 
 test("FEEDBACK-1b: a second report arriving on the watch queues behind the first, and answering the first shows it", async () => {

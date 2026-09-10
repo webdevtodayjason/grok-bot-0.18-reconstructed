@@ -56,18 +56,22 @@ select:focus-visible {
   position: relative;
   isolation: isolate;
   display: grid;
-  /* MOBILE-1, THE CAUSE. This grid had rows and no columns, so its one implicit column was `auto`
-     and sized to the widest child's min-content -- the window bar, whose three tracks resolved to
-     88 + 273 + 134.406 px plus 20 px of padding = 515.406 px, driven by six capability buttons
-     with no `min-width: 0` under them. Measured on grok-bot-local-vm at a 390 px viewport: the
-     whole console laid out at 515.406 px and `overflow: hidden` below clipped the other 125 px
-     with no scroll and no pan, so Send, Settings and the theme toggle were off screen and
+  /* MOBILE-1, THE CAUSE, and the fix is in the phone block at the end of this sheet rather than
+     here. This grid has rows and no columns, so its one implicit column is `auto` and sizes to the
+     widest child's min-content -- the window bar, whose three tracks resolved to 88 + 273 +
+     134.406 px plus 20 px of padding = 515.406 px, driven by six capability buttons with no
+     `min-width: 0` under them. Measured on grok-bot-local-vm at a 390 px viewport: the whole
+     console laid out at 515.406 px and `overflow: hidden` below clipped the other 125 px with no
+     scroll and no pan, so Send, Settings and the theme toggle were off screen and
      `elementFromPoint` at their centres answered null. Titan's report #4, in the person's words:
      "cannot scroll or move around, content is too large for the mobile viewport."
-     At 1440x900 the implicit column already computed to "1440px", so this line is a no-op above
-     the breakpoint -- and the gate's --desktop leg proves that rather than asserting it, by
-     fingerprinting every element's rect in the document with the rule and again without it. */
-  grid-template-columns: minmax(0, 1fr);
+     `grid-template-columns: minmax(0, 1fr)` was written HERE first, on the reading that the
+     implicit column already computes to "1440px" at desktop and the line is therefore a no-op
+     above the breakpoint. The gate's --desktop leg measured otherwise and that is why it exists:
+     at 1440x900 the room capsule came out 227 px wide with the rule and 268 px without it (and
+     20 px further left), because an `auto` column lets a child's own intrinsic width feed back into
+     the window bar's `1fr` track in a way a `1fr` column does not. So the rule lives inside
+     `@media (max-width: 690px)`, where it is needed, and desktop widths cannot be touched by it. */
   /* The shelf's row is content-sized, not a fixed bar: the composer grows to eight lines
      (QOL-COMPOSER) and a fixed track would leave it hanging out of the shelf with its last
      line clipped under the edge. The stage's 1fr gives back what the shelf takes. */
@@ -4416,6 +4420,14 @@ body[data-composer-drop="1"] .composer {
      and all six buttons are on screen with nothing to scroll. The shell's first track goes to
      `auto` to let the bar be as tall as it needs. */
   .app-shell {
+    /* THE CAUSE OF THE WHOLE REPORT, fixed here rather than in the base rule. The shell's implicit
+       column was `auto` and sized to the window bar's min-content, 515.406 px, and `overflow:
+       hidden` clipped the 125 px that did not fit with no scrollbar and no pan. Measured on
+       grok-bot-local-vm: this takes the computed column from 515.406px to the viewport's own width
+       at both phone sizes, and the count of elements a thumb cannot reach from 402 to 0.
+       It is scoped to the breakpoint because at 1440x900 it is NOT a no-op -- see the note on the
+       base rule; that is what the --desktop leg caught. */
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr) minmax(82px, auto);
   }
 

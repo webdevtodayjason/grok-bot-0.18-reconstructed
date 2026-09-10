@@ -638,20 +638,32 @@ a document that cannot move.
 ### The rule: desktop widths do not change
 
 Everything the phone pass adds lives inside `@media (max-width: 690px)`, or in a
-`@media (max-height: 500px)` block for a phone turned sideways. **Two rules are outside it**, and
-they are the only two:
+`@media (max-height: 500px)` block for a phone turned sideways. **One rule is outside it**, and it is
+the only one:
 
 ```css
-.app-shell { grid-template-columns: minmax(0, 1fr); }          /* the cause */
 .icon-button.drawer-toggle, .drawer-scrim { display: none; }   /* nodes that only exist on a phone */
 ```
 
-`tests/machine-room-mobile.test.mjs` parses the sheet and fails if a third one appears.
+`tests/machine-room-mobile.test.mjs` parses the sheet and fails if a second one appears.
 
-`verify-mobile --desktop` proves the first of them is a no-op at 1440x900 by an **A/B in one
-browser** rather than against a committed baseline, so the comparison isolates *this* ship instead of
-carrying every other wave's changes: load the console, fingerprint it, revert the rule, fingerprint
-it again.
+**The shell's column track was the second one until the gate caught it, and this is the useful part
+of the story.** `.app-shell { grid-template-columns: minmax(0, 1fr) }` is the cause's fix, and it was
+written in the base rule on the reading that it is a no-op above the breakpoint, since the implicit
+column already computes to `1440px` at 1440x900. The reading was wrong and the A/B leg measured it:
+reverting the rule moved **five rects** — `TITAN-MASCOT`, and `.room-capsule` with its `#room-title`
+and `#room-subtitle` — the capsule **227 px wide with the rule against 268 px and 20 px further left
+without it**. An `auto` column lets a child's own intrinsic width feed back into the window bar's
+`1fr` track in a way a `1fr` column does not; a computed column of `1440px` in both states says
+nothing about how the track below it resolves. The rule is inside `@media (max-width: 690px)` now, so
+desktop widths cannot be reached by it at all, and the claim is structural rather than a measurement
+that has to be repeated.
+
+`verify-mobile --desktop` holds the remaining line by an **A/B in one browser** rather than against a
+committed baseline, so the comparison isolates *this* ship instead of carrying every other wave's
+changes: load the console at 1440x900, fingerprint every rect, put the drawer nodes back (which
+**must** move rects, or the comparison is not evidence of anything), hide them again, and require the
+document to come back to the shipped fingerprint rect for rect.
 
 **What a pixel claim can be on this console, and what it cannot.** The first cut of that leg
 screenshotted the full page twice a few seconds apart and failed by 11 KB on a page nobody had
@@ -666,7 +678,7 @@ the other direction.
 So the leg makes two claims instead of one bad one:
 
 - **The geometry, exactly.** Every element in the document, by tag, id, class and rounded rect. One
-  element moving one pixel changes it. That is what "the shell's column rule changes nothing"
+  element moving one pixel changes it. That is what "the phone pass changes nothing at desktop"
   actually means, and it is deterministic — with one honest subtraction, measured in the same run:
   the fingerprint is taken **twice in the same state first**, and anything that moved on its own
   with nothing changed is named, counted and left out. On a busy box that is the agent rail
