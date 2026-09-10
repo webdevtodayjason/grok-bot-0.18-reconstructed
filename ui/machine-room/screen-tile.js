@@ -1,37 +1,88 @@
 /*
- * CONSOLE-4 item C: the rail's screen tile shows a picture or a plate, and never a broken image.
- * ---------------------------------------------------------------------------------------------
- * What Jason saw on console.titanium.bot: "The Titan screen at the top right says 'Click to open,'
- * but there's a broken image there." Two causes behind that one glyph, and both had to go:
+ * The rail's screen tile: a picture of the agent's screen that keeps up with the agent.
+ * ------------------------------------------------------------------------------------
+ * CONSOLE-4 item C built this module to put a picture in the tile at all, because HANDBACK-1's
+ * reader only ever ran while a hand-off was pending and an idle agent had nothing to show. It shipped
+ * with a rule called A STILL BY DEFAULT: one frame, then let the client go.
  *
- *   1. renderScreenTile always emitted the <img> and marked it hidden, while styles.css says
- *      `.rail-screen-button img { display: block }`. A UA sheet's [hidden] rule is one selector;
- *      that one is two, so it wins, and Chrome paints its broken-image glyph plus the alt text for
- *      an <img> with no src. Measured on his console 2026-09-08: hidden true, computed display
- *      block, no src, naturalWidth 0, a 231x75 box. The same stylesheet already fixes this exact
- *      trap one screen up for .handoff-island[hidden]; screen-tile.css now carries the belt for
- *      this one, so no future path can re-open it whatever app.js emits.
- *   2. Behind the glyph there was nothing to show anyway. HANDBACK-1's reader only ever mounts
- *      while a hand-off is PENDING, so an idle agent -- which is what Titan is nearly all day --
- *      had no frame in memory, none in storage, and no client running to make one.
+ * SCREEN-TILE-1 reverses that rule for a working agent, on Jason's ask, 2026-09-10 10:55, in his own
+ * words: "the AI's desktop in the right-hand corner has a screenshot that does not stay up to date.
+ * It gets recorded once and stays that way. It never updates. For instance, Titan was on a different
+ * web page, but when I looked at it on my desktop, I saw the original web page it loaded with."
  *
- * This module is cause 2. It mounts one hidden view_only noVNC client for the agent whose
- * conversation is open, exactly the way boxHandoffEnsureThumb builds one, takes a still, and gets
- * out of the way. app.js reads it through two functions and nothing else:
+ * Reproduced on grok-bot-local-vm 2026-09-10 before a line was changed: 25 s after the box's browser
+ * moved from example.com to wikipedia.org the tile still drew Example Domain, and the frame string
+ * was byte-identical at 4,143 characters with no reader mounted. Two lines did that. One dropped the
+ * client after a single good frame for anything that was not `working`; the other then refused to
+ * mount at all for an idle agent that already had a frame -- and that frame is persisted, so it
+ * survived reloads. "It gets recorded once and stays that way" was exactly what the code did.
  *
- *   window.__screenTile.frameFor(agentId)                          -> "" or a data URL
- *   window.__screenTile.sync({ agentId, seat, status, visible })   -> mount / refresh / tear down
+ * THE REVERSAL, WRITTEN DOWN AS A REVERSAL. CONSOLE-4 made the still a PRIVACY decision, not a
+ * performance one: the seat read on 2026-09-08 had Gmail, a GitHub account and a YouTube channel open
+ * on it, and a tile that keeps repainting an idle desktop is a standing screen-share nobody asked
+ * for. Jason has now asked for the live tile, so the reversal is his to make -- and it is bounded
+ * rather than abandoned. An agent that is WORKING is watched; an agent that is idle is photographed
+ * every 30 s by a client that mounts, takes one frame and lets go. An idle agent is never a standing
+ * stream of the operator's own browsing, which is the half of CONSOLE-4's rule that still applies.
  *
- * FIVE RULES, every one of them load-bearing and every one of them measured before it was written.
+ * THREE CADENCES.
+ *
+ *   LIVE   hold the client and capture every 3 s, while the record's status is `working` OR the
+ *          agent's newest tool row was a browser or desktop action inside the last 60 s. The second
+ *          half matters because `working` is `agent.isRunning`, which is only ever true DURING a
+ *          turn, and Jason looks at the tile between turns.
+ *   IDLE   every 30 s: mount, take one frame that passes the blank guard, release the client.
+ *          Bounded by construction.
+ *   OFF    a hidden tab, no conversation, a room, HANDBACK-1 holding the agent, or a tile laid out
+ *          to nothing -- a closed rail drawer at phone width, which is where the data ceiling in
+ *          docs/APPS.md actually lives. The desktop dialog is a pause rather than a teardown: it
+ *          closes in seconds and remounting costs the handshake again.
+ *
+ * THE IDLE WAKE IS THIS MODULE'S OWN CLOCK. sync() is only ever called from a render, and the
+ * adapter's heartbeat is 15 s, so a 30 s cadence hung off renders would be reset by every heartbeat
+ * and never fire. `nextIdleAt` is an absolute timestamp and the setTimeout behind it is armed once;
+ * a render that arrives while it is armed leaves it alone. That is the failure this shape exists to
+ * avoid, and there is a test named for it.
+ *
+ * WHAT THIS COSTS, measured on grok-bot-local-vm 2026-09-10 in real Chrome with CDP websocket frame
+ * accounting at 1440x1000, the 390x244 thumbnail. scripts/verify-cost.mjs sums Network.dataReceived,
+ * which is HTTP only, so none of this is counted anywhere else:
+ *
+ *   one mount to a real frame, &quality=0&compression=9        17.5 KiB   1,267 ms
+ *   the same at the client's default quality                   51.9 KiB   1,275 ms
+ *   holding a client on a settled screen                        0 bytes
+ *   the tile following a whole page change                     21.4 KiB   3.56 s after the launcher
+ *   a forced working minute                              6.2 to 137.1 KiB across runs
+ *   an idle minute, one grab                                   18.3 KiB
+ *   an idle grab over a photo-heavy page                       75.0 KiB
+ *   a hidden tab, and a shut rail drawer at 390x844             0 bytes
+ *
+ * The cheap reader URL is worth roughly a third of a mount and the thumbnail is not visibly worse for
+ * it (4,207 characters against 4,263). But the honest headline is the middle of that table: A GRAB
+ * COSTS WHATEVER IS ON THE SCREEN. Two grabs a minute is about 36.6 KiB over a settled desktop and
+ * about 150 KiB over a photo-heavy page, against a docs/APPS.md idle figure of 100 KiB -- which is
+ * decoded API bytes at PHONE width and excludes noVNC by name as COST-2. That is why this module
+ * asks the browser whether the tile is being PAINTED before it opens anything: in the case where
+ * that ceiling really applies the rail is a shut drawer, and this then costs zero. On a desktop
+ * console the cost is real, the gate prints it every run, and the lever for it is the cadence. The
+ * desktop dialog's own client is untouched either way.
+ *
+ * THE CAPTION. Every accepted frame stamps `capturedAt`, and a one-second clock writes "as of 3 s
+ * ago" onto the picture. It is re-added after every render on purpose: renderScreenTile rewrites the
+ * whole tile's innerHTML at least every heartbeat, so a caption emitted once would blink out and
+ * back. It is drawn absolutely over the bottom of the picture, so it can appear and disappear
+ * without moving anything in the rail.
+ *
+ * app.js reads this module through two functions and drives it with one:
+ *
+ *   window.__screenTile.frameFor(agentId)                                    -> "" or a data URL
+ *   window.__screenTile.sync({ agentId, seat, status, visible, activity })   -> mount / hold / release
+ *
+ * THE RULES CONSOLE-4 SET THAT STILL HOLD, every one of them measured before it was written.
  *
  * ONE READER AT A TIME. HANDBACK-1's reader owns the agent while a hand-off is pending; this one
  * stands down for it rather than opening a second websocket to the same seat. Two clients on one
  * display is two handshakes, two framebuffers and two copies of the same picture.
- *
- * A STILL BY DEFAULT. Refreshing only while the record's status is `working`. The alternative is a
- * standing screen-share of the operator's own browsing: the seat read on 2026-09-08 had Gmail, a
- * GitHub account and a YouTube channel open on it. A tile that keeps repainting an idle desktop is
- * a privacy decision nobody made, not a feature.
  *
  * NEVER TEAR DOWN ON A RENDER THAT MERELY CARRIED NO DISPLAY. The roster is rebuilt from listAgents
  * and the box status is a separate read, so a record is briefly seatless between the two. The
@@ -43,7 +94,9 @@
  * rectangle, and a confident white rectangle reads worse than a plate that says what clicking does.
  * Measured on Titan's seat: the first sample was 1,043 characters of solid white, the next 7,591 of
  * the real desktop. Length alone is a weak test -- a genuinely dark screen compresses small too --
- * so the guard also reads the colour spread off the thumbnail's own pixels before it encodes.
+ * so the guard also reads the colour spread off the thumbnail's own pixels before it encodes. A
+ * refused frame never touches `capturedAt`, so the caption can never claim a picture is fresher than
+ * the last one a person could actually see.
  *
  * ASK THE HOST WITH { id }, NEVER { agentId }. getForeverBoxStatus adds boxSeat only when it has an
  * agent to add it for, and the agentId form silently answers a stub with no boxSeat FIELD at all.
@@ -51,7 +104,7 @@
  * answered 104 B carrying no boxSeat key -- which is the difference between "the shared screen" and
  * "this host cannot say", and a caller that cannot tell them apart draws the wrong plate.
  *
- * Every DOM, storage and timer reference goes through `global`, so the whole file loads under
+ * Every DOM, storage, timer and clock reference goes through `global`, so the whole file loads under
  * node --test against a stub with no browser anywhere near it.
  */
 (function attachScreenTile(global) {
@@ -70,19 +123,30 @@
   // that index can never be chosen for eviction, and a hand-off frame a resolved card still draws
   // from can never be pushed out by a tile still. Three is the cap here -- a measured idle frame is
   // about 5.7 KB, so the two stores together sit near 63 KB, well inside what the newest-eight rule
-  // was sized for.
+  // was sized for. IDLE_PREFIX_AT is the frame's capture time, kept in a PARALLEL key rather than
+  // inside the frame value or inside the index: HANDBACK-1 reads nothing here, and the index is a
+  // plain list of ids that the eviction test reads back verbatim.
   const IDLE_PREFIX = "mr-screen-tile-frame:";
+  const IDLE_PREFIX_AT = "mr-screen-tile-frame-at:";
   const IDLE_INDEX = "mr-screen-tile-frames";
   const IDLE_KEEP = 3;
 
-  // How often a frame is taken. Five seconds while the agent is working, because that is the only
-  // time the picture is telling anyone something new; one second while warming up, because the
-  // first frame is the one the person is waiting for.
-  const WORKING_REFRESH_MS = 5000;
+  // The three cadences. Three seconds while the agent is live, because that is the tile keeping up
+  // with something that is moving; thirty while it is idle, which is a mount, one frame and a
+  // release rather than a held client; one second while a client is warming up, because the first
+  // frame is the one the person is waiting for.
+  const LIVE_REFRESH_MS = 3000;
+  const IDLE_REFRESH_MS = 30_000;
   const WARMUP_POLL_MS = 1000;
   // A client that has not produced a real frame in this long is not going to. Give the plate back
   // rather than leaving a websocket open on a seat forever.
   const WARMUP_CEILING_MS = 20_000;
+  // How long a browser or desktop tool row keeps the tile live after the turn that made it ends.
+  // `working` is agent.isRunning and is false the moment a turn finishes, which is exactly when
+  // Jason looks at the tile.
+  const ACTIVITY_WINDOW_MS = 60_000;
+  // The caption's own clock. It rewrites one text node and nothing else.
+  const AGE_TICK_MS = 1000;
 
   // The blank-frame guard's two thresholds. 2,048 sits an order above the 1,043-character white
   // sample and well under the 7,591-character real one, and the spread is read off the pixels.
@@ -91,6 +155,9 @@
   const MIN_SPREAD = 10;
 
   const doc = () => global.document ?? null;
+  // The clock goes through `global` like everything else, so a test can wind it forward without
+  // patching the process's own Date. In a browser `window.Date` IS Date, so this is the same call.
+  const now = () => (typeof global.Date?.now === "function" ? global.Date.now() : Date.now());
 
   // ---- the blank-frame guard, pure ------------------------------------------------------------
 
@@ -129,9 +196,27 @@
     return true;
   }
 
+  // ---- how old the picture is, in words --------------------------------------------------------
+
+  // Plain words, no clock face and no vendor units. Seconds up to a minute, because the whole point
+  // of the caption is telling "this is live" from "this is from before lunch"; past that a person
+  // only needs the order of magnitude.
+  function ageWords(ms) {
+    const elapsed = Math.max(0, Math.round(Number(ms) || 0));
+    const seconds = Math.round(elapsed / 1000);
+    if (seconds < 60) return `as of ${seconds} s ago`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes === 1) return "as of a minute ago";
+    if (minutes < 60) return `as of ${minutes} min ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours === 1) return "as of an hour ago";
+    return `as of ${hours} h ago`;
+  }
+
   // ---- the store ------------------------------------------------------------------------------
 
   const frames = new Map();
+  const capturedAts = new Map();
 
   function storage() {
     // The accessor itself throws in a browser with site data blocked, which is why every read and
@@ -147,24 +232,44 @@
     if (!store) return "";
     try {
       const stored = store.getItem(IDLE_PREFIX + agentId);
-      if (stored) { frames.set(agentId, stored); return stored; }
+      if (stored) {
+        frames.set(agentId, stored);
+        const at = Number(store.getItem(IDLE_PREFIX_AT + agentId));
+        if (Number.isFinite(at) && at > 0) capturedAts.set(agentId, at);
+        return stored;
+      }
     } catch { /* a live frame lands in a few seconds anyway */ }
     return "";
   }
 
-  function rememberFrame(agentId, dataUrl) {
+  // When the picture this agent's tile is drawing was taken, or null for a frame left behind by a
+  // session that stamped nothing. Null is a real answer: the caption says nothing rather than lying,
+  // and sync() treats it as old enough to replace.
+  function capturedAtFor(agentId) {
+    if (!agentId) return null;
+    if (!capturedAts.has(agentId)) frameFor(agentId);
+    const at = capturedAts.get(agentId);
+    return Number.isFinite(at) && at > 0 ? at : null;
+  }
+
+  function rememberFrame(agentId, dataUrl, at) {
     if (!agentId || !dataUrl) return;
     frames.set(agentId, dataUrl);
+    capturedAts.set(agentId, at);
     const store = storage();
     if (!store) return;
     try {
       store.setItem(IDLE_PREFIX + agentId, dataUrl);
+      store.setItem(IDLE_PREFIX_AT + agentId, String(at));
       let order = [];
       try { order = JSON.parse(store.getItem(IDLE_INDEX) ?? "[]"); } catch { order = []; }
       order = [agentId, ...(Array.isArray(order) ? order : []).filter((id) => id !== agentId)];
       // Only keys this index put there are ever removed. A hand-off frame lives under a different
       // prefix and is not in this list, so it cannot be reached from here at all.
-      order.slice(IDLE_KEEP).forEach((old) => { try { store.removeItem(IDLE_PREFIX + old); } catch { /* nothing to do */ } });
+      order.slice(IDLE_KEEP).forEach((old) => {
+        try { store.removeItem(IDLE_PREFIX + old); } catch { /* nothing to do */ }
+        try { store.removeItem(IDLE_PREFIX_AT + old); } catch { /* nothing to do */ }
+      });
       order = order.slice(0, IDLE_KEEP);
       store.setItem(IDLE_INDEX, JSON.stringify(order));
     } catch { /* the in-memory copy is still the frame this session draws */ }
@@ -207,9 +312,36 @@
     }).catch(() => { /* the next render asks app.js's own copy again */ });
   }
 
+  // ---- was this agent just doing something on a screen -----------------------------------------
+
+  // A tool row that means the picture is about to change. `Computer` is computerUseToolCall's own
+  // label in TOOL_LABELS; `Opened <host>` is what shellHeadline makes of `box-chrome <url>`, which
+  // is how an agent opens a page on its seat. A fetch is not on this list: curl changes no screen.
+  const BROWSER_ROW_TEXT = /^Opened\s/;
+  const BROWSER_ROW_KINDS = new Set(["Computer"]);
+  // Tool rows carry no timestamp of their own -- the console builds them from the conversation
+  // outline, which has none -- so this module stamps the moment IT first saw a given row. First
+  // sight is the honest reading of "the agent just did this": the row reached the console on the
+  // poll after the tool call, not before it.
+  const activity = { agentId: "", id: "", at: 0, browser: false };
+  function noteActivity(agentId, row) {
+    if (activity.agentId !== agentId) { activity.agentId = agentId; activity.id = ""; activity.at = 0; activity.browser = false; }
+    const id = String(row?.id ?? "");
+    if (!id || id === activity.id) return;
+    activity.id = id;
+    activity.at = now();
+    activity.browser = BROWSER_ROW_KINDS.has(String(row?.kind ?? "")) || BROWSER_ROW_TEXT.test(String(row?.text ?? ""));
+  }
+  function browsingLately(agentId) {
+    if (!activity.browser || activity.agentId !== agentId) return false;
+    return now() - activity.at < ACTIVITY_WINDOW_MS;
+  }
+
   // ---- the reader ------------------------------------------------------------------------------
 
   let reader = null;
+  let idleWake = null;
+  let ageTimer = null;
   const state = { last: null };
 
   // HANDBACK-1's reader, read only. While it holds an agent this module does not open a second
@@ -231,14 +363,76 @@
     return d.visibilityState === "visible";
   }
 
+  // IS THE TILE ACTUALLY ON SCREEN. A visible tab is not the same question: at phone width the rails
+  // are drawers, so the tile is laid out at zero size inside a closed one, and a rail can be
+  // collapsed on a desktop too. Reading a seat for a picture nobody can see is the same waste as
+  // reading one for a hidden tab, and this is the case where docs/APPS.md's idle ceiling actually
+  // lives -- it is a phone-width, API-bytes ceiling. A DOM that cannot answer (the unit test's stub,
+  // an element with no layout) is treated as on screen: refusing to draw because a measurement was
+  // unavailable is how a tile goes blank for everybody.
+  function tileOnScreen() {
+    const d = doc();
+    if (!d) return true;
+    let button = null;
+    try { button = d.getElementById("rail-screen")?.querySelector?.(".rail-screen-button") ?? null; } catch { return true; }
+    if (!button) return true;
+    // checkVisibility is the browser's OWN answer to "is this being painted", and it is the right
+    // question rather than a bounding box: the phone's closed rail drawer is `visibility: hidden`
+    // and translated off the right edge (styles.css, the drawer block), so the box still measures a
+    // healthy 274x172 -- measured on grok-bot-local-vm at 390x844 -- while nothing is on screen. It
+    // also covers display:none anywhere up the tree and opacity:0. Deliberately NOT a viewport
+    // intersection test: a rail scrolled so the tile is above the fold is still being painted, and
+    // treating that as invisible would leave a stale picture waiting for whoever scrolls back.
+    if (typeof button.checkVisibility === "function") {
+      try { return button.checkVisibility({ visibilityProperty: true, opacityProperty: true, contentVisibilityAuto: true }) === true; } catch { /* an older browser answers below */ }
+    }
+    if (typeof button.getBoundingClientRect !== "function") return true;
+    try {
+      const rect = button.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    } catch { return true; }
+  }
+
+  // ---- the idle wake, this module's own clock ---------------------------------------------------
+
+  function disarmIdle() {
+    if (!idleWake) return;
+    try { global.clearTimeout(idleWake.timer); } catch { /* nothing to do */ }
+    idleWake = null;
+  }
+
+  // Armed ONCE, for an absolute moment. A render that arrives while it is armed for the same agent
+  // does nothing at all -- which is the whole reason this is a timestamp and a setTimeout rather
+  // than something recomputed per render. sync() only ever runs from a render and the adapter's
+  // heartbeat is 15 s, so a rolling timer would be pushed back for ever and a 30 s cadence would
+  // never fire once.
+  function armIdle(agentId, delayMs) {
+    if (!agentId) return;
+    if (idleWake && idleWake.agentId === agentId) return;
+    disarmIdle();
+    const at = now() + Math.max(0, delayMs);
+    const fire = () => {
+      idleWake = null;
+      const last = state.last;
+      if (!last || last.agentId !== agentId) return;
+      // Straight back through sync, so every guard -- a hidden tab, a hand-off, a seat the host
+      // never named -- applies to the wake exactly as it applies to a render.
+      sync(last);
+    };
+    let timer = null;
+    try { timer = global.setTimeout(fire, Math.max(0, at - now())); } catch { timer = null; }
+    idleWake = { agentId, at, timer };
+  }
+
   function teardown() {
+    disarmIdle();
     if (!reader) return;
     try { global.clearInterval(reader.timer); } catch { /* nothing to do */ }
     try { reader.frame.remove(); } catch { /* already gone with the document */ }
     reader = null;
   }
 
-  function mount(agentId, display, everyMs) {
+  function mount(agentId, display, everyMs, hold) {
     const d = doc();
     if (!d) return;
     teardown();
@@ -254,23 +448,36 @@
     // the PAGE's origin -- the host's own 127.0.0.1 form is the viewer's machine through the relay,
     // which is the bug VNC-2 closed. vnc.html and not vnc_lite: the lite client ignores
     // resize=scale and paints the top-left corner of the screen only.
+    //
+    // quality=0&compression=9 is the cheap reader. Measured on grok-bot-local-vm 2026-09-10 with CDP
+    // websocket frame accounting: one mount to a real frame costs 17.5 KiB against 51.9 KiB at the
+    // client's default, in the same 1.27 s, with the 390x244 thumbnail not visibly worse for it
+    // (4,207 characters against 4,263). It is a third of the cost for the same picture; it is not,
+    // on its own, what makes the idle cadence cheap -- a grab costs whatever is on the screen, and
+    // the header records the range.
     const origin = global.location?.origin ?? "";
     frame.src = `${origin}/vnc/${display}/vnc.html`
       + `?path=${encodeURIComponent(`/vnc/${display}/websockify`)}`
-      + "&autoconnect=1&resize=scale&reconnect=1&bell=0&view_only=1";
+      + "&autoconnect=1&resize=scale&reconnect=1&bell=0&view_only=1"
+      + "&quality=0&compression=9";
     d.body.appendChild(frame);
     reader = {
       agentId,
       display,
       frame,
       everyMs,
-      startedAt: Date.now(),
+      // `hold` is the cadence in one word: a held client is the live tile, an unheld one is a
+      // mount-grab-release that lets go of the seat as soon as it has a picture.
+      hold: hold === true,
+      startedAt: now(),
       timer: global.setInterval(tick, everyMs),
     };
   }
 
-  function retime(everyMs) {
-    if (!reader || reader.everyMs === everyMs) return;
+  function retime(everyMs, hold) {
+    if (!reader) return;
+    reader.hold = hold === true;
+    if (reader.everyMs === everyMs) return;
     try { global.clearInterval(reader.timer); } catch { /* nothing to do */ }
     reader.everyMs = everyMs;
     reader.timer = global.setInterval(tick, everyMs);
@@ -298,6 +505,14 @@
     return { dataUrl, spread };
   }
 
+  // A one-shot grab whose client never painted anything: let it go and come back at the idle
+  // cadence rather than holding a websocket open on a seat that is not answering.
+  function giveUp(held) {
+    const agentId = held.agentId;
+    teardown();
+    armIdle(agentId, IDLE_REFRESH_MS);
+  }
+
   function tick() {
     const held = reader;
     if (!held) return;
@@ -306,31 +521,38 @@
     // seconds and remounting would cost the handshake again.
     if (desktopDialogOpen()) return;
     // A hidden tab is not a pause. Chrome throttles the timer anyway and there is nobody to show a
-    // frame to, so the client goes.
-    if (!pageVisible()) { teardown(); return; }
+    // frame to, so the client goes and the wake goes with it. A tile that has been laid out to
+    // nothing -- a closed rail drawer at phone width -- is the same case, checked here as well as in
+    // sync() because a window resize does not necessarily render.
+    if (!pageVisible() || !tileOnScreen()) { teardown(); return; }
     let source = null;
     try { source = held.frame.contentDocument?.querySelector("canvas") ?? null; } catch { source = null; }
     if (!source || !source.width || !source.height) {
-      if (held.everyMs !== WORKING_REFRESH_MS && Date.now() - held.startedAt > WARMUP_CEILING_MS) teardown();
+      if (!held.hold && now() - held.startedAt > WARMUP_CEILING_MS) giveUp(held);
       return;
     }
     const shot = capture(source);
     if (!shot || !frameLooksReal(shot.dataUrl, shot.spread)) {
-      if (held.everyMs !== WORKING_REFRESH_MS && Date.now() - held.startedAt > WARMUP_CEILING_MS) teardown();
+      if (!held.hold && now() - held.startedAt > WARMUP_CEILING_MS) giveUp(held);
       return;
     }
-    rememberFrame(held.agentId, shot.dataUrl);
-    paint(held.agentId, shot.dataUrl);
-    // A still by default: the frame is in hand, so the client goes until the agent is working
-    // again. Only a working agent keeps a reader alive.
-    if (held.everyMs !== WORKING_REFRESH_MS) teardown();
+    // Only an ACCEPTED frame moves the stamp. A blank one refused above leaves the caption reading
+    // the age of the last picture a person could actually see, which is the true answer.
+    const at = now();
+    rememberFrame(held.agentId, shot.dataUrl, at);
+    paint(held.agentId, shot.dataUrl, at);
+    startAgeClock();
+    // A held client is the live cadence and keeps reading. A one-shot grab has what it came for: the
+    // client goes and the next wake is 30 s out, so an idle agent is a photograph every half minute
+    // rather than a standing stream of somebody's browsing.
+    if (!held.hold) { const agentId = held.agentId; teardown(); armIdle(agentId, IDLE_REFRESH_MS); }
   }
 
   // Straight into the element, never through a render. Rebuilding the transcript to show a new
   // frame would throw the reader back to the bottom every few seconds, which is the scar
   // paintBoxHandoffFrame already carries -- and app.js now emits no <img> at all until it has a
   // src, so the first frame has to create the element rather than fill one in.
-  function paint(agentId, dataUrl) {
+  function paint(agentId, dataUrl, at) {
     const d = doc();
     if (!d || !agentId || !dataUrl) return;
     const tile = d.getElementById("rail-screen");
@@ -350,6 +572,57 @@
     img.hidden = false;
     const plate = tile.querySelector("[data-rail-screen-plate]");
     if (plate) plate.hidden = true;
+    paintAge(at == null ? capturedAtFor(agentId) : at);
+  }
+
+  // The age caption, written onto the picture and re-written after every render. renderScreenTile
+  // rebuilds #rail-screen wholesale at least once a heartbeat, so this element cannot be emitted
+  // once and left alone; it is created when it is missing and its text is replaced when it is not.
+  // It is laid out absolutely over the bottom of the picture, so it can appear and disappear
+  // without moving anything else in the rail.
+  function paintAge(at) {
+    const d = doc();
+    if (!d) return;
+    const agentId = state.last?.agentId ?? "";
+    const stamp = Number(at);
+    if (!agentId || !Number.isFinite(stamp) || stamp <= 0) return;
+    const tile = d.getElementById("rail-screen");
+    const button = tile?.querySelector?.(".rail-screen-button") ?? null;
+    if (!button) return;
+    if ((button.dataset?.agentId ?? "") !== agentId) return;
+    // Only over a picture. A plate is not a stale photograph, it is the absence of one, and dating
+    // it would read as a picture that failed to load rather than as a tile with nothing in it yet.
+    if (!button.querySelector("img[data-rail-screen]")) return;
+    let note = button.querySelector("[data-rail-screen-age]");
+    if (!note) {
+      note = d.createElement("small");
+      note.setAttribute("data-rail-screen-age", "");
+      note.className = "rail-screen-age";
+      button.appendChild(note);
+    }
+    const words = ageWords(now() - stamp);
+    if (note.textContent !== words) note.textContent = words;
+  }
+
+  // One second, and it only ever replaces that one string. It runs while the tab is visible and
+  // there is a conversation open; it stops with the tab, so a backgrounded console holds no timer.
+  function ageTick() {
+    if (!pageVisible()) { stopAgeClock(); return; }
+    const agentId = state.last?.agentId ?? "";
+    if (!agentId) { stopAgeClock(); return; }
+    paintAge(capturedAtFor(agentId));
+  }
+
+  function startAgeClock() {
+    if (ageTimer != null) return;
+    if (!pageVisible()) return;
+    try { ageTimer = global.setInterval(ageTick, AGE_TICK_MS); } catch { ageTimer = null; }
+  }
+
+  function stopAgeClock() {
+    if (ageTimer == null) return;
+    try { global.clearInterval(ageTimer); } catch { /* nothing to do */ }
+    ageTimer = null;
   }
 
   // ---- the one function app.js drives ----------------------------------------------------------
@@ -358,12 +631,17 @@
     const options = input ?? {};
     const agentId = options.agentId ?? "";
     const status = String(options.status ?? "");
-    const working = status === "working";
     const visible = options.visible === undefined ? pageVisible() : options.visible !== false;
-    state.last = { agentId, seat: options.seat, status, visible };
+    state.last = { agentId, seat: options.seat, status, visible, activity: options.activity ?? null };
+    if (agentId) noteActivity(agentId, options.activity);
+    // LIVE is a working turn OR a browser or desktop tool row inside the last minute. The second
+    // half is what makes the tile keep up BETWEEN turns, which is when Jason looks at it: `working`
+    // is agent.isRunning and is false the instant a turn ends.
+    const live = status === "working" || browsingLately(agentId);
 
-    // No conversation, a room, or a hidden tab: nothing to read for and nobody to show it to.
-    if (!agentId || !visible) { teardown(); return readState(); }
+    // No conversation, a room, a hidden tab, or a tile nobody can see: nothing to read for and
+    // nobody to show it to. The last of those is the phone, where the rails are drawers.
+    if (!agentId || !visible || !tileOnScreen()) { teardown(); stopAgeClock(); return readState(); }
 
     // HANDBACK-1 owns the agent while a hand-off is pending. One reader at a time.
     if (handoffReaderAgent() === agentId) { teardown(); return readState(); }
@@ -377,25 +655,47 @@
       return readState();
     }
 
-    const everyMs = working ? WORKING_REFRESH_MS : WARMUP_POLL_MS;
+    startAgeClock();
+
     if (reader && reader.agentId === agentId) {
-      if (reader.display !== display) mount(agentId, display, everyMs);
-      else retime(everyMs);
+      // A live agent holds its client at the live cadence. An agent that has just STOPPED being live
+      // keeps the client it has until its next frame and then lets go through tick(): pulling a held
+      // reader down to a one-shot here would throw away a handshake that is already paid for.
+      if (reader.display !== display) mount(agentId, display, live ? LIVE_REFRESH_MS : WARMUP_POLL_MS, live);
+      else retime(live ? LIVE_REFRESH_MS : (reader.hold ? reader.everyMs : WARMUP_POLL_MS), live);
+      if (!live && !reader.hold) armIdle(agentId, IDLE_REFRESH_MS);
       return readState();
     }
-    // A still already in hand and an idle agent: nothing to mount. The tile is drawing it already.
-    if (!working && frameFor(agentId)) { teardown(); return readState(); }
-    mount(agentId, display, everyMs);
+
+    if (live) { mount(agentId, display, LIVE_REFRESH_MS, true); return readState(); }
+
+    // Idle, and no reader running. With no picture at all, take one now -- the tile is showing a
+    // plate and the person is waiting for the first frame. With a picture in hand, wait for the
+    // wake: what is on screen is at most 30 s old, and mounting a client on every render is the
+    // thing the old still-by-default rule was right to avoid.
+    if (!frameFor(agentId)) { mount(agentId, display, WARMUP_POLL_MS, false); return readState(); }
+    const capturedAt = capturedAtFor(agentId);
+    const age = capturedAt == null ? Infinity : now() - capturedAt;
+    if (age >= IDLE_REFRESH_MS) { mount(agentId, display, WARMUP_POLL_MS, false); return readState(); }
+    armIdle(agentId, IDLE_REFRESH_MS - age);
     return readState();
   }
 
   function readState() {
+    const forAgent = reader?.agentId ?? state.last?.agentId ?? "";
     return {
       agentId: reader?.agentId ?? null,
       display: reader?.display ?? null,
       mounted: reader != null,
       everyMs: reader?.everyMs ?? null,
       startedAt: reader?.startedAt ?? null,
+      // SCREEN-TILE-1. Which cadence this is, and when the module next means to wake itself up.
+      // Both are read by the gate: "a client is held" and "a client happens to be up right now" are
+      // different claims, and an idle wake that a render had reset would show here as a number that
+      // keeps moving.
+      live: reader?.hold === true,
+      idleWakeAt: idleWake?.at ?? null,
+      capturedAt: capturedAtFor(forAgent),
     };
   }
 
@@ -411,7 +711,9 @@
     state: readState,
     frameLooksReal,
     spreadOf,
-    limits: { MIN_FRAME_CHARS, MIN_SPREAD, IDLE_KEEP, IDLE_PREFIX, IDLE_INDEX, WORKING_REFRESH_MS, WARMUP_POLL_MS, THUMB_W, THUMB_H },
+    ageWords,
+    capturedAtFor,
+    limits: { MIN_FRAME_CHARS, MIN_SPREAD, IDLE_KEEP, IDLE_PREFIX, IDLE_PREFIX_AT, IDLE_INDEX, LIVE_REFRESH_MS, IDLE_REFRESH_MS, WARMUP_POLL_MS, WARMUP_CEILING_MS, ACTIVITY_WINDOW_MS, AGE_TICK_MS, THUMB_W, THUMB_H },
     // app.js hands over its gateway caller here. Without one this module never asks the host
     // anything and simply uses the seat it is given.
     configure(options) {
@@ -420,7 +722,9 @@
     },
   };
 
-  // A tab that goes away drops the client rather than leaving a websocket open on a seat nobody is
-  // watching. Registered once, and only where there is a document to register it on.
-  doc()?.addEventListener?.("visibilitychange", () => { if (!pageVisible()) teardown(); });
+  // A tab that goes away drops the client, the idle wake and the caption's clock, rather than
+  // leaving a websocket open and two timers running on a seat nobody is watching. It all comes back
+  // on the render the adapter's own resume() causes. Registered once, and only where there is a
+  // document to register it on.
+  doc()?.addEventListener?.("visibilitychange", () => { if (!pageVisible()) { teardown(); stopAgeClock(); } });
 })(typeof window !== "undefined" ? window : globalThis);

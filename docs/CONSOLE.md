@@ -356,10 +356,10 @@ Five rules, each one load-bearing:
 - **One reader at a time.** `HANDBACK-1`'s reader owns the agent while a hand-off is pending; this
   one stands down for it (read through `window.__machineRoomHandoff.screen().readerDisplay`) rather
   than opening a second websocket to the same seat.
-- **A still by default.** It refreshes about every 5 s **only while the record's status is
-  `working`**; otherwise it takes one frame and lets the client go. The alternative is a standing
-  screen-share of the operator's own browsing — the seat read on 2026-09-08 had Gmail, a GitHub
-  account and a YouTube channel open on it. That is a privacy decision, not a performance one.
+- **Three cadences, not a still.** See *The tile keeps up* below. `CONSOLE-4` shipped this module
+  with a rule called **a still by default** — one frame for an idle agent, then let the client go —
+  and `SCREEN-TILE-1` reversed it on Jason's ask. The half of that rule that survives is that an
+  idle agent is **photographed and never streamed**.
 - **Never torn down on a render that merely carried no display.** The roster is rebuilt from
   `listAgents` and the box status is a separate read, so a record is briefly seatless between the
   two. Tearing down there restarted noVNC's handshake on every heartbeat and took the first frame
@@ -372,6 +372,135 @@ Five rules, each one load-bearing:
   alone is a weak test — a genuinely dark screen compresses small too — so the guard reads the
   **colour spread off the thumbnail's own pixels** before it encodes, and needs both: at least 2,048
   characters and a luminance spread of at least 10 out of 255.
+
+### The tile keeps up (SCREEN-TILE-1)
+
+Jason, 2026-09-10 10:55:
+
+> "The AI's desktop in the right-hand corner has a screenshot that does not stay up to date. It gets
+> recorded once and stays that way. It never updates. For instance, Titan was on a different web
+> page, but when I looked at it on my desktop, I saw the original web page it loaded with."
+
+**Reproduced on `grok-bot-local-vm` before a line was changed.** 25 s after the box's browser moved
+from `example.com` to `wikipedia.org` the tile still drew Example Domain and the frame string was
+**byte-identical at 4,143 characters**, with no reader mounted.
+
+**The cause was two lines and a stale key.** One dropped the client after a single good frame for
+anything that was not `working`; the other then refused to mount at all for an idle agent that
+already had a frame — and that frame is persisted under `mr-screen-tile-frame:<agentId>`, so it
+survived reloads. "It gets recorded once and stays that way" is exactly what the code did.
+
+**A third cause, found while building the fix and measured:** `renderScreenTile` preferred a
+hand-off's frozen still over the live frame *unconditionally*. So for any agent that had ever handed
+something back, every render put the old still back over the moving one, for ever — a 2,511-character
+hand-off still re-painted over a 4,200-character live frame on every heartbeat. The frozen still now
+wins only while the hand-off is **pending**, which is the case `HANDBACK-1` owns and the case where
+this module stands down anyway.
+
+**The three cadences.**
+
+| | when | what it does |
+|---|---|---|
+| **live** | the record's status is `working`, **or** the newest tool row was a browser or desktop action inside the last 60 s | holds the client and captures every **3 s** |
+| **idle** | anything else, with a conversation open and the tab visible | every **30 s**: mount, take one frame that passes the blank guard, release the client |
+| **off** | a hidden tab, no conversation, a room, or `HANDBACK-1` holding the agent | no client, no wake, no caption clock. The desktop dialog is a **pause**, not a teardown |
+
+**The activity half of "live" is load-bearing.** `status` is `agent.isRunning`, which is only ever
+true *during* a turn — and Jason looks at the tile *between* turns. So `app.js` hands the newest tool
+row over on the sync object (`activity`), the module stamps first sight itself (a tool row carries no
+timestamp of its own; the outline they are woven from has none), and `Computer` or a shell row
+headlined `Opened <host>` keeps the tile live for a minute. A `Fetched` row does not: `curl` changes
+no screen.
+
+**The idle wake is the module's own clock.** `sync()` only ever runs from a render and the adapter's
+heartbeat is 15 s, so a cadence recomputed per render would be pushed back for ever and never fire.
+`nextIdleAt` is an absolute timestamp with one `setTimeout` behind it; a render that arrives while it
+is armed does nothing. There is a test named for that failure.
+
+**The privacy rule, reversed on purpose and written down as a reversal.** `CONSOLE-4` made the still
+a privacy decision, not a performance one: the seat read on 2026-09-08 had Gmail, a GitHub account
+and a YouTube channel open on it, and a tile that keeps repainting an idle desktop is a standing
+screen-share nobody asked for. Jason has now asked for the live tile, so the reversal is his. It is
+**bounded rather than abandoned**: a working agent is watched, an idle agent is photographed every
+30 s by a client that mounts, grabs and lets go. An idle agent is never a standing stream.
+
+### What it costs
+
+**Measured on `grok-bot-local-vm` (this Mac) at 1440x1000 in real Chrome via playwright-core, with
+CDP websocket frame accounting, 2026-09-10.** `scripts/verify-cost.mjs` sums `Network.dataReceived`,
+which is HTTP only — so these bytes are counted nowhere else, which is a reason to print them here
+and not a reason to treat them as free.
+
+| | measured |
+|---|---|
+| one mount to a real frame, `&quality=0&compression=9` | **17.5 KiB**, 1,267 ms |
+| the same at the client's default quality | **51.9 KiB**, 1,275 ms |
+| holding a client on a settled screen, 20 s | **0 bytes** |
+| the tile following a whole page change | **3.56 s** from the launcher returning, **21.4 KiB** over 17 frames |
+| a forced working minute | **6.2 KiB** to **137.1 KiB** across runs — it is whatever the screen did |
+| an idle minute, one grab | **18.3 KiB**; at the steady two grabs a minute, **36.6 KiB** |
+| one grab over a photo-heavy page | **75.0 KiB** |
+| a hidden tab, 10 s | **0 bytes**, 0 readers |
+| at 390x844 with the rail drawer shut, 8 s, agent held live | **0 bytes**, 0 readers |
+
+The page-change latency is measured **from the moment `box-chrome` returns**, not from the moment the
+gate reached for `docker exec`: that exec is the gate's own instrumentation, it measured 1.24 s on
+this Mac, and an agent on the box calls the launcher directly and pays none of it. The full
+gate-side number was 4.80 s. The tile's own share is bounded by the 3 s live cadence.
+
+**The live cadence is bounded only by what the screen does.** A held client streams whatever is on it:
+a settled screen costs nothing, a whole page change cost 11.7 KiB here and 323.7 KiB on a heavier page
+during the design pass, and an agent watching a video would be unbounded. That is what the 600 KiB
+working figure is for, and `--tile-live` prints the working minute against it every run.
+
+`&quality=0&compression=9` on the reader's URL is what makes the 30 s idle cadence affordable, and
+the 390x244 thumbnail is not visibly worse for it (4,207 characters against 4,263 at the default).
+The desktop dialog's own client is untouched.
+
+**What those numbers are not.** `docs/APPS.md`'s **100 KiB idle** and **600 KiB working** ceilings
+are *decoded API bytes at phone width*, and they exclude noVNC **by name** as `COST-2`. The gate
+prints the tile against those figures because that is the only honest way to say whether it is large,
+not because they are the same budget. At two grabs a minute the idle tile is about **36.6 KiB** on a
+settled desktop, or **92.7 KiB all in** with the adapter's own measured 56.1 KiB idle minute — and a
+grab over a photo-heavy page measured 75.0 KiB, which at two a minute would be over on its own. **A
+grab is a whole framebuffer and costs whatever is on the screen.** If Jason wants that number lower,
+the lever is the cadence, and the numbers to move it with are in this table.
+
+**Where that ceiling really applies, this costs nothing.** At phone width the rails are drawers, and a
+shut drawer is `visibility: hidden` and translated off the right edge — so the tile's **bounding box
+still measures 274x172** and only `checkVisibility()` tells the truth about it. The module asks that
+question and refuses to open a websocket for a picture the browser is not painting. Measured at
+390x844 with the agent held **live** (which at desktop width is a client up 100% of the time):
+**0 bytes over 8 s and 0 readers**, and a reader back within 15 s of the window returning to 1440.
+
+**Two things the gate had to learn to measure this honestly**, both worth keeping in mind for any
+later leg. Websocket accounting over a **short** window under-counts: CDP delivers frame events in
+batches, and a 1.4 s window read 0 bytes while the minute after it read 101.8 KiB — so the byte claim
+and the latency claim use different windows. And the screen has to be **settled** before "the frame
+changed" can be attributed to the page: a held client re-encodes every 3 s and a caret blinking in a
+URL bar moves the bytes on its own, so the leg reads the frame twice four seconds apart first and
+prints whether it settled.
+
+**The cheapest frame source is not reachable from the console.** A 390x244 frame taken inside the box
+with `ffmpeg x11grab` costs **918 B in 315 ms** — about twenty times cheaper per frame than a VNC
+mount. Nothing carries it: none of the 180 commands in `source/host/gateway-protocol.ts` captures a
+screen, and the relay has no such route. Wiring one means a new route in `ui/server.mjs`, which
+`SCREEN-TILE-1` did not own. It is filed on the row.
+
+### How old the picture is
+
+Every accepted frame stamps `capturedAt`, kept in a parallel storage key
+(`mr-screen-tile-frame-at:<agentId>`) so the frame value and `HANDBACK-1`'s eviction index are both
+untouched. A **refused** frame never moves the stamp, so the caption always dates the last picture a
+person could actually see.
+
+A one-second clock writes **"as of 3 s ago"** onto the picture — seconds up to a minute, then "a
+minute ago", "2 min ago", "an hour ago". It is re-added after every render on purpose:
+`renderScreenTile` rewrites the whole tile's `innerHTML` at least once a heartbeat, so a caption
+emitted once would blink out and stay out. It is laid out **absolutely** over the bottom of the
+picture, so it appears and disappears without moving a pixel of the rail, and it is never drawn over
+a plate — a plate is the absence of a picture, not a stale one, and dating it would read as a picture
+that failed to load.
 
 ### Storage
 
@@ -463,6 +592,7 @@ node scripts/verify-console-polish.mjs --boot     the plate is on <html> before 
                                        --picker   no tile-shaped blanks; the default is Titan Nebula
                                        --badge    a gap is one row, and it opens and shuts again
                                        --tile     a picture or a plate, and never a broken image
+                                       --tile-live the tile follows the agent's screen, and what that costs
                                        --files    a file row opens a viewer and downloads
                                        --all      every leg in sequence, one browser
 ```
@@ -480,7 +610,25 @@ Five rules the script is written under, each paid for by an earlier gate that li
 - **Nothing is read before the adapter exists.** The static shell satisfies selectors with markup
   `app.js` has not filled yet. (It used to satisfy them with seed COPY, which the review pass
   emptied — see §1.)
-- **The rail tile's click is a write**, so that leg is local-box only.
+- **The rail tile's click is a write**, so that leg is local-box only. `--tile-live` drives the
+  box's own browser with `box-chrome` and holds a reader on a real seat, so it is local-box only for
+  the same reason and is refused outright in read-only mode.
+- **A cadence measured through `app.js`'s own render loop is not a cadence.** `renderBoxHandoffSurfaces`
+  calls `sync` on every heartbeat with the record's *real* status, which retimes the reader underneath
+  any probe holding it at another one — measured while building `--tile-live`. So that leg pins the
+  state the module is driven with for the length of a measurement, puts it back afterwards, and says
+  in its own output that the cadence was **forced**. The local box's model endpoint does not take
+  turns (`docs/APPS.md`), so a forced cadence is the strongest claim this machine can make and the
+  real-turn proof belongs on the R750 demo tenant.
+- **The tile has to be showing the agent the leg measures.** `screen-tile.js` refuses to paint into a
+  tile carrying another agent's id, so a leg measuring one agent while the console has another open
+  reads a stamp that moves and a picture that never changes — measured, when Playwright's element
+  click on a roster card silently did not take. `--tile-live` clicks the card in the page as a
+  fallback and then asserts the tile's own `data-agent-id`.
+- **Websocket bytes are invisible to `scripts/verify-cost.mjs`**, which sums `Network.dataReceived`
+  and therefore counts HTTP only. `--tile-live` counts `Network.webSocketFrameReceived` and prints
+  the tile against the same figures `docs/APPS.md` sets, with what those figures are and are not
+  spelled out in §3.
 - **`getForeverBoxStatus` takes `{ id }`**, and the tile leg asserts the difference between the two
   argument shapes rather than assuming it.
 - **A leg opens a conversation that HAS the thing it measures.** The badge, files and scroll legs
@@ -505,7 +653,7 @@ Screenshots land in `$GROK_BOT_SHOT_DIR` and every one is named in the output.
 | `scripts/verify-mobile.mjs` | the same console at 390x844 and 430x932 with touch, and a 1440x900 leg that fails on a changed pixel (§7) |
 | `node --test tests/machine-room-mobile.test.mjs` | that the phone pass stayed inside `@media (max-width: 690px)` (§7) |
 | `node --test tests/machine-room-gap-badge.test.mjs` | the gap predicate (**including that an adapter notice ends a gap and is never folded away**), the headline, its kinds line in plain words and its span ceiling, the preference store, the receipt that survives a rebuild, and that the module is loaded ahead of app.js |
-| `node --test tests/machine-room-screen-tile.test.mjs` | the blank-frame refusal, the reader's life, the seat argument shape, and the stylesheet's `[hidden]` belt |
+| `node --test tests/machine-room-screen-tile.test.mjs` | the blank-frame refusal, the reader's life, the seat argument shape, the stylesheet's `[hidden]` belt, and `SCREEN-TILE-1`'s three cadences — the idle remount, that a render never pushes the wake back, the hidden tab, the cheap reader URL, `capturedAt` and the age wording |
 | `node --test tests/machine-room-files.test.mjs` | the viewer's five branches, the masking, and the `/files` route's fences against a real relay and a real gateway |
 | `scripts/verify-dashboard.mjs` | unchanged by this wave, and NOT green on `grok-bot-local-vm`. It leaves its own probe agents behind and they then fail its avatar and bot-cap legs (GATE-14), so the honest way to read it on this box is to diff its failure list against a run of the previous commit rather than to read its tally |
 

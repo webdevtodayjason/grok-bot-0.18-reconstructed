@@ -5033,11 +5033,20 @@
     const lead = contextRecord();
     if (!lead) { tile.innerHTML = ""; return; }
     const live = lead.handoff ?? null;
-    // CONSOLE-4 seam: a hand-off's own frozen frame first (HANDBACK-1 owns that), then the idle
-    // reader's (screen-tile.js, item C). With the module absent this is exactly today's source.
-    const frame = boxHandoffFrame(lead.id, live?.requestId ?? boxHandoffLastRequestId(lead) ?? "")
-      || (typeof window.__screenTile?.frameFor === "function" ? window.__screenTile.frameFor(lead.id) : "")
-      || "";
+    // CONSOLE-4 seam, corrected by SCREEN-TILE-1. Two frame sources: a hand-off's own frozen still
+    // (HANDBACK-1 owns those, keyed by request id) and the rail reader's live one (screen-tile.js).
+    //
+    // WHICH ONE WINS DEPENDS ON WHETHER THE HAND-OFF IS STILL PENDING, and it has to. While a step
+    // is pending the frozen still is the picture of the thing the person is being asked to do, and
+    // this module stands down off that agent anyway. Once the step is resolved the hand-off still is
+    // a photograph of the past -- and preferring it unconditionally meant that for any agent that
+    // had EVER handed something back, every render put the old still back over the live frame, for
+    // ever. That is Jason's "it gets recorded once and stays that way" for a subset of agents, and
+    // it was measured on grok-bot-local-vm while building SCREEN-TILE-1: a 2,511-character hand-off
+    // still re-painted over a moving 4,200-character live frame on every heartbeat.
+    const tileFrame = typeof window.__screenTile?.frameFor === "function" ? window.__screenTile.frameFor(lead.id) : "";
+    const handoffFrame = boxHandoffFrame(lead.id, live?.requestId ?? boxHandoffLastRequestId(lead) ?? "");
+    const frame = (live ? (handoffFrame || tileFrame) : (tileFrame || handoffFrame)) || "";
     const seat = boxHandoffSeatOf(lead);
     // "Connecting" only while a reader for THIS agent is actually running. It used to be said
     // whenever the box had handed out a seat, so an idle agent with a screen sat on "Connecting"
@@ -5067,6 +5076,21 @@
         : `<span class="rail-screen-plate" data-rail-screen-plate>${escapeHtml(plate)}</span>`)
       + `</button>`
       + `<small class="rail-screen-caption" id="rail-screen-caption">${escapeHtml(caption)}</small>`;
+  }
+
+  // SCREEN-TILE-1. The newest tool row in the open conversation, which is the only signal the
+  // console has for "this agent was just doing something on a screen". A tool row is a system
+  // message carrying `kind` off TOOL_LABELS ("Computer" for computerUseToolCall, "Shell" for a
+  // command, and so on); its text is the headline, which is where `Opened <host>` lands for a
+  // `box-chrome <url>` call. No timestamp: the outline these rows are woven from carries none, so
+  // screen-tile.js stamps the moment it first saw the row rather than trusting one that is not there.
+  function newestToolRow(record) {
+    const rows = Array.isArray(record?.messages) ? record.messages : [];
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const row = rows[i];
+      if (row?.type === "system" && row.kind) return { id: row.id ?? "", kind: row.kind, text: String(row.text ?? "") };
+    }
+    return null;
   }
 
   // The newest hand-off this conversation has on screen, so a finished step still shows its own
@@ -5101,6 +5125,11 @@
       seat,
       status: lead?.status ?? null,
       visible: !document.hidden && !elements.desktopDialog.open,
+      // SCREEN-TILE-1: the one property this wave added here. `status` is agent.isRunning, so it is
+      // only ever true DURING a turn -- and Jason looks at the tile between turns. The newest tool
+      // row says whether the last thing this agent did was on a screen; screen-tile.js decides what
+      // to do about it, and stamps first sight itself, because a tool row carries no time.
+      activity: newestToolRow(lead),
     });
     renderHandoffRail();
     renderScreenTile();
