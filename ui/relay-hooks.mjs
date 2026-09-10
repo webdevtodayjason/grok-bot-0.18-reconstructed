@@ -163,6 +163,18 @@ export async function loadRelayHooks({ log = (line) => console.log(line), deps =
       return P;
     },
 
+    /**
+     * One device's push row, dropped. Called from the device revoke, so a phone a customer revoked
+     * because they lost it stops being notified in the same action rather than on somebody's next
+     * sweep. A no-op with no push-edge.mjs, and never a reason a revoke fails: the bearer is already
+     * dead by the time this runs, so the worst case of a failure here is a row nothing can use.
+     */
+    async pushForgetDevice(slug, deviceId) {
+      if (P == null || typeof P.forgetDevice !== "function") return { ok: false, error: "no_push" };
+      try { return await P.forgetDevice(slug, deviceId); }
+      catch (error) { log(`hook  a revoked device's push row could not be dropped: ${error?.message ?? error}`); return { ok: false, error: "failed" }; }
+    },
+
     /** The sweep that turns a pending card into one push. A no-op with no push-edge.mjs. */
     pushSweepStart() {
       if (P == null || typeof P.sweepStart !== "function") return;

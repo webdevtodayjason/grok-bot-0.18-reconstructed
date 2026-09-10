@@ -205,7 +205,19 @@ const DOOR = () => {
     buttonBackground: getComputedStyle(document.querySelector("button")).backgroundColor,
     buttonColor: getComputedStyle(document.querySelector("button")).color,
     inlineSvgs: document.querySelectorAll("svg").length,
-    subresources: document.querySelectorAll("img, script, link[rel=stylesheet]").length,
+    // THE PAGE'S OWN subresources, which is what this leg is about: an asset path exempted from the
+    // session check would be a hole in the thing the door exists to close. A script the EDGE injects
+    // is not the page asking for anything -- measured on console.titanium.bot 2026-09-10, Cloudflare
+    // Web Analytics adds static.cloudflareinsights.com/beacon.min.js to every page on the zone -- so
+    // same-origin and relative references are counted and anything cross-origin is listed instead.
+    subresources: [...document.querySelectorAll("img, script, link[rel=stylesheet]")]
+      .map((el) => el.getAttribute("src") ?? el.getAttribute("href") ?? "")
+      .filter((one) => one.length > 0 && !one.startsWith("data:"))
+      .filter((one) => { try { return new URL(one, location.href).origin === location.origin; } catch { return true; } }).length,
+    injected: [...document.querySelectorAll("img, script, link[rel=stylesheet]")]
+      .map((el) => el.getAttribute("src") ?? el.getAttribute("href") ?? "")
+      .filter((one) => one.length > 0 && !one.startsWith("data:"))
+      .filter((one) => { try { return new URL(one, location.href).origin !== location.origin; } catch { return false; } }),
     title: document.title,
     h1: document.querySelector("h1")?.textContent?.replace(/\s+/g, " ").trim() ?? "",
     machineRoom: document.documentElement.outerHTML.includes("Machine Room"),
@@ -259,11 +271,19 @@ async function legDoor(origin, phone, { tenant }) {
   check(out.buttonBackground === CYAN, `${label}: the button is Signal Cyan`, `${out.buttonBackground} (want ${CYAN})`);
   check(out.buttonColor === MIDNIGHT, `${label}: on Midnight text`, out.buttonColor);
   check(out.inlineSvgs >= 1, `${label}: the Ti mark is inline`, `${out.inlineSvgs} svg`);
-  check(out.subresources === 0, `${label}: and the page asks for no asset at all`, `${out.subresources}`,);
+  check(out.subresources === 0, `${label}: and the page asks for no asset of its own at all`, `${out.subresources}`);
+  // Printed rather than asserted: it is the zone's setting and not this page's markup, and a gate
+  // that failed on it would be reporting somebody else's decision as this door's defect. It is worth
+  // reading, though: this is the one screen that is a credential form.
+  if (out.injected.length > 0) info(`${label}: the edge injects ${out.injected.length} script(s) into this page: ${out.injected.join(", ")}`);
   check(/Titanium Bot/.test(out.title) && /Titanium *Bot/.test(out.h1), `${label}: the title and the heading name the product`, `"${out.title}" / "${out.h1}"`);
   check(out.machineRoom === false, `${label}: the string Machine Room appears nowhere`, out.machineRoom ? "it is still there" : "gone");
   check(out.forms === 1 && out.buttons === 1, `${label}: still one form and one button`, `${out.forms} form, ${out.buttons} button`);
-  check(out.email === tenant, `${label}: the email field is drawn ${tenant ? "with" : "without"} a control plane`, `${out.email}`);
+  // Against a relay this gate STARTED, it chose the branch and so it asserts it. Against a live
+  // console (--url) it gets whichever door that deployment has, so the email field is REPORTED. A
+  // gate that asserted its own guess there would fail on a correct page.
+  if (URL_TARGET == null) check(out.email === tenant, `${label}: the email field is drawn ${tenant ? "with" : "without"} a control plane`, `${out.email}`);
+  else info(`${label}: this deployment draws the ${out.email ? "account door (email and password)" : "instance-password door"}`);
 
   // Focus a control and read the scale back. RECORDED, NOT ASSERTED: see the rule at the top.
   await page.focus("#password").catch(() => {});
@@ -292,7 +312,11 @@ async function legCors(origin) {
     check(res.headers.get("access-control-allow-credentials") == null, `and never allows credentials`,
       "the cookie is SameSite=Strict and is never sent cross-site, so credentials would buy a shell nothing and cost this console its CSRF answer");
     check(/authorization/i.test(String(res.headers.get("access-control-allow-headers"))), "and admits the Authorization header", String(res.headers.get("access-control-allow-headers")));
-    check(res.headers.get("vary") === "origin", "and varies on origin, so no shared cache crosses two origins", String(res.headers.get("vary")));
+    // INCLUDES origin, not equals it. A compressing edge adds Accept-Encoding of its own and that is
+    // correct: what this assertion is about is that no shared cache can serve one origin's
+    // access-control headers to another origin's request.
+    check(String(res.headers.get("vary") ?? "").toLowerCase().split(",").map((one) => one.trim()).includes("origin"),
+      "and varies on origin, so no shared cache crosses two origins", String(res.headers.get("vary")));
   }
 
   for (const liar of ["https://evil.example", "https://localhost.evil.example", "null"]) {

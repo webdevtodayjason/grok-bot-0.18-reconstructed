@@ -1463,6 +1463,12 @@ function handleDeviceRevoke(req, res, t, sub, id) {
   try { gone = store.revoke(id, { sub }); }
   catch (error) { return fail(res, 500, `the device list could not be written: ${error?.message ?? error}`); }
   if (!gone) return fail(res, 404, "no such device");
+  // And its push row with it, in the same action. Not awaited and never able to fail this revoke:
+  // the bearer is dead the moment the line above returns, and a person revoking a phone they lost
+  // must not be told the revoke failed because a notification row would not delete. It IS logged.
+  void HOOKS.pushForgetDevice(t.slug, id).then((answer) => {
+    if (answer?.ok === true && answer?.removed === true) console.log(`device ${id} will not be notified on ${t.slug} either`);
+  }).catch(() => {});
   console.log(`device ${id} revoked on ${t.slug}`);
   res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
   return res.end(JSON.stringify({ revoked: id, tenant: t.slug }));

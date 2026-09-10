@@ -1318,6 +1318,11 @@ export function create(deps = {}) {
       return edge.handle(...arguments);
     },
     sweepStart: () => edge.sweepStart(),
+    // Revoking a device bearer has to take its push row with it, or a phone somebody revoked because
+    // they lost it goes on being notified. The edge wrote this function for item A's revoke and item
+    // A never called it; measured on the R750 2026-09-10, a revoked device's row was still in
+    // push.json. The seam carries it now.
+    forgetDevice: (slug, deviceId) => edge.forgetDevice(slug, deviceId),
     close() { stopReader?.(); edge.close?.(); },
   };
 }

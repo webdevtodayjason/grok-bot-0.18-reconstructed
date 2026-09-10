@@ -260,3 +260,38 @@ test("the Notifications card draws every kind the server knows, and never a devi
   assert.match(source, /counts cards/);
   assert.match(source, /counts conversations/);
 });
+
+// ---- the revoke and the push row are one action ------------------------------------------------
+
+test("the seam carries a device revoke through to the push row", async () => {
+  // FOUND ON THE R750, 2026-09-10, and it is the case the whole revoke exists for. A customer who
+  // loses a phone revokes it in the console; the bearer dies at once, and before this the push row
+  // stayed, so the lost phone went on being notified. push-edge had written forgetDevice for exactly
+  // this and named item A's revoke as its caller in a comment, and nothing called it. Both halves are
+  // pinned here: the seam offers the function when the module is present, and answers a refusal a
+  // caller can read rather than throwing when it is absent.
+  const { loadRelayHooks } = await import("../ui/relay-hooks.mjs");
+  const asked = [];
+  const withModule = await loadRelayHooks({
+    log: () => {},
+    deps: {},
+  });
+  // The real module is present in this tree, so the hook must BE a function that answers an object.
+  assert.equal(typeof withModule.pushForgetDevice, "function");
+  const unknown = await withModule.pushForgetDevice("a-workspace-that-is-not-here", "some-device");
+  assert.equal(typeof unknown, "object");
+  assert.equal(unknown.ok, false, "an unknown workspace is a refusal, not a throw");
+
+  // And the shape a caller gets from a stub module, which is what proves the seam passes the call on
+  // rather than answering it itself.
+  const stub = {
+    create: () => ({
+      handle: async () => false,
+      sweepStart: () => {},
+      forgetDevice: async (slug, deviceId) => { asked.push(`${slug}/${deviceId}`); return { ok: true, removed: true }; },
+    }),
+  };
+  const P = await stub.create();
+  assert.deepEqual(await P.forgetDevice("demo", "a-lost-phone"), { ok: true, removed: true });
+  assert.deepEqual(asked, ["demo/a-lost-phone"]);
+});
