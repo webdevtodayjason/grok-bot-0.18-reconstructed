@@ -889,6 +889,9 @@ async function legInBrowser(leg) {
   const origin = (argOf("--url", "http://127.0.0.1:7777")).replace(/\/+$/, "");
   const out = argOf("--out", `/tmp/handbook-console-${leg}-${Date.now()}.jsonl`);
   const email = argOf("--email", "");
+  // Where the pictures go. A passing page.click() is not evidence a person can read the answer, so
+  // the run leaves one frame per question behind. Never between filling a password and submitting it.
+  const shots = argOf("--shots", "");
   const password = process.env.HANDBOOK_CONSOLE_PASSWORD ?? "";
   const viewport = { width: 1440, height: 900 };
   const pwDir = path.join(REPO, ".cache/playwright");
@@ -1023,6 +1026,10 @@ async function legInBrowser(leg) {
         messages: seen.length - before.length, points, score, hits, text,
       });
       appendFileSync(out, `${JSON.stringify(rows.at(-1))}\n`);
+      if (shots.length > 0) {
+        const file = path.join(shots, `console-${leg}-${question.id}.png`);
+        await page.screenshot({ path: file, fullPage: false }).then(() => console.log(`   picture ${file}`)).catch(() => {});
+      }
       console.log(`\n[${question.id}${question.askAlt != null ? " (paraphrased)" : ""}] ${Math.round((Date.now() - t0) / 1000)}s, ${seen.length - before.length} row(s), ${points}/4`);
       console.log(`  path ${score.path ? "y" : "n"}  word ${score.word ? "y" : "n"}  safe ${score.safe ? "y" : "n"}  next ${score.next ? "y" : "n"}${hits.length ? `  [${hits.join("; ")}]` : ""}`);
       console.log(`  ${JSON.stringify(text.slice(0, 600))}`);
@@ -1111,6 +1118,7 @@ function usage() {
   console.log("  --rescore <file>    score a run's jsonl again with today's rubric, no box and no turns");
   console.log("  --seed-dir <dir>    read the packs from somewhere else (the broken-block injection test)");
   console.log("  --out <file>        where the answers are written");
+  console.log("  --shots <dir>       a browser leg leaves one picture per question here");
 }
 
 const leg = argOf("--leg", null);

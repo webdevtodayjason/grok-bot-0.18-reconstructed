@@ -264,6 +264,12 @@ function onboardingSentences(record: SandOnboardingRecord | null, sandRoot: stri
  * glossary or a guardrail list in this section would be paid for on every turn of every agent
  * forever, while a file costs nothing until a question needs it.
  *
+ * The first sentence is an INSTRUCTION, not a described habit. Measured on the R750 demo tenant on
+ * 2026-09-11: with the habit wording ("I read whichever fits before answering"), that box's model
+ * opened no pack at all across five owner questions and answered from memory, while the local box's
+ * model read the index on its first question. A pointer nobody acts on is a pointer that is not
+ * there, so the sentence names the trigger and says BEFORE.
+ *
  * The second sentence is DELIBERATELY REDUNDANT with the guardrail pack. A turn where no file was
  * read still has to be safe, and this is the sentence that makes the refusal true with nothing
  * fetched. The combined budget is pinned by tests/handbook-seeds.test.mjs.
@@ -274,10 +280,10 @@ function handbookSentences(sandRoot: string): string[] {
     SAND_HANDBOOK_SKILL_LOOKUP, "SKILL.md",
   ));
   return [
-    "What this product can really do, the words used here, and what I must never ask for are"
-      + ` written down for me at ${handbook}. It names the other handbook files; I read whichever`
-      + " fits before answering what I can do, how to connect something, or what a word means, and"
-      + " I would rather say a thing is not here yet than describe what we do not have.",
+    `I read ${handbook} BEFORE I answer anything about what this product can do, what a word here`
+      + " means, how to connect an app, what to set up for a trade, or what I may ask for. It is"
+      + " written for me and names the other handbook files. I answer none of those from memory,"
+      + " and would rather say a thing is not here yet than describe what we do not have.",
     "I never ask anybody to type a password, a card number or any credential to me in chat: those"
       + " go in the masked box on that app's own page in the Marketplace, or a secure card I raise."
       + " If one is pasted anyway I do not repeat it, I say where it goes and to change it at the"
