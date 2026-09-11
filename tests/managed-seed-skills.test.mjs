@@ -14,7 +14,7 @@
 // invocation inlines and skills/<id>/SKILL.md is what the agent reads, so the two disagreeing is
 // the model and the agent working from different recipes.
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -49,7 +49,11 @@ const service = (cacheDir, fetch) => new SandManagedSkillsService({ getCacheDir:
 
 const SEEDS = unionWithSeedSkills([]).map((skill) => skill.id).sort();
 
-test("the bundle carries the five real managed skills, frontmatter and all", () => {
+const seedSourceDir = path.join(repoRoot, "source/host/extensions/managed-setup/seed-skills");
+const seedDirectories = readdirSync(seedSourceDir, { withFileTypes: true })
+  .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+
+test("the bundle carries every seed directory in the tree, frontmatter and all", () => {
   // email joined them with MAIL-1: an agent that is handed mail needs the recipe for answering it,
   // and this box fetches nothing from a dashboard, so a skill it is not shipped is a skill it
   // never has. onboarding joined them with ONBOARD-1, for the same reason: it is the recipe Titan
@@ -57,7 +61,15 @@ test("the bundle carries the five real managed skills, frontmatter and all", () 
   // code joined them with CODE-1, for the same reason again: it is the recipe that tells an agent
   // when to hand real coding work to a throwaway machine, what that machine cannot do (it has no
   // internet, so no clone and no install), and that it must read the result before reporting.
-  assert.deepEqual(SEEDS, ["add-connector", "code", "email", "learn-from-demonstration", "onboarding"]);
+  // KB-1 added five more, the handbook packs, which is why this is no longer a list of five written
+  // out here: the invariant that matters is that the GENERATED bundle carries exactly what the
+  // directory holds, because forgetting `node scripts/gen-seed-skills.mjs` is how old words ship
+  // inside a bundle with every test green. The roster of ten is pinned in tests/handbook-seeds.test.mjs.
+  assert.deepEqual(SEEDS, seedDirectories,
+    "re-run scripts/gen-seed-skills.mjs: the bundle and the seed-skills directory disagree");
+  for (const id of ["add-connector", "code", "email", "learn-from-demonstration", "onboarding"]) {
+    assert.ok(SEEDS.includes(id), `${id} is still seeded; it predates the handbook and nothing may drop it`);
+  }
   const learn = unionWithSeedSkills([]).find((skill) => skill.id === "learn-from-demonstration");
   assert.equal(learn.name, "learn-from-demonstration", "the name comes from the file's frontmatter");
   // The frontmatter folds the description onto several lines (`description: >-`), which the

@@ -54,6 +54,19 @@ export const SAND_ONBOARDING_RETRIGGER_PHRASE = "run first-time setup";
 /** The id of the seed skill that IS the interview, so the agent can find and follow it. */
 export const SAND_ONBOARDING_SKILL_LOOKUP = "onboarding";
 
+/**
+ * KB-1. The id of the handbook pack that is the INDEX of the other four, so the section names one
+ * path instead of five.
+ *
+ * Why a path at all. A seeded managed skill costs zero standing prompt bytes and is also named
+ * nowhere the model can see: `getSystemPrompt` adds no section listing managed skills, the
+ * `agent_skills` catalog section only renders when `resolveAgentSkills` supplies something and
+ * nothing in this tree supplies it, and no tool runs a skill. So the two ways a seed reaches a turn
+ * are a path written into THIS section and a `workflowReference` node in a dispatched prompt.
+ * Seeding guarantees the packs exist; this sentence is what makes them reach an answer.
+ */
+export const SAND_HANDBOOK_SKILL_LOOKUP = "handbook-what-i-can-do";
+
 export const SAND_LEAD_AGENT_FILENAME = "lead-agent.json";
 
 export interface StandingPersonaAgent {
@@ -241,6 +254,37 @@ function onboardingSentences(record: SandOnboardingRecord | null, sandRoot: stri
   return [`${state} ${retrigger}`, how];
 }
 
+/**
+ * KB-1. The two sentences that make the handbook reachable, and the only standing spend this wave
+ * takes. Both are in the GENERAL block, never behind the lead marker, because every agent here
+ * answers an owner's question sooner or later.
+ *
+ * One path, not five ids: the first pack is the index and names the other four, so the section pays
+ * for one file name rather than five. Nothing of the handbook's own content is pasted here -- a
+ * glossary or a guardrail list in this section would be paid for on every turn of every agent
+ * forever, while a file costs nothing until a question needs it.
+ *
+ * The second sentence is DELIBERATELY REDUNDANT with the guardrail pack. A turn where no file was
+ * read still has to be safe, and this is the sentence that makes the refusal true with nothing
+ * fetched. The combined budget is pinned by tests/handbook-seeds.test.mjs.
+ */
+function handbookSentences(sandRoot: string): string[] {
+  const handbook = toModelVisiblePath(join(
+    sandRoot, MANAGED_SKILLS_DIRNAME, MANAGED_SKILL_FILES_DIRNAME,
+    SAND_HANDBOOK_SKILL_LOOKUP, "SKILL.md",
+  ));
+  return [
+    "What this product can really do, the words used here, and what I must never ask for are"
+      + ` written down for me at ${handbook}. It names the other handbook files; I read whichever`
+      + " fits before answering what I can do, how to connect something, or what a word means, and"
+      + " I would rather say a thing is not here yet than describe what we do not have.",
+    "I never ask anybody to type a password, a card number or any credential to me in chat: those"
+      + " go in the masked box on that app's own page in the Marketplace, or a secure card I raise."
+      + " If one is pasted anyway I do not repeat it, I say where it goes and to change it at the"
+      + " app if it was real.",
+  ];
+}
+
 // ------------------------------------------------------------------------ the section
 
 function mailSentences(agentId: string, mail: AgentMailFile | null): string[] {
@@ -296,6 +340,8 @@ export function renderStandingPersonaSection(input: StandingPersonaInput): strin
       + " E2B sandbox is configured for this workspace I can run the work there instead. There is"
       + " no other machine I hand coding to.",
     ...onboardingSentences(record, sandRoot),
+    "",
+    ...handbookSentences(sandRoot),
     "",
     // TITAN-CATALOG-1. Jason, 2026-09-09 17:40, and Titan's own report two minutes before it: a bot
     // asked for a new bot built one from nothing every time. MEASURED on grok-bot-local-vm, bundle

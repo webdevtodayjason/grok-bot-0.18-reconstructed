@@ -110,6 +110,9 @@ import "./composer-paste.test.mjs";
 import "./vnc-paste-bridge.test.mjs";
 import "./skill-ownership.test.mjs";
 import "./standing-persona.test.mjs";
+// KB-1: the agent's handbook, its seeded packs and the rubric that scores what it changed.
+import "./handbook-seeds.test.mjs";
+import "./handbook-rubric.test.mjs";
 import "./awaiting-operator.test.mjs";
 import "./env-fanout.test.mjs";
 import "./titan-crew.test.mjs";
