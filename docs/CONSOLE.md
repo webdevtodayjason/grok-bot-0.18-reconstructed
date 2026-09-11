@@ -1411,6 +1411,15 @@ three chips, on the agent's own bubble: **11.44:1** on `rgb(15, 23, 27)`. The wh
 composites to 14.5:1, which is the point: the chip is the quieter thing in the paragraph, not the
 louder one.
 
+**Measured on the R750**, through `https://console.titanium.bot` in real Chrome at **1440x900**, as a
+throwaway customer on the demo tenant, 2026-09-10, on a reply this run asked for (*"Alerts go to
+`#titan-alerts` on `titan-box-01` and mail lands at `titan@myagents.email`."*): three chips at
+`rgb(143, 217, 230)` on `rgba(10, 16, 20, 0.62)`, `1px` border `rgba(0, 200, 240, 0.25)`, radius
+5 px, 13.8 px `ui-monospace`, `overflow-wrap anywhere`, `cursor pointer`, the first one 118x18. Ink
+**11.44:1** against a pill compositing to `rgb(15, 23, 27)`; flipped to mist on the same row,
+`rgb(6, 85, 97)` on `rgb(195, 218, 218)`, **5.78:1**. Shipped relay-only: no host bundle change, no
+box swap, the relay restarted last.
+
 Nothing else about the chip moved with 5b: the box, the radius, the monospace stack, the wrapping, the
 click that copies, the tick and the accessible name are the CONSOLE-5 values, and
 `tests/machine-room-code-chip-pixels.test.mjs` still holds every other node on its old pixel.
