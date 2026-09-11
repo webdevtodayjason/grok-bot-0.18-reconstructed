@@ -48,7 +48,9 @@
 //
 // In --url mode nothing is created and nothing is sent: the leg types into the box and never
 // presses Send. CONSOLE_BEARER is read from the environment, sent as an Authorization header, and
-// never printed.
+// never printed. A tenant console asks for a sign-in rather than a bearer: set GATE_EMAIL and
+// GATE_PASSWORD for a throwaway customer minted outside this file, which is what the R750 leg uses.
+// Neither is printed, and with neither set the run opens the local relay the way it always has.
 import { createRequire } from "node:module";
 import { mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
@@ -117,8 +119,25 @@ async function newPage({ w = 1440, h = 900 } = {}) {
   return page;
 }
 
+// The live console is a tenant's, behind its own door, so a run against console.titanium.bot signs
+// in as a throwaway customer first. The password is read from the environment, added to nothing that
+// is printed, and the account is minted and removed by the operator outside this file. With no
+// credentials in the environment this is a no-op and the local relay opens as it always has.
+const EMAIL = process.env.GATE_EMAIL ?? "";
+const PASSWORD = process.env.GATE_PASSWORD ?? "";
+const signIn = async (page, ms = 60_000) => {
+  if (!EMAIL || !PASSWORD) return false;
+  await page.goto(`${ORIGIN}/login`, { waitUntil: "domcontentloaded", timeout: within(ms) });
+  await page.fill('input[type="email"], input[name="email"]', EMAIL).catch(() => {});
+  await page.fill('input[type="password"]', PASSWORD).catch(() => {});
+  await page.press('input[type="password"]', "Enter").catch(() => {});
+  await page.waitForLoadState("domcontentloaded").catch(() => {});
+  return true;
+};
+
 const boot = async (page, ms = 60_000) => {
-  await page.goto(`${ORIGIN}/`, { waitUntil: "load", timeout: within(ms) });
+  const signedIn = await signIn(page, ms);
+  if (!signedIn) await page.goto(`${ORIGIN}/`, { waitUntil: "load", timeout: within(ms) });
   return await page.waitForFunction(() => window.__machineRoomAdapter != null, null, { timeout: within(ms) })
     .then(() => true).catch(() => false);
 };
