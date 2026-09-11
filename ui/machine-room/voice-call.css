@@ -1,0 +1,264 @@
+/* VOICE-13: the call screen on a phone.
+ *
+ * Jason recorded ChatGPT's voice mode on his iPhone and said "this is what I want": a full-screen
+ * surface over the chat, Titan large and alive in the middle, hands free, and a row at the bottom
+ * with somewhere to type, a mute and a round X.
+ *
+ * THIS SHEET CARRIES NO BREAKPOINT AT ALL, and that is deliberate. voice.js alone decides whether
+ * the screen exists (callWanted(): 690 px of width, 500 px of height, or a shell that names its own
+ * platform). Everything here is driven by attributes and custom properties and sizes itself with vw
+ * and min(), so the module and the sheet cannot disagree the way 690 and 900 already do elsewhere in
+ * this console -- voice.js's LINE_SHELF_WIDTH answers a different question and says so in writing.
+ *
+ * A NAMED BRAND DEVIATION, in the voice styles.css:5281 already uses for the talk control. The ground
+ * is Midnight #090d14, which is the boot cover's own literal (boot.css) and the same KIND of
+ * full-bleed brand surface. The cyan on screen is Titan's OWN body colour, vendored inside
+ * assets/titan-mascot.js (#23DCEF / #00C8F0 / #00AFE0) and not chrome we painted. Every control here
+ * stays on the console's teal, because the sheet says in writing that Signal Cyan appears nowhere in
+ * this console on purpose.
+ *
+ * Z-INDEX 80 is the free slot: above the phone drawers at 70, below the toast at 100, so a toast can
+ * still be read over a call.
+ */
+
+.voice-call {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: #090d14;
+  color: var(--paper, #e8eef2);
+  /* The level the avatar module writes once a frame. Declared here so a sheet that loads before the
+   * module still has a number to read. */
+  --voice-level: 0;
+  --voice-call-face: min(632px, 162vw);
+  padding-top: max(16px, env(safe-area-inset-top));
+  padding-bottom: calc(max(18px, env(safe-area-inset-bottom)) + 6px);
+  padding-left: max(16px, env(safe-area-inset-left));
+  padding-right: max(16px, env(safe-area-inset-right));
+  overflow: hidden;
+}
+
+/* `:not([hidden])` because [hidden] loses to an author display rule. .voice-line and .voice-overlay
+ * both already say so in writing; this is the third node in this console to need it. */
+.voice-call:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* The background is locked while a call is up. A person left on a chat they cannot scroll is worse
+ * than the bug this wave fixes, so voice.js releases this on every path out of a call. */
+body[data-voice-call] { overflow: hidden; }
+
+/* ---------------------------------------------------------------- the face
+ *
+ * NOTHING IN THE MASCOT'S ANCESTOR CHAIN IS EVER SCALED. The vendored kit sizes its canvas from
+ * host.getBoundingClientRect().width, which is transform-aware, so a resize landing while an
+ * ancestor is scaled leaves Titan stretched for the rest of the call. The halos are SIBLINGS and
+ * they are the only things here that take a transform. voice-call-avatar.js repeats the rule.
+ */
+.voice-call-face {
+  position: relative;
+  flex: 1 1 auto;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-height: 0;
+}
+
+.voice-call-face titan-mascot,
+.voice-call-face .voice-call-still {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: var(--voice-call-face);
+  max-width: none;
+  opacity: .9;
+  transition: opacity 180ms ease-out, width 260ms ease-out;
+}
+
+.voice-call-face .voice-call-still {
+  width: min(300px, 76vw);
+  height: auto;
+}
+
+.voice-call-halo {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: min(260px, 62vw);
+  aspect-ratio: 1;
+  margin: -1px 0 0 -1px;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle, rgb(127 227 220 / 35%) 0%, rgb(49 182 184 / 12%) 55%, transparent 72%);
+  /* The centring translate is composed INTO the same transform as the scale on purpose: a separate
+   * `scale` property composes around the box's own corner and the halo orbits instead of breathing.
+   * mascots.css learned that with the attention turn and wrote it down. */
+  transform: translate(-50%, -50%) scale(1);
+  opacity: .3;
+  will-change: transform, opacity;
+}
+
+.voice-call-halo.is-outer {
+  width: min(330px, 80vw);
+  background: radial-gradient(circle, rgb(49 182 184 / 18%) 0%, transparent 70%);
+  opacity: .18;
+}
+
+/* Connecting: the console's existing ring pulse, on the outer halo only. */
+.voice-call[data-voice-call-word="Connecting"] .voice-call-halo.is-outer {
+  animation: voice-call-ring 1800ms ease-in-out infinite;
+}
+
+@keyframes voice-call-ring {
+  0%, 100% { opacity: .10; }
+  50% { opacity: .28; }
+}
+
+.voice-call[data-voice-call-word="Muted"] .voice-call-face titan-mascot { opacity: .55; }
+
+/* ---------------------------------------------------------------- the card
+ *
+ * When a reply carries a card or a tool result, the avatar shrinks to a small orb above the bottom
+ * row and the card takes the middle. The shrink is a WIDTH change on the mascot, which is safe for
+ * exactly the reason above: nothing is scaled, so the kit re-measures once and draws Titan smaller
+ * rather than stretched.
+ */
+.voice-call-card {
+  display: none;
+  width: min(560px, 100%);
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.voice-call[data-voice-call-card] .voice-call-card { display: block; }
+.voice-call[data-voice-call-card] .voice-call-face { flex: 0 0 auto; }
+.voice-call[data-voice-call-card] { --voice-call-face: 190px; }
+.voice-call[data-voice-call-card] .voice-call-halo { width: 96px; }
+.voice-call[data-voice-call-card] .voice-call-halo.is-outer { width: 120px; }
+
+.voice-call-card .message-row { margin: 0 0 8px; }
+.voice-call-card .message-bubble,
+.voice-call-card .inline-card {
+  background: rgb(255 255 255 / 6%);
+  border-radius: 12px;
+}
+
+/* ---------------------------------------------------------------- the words under him */
+.voice-call-status {
+  min-height: 1.1em;
+  margin: 0;
+  max-width: min(560px, 92vw);
+  font-size: 13px;
+  line-height: 1.3;
+  text-align: center;
+  color: var(--teal-300, #7fe3dc);
+  opacity: .85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-call-state {
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: .02em;
+  color: var(--teal-300, #7fe3dc);
+}
+
+/* ---------------------------------------------------------------- the bottom row */
+.voice-call-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(560px, 100%);
+}
+
+.voice-call-typed {
+  flex: 1 1 auto;
+  display: flex;
+  min-width: 0;
+}
+
+.voice-call-typed input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 44px;
+  padding: 0 14px;
+  border-radius: 22px;
+  border: 1px solid rgb(127 227 220 / 28%);
+  background: rgb(255 255 255 / 6%);
+  color: var(--paper, #e8eef2);
+  font: inherit;
+  font-size: 16px; /* 16 px or iOS zooms the whole screen on focus. */
+}
+
+.voice-call-typed input::placeholder { color: rgb(232 238 242 / 45%); }
+
+.voice-call-mute,
+.voice-call-end {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  gap: 2px;
+  width: 56px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 4px 0;
+  border-radius: 28px;
+  border: 1px solid rgb(127 227 220 / 28%);
+  background: rgb(255 255 255 / 6%);
+  color: var(--paper, #e8eef2);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* A WORD UNDER EACH, NOT AN ICON ALONE. index.html says that about the talk control in writing, and
+ * a round X with nothing beside it is the thing that rule exists to prevent. */
+.voice-call-mute .voice-call-glyph,
+.voice-call-end .voice-call-glyph { font-size: 18px; line-height: 1; }
+
+.voice-call-mute[aria-pressed="true"] {
+  border-color: var(--teal-300, #7fe3dc);
+  background: rgb(127 227 220 / 18%);
+}
+
+.voice-call-end {
+  border-color: rgb(255 111 114 / 55%);
+  background: rgb(255 111 114 / 16%);
+  color: var(--danger-500, #ff6f72);
+}
+
+/* ---------------------------------------------------------------- the ended note
+ *
+ * Not the toast: 2.8 s is shorter than unlocking a phone, and this note exists for exactly the case
+ * where the phone was locked. It lives in .conversation-space beside the VOICE-7 panel, so
+ * renderTranscript's wholesale innerHTML rewrite cannot take it with it.
+ */
+.voice-call-ended {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  z-index: 13;
+  margin: 0;
+  max-width: 90%;
+  padding: 6px 14px;
+  border-radius: 14px;
+  background: rgb(13 17 23 / 88%);
+  color: var(--paper, #e8eef2);
+  font-size: 13px;
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-call-halo { animation: none !important; }
+  .voice-call-face titan-mascot,
+  .voice-call-face .voice-call-still { transition: none; }
+}

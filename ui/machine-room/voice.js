@@ -139,6 +139,39 @@
   // tab and the only way out was a reload.
   const NOTE_DISMISS_MS = 6000;
 
+  // ---------------------------------------------------------------- VOICE-13: the call screen
+  //
+  // Jason recorded ChatGPT's voice mode on his iPhone and said "this is what I want": press Talk and a
+  // full-screen surface comes up over the chat with Titan large and alive in the middle, hands free,
+  // a row at the bottom to type in, a mute, and a round X to end it.
+  //
+  // A PHONE CALL IS NOT A NEW TALK MODE. It is always-listening with a different surface, and the
+  // relay cannot tell the two apart: the session frame is written once and byte-identically for the
+  // life of a socket with server VAD at 700 ms of silence, and the only difference between push and
+  // always is the page's own muted() callback. So this wave adds no frame, no field and no relay
+  // change. talkMode() is NOT touched either, because settings.js paints the Talk mode row from it and
+  // a phone-shaped lie there would contradict the person's stored choice (SETTINGS-3).
+  //
+  // THE TWO NUMBERS ARE THE CONSOLE'S OWN. 690 px is the phone width four styles.css blocks already
+  // use; 500 px is the landscape-phone height the sheet already has a block for, and it is what keeps
+  // a call screen up when somebody rotates the phone mid-call. LINE_SHELF_WIDTH above stays 900
+  // because it answers a DIFFERENT question -- "is there room in a 358 px composer for a sentence" is
+  // not "is this a phone" -- and voice-call.css carries no breakpoint at all, so the module and the
+  // sheet cannot disagree the way those two already do.
+  const CALL_WIDTH = 690;
+  const CALL_HEIGHT = 500;
+  const CALL_ID = "voice-call";
+  const CALL_ENDED_ID = "voice-call-ended";
+  // Five words and no sixth. The brief names four; Connecting is honest, because the screen is up
+  // before the line is -- 224 ms on loopback, 1.6 to 2.0 s through console.titanium.bot -- and
+  // Thinking there would claim Titan is working on something nobody has said yet.
+  const CALL_WORDS = ["Connecting", "Listening", "Thinking", "Talking", "Muted"];
+  // One event, one sentence, in plain words, with no condition name and nothing to press.
+  const CALL_ENDED_SENTENCE = "The call ended.";
+  // How long the ended note stays once somebody is actually looking at it. Longer than a refusal's
+  // six seconds because this note is read AFTER an interruption, not during one.
+  const CALL_ENDED_MS = 10_000;
+
   // ---------------------------------------------------------------- VOICE-7: the speech panel
   //
   // Jason, 2026-09-10 11:09: "a semi-transparent modal over the current chat window where that is
@@ -437,7 +470,15 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // `blocks` is every block the worklet posted, counted BEFORE any gate, because the one question it
     // answers is whether the audio graph is running at all. A block that is muted or held is still a
     // microphone that works.
-    const stats = { sent: 0, heldFrames: 0, heldMs: 0, mutedFrames: 0, bytes: 0, blocks: 0 };
+    // VOICE-13. micLevel is the RMS of the last frame that was allowed through, so the call screen's
+    // avatar can react to the person's own voice. The playback half of this file has had a level since
+    // VOICE-1 (an AnalyserNode); the capture half had none at all, and an AnalyserNode on the input
+    // would be a second audio node for a number the frame already contains. It is micLevel and not
+    // level because stats().level is already the playback analyser's.
+    //
+    // IT DOES NOT TOUCH sent, heldFrames, heldMs OR mutedFrames, and it must not: the comment above
+    // this function says MEETING-1 shares it rather than forking it, and --leg frames reads those four.
+    const stats = { sent: 0, heldFrames: 0, heldMs: 0, mutedFrames: 0, bytes: 0, blocks: 0, micLevel: 0, micFrames: 0 };
     let pending = new Float32Array(0);
     let stopped = false;
 
@@ -455,14 +496,22 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
         pending = pending.slice(frameSamples);
         // Asked FIRST, and before the gate: in push to talk between holds there is nobody talking,
         // so this is not the gate holding anything and must not be counted as though it were.
-        if (muted()) { stats.mutedFrames += 1; continue; }
+        if (muted()) { stats.mutedFrames += 1; stats.micLevel = 0; continue; }
         // Asked before every chunk. A held frame is never sent -- not muted on the wire, not
         // zero-filled, not queued for later: dropped, and counted.
         if (held()) {
           stats.heldFrames += 1;
           stats.heldMs += (frameSamples / sampleRate) * 1000;
+          // Zero, and that is correct rather than missing: the echo gate legitimately shuts the
+          // microphone while the agent speaks, so there is no voice in this frame to read a level off.
+          stats.micLevel = 0;
           continue;
         }
+        // Three lines, before the conversion, on the frame that is about to go. No new audio node.
+        let sum = 0;
+        for (let i = 0; i < frame.length; i += 1) sum += frame[i] * frame[i];
+        stats.micLevel = Math.sqrt(sum / frame.length);
+        stats.micFrames += 1;
         const pcm = pcm16FromFloat32(frame);
         stats.sent += 1;
         stats.bytes += pcm.byteLength;
@@ -753,6 +802,9 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       button.classList.toggle("is-live", state.on);
       button.classList.toggle("is-held", state.held);
     }
+    // VOICE-13. The call screen is painted from the same path and never from a timer, so the word on it
+    // and the orb on the button are always the same fact.
+    paintCall();
     const line = mountLine();
     if (line == null) return;
     const { text, action } = lineFor(state.notes);
@@ -1029,6 +1081,436 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     hide(node, !state.heard.open);
   }
 
+  // ------------------------------------------------------- VOICE-13: the call screen on a phone
+  //
+  // WHAT IS NEW HERE AND WHAT IS NOT. The screen, the five words, the typed field, the status line and
+  // the card are new. The turn is not: a spoken exchange becomes two durable rows entirely on the
+  // relay under the `voice:` nonce, and the Spoken chip rides that nonce, so nothing here remembers a
+  // conversation. The page writes exactly one ephemeral thing, the ended note.
+  const call = {
+    /** Is the screen up. Not the same as state.on: the screen is up first and goes last. */
+    up: false,
+    /** Which of the five words is on screen right now. */
+    word: "",
+    /** The page's own fact, and the only thing `Muted` is made of. */
+    muted: false,
+    /** Did a person press End or Escape. Decides whether the ended note is raised at all. */
+    endedByPerson: false,
+    /** The words under him while Titan is working, taken from the chat's own tool receipts. */
+    status: "",
+    /** The newest system row and the newest card when the call opened, so a stale one is never shown. */
+    fromSystem: "",
+    fromCard: "",
+    /** Which card is on screen, by the id of the row it was copied from. */
+    card: "",
+    /** A level a gate injected, which the output labels as injected. Null when nothing is injected. */
+    levels: null,
+    /** The screen-awake request, where the browser or the shell has one to give. */
+    awake: null,
+  };
+  let callEndedTimer = null;
+
+  /**
+   * Is a call screen what this press should open. Read LIVE on every press and never cached, because a
+   * window dragged narrow between two presses is a different answer.
+   *
+   * The zero guards matter: a fake window in the unit tests has no innerWidth, and `0 <= 690` would
+   * make every headless press a call.
+   */
+  function callWanted() {
+    if (shellHost()?.platform != null) return true;
+    const width = Number(global.innerWidth ?? 0);
+    const height = Number(global.innerHeight ?? 0);
+    return (width > 0 && width <= CALL_WIDTH) || (height > 0 && height <= CALL_HEIGHT);
+  }
+
+  // One idempotent <link>, on the precedent push-settings.js set. index.html writes that contract down
+  // for this console's late sheets, and it is what keeps this wave out of a file another pane holds.
+  function ensureCallStylesheet() {
+    const document_ = global.document;
+    if (document_?.head == null) return;
+    if (document_.querySelector('link[href$="voice-call.css"]') != null) return;
+    const link = document_.createElement("link");
+    link.rel = "stylesheet";
+    link.href = "voice-call.css";
+    document_.head.appendChild(link);
+  }
+
+  // NEITHER CONTROL CARRIES data-talk-button. docs/APPS.md makes that a one-element contract and the
+  // desktop shell counts it; two would break its reader silently.
+  function callMarkup() {
+    return `<div class="voice-call" id="${CALL_ID}" data-voice-call hidden role="group" aria-label="Talking to Titan">`
+      + `<div class="voice-call-card" data-voice-call-card-slot aria-live="polite"></div>`
+      + `<div class="voice-call-face" data-voice-call-face>`
+      + `<span class="voice-call-halo" data-voice-call-halo aria-hidden="true"></span>`
+      + `<span class="voice-call-halo is-outer" data-voice-call-halo-outer aria-hidden="true"></span>`
+      + `</div>`
+      + `<p class="voice-call-status" data-voice-call-status aria-live="polite"></p>`
+      + `<p class="voice-call-state" data-voice-call-state aria-live="polite">${CALL_WORDS[0]}</p>`
+      + `<div class="voice-call-controls">`
+      + `<form class="voice-call-typed" data-voice-call-form>`
+      + `<label class="sr-only" for="voice-call-input">Type to Titan</label>`
+      + `<input id="voice-call-input" data-voice-call-input type="text" autocomplete="off" placeholder="Type instead" />`
+      + `</form>`
+      + `<button class="voice-call-mute" type="button" data-voice-call-mute aria-pressed="false">`
+      + `<span class="voice-call-glyph" aria-hidden="true">&#9423;</span><span>Mute</span></button>`
+      + `<button class="voice-call-end" type="button" data-voice-call-end>`
+      + `<span class="voice-call-glyph" aria-hidden="true">&#10005;</span><span>End</span></button>`
+      + `</div></div>`;
+  }
+
+  /**
+   * A PLAIN FIXED DIV ON document.body, and neither of the two obvious alternatives.
+   *
+   * NOT .conversation-space, where the VOICE-7 panel lives: that layer measured 374x587 at 8,124 on a
+   * 390x844 phone, so it covers the conversation and never the window bar or the shelf.
+   *
+   * NOT a <dialog>, because escapeStops() refuses to act while any dialog[open] stands -- a dialog
+   * screen would make Escape refuse to end the call it is in.
+   */
+  function mountCall() {
+    const document_ = global.document;
+    if (document_?.body == null) return null;
+    let node = document_.getElementById(CALL_ID);
+    if (node != null) return node;
+    ensureCallStylesheet();
+    document_.body.insertAdjacentHTML("beforeend", callMarkup());
+    node = document_.getElementById(CALL_ID);
+    if (node == null) return null;
+    node.addEventListener("click", (event) => {
+      if (event.target?.closest?.("[data-voice-call-end]") != null) {
+        event.preventDefault();
+        call.endedByPerson = true;
+        stop();
+        return;
+      }
+      if (event.target?.closest?.("[data-voice-call-mute]") != null) {
+        event.preventDefault();
+        callMute(!call.muted);
+      }
+    });
+    // THE TYPED LINE GOES THROUGH THE COMPOSER A PERSON ALREADY USES and not through a second sender.
+    // app.js's own submit listener pins the transcript, sends through the adapter, clears the box and
+    // draws the row, so a line typed on the call screen is the same turn in every way that matters.
+    node.addEventListener("submit", (event) => {
+      if (event.target?.closest?.("[data-voice-call-form]") == null) return;
+      event.preventDefault();
+      const field = node.querySelector("[data-voice-call-input]");
+      const text = String(field?.value ?? "").trim();
+      if (text.length === 0) return;
+      if (sendThroughComposer(text) && field != null) field.value = "";
+    });
+    return node;
+  }
+
+  /**
+   * The one door a typed line leaves by. It fills the console's own message box and asks the composer
+   * to submit, so every rule app.js keeps about sending -- the pin, the attachments, the adapter, the
+   * clearing -- is kept once rather than twice.
+   *
+   * WHAT THIS DOES NOT DO, said plainly because the screen it is on is a voice screen: the answer to a
+   * typed line is NOT spoken. The relay speaks a reply because it is the side that handed the turn to
+   * the box, and a typed turn goes straight from this console to the box without the relay in it. The
+   * browser sends exactly three JSON shapes down the voice socket and none of them carries text, so
+   * speaking a typed turn would be a new wire frame. The line and its answer land in the chat behind
+   * the screen, which is where a person looks for them when the call ends.
+   */
+  function sendThroughComposer(text) {
+    const document_ = global.document;
+    const form = document_?.getElementById("composer");
+    const box = document_?.getElementById("message-input");
+    if (form == null || box == null) return false;
+    box.value = text;
+    try { box.dispatchEvent(new global.Event("input", { bubbles: true })); } catch { /* autosize only */ }
+    try {
+      if (typeof form.requestSubmit === "function") form.requestSubmit();
+      else form.dispatchEvent(new global.Event("submit", { bubbles: true, cancelable: true }));
+    } catch { return false; }
+    return true;
+  }
+
+  function callMute(on) {
+    call.muted = on === true;
+    // MUTE IS state.talking AND NOTHING ELSE. The capture loop already asks muted() before every
+    // 100 ms frame and counts mutedFrames, which is the number a gate reads.
+    //
+    // The relay's own {t:"mic",on:false} frame exists (voice-edge.mjs) and this page has never sent it,
+    // deliberately: it calls the echo gate's release(), so an unmute landing mid-reply would drop the
+    // echo hold and the microphone could hear Titan through the speaker for the 350 ms tail.
+    state.talking = !call.muted;
+    paint();
+  }
+
+  /** Which of the five words is true right now. Muted outranks the other four. */
+  function callWord() {
+    if (call.muted) return "Muted";
+    if (state.ready == null) return "Connecting";
+    if (state.orb === "thinking") return "Thinking";
+    if (state.orb === "speaking") return "Talking";
+    return "Listening";
+  }
+
+  /**
+   * The thin line under him while Titan is working: "Searching 9 websites", in the words the console's
+   * own tool receipts already say. It is READ OFF THE CHAT rather than off the wire, because the chat
+   * is where those words are written -- the adapter summarises a tool step into a system row and
+   * app.js draws it -- and a second source for the same sentence is a second wording to keep in step.
+   *
+   * Only a row NEWER than the moment this call opened is ever shown: a receipt from this morning is not
+   * what Titan is doing now.
+   */
+  function callStatusText() {
+    const document_ = global.document;
+    const rows = document_?.querySelectorAll?.("#transcript .message-row.is-system") ?? [];
+    const last = rows[rows.length - 1] ?? null;
+    if (last == null) return "";
+    const id = String(last.getAttribute?.("data-message-id") ?? "");
+    if (id.length > 0 && id === call.fromSystem) return "";
+    const words = (last.querySelector?.("summary") ?? last.querySelector?.(".message-bubble"))?.textContent ?? "";
+    return String(words).replace(/\s+/g, " ").trim().slice(0, 90);
+  }
+
+  /** The newest card or tool result in a reply, as the row it lives in. Never one of the person's own. */
+  function callCardRow() {
+    const document_ = global.document;
+    const rows = document_?.querySelectorAll?.("#transcript .message-row:not(.is-user)") ?? [];
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const row = rows[i];
+      if (row.querySelector?.(".inline-card, [data-attachment]") == null) continue;
+      return row;
+    }
+    return null;
+  }
+
+  /**
+   * THE CARD IS COPIED, AND ITS CONTROLS ARE LEFT BEHIND. Every card's buttons are wired by delegation
+   * against the row in the transcript and carry its data-message-id; a live copy of them on top of the
+   * screen would be a second control for one decision, and the one underneath is the one that works.
+   * So the copy is there to be READ, and the chat keeps the controls.
+   */
+  function paintCallCard(node) {
+    const slot = node.querySelector("[data-voice-call-card-slot]");
+    if (slot == null) return;
+    const row = callCardRow();
+    const id = String(row?.getAttribute?.("data-message-id") ?? "");
+    if (row == null || id.length === 0 || id === call.fromCard) {
+      if (call.card.length > 0) { call.card = ""; slot.textContent = ""; node.removeAttribute("data-voice-call-card"); }
+      return;
+    }
+    if (id === call.card) return;
+    let copy = null;
+    try { copy = row.cloneNode(true); } catch { copy = null; }
+    if (copy == null) return;
+    for (const one of copy.querySelectorAll?.("button, input, textarea, select, details") ?? []) {
+      try { one.remove(); } catch { /* a node that will not go is read-only anyway */ }
+    }
+    slot.textContent = "";
+    slot.appendChild(copy);
+    call.card = id;
+    if (node.getAttribute("data-voice-call-card") !== "up") node.setAttribute("data-voice-call-card", "up");
+  }
+
+  // Every write here is guarded on a change, the same rule paint() and paintOverlay() keep: the
+  // body-wide observer watches childList, and an unguarded textContent repaints on its own mutation.
+  function paintCall() {
+    const document_ = global.document;
+    if (document_ == null) return;
+    const node = document_.getElementById(CALL_ID);
+    if (node == null) return;
+    hide(node, !call.up);
+    if (!call.up) return;
+    const word = callWord();
+    call.word = word;
+    const line = node.querySelector("[data-voice-call-state]");
+    if (line != null && line.textContent !== word) line.textContent = word;
+    // THE SCREEN'S OWN ATTRIBUTE IS NOT THE PARAGRAPH'S, and the two must not share a name: the first
+    // cut called both data-voice-call-state, so a querySelector for the line matched the whole screen
+    // and every reader of the word got the entire screen's text instead ("ConnectingType to TitanMuteEnd").
+    if (node.getAttribute("data-voice-call-word") !== word) node.setAttribute("data-voice-call-word", word);
+    const status = word === "Thinking" ? callStatusText() : "";
+    call.status = status;
+    const statusNode = node.querySelector("[data-voice-call-status]");
+    if (statusNode != null && statusNode.textContent !== status) statusNode.textContent = status;
+    const mute = node.querySelector("[data-voice-call-mute]");
+    const pressed = call.muted ? "true" : "false";
+    if (mute != null && mute.getAttribute("aria-pressed") !== pressed) mute.setAttribute("aria-pressed", pressed);
+    paintCallCard(node);
+    try { global.__voiceCallAvatar?.setState?.(word); } catch { /* the screen still reads the word */ }
+  }
+
+  /** What the avatar reads. A gate may inject both, and the leg that does says so in its own output. */
+  function callLevels() {
+    if (call.levels != null) return call.levels;
+    return { mic: state.capture?.stats.micLevel ?? 0, out: state.sound?.level() ?? 0 };
+  }
+  function setCallLevels(mic, out) {
+    call.levels = mic == null && out == null ? null : { mic: Number(mic) || 0, out: Number(out) || 0 };
+    return call.levels;
+  }
+
+  /**
+   * Open it. OPTIMISTICALLY, which is only safe because a refusal TAKES THE SCREEN AWAY (see stop()):
+   * the dial is 224 ms on loopback and up to two seconds through console.titanium.bot, and a screen
+   * that waited for the line would make Talk feel dead on a phone.
+   */
+  function openCall() {
+    // IDEMPOTENT, and that is load-bearing: pressSpent guards holdStart only, so one thumb firing
+    // pointerdown AND touchstart reaches this branch twice, microseconds apart.
+    if (call.up || state.on) return;
+    // THE VOICE-6 RULE COMES FIRST, before anything is opened, and it is the same rule holdStart and
+    // toggle keep: while a refusal is standing the press CLEARS the sentence. Without it the screen
+    // would open over the standing refusal and start()'s own clearNotes() would delete the only
+    // explanation a person had. Only a FRESH sentence eats the press, on VOICE-11's cooldown, so a
+    // sentence somebody has had time to read is cleared AND dialled by one press.
+    if (!state.on && state.notes.length > 0) {
+      const fresh = clockNow() - Number(state.notes[0]?.at ?? 0) < REARM_COOLDOWN_MS;
+      clearNotes();
+      if (fresh) return;
+    }
+    const node = mountCall();
+    if (node == null) return;
+    const document_ = global.document;
+    call.up = true;
+    call.muted = false;
+    call.endedByPerson = false;
+    call.card = "";
+    call.levels = null;
+    const systemRows = document_.querySelectorAll?.("#transcript .message-row.is-system") ?? [];
+    call.fromSystem = String(systemRows[systemRows.length - 1]?.getAttribute?.("data-message-id") ?? "");
+    call.fromCard = String(callCardRow()?.getAttribute?.("data-message-id") ?? "");
+    dismissEndedNote();
+    // THE BACKGROUND IS LOCKED. At phone widths body{overflow:auto} and .app-shell{min-height:100dvh},
+    // so a thumb scrolls the chat behind a fixed screen and iOS rubber-bands the page. The attribute is
+    // the only new DOM contract this wave adds, and docs/APPS.md names it for the shells.
+    try { document_.body.dataset.voiceCall = "up"; } catch { /* a body that will not take it still gets the screen */ }
+    const shell = document_.querySelector(".app-shell");
+    try { if (shell != null) shell.inert = true; } catch { /* a browser with no inert keeps the screen on top */ }
+    hide(node, false);
+    try { global.__voiceCallAvatar?.mount?.(node.querySelector("[data-voice-call-face]"), { levels: callLevels }); }
+    catch { /* with no module the screen is the words and the controls, which still end a call */ }
+    keepAwake(true);
+    paintCall();
+    // HANDS FREE FOR THE LIFE OF THE SCREEN. No hold, no press per turn: the vendor's own turn
+    // detection decides where one utterance ends, which is what the relay is already configured for.
+    void start({ handsFree: true });
+  }
+
+  /**
+   * THE CLOSE FUNNEL, and there is exactly one. Every way out of a call already goes through stop():
+   * the End control, Escape, visibilitychange when the tab is hidden, pagehide, beforeunload, the
+   * 4001-4004 refusals, and the push idle timer. One insertion point there catches all seven with no
+   * new listener and nothing to keep in step.
+   */
+  function closeCall() {
+    const document_ = global.document;
+    const wasUp = call.up;
+    call.up = false;
+    call.muted = false;
+    call.word = "";
+    call.status = "";
+    call.card = "";
+    call.levels = null;
+    keepAwake(false);
+    try { global.__voiceCallAvatar?.release?.(); } catch { /* the node goes with the screen anyway */ }
+    if (document_ != null) {
+      const node = document_.getElementById(CALL_ID);
+      if (node != null) {
+        hide(node, true);
+        node.removeAttribute("data-voice-call-card");
+        const slot = node.querySelector("[data-voice-call-card-slot]");
+        if (slot != null) slot.textContent = "";
+        const field = node.querySelector("[data-voice-call-input]");
+        if (field != null) field.value = "";
+      }
+      // RELEASED ON EVERY PATH. If one path misses this the person is left on a chat they cannot
+      // scroll, which is worse than the bug this wave fixes.
+      try { delete document_.body.dataset.voiceCall; } catch { /* nothing was set */ }
+      const shell = document_.querySelector(".app-shell");
+      try { if (shell != null) shell.inert = false; } catch { /* never set */ }
+    }
+    if (!wasUp) { call.endedByPerson = false; return; }
+    const byPerson = call.endedByPerson;
+    call.endedByPerson = false;
+    // ONE rAF, so these two reads happen after stop()'s synchronous work and after layout.
+    const after = () => {
+      // THE NEWEST LINE, which is where a person who has just been talking is looking. Written
+      // directly because pinTranscriptToBottom is not published and app.js belongs to another wave;
+      // renderTranscript's own wasNearBottom rule keeps every later repaint pinned.
+      const transcript = global.document?.getElementById("transcript");
+      if (transcript != null && typeof transcript.scrollHeight === "number") transcript.scrollTop = transcript.scrollHeight;
+      // ONE EVENT GETS ONE SENTENCE. A person who pressed End knows the call ended, and a refusal has
+      // its own sentence in its own home on the shelf -- this note is for the third case only: the
+      // phone was locked, or a call came in, and the call ended while nobody was looking at it.
+      if (!byPerson && state.notes.length === 0) showEndedNote();
+    };
+    const raf = global.requestAnimationFrame;
+    if (typeof raf === "function") raf(after); else global.setTimeout(after, 16);
+  }
+
+  /**
+   * The screen stays awake while a call is up, where the host has a way to keep it. Both doors are
+   * optional and both are asked for in a try: a browser without a wake lock is not a reason to refuse
+   * somebody a call.
+   */
+  function keepAwake(on) {
+    if (on) {
+      try { shellHost()?.setKeepAwake?.(true); } catch { /* the shell decides for itself */ }
+      try {
+        const lock = global.navigator?.wakeLock?.request?.("screen");
+        if (lock?.then != null) lock.then((sentinel) => { call.awake = sentinel; }, () => { call.awake = null; });
+      } catch { call.awake = null; }
+      return;
+    }
+    try { shellHost()?.setKeepAwake?.(false); } catch { /* as above */ }
+    const sentinel = call.awake;
+    call.awake = null;
+    try { sentinel?.release?.(); } catch { /* already released */ }
+  }
+
+  // ------------------------------------------------------------ VOICE-13: the ended note
+  //
+  // It is NOT a transcript row and is never durable: the durable record of a spoken turn is the two
+  // rows the relay writes. It is NOT the toast either -- 2.8 s is shorter than unlocking a phone, and
+  // a toast fired as the screen locks is gone before anybody looks, which is the exact case this note
+  // exists for. It is mounted in .conversation-space beside the VOICE-7 panel, so renderTranscript's
+  // wholesale innerHTML rewrite cannot take it with it.
+  function showEndedNote() {
+    const document_ = global.document;
+    const space = document_?.querySelector(".conversation-space");
+    if (space == null) return;
+    let note = document_.getElementById(CALL_ENDED_ID);
+    if (note == null) {
+      space.insertAdjacentHTML("beforeend", `<p class="voice-call-ended" id="${CALL_ENDED_ID}" data-voice-call-ended hidden>${CALL_ENDED_SENTENCE}</p>`);
+      note = document_.getElementById(CALL_ENDED_ID);
+      if (note == null) return;
+    }
+    if (note.textContent !== CALL_ENDED_SENTENCE) note.textContent = CALL_ENDED_SENTENCE;
+    hide(note, false);
+    // ITS DISMISS IS ARMED ON VISIBILITY, NOT ON THE ENDING. The commonest way a call ends by itself is
+    // the phone going to sleep, and a timer started then runs out in somebody's pocket.
+    if (document_.visibilityState === "visible" || document_.visibilityState == null) armEndedDismiss();
+  }
+
+  function armEndedDismiss() {
+    if (callEndedTimer != null) { try { global.clearTimeout(callEndedTimer); } catch { /* fine */ } }
+    callEndedTimer = global.setTimeout(() => { callEndedTimer = null; dismissEndedNote(); }, CALL_ENDED_MS);
+    callEndedTimer?.unref?.();
+  }
+
+  function dismissEndedNote() {
+    if (callEndedTimer != null) {
+      try { global.clearTimeout(callEndedTimer); } catch { /* fine */ }
+      callEndedTimer = null;
+    }
+    const note = global.document?.getElementById(CALL_ENDED_ID);
+    if (note != null) hide(note, true);
+  }
+
+  function endedNoteUp() {
+    const note = global.document?.getElementById(CALL_ENDED_ID);
+    return note != null && note.hidden !== true;
+  }
+
   async function start(options = {}) {
     if (state.on) return;
     state.on = true;
@@ -1052,7 +1534,12 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     const captureFirst = options.captureFirst === true;
     // In always listening the microphone is open for the whole call and opening the line is what asks
     // for that. In push to talk the hold is what asks, and holdStart has already said so.
-    if (talkMode() !== "push") state.talking = true;
+    //
+    // VOICE-13 adds the third way of asking: the call screen is hands free for its whole life whatever
+    // this browser's talk mode says, because the screen itself is the consent. It does NOT take
+    // captureFirst -- that comment below says why a refused line should never have touched the
+    // microphone, and a press on a phone is a press and not a hold.
+    if (talkMode() !== "push" || options.handsFree === true) state.talking = true;
     // The relay owns the orb once the line is up; until `ready` arrives there is no frame to obey,
     // and "thinking" is the honest one of the four for a line that is being dialled.
     orb("thinking");
@@ -1174,6 +1661,12 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // rather than fading, and the hold goes with it: a button drawn as held after the line has
     // dropped is a microphone a person believes is open.
     closeOverlay();
+    // VOICE-13. THE CALL SCREEN GOES HERE, beside the panel, and this is the only place it is closed
+    // from. Seven exits reach this function already, so one insertion point catches all of them --
+    // including every refusal, which is what makes opening the screen optimistically safe: a refusal
+    // takes the screen away and the sentence lands in its one existing home on the shelf, where the
+    // person is looking. The screen never carries a second copy of that sentence.
+    closeCall();
     clearIdleClose();
     state.held = false;
     state.talking = false;
@@ -1216,10 +1709,24 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   function talkMode() { return TALK_MODES.includes(state.talkMode) ? state.talkMode : TALK_MODE_DEFAULT; }
 
   function talkDown() {
+    // VOICE-13. A CALL IS ALREADY UP: the way out is the End control on it, or Escape. A press that
+    // reached here through the space bar or the desktop shell's hotkey does nothing rather than
+    // half-ending a hands-free call, and the screen covers the button a thumb would have found.
+    if (call.up) return undefined;
+    // ON A PHONE THE PRESS IS A CALL. The branch is wrapped, and that is deliberate: a bug in the call
+    // screen must never make Talk dead on a phone, so a throw here falls through to the behaviour this
+    // control has had since VOICE-7. A line that is ALREADY up falls through too, so a window narrowed
+    // mid-call keeps the press that ends it.
+    if (callWanted() && !state.on) {
+      try { openCall(); return undefined; }
+      catch { /* fall through to the hold or the toggle below */ }
+    }
     if (talkMode() === "always") { toggle(); return undefined; }
     return holdStart();
   }
   function talkUp() {
+    // There is no hold to release on a call screen: nothing is being held.
+    if (call.up) return undefined;
     if (talkMode() === "always") return undefined;
     return holdEnd();
   }
@@ -1539,6 +2046,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     const document_ = global.document;
     if (document_?.querySelector?.("dialog[open]") != null) return false;
     if (document_?.body?.dataset?.drawer) return false;
+    // VOICE-13. Escape is a person leaving, exactly as End is, so the call screen's ended note is not
+    // raised for it: somebody who pressed a key to leave knows the call is over, and one event gets one
+    // sentence.
+    if (call.up) call.endedByPerson = true;
     // stop() clears a standing note when it has nothing new to say, so both branches really leave, and
     // it leaves `on` false, which is what makes onClose ignore the close that follows our own.
     if (engaged) stop(); else clearNotes();
@@ -2036,7 +2547,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // toggle a second time on top of it.
     document_.addEventListener("click", (event) => {
       const talk = event.target?.closest?.("[data-voice-talk]");
-      if (talk != null) { event.preventDefault(); if (talkMode() !== "push") toggle(); return; }
+      // VOICE-13: through talkDown rather than straight to toggle(), so the one press that reaches the
+      // microphone by THIS road -- always listening, where pointerdown deliberately does nothing --
+      // opens a call screen on a phone like every other road does. talkDown's own branch decides.
+      if (talk != null) { event.preventDefault(); if (talkMode() !== "push") void talkDown(); return; }
       if (event.target?.closest?.("[data-voice-open-settings]") != null) { event.preventDefault(); openSettings(); }
     });
     // ---------------------------------------------------------- VOICE-7: press and hold
@@ -2052,6 +2566,11 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       return talk != null && talk.disabled !== true ? talk : null;
     };
     document_.addEventListener("pointerdown", (event) => {
+      // VOICE-13. A pointer in the conversation takes the ended note away, the way reading a refusal
+      // does. It shares this listener rather than adding a second pointerdown: the push path below is
+      // the one the hold is measured through, and two listeners for one event on one document is the
+      // kind of thing that gets found when one of them starts calling preventDefault.
+      if (endedNoteUp() && event.target?.closest?.(".conversation-space") != null) dismissEndedNote();
       if (talkMode() !== "push" || isTalk(event) == null) return;
       // No text selection, no drag, no focus ring flicker: a hold is a hold.
       event.preventDefault();
@@ -2077,7 +2596,13 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // pointer released outside the window never delivers its up either. Both leave a microphone open.
     global.addEventListener?.("blur", release);
     // A tab nobody is looking at has no business holding a microphone open.
-    document_.addEventListener("visibilitychange", () => { if (document_.hidden && state.on) stop(); });
+    document_.addEventListener("visibilitychange", () => {
+      if (document_.hidden && state.on) { stop(); return; }
+      // VOICE-13. AND THE NOTE'S OWN CLOCK STARTS HERE, not when the call ended: the commonest way a
+      // call ends by itself is the phone going to sleep, and a ten second timer started then runs out
+      // in somebody's pocket. This is the moment a person is actually looking at the sentence.
+      if (!document_.hidden && endedNoteUp()) armEndedDismiss();
+    });
     global.addEventListener?.("pagehide", () => { if (state.on) stop(); });
     global.addEventListener?.("beforeunload", () => { if (state.on) stop(); });
     // The line has two homes and the window's width picks one. Without this, a window dragged narrow
@@ -2156,6 +2681,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // choice is "always listening" must not get one hold's worth of the other behaviour while a
     // settings surface they have not opened catches up.
     state.talkMode = readStoredTalkMode();
+    // VOICE-13. The sheet is asked for at boot rather than on the first press: a screen that comes up
+    // 300 ms after a thumb cannot wait for a stylesheet to be fetched, and an unstyled full-screen div
+    // is the worst frame this console could draw.
+    ensureCallStylesheet();
     paint();
     mountOverlay();
     wire();
@@ -2231,6 +2760,14 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       notes: state.notes.map((one) => one.condition),
       ready: state.ready,
       hops: state.hops,
+      // VOICE-13. The microphone's own RMS, which did not exist before this wave: stats().level is the
+      // playback analyser and these are two different numbers. It reads 0 for a frame the echo gate
+      // held or a mute dropped, which is the truth of that frame rather than a missing reading.
+      micLevel: state.capture?.stats.micLevel ?? 0,
+      micFrames: state.capture?.stats.micFrames ?? 0,
+      // And the call screen, as a person would describe it: up or not, which word is on it, whether it
+      // is muted, the status line under him, and whether a card has taken the middle.
+      call: { up: call.up, word: call.word, muted: call.muted, status: call.status, card: call.card },
     }),
     // Exposed so a test can pin the words and the arithmetic without a browser, which is the
     // contract marketplace-bots.js and cloud-browser.js already keep.
@@ -2304,6 +2841,34 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     _spaceMayTalk: spaceMayTalk,
     _escapeStops: escapeStops,
     _onKeyUp: onKeyUp,
+    // VOICE-13. The call screen. _call is the only door into it from outside this file, and nothing
+    // outside ever writes _state.
+    _call: {
+      open: openCall,
+      close: closeCall,
+      isUp: () => call.up,
+      stateWord: callWord,
+      mute: callMute,
+      statusText: callStatusText,
+      cardRow: callCardRow,
+      typed: sendThroughComposer,
+      endedNoteUp: endedNoteUp,
+      dismissEndedNote,
+      levels: callLevels,
+      _state: call,
+      _endedTimer: () => callEndedTimer,
+    },
+    _callWanted: callWanted,
+    _CALL_WIDTH: CALL_WIDTH,
+    _CALL_HEIGHT: CALL_HEIGHT,
+    _CALL_ID: CALL_ID,
+    _CALL_WORDS: CALL_WORDS,
+    _CALL_ENDED_SENTENCE: CALL_ENDED_SENTENCE,
+    _CALL_ENDED_MS: CALL_ENDED_MS,
+    _callMarkup: callMarkup,
+    _mountCall: mountCall,
+    _paintCall: paintCall,
+    _setCallLevels: setCallLevels,
   };
 
   if (global.document != null) {
