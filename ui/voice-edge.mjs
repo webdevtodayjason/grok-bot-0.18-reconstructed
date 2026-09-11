@@ -611,6 +611,53 @@ export function splitSentences(text, { max = 320 } = {}) {
 
 const asString = (value) => (typeof value === "string" ? value.trim() : "");
 
+/**
+ * VOICE-8. The four the OPERATOR sets and a customer's session may not. They are his choices because
+ * they are billed to his key; the rows that set them live on the Operator section of Settings.
+ */
+export const OPERATOR_ONLY_VOICE_FIELDS = ["vendor", "model", "voice", "agentId"];
+
+// VOICE-10. HOW THE TALK BUTTON BEHAVES, PER PERSON.
+//
+// The page keeps this in the browser too, and that copy is the fallback and the thing that still works
+// in a private window. What this file adds is the half the row was filed for: a person who chooses
+// always listening on a laptop gets always listening on their phone.
+//
+// It is keyed on the SUB -- the session's own person claim, "" for the instance-password door -- which
+// is the same key the device list and the notification settings are keyed on (ui/server.mjs subOf), so
+// two accounts sharing one workspace do not fight over how their own button behaves. The field the
+// console sends is `talkMode`, one value; what is kept on disk is a map, and the route answers the
+// caller's own entry and nobody else's.
+//
+// It is on THIS door rather than on the notifications door the row first named, because that door
+// refuses the field by name -- its own field list is frozen to kinds, quietHours and utcOffsetMinutes
+// -- and opening it is an edit to a file this wave does not own. docs/VOICE.md 13 says so in writing.
+export const TALK_MODES = ["push", "always"];
+/** Hold the button, because a microphone that is open until you say otherwise is not a default. */
+export const TALK_MODE_DEFAULT = "push";
+const talkModeOf = (value) => (TALK_MODES.includes(asString(value)) ? asString(value) : "");
+
+// A bound, because this map grows by one for every person who ever chooses and a state file with no
+// ceiling is one somebody eventually finds at a gigabyte. The oldest entries fall off, and the only
+// cost of falling off is that that person's next console opens on their own browser's copy.
+const TALK_MODE_SUBS = 200;
+
+function normalizeTalkModes(raw) {
+  if (raw == null || typeof raw !== "object") return {};
+  const out = {};
+  for (const [sub, mode] of Object.entries(raw)) {
+    if (typeof sub !== "string" || sub.length > 256) continue;
+    const mine = talkModeOf(mode);
+    if (mine.length === 0) continue;
+    out[sub] = mine;
+  }
+  const keys = Object.keys(out);
+  if (keys.length <= TALK_MODE_SUBS) return out;
+  const kept = {};
+  for (const sub of keys.slice(-TALK_MODE_SUBS)) kept[sub] = out[sub];
+  return kept;
+}
+
 export function normalizeVoiceSettings(raw) {
   const value = raw == null || typeof raw !== "object" ? {} : raw;
   const vendor = VENDORS[asString(value.vendor)] != null ? asString(value.vendor) : DEFAULT_VENDOR;
@@ -622,6 +669,8 @@ export function normalizeVoiceSettings(raw) {
     /** Which agent the voice talks to. Empty means "work it out", and the relay prints which. */
     agentId: asString(value.agentId),
     apiKey: typeof value.apiKey === "string" ? value.apiKey : "",
+    /** VOICE-10. Per person, keyed on the session's own sub. A workspace nobody chose on has {}. */
+    talkModes: normalizeTalkModes(value.talkModes),
   };
 }
 
@@ -647,7 +696,7 @@ export async function writeVoiceSettings(next, { file, ownLikeParent = null } = 
  * when a string, CLEARED when null, and KEPT when the field is absent -- which is what lets the
  * Voice card save the vendor or the agent without ever holding a key it never received.
  */
-export function mergeVoiceSettings(current, patch) {
+export function mergeVoiceSettings(current, patch, { sub = "" } = {}) {
   const base = normalizeVoiceSettings(current);
   const value = patch == null || typeof patch !== "object" ? {} : patch;
   const next = { ...base };
@@ -658,6 +707,19 @@ export function mergeVoiceSettings(current, patch) {
   if (typeof value.agentId === "string") next.agentId = value.agentId;
   if (typeof value.apiKey === "string") next.apiKey = value.apiKey.trim();
   else if (value.apiKey === null) next.apiKey = "";
+  // VOICE-10. `talkMode` is the CALLER'S OWN. It lands under their own sub and nowhere else, so a
+  // person writing theirs can neither read nor move anybody else's. A value this relay does not know
+  // is IGNORED rather than defaulted -- a default written over a real choice is a choice silently
+  // thrown away -- and null clears this person's entry, handing them back to their own browser's copy.
+  const who = typeof sub === "string" ? sub : "";
+  if (typeof value.talkMode === "string") {
+    const mine = talkModeOf(value.talkMode);
+    if (mine.length > 0) next.talkModes = { ...base.talkModes, [who]: mine };
+  } else if (value.talkMode === null) {
+    const rest = { ...base.talkModes };
+    delete rest[who];
+    next.talkModes = rest;
+  }
   return normalizeVoiceSettings(next);
 }
 
@@ -666,11 +728,17 @@ export function mergeVoiceSettings(current, patch) {
  * shape is the only thing either route returns, so there is no route on this server that can read
  * a realtime key back out once it is set. cp/PROVIDERS-ROUTES.md 5 is the rule and this honours it.
  */
-export function voiceSettingsShape(settings, { vendors = null, agents = [], sessionCapSeconds = 0, dayCapSeconds = 0, dayUsedSeconds = 0, recent = [], available = null } = {}) {
+export function voiceSettingsShape(settings, { vendors = null, agents = [], sessionCapSeconds = 0, dayCapSeconds = 0, dayUsedSeconds = 0, recent = [], available = null, sub = "" } = {}) {
   const value = normalizeVoiceSettings(settings);
+  const myTalkMode = talkModeOf(value.talkModes?.[typeof sub === "string" ? sub : ""]);
   return {
     enabled: value.enabled,
     vendor: value.vendor,
+    // VOICE-10. THIS CALLER'S OWN talk mode and nobody else's: the map is never answered, only the one
+    // entry. OMITTED rather than defaulted where this person has never chosen, which is the PROXY-1
+    // rule and the whole of how the page knows to keep its own browser's copy rather than be handed a
+    // value the relay made up.
+    ...(myTalkMode.length > 0 ? { talkMode: myTalkMode } : {}),
     // EXACTLY WHAT THE WORKSPACE SET, and empty when it set nothing. These used to fall back to the
     // vendor's own default, and the Voice card writes the answer straight into two text inputs, so a
     // customer who had never touched either field read a vendor's product name back off their own
@@ -2044,6 +2112,12 @@ export function makeVoiceEdge({
   // gate on a laptop, grok-bot-local-vm -- and it means "there is only the file", which is exactly
   // what this edge did before this existed.
   secrets = null,
+  // VOICE-10. WHICH PERSON is asking, for the one field on this door that is theirs rather than the
+  // workspace's. It is ui/server.mjs's own subOf handed down, so the talk mode is keyed on exactly the
+  // claim the device list and the notification settings are keyed on, and this file does not get a
+  // second opinion about who somebody is. Absent -- every test that does not care, and every caller
+  // before this shipped -- reads as the workspace's own, which is the same default subOf itself has.
+  subOf = () => "",
 }) {
   const settingsFile = t.voiceSettingsFile;
   const ledgerFile = t.voiceLedgerFile;
@@ -2095,6 +2169,10 @@ export function makeVoiceEdge({
       res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
       res.end(JSON.stringify(body));
     };
+    // VOICE-10. Read once per request, so the GET's answer and the POST's write are about the same
+    // person even if a session is renewed between them.
+    let sub = "";
+    try { sub = String(subOf(req) ?? ""); } catch { sub = ""; }
     const shapeNow = async (settings) => {
       const caps = await policy.for(t.slug);
       const rows = await readVoiceLedger(ledgerFile);
@@ -2103,6 +2181,8 @@ export function makeVoiceEdge({
         .map((a) => ({ id: String(a.id), name: String(a.name ?? "") }));
       return voiceSettingsShape(settings, {
         agents,
+        // VOICE-10. Whose talk mode this answer carries. One entry, never the map.
+        sub,
         // KEYS-1. Whether there is a key for THIS workspace's service at all, wherever it lives.
         // This is what the console's Talking switch reads, and it is asked through the reader's
         // cached copy, so a settings GET costs no network after the relay's first read.
@@ -2152,7 +2232,28 @@ export function makeVoiceEdge({
       res.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
       return res.end(JSON.stringify({ error: "not_yours", message: "Keys the product uses are set by your operator." }));
     }
-    const next = mergeVoiceSettings(await readVoiceSettings(settingsFile), patch);
+    // VOICE-8. AND THE DOOR CLOSES BEHIND THE OTHER FOUR, for the same reason and in the same words.
+    //
+    // Which service does the talking, which model, which voice and which assistant every spoken turn
+    // goes to are the OPERATOR'S choices: they are billed to his key, and the rows that set them are on
+    // the Operator section of Settings, which a customer never sees. Until this shipped the route took
+    // all four from any signed-in session, so a customer with a browser console could point their own
+    // workspace's voice at a model he did not choose and have him pay for it. A client-side gate is not
+    // a gate.
+    //
+    // REFUSED AND NOT SILENTLY DROPPED, the KEYS-1 rule: a 200 that quietly ignores a field the caller
+    // sent is the failure where the caller believes it worked. `enabled` and `talkMode` stay open,
+    // because those two really are the workspace's and the person's own.
+    const operatorFields = OPERATOR_ONLY_VOICE_FIELDS.filter((name) => typeof patch?.[name] === "string");
+    if (operatorFields.length > 0 && t.operator !== true) {
+      res.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify({
+        error: "not_yours",
+        fields: operatorFields,
+        message: "Which service does the talking, and which assistant it talks to, are set by your operator.",
+      }));
+    }
+    const next = mergeVoiceSettings(await readVoiceSettings(settingsFile), patch, { sub });
     t.ensureDir();
     try { await writeVoiceSettings(next, { file: settingsFile, ownLikeParent }); }
     catch (error) {
@@ -2323,7 +2424,7 @@ const voiceEdges = new Map();
  * cache shape and the same invalidation mailEdgeFor uses, so a tenant re-provisioned under a live
  * relay does not keep writing to a path that is no longer theirs.
  */
-export function voiceEdgeFor(t, { ownLikeParent = null, log = () => {}, relayBase = "", relayToken = "", WebSocketImpl = null, providerUrl = "", secrets = null, policy = null } = {}) {
+export function voiceEdgeFor(t, { ownLikeParent = null, log = () => {}, relayBase = "", relayToken = "", WebSocketImpl = null, providerUrl = "", secrets = null, policy = null, subOf = () => "" } = {}) {
   const found = voiceEdges.get(t.slug);
   if (found != null && found.settingsFile === t.voiceSettingsFile) return found.edge;
   const edge = makeVoiceEdge({
@@ -2340,6 +2441,8 @@ export function voiceEdgeFor(t, { ownLikeParent = null, log = () => {}, relayBas
     // KEYS-1. ONE reader for the whole relay, built in ui/server.mjs and handed down, so every
     // workspace's edge reads the same cached copy and a fleet of tenants is not a fleet of timers.
     secrets,
+    // VOICE-10. And one reader for who is asking, which is ui/server.mjs's own subOf.
+    subOf,
   });
   voiceEdges.set(t.slug, { settingsFile: t.voiceSettingsFile, edge });
   return edge;

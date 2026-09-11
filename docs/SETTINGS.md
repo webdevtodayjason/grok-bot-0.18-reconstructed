@@ -161,15 +161,57 @@ whoever runs the bus. Neither is a vendor key the product fetches, which is the 
 The claim that is measured and that matters: **zero password fields anywhere a customer can reach** —
 zero on all five customer sections at both viewports.
 
-And one thing that is NOT here yet, written down rather than implied: the technical half of talking
-— **Service, Model, Voice and Who you are talking to**. The old Voice card carried those four beside
-its key field; the key field is gone, correctly, and the four went with it. The relay still accepts
-every one of those writes, so the capability is live on the server and has no control on screen.
-Measured on a local relay from the shipped build behind the instance-password door, 2026-09-10:
-`[data-voice-vendor]`, `[data-voice-model]`, `[data-voice-voice]` and `[data-voice-agent]` are absent
-from the whole page. It is filed as **VOICE-8** with an owner and a next action — four rows
-registered into an Operator *Talking* group through `__mrSettings.register`, reading and writing the
-route that already takes them.
+### The Operator section's Talking group (VOICE-8, landed)
+
+The technical half of talking — **Service, Model, Voice and Who you are talking to** — is four rows in
+a *Talking* group on the Operator section. The old Voice card carried them beside its key field; the
+key field is gone, correctly, and for a day the other four went with it, which left the capability
+live on the server with no control on screen. That is the hand-operation shape: the only way to change
+the voice service was to edit a file on the server.
+
+Each is a label, one line and one control, like every other row on this surface:
+
+| Row | Control | What an empty value means |
+| --- | --- | --- |
+| Service | a select off the two the route answers, whose labels are billing shapes and name no vendor | — |
+| Model | a text field and a Save | the service's own default |
+| Voice | a text field and a Save | the service's own default |
+| Who you are talking to | a select off this workspace's own bots, plus *Whoever is leading the team* | the relay works it out and prints which |
+
+They carry the same four attributes the card carried — `data-voice-vendor`, `data-voice-model`,
+`data-voice-voice`, `data-voice-agent` — so the gate selectors measure the rows rather than a new name
+for the same thing. They are **written back from the door's own answer** and never left as typed.
+
+**Three things about how they get there are load-bearing.**
+
+They are registered by `voice.js` through `__mrSettings.register({section: "operator", group:
+"talking", operatorOnly: true})` — the registry, not a hunt for a panel by its title. That call did
+nothing at all until this wave: `bodyMarkup` returned early for a section whose body another module
+fills, so the entry was stored, its `fill` ran against the operator's body on every paint, and its
+markup was never drawn, with no error and no failing test. The Operator section now names one group
+and the contributed rows are painted in **their own container beside app.js's stack**, never inside it:
+that stack is somebody else's markup and every gate reads its controls by id. A repaint rebuilds that
+container only when the **set** of rows in it changed, so a half-typed field is not taken out of
+somebody's hands by a refresh.
+
+They carry **no `data-settings-action`**. The surface's `act()` has no default branch, so an action it
+does not know is swallowed with no error and no toast — a control that looks wired and is not. Each
+row wires its own listener inside `fill()`, idempotently, which is what `push-settings.js` already does.
+
+And **the door is shut behind them as well as in front of them.** `POST /voice/settings` refuses
+`vendor`, `model`, `voice` and `agentId` from any workspace that is not the operator's, in words, the
+same way KEYS-1 refused `apiKey`. Until this wave it took all four from any signed-in session, so a
+customer with a browser console could point their own workspace's voice at a model the operator did not
+choose and have it billed to his key. A client-side gate is not a gate.
+
+**MEASURED on grok-bot-local-vm (this Mac), real Chrome at 1440x900, behind the instance-password door,
+2026-09-10:** the four controls are on the Operator section under one *Talking* heading, each enabled,
+each one label and one control slot, with the Service options reading *"flat rate for each minute you
+talk"* and *"charged by how much is said, not by the minute"*; choosing the other Service round-trips
+through `GET /voice/settings`; and the four are on **none** of the five customer sections and `[data-voice]`
+matches nothing anywhere on the page. On the R750 through console.titanium.bot as a throwaway customer
+the four are ABSENT, which is the only thing that server can show: operator-ness there is the WORKSPACE
+(section 3), and the demo tenant is not the operator's.
 
 ---
 
@@ -178,6 +220,14 @@ route that already takes them.
 **The relay decides, and says so.** `GET /auth/state` answers `operator: true` — only to an
 authenticated caller — when there is no control plane at all, when the session carries no tenant
 claim, or when the session was minted by the instance password. An absent field means false.
+
+**Operator-ness is the WORKSPACE and not the person.** It is `tenantOf(req) === OPERATOR_SLUG`, so
+every session on the operator's own workspace is the operator's and no session on a customer's
+workspace can be. That is why the Operator section and its Talking rows can only be proved PRESENT on
+a local relay behind the instance-password door: on the R750 the demo tenant is not the operator's
+workspace, and what a throwaway customer there proves is that the rows are absent. The one fact on this
+door that IS a person's rather than a workspace's is the talk mode, which is keyed on the session's own
+person claim — `docs/VOICE.md` 13.
 
 The console never infers operator-ness from a URL, a hostname, a slug, or whether a route happened
 to answer. A surface that guesses at privilege eventually guesses wrong in front of a customer.

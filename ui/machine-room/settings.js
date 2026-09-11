@@ -130,6 +130,43 @@
     .filter((one) => one.section === sectionId && one.group === groupId && (one.operatorOnly !== true || isOperator === true))
     .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
 
+  /** One contributed row, wrapped the way every other row on this surface is wrapped. */
+  const contributedRow = (one) =>
+    `<div class="setting-row" data-setting-row="${esc(one.id)}" data-settings-contributed="${esc(one.id)}">${one.markup()}</div>`;
+
+  /**
+   * Every contributed row of one section, in the order it will be drawn. The id list is what tells a
+   * repaint whether the SET of rows changed, which is the only thing that may rebuild a mounts
+   * section's contributed container.
+   */
+  const contributedFor = (section, isOperator) => (section.groups ?? [])
+    .flatMap((group) => contributorsFor(section.id, group.id, isOperator));
+
+  /**
+   * VOICE-8. THE CONTRIBUTED GROUPS OF A SECTION WHOSE BODY BELONGS TO SOMEBODY ELSE.
+   *
+   * Notifications is push-settings.js's and Operator is app.js's, and both are painted as empty shells
+   * this file never rebuilds while they are on screen. So a sibling module's rows cannot go inside
+   * them: they go in a container of their own, immediately after the owner's, in the same group-and-card
+   * shape as every other row on this surface. The owner's markup stays byte-identical, which is what
+   * keeps app.js's own controls and every gate that reads them untouched.
+   *
+   * Empty when nothing is contributed, so a section nobody has registered a row on draws exactly what
+   * it drew before -- no stray heading, no empty card.
+   */
+  function contributedMarkup(section, facts_) {
+    const isOperator = facts_?.operator === true;
+    const groups = (section.groups ?? []).map((group) => {
+      const mine = contributorsFor(section.id, group.id, isOperator);
+      if (mine.length === 0) return "";
+      return `<div class="settings-group" data-settings-group="${esc(group.id)}">`
+        + `<p class="settings-group-label">${esc(group.label)}</p>`
+        + `<div class="settings-card">${mine.map(contributedRow).join("")}</div></div>`;
+    }).join("");
+    if (groups.length === 0) return "";
+    return `<div class="settings-rows settings-contributed" data-settings-contributed-host="${esc(section.id)}">${groups}</div>`;
+  }
+
   // The original's four, then the one this product adds, then the operator's. The order is the
   // screenshots' order and the nav draws it as given.
   const SECTIONS = [
@@ -181,9 +218,13 @@
       subtitle: "Everything technical. Only you see this section.",
       keywords: ["operator", "technical", "job bus", "mail", "host", "providers", "answering"],
       operatorOnly: true,
-      // Drawn by app.js's settingsPanel(), unchanged in behaviour. No rows of its own.
+      // Drawn by app.js's settingsPanel(), unchanged in behaviour. No rows OF ITS OWN -- and since
+      // VOICE-8 one group for the rows a sibling module contributes, which is the only reason this
+      // array is not empty. The contributed groups are painted BESIDE app.js's stack and never inside
+      // it: that stack is somebody else's markup, and the one rule a mounts section has is that its
+      // owner's body is not rebuilt under them.
       mounts: "operator",
-      groups: [],
+      groups: [{ id: "talking", label: "Talking" }],
     },
   ];
 
@@ -269,10 +310,12 @@
       // module is loaded, whether or not talking is switched on for the workspace: somebody who wants
       // to hold the button rather than toggle it should be able to say so before the first press.
       //
-      // Remembered per browser, beside Theme and Microphone, which are remembered the same way. The
-      // relay's own /voice/settings is one file per WORKSPACE and two people sharing one would fight
-      // over how their own button behaves, so this choice deliberately never goes there.
-      // docs/VOICE.md says in those words that per browser is not per person.
+      // Remembered for the PERSON since VOICE-10, with this browser as the fallback: the voice module
+      // writes its own stored copy first -- the button is live before any route answers -- and also puts
+      // the value on the person's own key on /voice/settings, which is the same key the device list and
+      // the notification settings use. The file there is still one per workspace; the choice inside it is
+      // one per person, which is what stops two people sharing a workspace fighting over their own
+      // button. docs/VOICE.md 13 says which half is which. This row reaches all of it through one door.
       if (f.talkMode != null) {
         add({
           id: "talk-mode", group: "system",
@@ -597,18 +640,21 @@
       // the OPERATOR body's stack of cards, which is what it has always described, and voice.js finds
       // its own card's home by exactly that selector. One class, one owner, two cards that cannot
       // land on each other's section.
-      return head + `<div class="settings-rows" data-push-mount data-settings-section="${esc(section.id)}"></div>`;
+      return head + `<div class="settings-rows" data-push-mount data-settings-section="${esc(section.id)}"></div>`
+        + contributedMarkup(section, facts);
     }
     if (section.mounts === "operator") {
       const markup = typeof host().operatorMarkup === "function" ? host().operatorMarkup() : "";
-      return head + `<div class="settings-rows settings-operator" data-settings-section="${esc(section.id)}">${markup}</div>`;
+      // BYTE-IDENTICAL, on purpose. app.js owns every control in here and the gates read them by id;
+      // VOICE-8's four rows are the SIBLING below it and not a thing inserted into it.
+      return head + `<div class="settings-rows settings-operator" data-settings-section="${esc(section.id)}">${markup}</div>`
+        + contributedMarkup(section, facts);
     }
     const rows = rowsFor(section.id, facts);
     const groups = section.groups.map((group) => {
       const mine = rows.filter((row) => row.group === group.id);
       const header = group.id === "account" ? accountHeaderMarkup(facts) : "";
-      const extra = contributorsFor(section.id, group.id, facts.operator === true)
-        .map((one) => `<div class="setting-row" data-setting-row="${esc(one.id)}" data-settings-contributed="${esc(one.id)}">${one.markup()}</div>`).join("");
+      const extra = contributorsFor(section.id, group.id, facts.operator === true).map(contributedRow).join("");
       if (mine.length === 0 && header === "" && extra === "") return "";
       return `<div class="settings-group" data-settings-group="${esc(group.id)}">`
         + `<p class="settings-group-label">${esc(group.label)}</p>`
@@ -625,6 +671,44 @@
   let current = null;
   let armedUpdate = null;
   let wired = false;
+
+  // ---- SETTINGS-3: a read that started before a person's change may not paint over it -------------
+  //
+  // MEASURED on grok-bot-local-vm, real Chrome, 2026-09-10: at 390x844, with `always` stored, opening
+  // Settings and choosing *Push to talk* the instant the sheet painted left the select reading `always`
+  // in 10 of 10 runs while the voice module and this browser both read `push`. With a 2.5 s settle
+  // first: 0 of 10. At 1440x900: 0 of 10 either way. So it is not a cache and not a wrong read -- it is
+  // an ORDER. open() paints, then fires its own readFacts(); that read snapshots the live values
+  // SYNCHRONOUSLY before its first await; the person changes a control while it is in flight; and when
+  // it lands it repaints from its own older snapshot and puts the old value back under their hand. The
+  // account menu's refresh 2.5 s after boot is a second, slower producer of the same paint.
+  //
+  // The fix is at the mechanism and not at the one row, because three rows were measured reverting
+  // together (talk mode, theme and microphone) and a fourth writes through a route:
+  //
+  //   1. EVERY ACT THAT CHANGES A VALUE WRITES IT INTO THE FACTS. This is already this file's own habit
+  //      -- act("update-box") sets facts.updateArmed before it paints -- and it makes the next paint,
+  //      whoever triggers it, draw what the person chose.
+  //   2. AND A GENERATION GUARD, so a read that STARTED before the change cannot undo step 1 when it
+  //      lands. Each change takes the next number; readFacts remembers the number it started at and,
+  //      before it publishes its snapshot, re-applies every change newer than that. A read that starts
+  //      AFTER the change has no newer change to re-apply and the route's own answer wins, which is
+  //      what has to happen for a value the relay is the authority on.
+  //
+  // refresh(id) -- the contributor form -- paints WITHOUT re-reading, so it was never a producer and
+  // stays correct under this.
+  const CHANGE_LOG = [];
+  const CHANGE_LOG_MAX = 32;
+  let changeSeq = 0;
+
+  /** A value the person just changed: into the facts now, and into the log so a late read cannot win. */
+  function noteChange(key, value) {
+    changeSeq += 1;
+    facts = { ...facts, [key]: value };
+    CHANGE_LOG.push({ seq: changeSeq, key, value });
+    if (CHANGE_LOG.length > CHANGE_LOG_MAX) CHANGE_LOG.splice(0, CHANGE_LOG.length - CHANGE_LOG_MAX);
+    return value;
+  }
 
   const panel = () => doc()?.getElementById("panel-content") ?? null;
   const surface = () => panel()?.querySelector("[data-settings-surface]") ?? null;
@@ -647,6 +731,9 @@
 
   /** Everything the surface can know, gathered once per open. Every read degrades on its own. */
   async function readFacts() {
+    // SETTINGS-3. The number this read was born at. Everything the person changes from here until it
+    // lands is newer than this snapshot and wins over it.
+    const bornAt = changeSeq;
     const api = adapter();
     const h = host();
     const next = {
@@ -764,6 +851,10 @@
     if (v != null && v.supportsMicChoice === true) reads.push(readMicrophones().then((list) => { if (list != null) next.microphones = list; }));
 
     await Promise.all(reads);
+    // SETTINGS-3. A person changed something while these reads were in flight, so this snapshot is
+    // older than what is on screen: those fields keep the value they were given rather than being
+    // painted over with the one this read started with.
+    for (const one of CHANGE_LOG) if (one.seq > bornAt) next[one.key] = one.value;
     facts = next;
     return facts;
   }
@@ -788,6 +879,28 @@
 
   // ---- painting ----------------------------------------------------------------------------------
 
+  /**
+   * VOICE-8. The one thing a repaint may change on a section whose body belongs to somebody else.
+   *
+   * The owner's markup is never touched. The contributed container beside it is rebuilt ONLY when the
+   * set of rows in it is not the set that should be there -- a module registering late, an operator
+   * fact arriving and making an operatorOnly row eligible -- and left alone on every other paint, so a
+   * field somebody is typing into is not taken out of their hands by the account menu's own refresh.
+   */
+  function syncContributed(body, section) {
+    const wanted = contributedFor(section, facts.operator === true).map((one) => one.id);
+    const standing = body.querySelector(`[data-settings-contributed-host="${section.id}"]`);
+    const have = standing == null ? [] : [...standing.querySelectorAll("[data-settings-contributed]")]
+      .map((node) => node.dataset.settingsContributed);
+    if (have.join("|") === wanted.join("|")) return false;
+    if (standing != null) standing.remove();
+    if (wanted.length === 0) return true;
+    const anchor = body.querySelector(`[data-settings-section="${section.id}"]`);
+    if (anchor == null) return false;
+    anchor.insertAdjacentHTML("afterend", contributedMarkup(section, facts));
+    return true;
+  }
+
   function paint(sectionId, rowId) {
     const shell = surface();
     const body = shell?.querySelector("[data-settings-body]");
@@ -807,12 +920,23 @@
     const standing = body.querySelector(`[data-settings-section="${section.id}"]`);
     const keep = section.mounts != null && standing != null;
     if (!keep) body.innerHTML = bodyMarkup(section, facts);
+    // VOICE-8. The owner's body is kept, so the rows OTHER modules contributed to it are reconciled on
+    // their own -- and only when the SET of them changed, never merely because a repaint happened. A
+    // module that registers while its section is already open gets its markup here; a repaint a second
+    // later leaves a half-typed field exactly where the person left it.
+    else syncContributed(body, section);
     for (const button of shell.querySelectorAll("[data-settings-nav]")) {
       const active = button.dataset.settingsNav === section.id;
       button.classList.toggle("is-active", active);
       button.setAttribute("aria-selected", String(active));
     }
     const mount = body.querySelector(`[data-settings-section="${section.id}"]`);
+    // Where the contributed rows really are. On an ordinary section that is inside the body's own
+    // [data-settings-section] and `mount` is it; on a mounts section the owner's body is somebody
+    // else's and the contributed rows are the container beside it, so a fill handed `mount` would be
+    // handed a root its own controls are not in. That is the difference between a row that fills and a
+    // row that is drawn and never gets a value.
+    const contributedHost = body.querySelector(`[data-settings-contributed-host="${section.id}"]`);
     // The two bodies their owners fill. Notifications through push-settings.js's own public mount --
     // its observer watches #panel-content's children and a body swap is two levels below that -- and
     // Operator through app.js, which still owns every control on it.
@@ -823,7 +947,7 @@
     for (const one of CONTRIBUTORS.values()) {
       if (one.section !== section.id || one.fill == null) continue;
       if (one.operatorOnly === true && facts.operator !== true) continue;
-      try { one.fill(mount ?? body); } catch { /* one row short beats a blank section */ }
+      try { one.fill(contributedHost ?? mount ?? body); } catch { /* one row short beats a blank section */ }
     }
     if (rowId) {
       const row = body.querySelector(`[data-setting-row="${rowId}"]`);
@@ -925,8 +1049,19 @@
       catch (error) { node.disabled = false; toast(`That device was not revoked: ${error.message}`); }
       return;
     }
-    if (action === "theme") { applyTheme(node.value); toast(node.value === "system" ? "Following this device." : `${node.options[node.selectedIndex].text} it is.`); return; }
-    if (action === "microphone") { voice()?.setMicDeviceId?.(node.value); toast("That microphone is the one Talk uses."); return; }
+    if (action === "theme") {
+      applyTheme(node.value);
+      // SETTINGS-3. Into the facts, so the next paint -- whoever fires it -- draws what was chosen.
+      noteChange("theme", node.value);
+      toast(node.value === "system" ? "Following this device." : `${node.options[node.selectedIndex].text} it is.`);
+      return;
+    }
+    if (action === "microphone") {
+      voice()?.setMicDeviceId?.(node.value);
+      noteChange("microphone", node.value);
+      toast("That microphone is the one Talk uses.");
+      return;
+    }
     if (action === "talk-mode") {
       // Painted back from the module rather than left as typed, so a value it refused shows what it
       // really is rather than what was asked for. Changing it while a call is up ends that call, which
@@ -935,14 +1070,27 @@
       const was = voice()?.talkMode?.();
       const next = voice()?.setTalkMode?.(node.value) ?? was;
       node.value = next ?? node.value;
+      // SETTINGS-3. The row used to lie about itself from here on: the module, this browser's stored
+      // value and the control were all correct and a refresh already in flight painted the old value
+      // back over the control. The value goes into the facts, and the guard in readFacts stops a read
+      // that started earlier from undoing it.
+      if (next != null) noteChange("talkMode", next);
       toast(next === "always" ? "Press Talk once to start, once more to stop." : "Hold Talk while you speak.");
       return;
     }
     if (action === "voice") {
       const on = node.getAttribute("aria-pressed") !== "true";
       node.setAttribute("aria-pressed", String(on));
+      // SETTINGS-3 again, and this one travels through a route, which is why the guard and not only the
+      // write-back is needed: the switch is noted BEFORE the await so a read already in flight cannot
+      // land between the press and the answer and put the old position back.
+      noteChange("voice", { ...(facts.voice ?? {}), enabled: on });
       try { await voice()?.setEnabled?.(on); toast(on ? "Talking is on." : "Talking is off."); }
-      catch (error) { node.setAttribute("aria-pressed", String(!on)); toast(`That was not saved: ${error.message}`); }
+      catch (error) {
+        node.setAttribute("aria-pressed", String(!on));
+        noteChange("voice", { ...(facts.voice ?? {}), enabled: !on });
+        toast(`That was not saved: ${error.message}`);
+      }
       return;
     }
     if (action === "bot-name") {
@@ -1009,15 +1157,18 @@
       // Two presses, and the first disarms itself after six seconds. A repaint disarms it too, so a
       // button reading Update is never one press away from recreating the computer.
       if (armedUpdate == null) {
-        armedUpdate = global.setTimeout(() => { armedUpdate = null; facts.updateArmed = false; paint(current, null); }, 6000);
-        facts.updateArmed = true;
+        armedUpdate = global.setTimeout(() => { armedUpdate = null; noteChange("updateArmed", false); paint(current, null); }, 6000);
+        // SETTINGS-3. The same write this file already did, through the one door that also tells a read
+        // in flight it is out of date -- otherwise a refresh landing in the six second window disarms
+        // the button under a finger that is about to press it again.
+        noteChange("updateArmed", true);
         paint(current, null);
         toast(`Press it again to replace the computer ${typeof h.workspaceName === "function" && h.workspaceName() ? `for ${h.workspaceName()}` : "for this workspace"} with a fresh one.`);
         return;
       }
       global.clearTimeout(armedUpdate);
       armedUpdate = null;
-      facts.updateArmed = false;
+      noteChange("updateArmed", false);
       const id = typeof h.leadId === "function" ? h.leadId() : null;
       if (id == null || typeof api?.updateBox !== "function") { paint(current, null); toast("This computer cannot be updated from here."); return; }
       node.disabled = true;
@@ -1113,6 +1264,10 @@
     paint,
     facts: () => facts,
     _readFacts: readFacts,
+    // SETTINGS-3. What the guard knows, so a gate can tell "the control agrees" from "the control
+    // agrees because nothing ever raced it".
+    _changeLog: () => CHANGE_LOG.map((one) => ({ ...one })),
+    _noteChange: noteChange,
     _shellMarkup: shellMarkup,
     _bodyMarkup: bodyMarkup,
     _rowMarkup: rowMarkup,

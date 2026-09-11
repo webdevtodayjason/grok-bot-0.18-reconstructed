@@ -2773,6 +2773,11 @@ const voicePolicy = makeVoicePolicy({ relayBase: RELAY?.cpUrl ?? "", relayToken:
 const voiceDeps = {
   policy: voicePolicy,
   ownLikeParent,
+  // VOICE-10. WHICH PERSON is asking, for the one field on the voice door that is a person's own and
+  // not the workspace's: how their Talk button behaves. It is the same reader the device list and the
+  // notification settings key on, so one account's choice is never another's, and "" -- the instance
+  // password door -- reads as the workspace's own the way it does everywhere else in this file.
+  subOf,
   log: (line) => console.log(line),
   relayBase: RELAY?.cpUrl ?? "",
   relayToken: RELAY?.relayToken ?? "",

@@ -835,27 +835,42 @@ browser hands every keystroke to the machine on the other side. Measured while b
 scroll that put the focus in that frame, Escape never arrived. There is no fix for that and none is
 wanted — the way out then is the button, which is always on the screen.
 
-### Where the choice is stored, and the one thing about it that is not finished
+### Where the choice is stored: the person, with this browser as the fallback (VOICE-10)
 
-**It is yours, not your workspace's, and today that means it is per browser.** Everything else about
-talking is written to one settings file per workspace; two people sharing a workspace would then fight
-over how their own button behaves, so this one row deliberately never goes through that door. No
-request body in the page carries it. What holds it instead is this browser — the same place the
-settings surface keeps Theme and the microphone choice, which are the two rows either side of it — so
-it does not follow you to your phone and it is gone if you clear site data. It falls back to holding
-when there is nothing stored, in a private window, and in a browser set to refuse site data.
+**It is yours, not your workspace's, and since VOICE-10 that means it follows you.** Choose always
+listening on your laptop and the console on your phone opens on always listening, signed in as you.
 
-**Per browser is not per person, and that is the unfinished part.** A person who sets always-listening
-on their laptop gets holding again on their phone. The only per-person door on this product today is
-the one Notifications uses; moving this row onto it is **filed as VOICE-10 in docs/GAP-ANALYSIS.md**,
-with an owner, the cost and the proof step, rather than explained here and left to be discovered on a
-second device.
+It is kept on **this door** — `/voice/settings` — but not the way everything else on that door is kept.
+Everything else there is one value per WORKSPACE; the talk mode is a map keyed on the session's own
+person claim, the same key the device list and the notification settings use, so two accounts sharing a
+workspace each keep their own and neither can read or move the other's. The route answers **the caller's
+own entry and never the map**, and it **omits the field entirely** for somebody who has never chosen,
+because a default arriving from a server is a choice nobody made written over a real one.
 
-The page keeps its own copy whatever happens to that, because the button is live the moment the
-console paints, before any route has answered, and it has to know which of the two things it is before
-the first press. The settings row reaches it through one door, `setTalkMode`, and that door is also
-what ends the call you are in when you change the mode — the alternative is a live microphone whose
-control has changed meaning underneath you.
+It is on this door rather than on the notifications door the row first named for a plain reason: that
+door refuses the field by name — its field list is frozen to kinds, quiet hours and the offset — and
+opening it was an edit to a file the wave that landed this did not own. The key is the same either way,
+which is the part that matters.
+
+**This browser's copy is still written, first, and it is the behaviour.** The button is live the moment
+the console paints, long before any route has answered, and it has to know which of the two things it is
+before the first press. So the page reads its own stored value first; the relay's answer arrives with the
+settings read boot already makes and is adopted then. A relay that refuses, a relay that never answers,
+a private window, a browser set to refuse site data: in every one of those the button does what was asked
+of it and the only thing lost is that the choice does not travel. With nothing stored anywhere the answer
+is **holding**, because a microphone that is open until you say otherwise is not a default.
+
+**An answer that lands never cuts a call in half.** The settings row reaches the value through one door,
+`setTalkMode`, and that door ends the call you are in when the mode really changes — the alternative is a
+live microphone whose control has changed meaning underneath you. A value arriving from the route goes
+through a *different* door, because nobody pressed anything: a call that is up keeps the mode it was
+opened under and the route's value is taken on the next load.
+
+**MEASURED on grok-bot-local-vm (this Mac), real Chrome, 2026-09-10, `verify-voice --leg person`:** one
+browser chooses always listening, its own storage holds it and `GET /voice/settings` answers it; a second
+browser with nothing stored, signed in as the same person, is on always listening at first paint with no
+press and no line opened, and the Talk mode row on it opens reading always listening; a third browser with
+nothing stored and the settings door blocked outright opens on holding.
 
 The desktop app's global hotkey is a later wave. It presses this same control through the same pair of
 entry points, so it inherits whichever mode is set rather than being a third behaviour to keep in

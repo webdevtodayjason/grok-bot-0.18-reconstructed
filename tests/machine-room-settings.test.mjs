@@ -470,6 +470,148 @@ test("a sibling module contributes a row by registering it, idempotently and by 
   for (const bad of [null, undefined, {}, { id: "" }, { id: 7 }]) assert.equal(mr.register(bad), false, `register(${JSON.stringify(bad)}) should refuse`);
 });
 
+// ---- SETTINGS-3: a read that started before a change may not paint over it ------------------------
+//
+// THE BROWSER LEG PROVES THIS END TO END and this one proves it DETERMINISTICALLY, which the browser
+// cannot: there the window is a few hundred milliseconds wide at 390x844 and shut at 1440x900, and a
+// leg that waits for the sheet to settle passes on the bug. Here the read is held open on purpose, so
+// the order is the assertion rather than the timing.
+//
+// The producer was open()'s own `void readFacts().then(paint)`. readFacts snapshots the live values
+// SYNCHRONOUSLY before its first await; act() wrote the module, this browser's storage and the DOM node
+// and never the facts; so a change made while the read was in flight was painted over from that older
+// snapshot. MEASURED on grok-bot-local-vm at 390x844, 2026-09-10: 10 of 10 runs left the Talk mode
+// select reading `always` while the module and localStorage both read `push`.
+test("a read that started before a person's change does not publish its older snapshot over it", async () => {
+  const mr = (() => {
+    // A stub with enough of a page for readFacts to gather: a voice module that answers the OLD value,
+    // and a /auth/devices read this test can hold open and release by hand.
+    let release = null;
+    const held = new Promise((resolve) => { release = resolve; });
+    const stub = {
+      document: undefined,
+      localStorage: { getItem: () => null, setItem: () => {} },
+      fetch: async () => { await held; return { ok: true, status: 200, text: async () => JSON.stringify({ devices: [] }) }; },
+      __voice: { talkMode: () => "always", micDeviceId: () => "", supportsMicChoice: false },
+    };
+    const source = readFileSync(path.join(repoRoot, "ui/machine-room/settings.js"), "utf8");
+    new Function("window", source)(stub);
+    return { api: stub.__mrSettings, release };
+  })();
+
+  // The read is in flight and has already taken its synchronous snapshot of the old value.
+  const reading = mr.api._readFacts();
+  // The person changes it. act() goes through this one door, which writes the facts AND stamps the
+  // change, and act("update-box") was already writing facts directly before this wave -- the habit is
+  // this file's own.
+  mr.api._noteChange("talkMode", "push");
+  assert.equal(mr.api.facts().talkMode, "push", "the change did not reach the facts at all");
+  // Now the read lands.
+  mr.release();
+  await reading;
+  assert.equal(mr.api.facts().talkMode, "push",
+    "the read published its own older snapshot over a change made after it started, which is SETTINGS-3");
+  // A change made BEFORE the next read has nothing newer to re-apply, so the live value wins again --
+  // which is what has to happen for a value the relay is the authority on.
+  await mr.api._readFacts();
+  assert.equal(mr.api.facts().talkMode, "always",
+    "a read that started AFTER the change must win, or a route answer could never correct a stale control");
+  // And the log is bounded: it is a guard, not a history of the session.
+  for (let n = 0; n < 50; n += 1) mr.api._noteChange("theme", n % 2 === 0 ? "dark" : "light");
+  assert.ok(mr.api._changeLog().length <= 32, `the change log grew to ${mr.api._changeLog().length}`);
+});
+
+// ---- VOICE-8: the seam a module contributes a row to a section whose body is somebody else's ------
+//
+// THE FAILURE THIS PINS IS SILENT. The registry was published for exactly this and bodyMarkup returned
+// EARLY for a mounts section -- it never reached contributorsFor at all -- and the Operator section
+// carried no groups. So register({section: "operator", group: "talking"}) stored the entry, had its
+// fill() called with the operator body on every paint, and never drew its markup: no error, no failing
+// test, a row nobody can see. docs/SETTINGS.md promised that call as VOICE-8's next action.
+test("a module contributes rows to the Operator section, beside app.js's own stack and not inside it", () => {
+  const mr = pure();
+  const operator = mr.SECTIONS.find((section) => section.id === "operator");
+  assert.equal(operator.mounts, "operator", "the Operator body is still app.js's to fill");
+  assert.deepEqual(operator.groups.map((group) => group.id), ["talking"],
+    "the one group this section names is the one VOICE-8's rows go in, and nothing else grew an array");
+
+  const bare = mr._bodyMarkup(operator, { operator: true });
+  assert.ok(!bare.includes("data-settings-contributed-host"),
+    "a section nobody has contributed a row to draws exactly what it drew before: no heading, no empty card");
+
+  assert.equal(mr.register({
+    id: "voice-service", section: "operator", group: "talking", order: 10, operatorOnly: true,
+    markup: () => '<div><strong>Service</strong><small>which one does the talking</small></div><div class="setting-control"><select data-voice-vendor></select></div>',
+  }), true);
+  assert.equal(mr.register({
+    id: "voice-agent", section: "operator", group: "talking", order: 40, operatorOnly: true,
+    markup: () => '<div><strong>Who you are talking to</strong><small>the head of your team</small></div><div class="setting-control"><select data-voice-agent></select></div>',
+  }), true);
+
+  const drawn = mr._bodyMarkup(operator, { operator: true });
+  assert.match(drawn, /data-settings-contributed="voice-service"/, "a row registered on Operator is not on Operator");
+  assert.match(drawn, /data-voice-vendor/, "the control itself never reached the page");
+  assert.match(drawn, /<p class="settings-group-label">Talking<\/p>/, "the group it named has no heading");
+  // BESIDE app.js's stack, never inside it. That body is somebody else's markup and every gate reads its
+  // controls by id; a row inserted into it is a row inside a container this file does not own.
+  const stack = drawn.indexOf('class="settings-rows settings-operator"');
+  const contributed = drawn.indexOf("data-settings-contributed-host=");
+  assert.ok(stack >= 0 && contributed > stack, "the contributed rows are not a sibling AFTER the operator stack");
+  assert.match(drawn, /<div class="settings-rows settings-operator" data-settings-section="operator"><\/div>/,
+    "app.js's own container is no longer byte-identical, which is what keeps its controls and their gates untouched");
+  // In the order they asked for, not the order they registered in.
+  assert.ok(drawn.indexOf("voice-service") < drawn.indexOf("voice-agent"));
+});
+
+test("an operatorOnly contributed row is absent when the facts do not say operator", () => {
+  const mr = pure();
+  const operator = mr.SECTIONS.find((section) => section.id === "operator");
+  mr.register({
+    id: "voice-service", section: "operator", group: "talking", operatorOnly: true,
+    markup: () => '<div><strong>Service</strong><small>which one</small></div><div class="setting-control"><select data-voice-vendor></select></div>',
+  });
+  // FAIL CLOSED, the same rule the nav follows. An identity the console could not read is not an
+  // operator, so absent, null and false all draw nothing -- and the control's own attribute is the thing
+  // asserted, because that is what a customer would be able to reach.
+  for (const facts of [{}, { operator: null }, { operator: false }, { operator: "yes" }, { operator: 1 }]) {
+    const drawn = mr._bodyMarkup(operator, facts);
+    assert.ok(!drawn.includes("data-voice-vendor"),
+      `facts of ${JSON.stringify(facts)} drew the operator's control`);
+    assert.ok(!drawn.includes("data-settings-contributed-host"), `facts of ${JSON.stringify(facts)} drew the container`);
+  }
+  assert.match(mr._bodyMarkup(operator, { operator: true }), /data-voice-vendor/);
+  // And on no customer section at all, whichever way the facts read.
+  for (const section of mr.sectionsFor(false)) {
+    for (const facts of [{ ...FULL_FACTS }, { ...FULL_FACTS, operator: true }]) {
+      assert.ok(!/data-voice-(vendor|model|voice|agent)/.test(mr._bodyMarkup(section, facts)),
+        `${section.id} carries one of the operator's talking controls`);
+    }
+  }
+});
+
+test("the Operator section's contributed copy is exempt from the banned-word sweep, like the rest of it", () => {
+  // RULE 1 IS ABOUT A CUSTOMER'S ROWS. docs/SETTINGS.md section 2 exempts the Operator section by
+  // design: a vendor's name and the word key are the OPERATOR's words, and the four Talking rows are
+  // his. The sweep has to go on reading only what a customer can read -- and it has to keep catching a
+  // contributed row on a CUSTOMER section, which is the half that would otherwise be a hole in it.
+  const mr = pure();
+  mr.register({
+    id: "voice-service", section: "operator", group: "talking", operatorOnly: true,
+    markup: () => '<div><strong>Service</strong><small>Which service does the talking, on your own key.</small></div><div class="setting-control"><select data-voice-vendor></select></div>',
+  });
+  const copy = mr.customerCopy({ ...FULL_FACTS, operator: true });
+  assert.equal(copy.filter((entry) => /^operator/.test(entry.where)).length, 0,
+    "the sweep reached the operator's section, which is exempt by design and would fail on his own words");
+  assert.deepEqual(copy.filter((entry) => mr.BANNED.test(entry.text)), [],
+    "a customer-visible word tripped the sweep");
+  // The contributed row's own words are not in the sweep's input at all, which is what "exempt" means
+  // here -- and the proof that it is the SECTION and not the row that is exempt is that the same words
+  // on a customer section are still unreachable to a contributor: customerCopy walks rowsFor, which is
+  // this file's own rows, so the guard that really matters is the live page's, swept by
+  // scripts/verify-settings.mjs over every node on the five customer sections.
+  assert.equal(copy.filter((entry) => /Which service does the talking/.test(entry.text)).length, 0);
+});
+
 // The seam voice.js opens Settings through, and why it is a function of a SECTION and not a click.
 // voice.js used to synthesise a click on #shelf-settings, which computes display:none at 390x844 --
 // so "Open voice settings" was dead on every phone, silently, because a click on a hidden element
