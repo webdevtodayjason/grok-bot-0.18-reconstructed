@@ -35,6 +35,7 @@
 //                   makes voice do nothing in the iPhone app is WebKit's -- a capture context born
 //                   suspended and never resumed inside the press.
 //
+//   --leg call      VOICE-13: the call screen a press brings up on a phone, in WebKit at 390x844.
 //   --leg person    VOICE-10: the talk mode follows the PERSON and not the browser. Always listening is
 //                   chosen in one browser, a SECOND browser signed in as the same person opens on it at
 //                   first paint with nothing pressed, and a third with no stored value and the route
@@ -76,7 +77,7 @@ const GATE_AGENT = gateUserAgent(import.meta.url);
 const MACHINE = process.env.GATE_MACHINE ?? `${os.hostname()} (${os.platform()} ${os.arch()})`;
 const GATEWAY = process.env.SAND_GATEWAY_URL ?? "http://127.0.0.1:1340";
 
-const LEGS = ["cp", "relay", "nokey", "caps", "origin", "refused", "browser", "frames", "overlay", "person", "release"];
+const LEGS = ["cp", "relay", "nokey", "caps", "origin", "refused", "browser", "frames", "overlay", "person", "release", "call"];
 const leg = (() => {
   const at = process.argv.indexOf("--leg");
   return at === -1 ? "" : String(process.argv[at + 1] ?? "");
@@ -110,6 +111,10 @@ if (process.argv.includes("--help") || process.argv.includes("-h") || leg.length
     "           1440x900 and in WebKit at 390x844, with the silence counted at the vendor; a tap; the",
     "           press after a refusal; a hold whose release never comes; and the three microphone",
     "           refusals read as three different sentences.",
+    "  call     VOICE-13: the call screen on a phone. WebKit at 390x844 dpr 3 with touch: the press, the",
+    "           five words in order, the avatar reacting to a level with the mascot never transformed, a",
+    "           typed line mid-call, a tool receipt as the status line, a card taking the middle, mute,",
+    "           End, an app switch, Escape, the reduced-motion still, and what six seconds of it costs.",
     "",
     "Env: SAND_PROFILE_DIRS (the live legs), SAND_GATEWAY_URL, GATE_MIC_WAV,",
     "     GROK_BOT_PLAYWRIGHT_DIR, VOICE_GATE_PORT (default 7793), VOICE_GATE_CP_PORT (default 7794).",
@@ -1642,6 +1647,8 @@ async function legOverlay() {
     return {
       shelf: r(".control-shelf"), composer: r("#composer"), talk: r("[data-voice-talk]"),
       box: r("#message-input"),
+      shelfKids: [...(document.querySelector(".control-shelf")?.children ?? [])]
+        .map((n) => (n.id || n.className) + ":" + Math.round(n.getBoundingClientRect().width) + "x" + Math.round(n.getBoundingClientRect().height)),
       line: (() => { const n = document.getElementById("voice-line"); return n == null ? null : {
         hidden: n.hidden === true, text: (n.textContent ?? "").replace(/\s+/g, " ").trim() }; })(),
       overlay: ov == null ? null : {
@@ -1660,15 +1667,40 @@ async function legOverlay() {
   })()`;
   const sameRect = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
+  /**
+   * WHAT "THE FOOTER DID NOT MOVE" MEANS AT EACH WIDTH, and the difference is a measurement rather than a
+   * convenience. At 1440x900 every rect is byte-identical across a whole turn and stays that way.
+   *
+   * At 740x900 -- where VOICE-13 had to move these rows, because at 390x844 a press is now a call screen --
+   * one thing in that shelf is NOT voice's. MEASURED here with the voice line and the panel both away and
+   * 0x0: .workspace-list goes 0x0 to 93x46 the first time a turn really lands, because the console draws a
+   * chip for the conversation that turn created, and at this width that chip shares the composer's row and
+   * takes 93 px off it. At 1440x900 the row has slack and the same chip costs nothing. So at the narrow
+   * width the claim is the one VOICE-2 was actually about -- NO NEW ROW OPENS, nothing changes height,
+   * nothing moves vertically -- and the chip's own width is printed beside it rather than asserted away.
+   */
+  const footerHeld = (now, base, strict) => (strict
+    ? sameRect(now.shelf, base.shelf) && sameRect(now.composer, base.composer)
+      && sameRect(now.talk, base.talk) && sameRect(now.box, base.box)
+    : now.shelf?.h === base.shelf?.h && now.shelf?.y === base.shelf?.y
+      && now.composer?.h === base.composer?.h && now.composer?.y === base.composer?.y
+      && now.talk?.h === base.talk?.h && now.talk?.y === base.talk?.y
+      && now.box?.h === base.box?.h && now.box?.y === base.box?.y);
+
   // One leg per run has to fit a 300 second ceiling and this one drives four combinations against a
   // shared box. VOICE_GATE_ONLY narrows it while something is being chased -- "desktop", "phone",
   // "push", "always" -- and a full run names nothing.
   const only = String(process.env.VOICE_GATE_ONLY ?? "").toLowerCase();
   const runId = randomBytes(3).toString("hex");
   let turn = 0;
+  // VOICE-13 RE-CUT THE SECOND VIEWPORT, and not to work around a red line: at 390x844 a press is now a
+  // call screen by design, so a leg that held a hold there would be measuring a behaviour the product no
+  // longer has. 740x900 is still UNDER LINE_SHELF_WIDTH, so everything these rows really measured about
+  // the refusal line's shelf home and the footer's geometry at a narrow width still holds, and it is
+  // over the call width, so the hold is still a hold. The phone is measured by --leg call.
   for (const view of [
     { name: "desktop", width: 1440, height: 900, hasTouch: false },
-    { name: "phone", width: 390, height: 844, hasTouch: true },
+    { name: "narrow", width: 740, height: 900, hasTouch: true },
   ]) {
     if (only.length > 0 && !only.includes(view.name) && (only.includes("desktop") || only.includes("phone"))) continue;
     for (const mode of ["push", "always"]) {
@@ -1703,6 +1735,15 @@ async function legOverlay() {
         document.getElementById("voice-overlay")?.closest(".conversation-space") != null
         && document.getElementById("voice-overlay")?.closest(".control-shelf") == null);
       check(inSpace, "and it really is inside .conversation-space and outside .control-shelf", String(inSpace));
+      // VOICE-13: neither of these widths is a phone, so neither gets a call screen. 740 px is the
+      // width that proves the predicate is not simply "narrower than the refusal line's shelf home".
+      const noCall = await page.evaluate(() => ({
+        wanted: window.__voice?._callWanted?.() ?? null,
+        up: document.getElementById("voice-call") == null ? false : document.getElementById("voice-call").hidden === false,
+      }));
+      check(noCall.wanted === false && noCall.up === false,
+        `and at ${view.width}x${view.height} no call screen is wanted or drawn, so the strip and the panel are still the shape of this window`,
+        JSON.stringify(noCall));
 
       // THE FIRST COMBINATION DRIVES THE MODE THROUGH THE ROW A PERSON REALLY USES, and with no settle.
       //
@@ -1847,12 +1888,16 @@ async function legOverlay() {
       check(seen.at(-1) === words.at(-1), "and the last partial is the whole sentence so far, replaced rather than appended", JSON.stringify(seen.at(-1)));
 
       const during = await page.evaluate(RECTS);
-      check(sameRect(during.shelf, before.shelf) && sameRect(during.composer, before.composer)
-        && sameRect(during.talk, before.talk) && sameRect(during.box, before.box),
-        "THE FOOTER DID NOT MOVE while the words were being built",
+      check(footerHeld(during, before, view.name === "desktop"),
+        view.name === "desktop"
+          ? "THE FOOTER DID NOT MOVE while the words were being built"
+          : "THE FOOTER OPENED NO ROW AND NOTHING CHANGED HEIGHT while the words were being built",
         `shelf ${JSON.stringify(during.shelf)} composer ${JSON.stringify(during.composer)} talk ${JSON.stringify(during.talk)} `
         + `message box ${JSON.stringify(during.box)} on ${MACHINE}`);
       check(during.sideways === false, "and the page does not scroll sideways with the panel up", String(during.sideways));
+      if (!sameRect(during.composer, before.composer)) {
+        info(`the composer is ${during.composer.w} px against ${before.composer.w} px, and the shelf's children say why: ${JSON.stringify(before.shelfKids)} before, ${JSON.stringify(during.shelfKids)} during. The voice line is 0x0 in both.`);
+      }
 
       // The settled transcript races the tool call, so it is another partial and must NOT dissolve.
       stub.emitUserTranscriptDone(words.at(-1));
@@ -1899,13 +1944,17 @@ async function legOverlay() {
       check(mine[0] === after.lastHeard, "AND IT IS BYTE-IDENTICAL to the panel's last words", `${JSON.stringify(mine[0])} vs ${JSON.stringify(after.lastHeard)}`);
 
       // -- the footer, after ------------------------------------------------------------------------
-      check(sameRect(after.shelf, before.shelf), "the footer's height AND width are what they were before anybody talked",
+      check(view.name === "desktop" ? sameRect(after.shelf, before.shelf) : (after.shelf?.h === before.shelf?.h && after.shelf?.y === before.shelf?.y),
+        "the footer's height is what it was before anybody talked",
         `${JSON.stringify(before.shelf)} before, ${JSON.stringify(after.shelf)} after, on ${MACHINE}`);
-      check(sameRect(after.composer, before.composer), "the message box never narrowed",
+      check(view.name === "desktop" ? sameRect(after.composer, before.composer) : (after.composer?.h === before.composer?.h && after.composer?.y === before.composer?.y),
+        view.name === "desktop" ? "the message box never narrowed" : "the message box never changed height or moved",
         `${JSON.stringify(before.composer)} before, ${JSON.stringify(after.composer)} after`);
-      check(sameRect(after.talk, before.talk), "and the talk button never moved",
+      check(view.name === "desktop" ? sameRect(after.talk, before.talk) : (after.talk?.h === before.talk?.h && after.talk?.y === before.talk?.y),
+        "and the talk button never moved",
         `${JSON.stringify(before.talk)} before, ${JSON.stringify(after.talk)} after`);
-      check(sameRect(after.box, before.box), "and neither did the message box a person types into",
+      check(view.name === "desktop" ? sameRect(after.box, before.box) : (after.box?.h === before.box?.h && after.box?.y === before.box?.y),
+        "and neither did the message box a person types into",
         `${JSON.stringify(before.box)} before, ${JSON.stringify(after.box)} after`);
 
       // -- AND THE AGENT'S REPLY, which is the half this leg could not see before -------------------
@@ -1920,8 +1969,7 @@ async function legOverlay() {
         "The team is on the settings surface this afternoon, and the deploy gate is green.");
       await page.waitForTimeout(150);
       const replied = await page.evaluate(RECTS);
-      check(sameRect(replied.shelf, before.shelf) && sameRect(replied.composer, before.composer)
-        && sameRect(replied.talk, before.talk) && sameRect(replied.box, before.box),
+      check(footerHeld(replied, before, view.name === "desktop"),
         "THE FOOTER DID NOT MOVE when the agent answered either, which is every turn rather than only a refused one",
         `shelf ${JSON.stringify(replied.shelf)} composer ${JSON.stringify(replied.composer)} talk ${JSON.stringify(replied.talk)} `
         + `message box ${JSON.stringify(replied.box)} on ${MACHINE}`);
@@ -2413,7 +2461,10 @@ async function legRelease() {
 
   for (const view of [
     { name: "desktop", engine: "chromium", width: 1440, height: 900, touch: false, permissions: true, fakeMic: false },
-    { name: "phone", engine: "webkit", width: 390, height: 844, touch: true, permissions: false, fakeMic: true },
+    // VOICE-13: 740x900 rather than 390x844. The claim of this row is WebKit's own release -- the engine
+    // that shipped the defect -- and at phone width a press is now a call screen rather than a hold, so
+    // the hold had to move to a window that still has one. --leg call measures the phone.
+    { name: "narrow", engine: "webkit", width: 740, height: 900, touch: true, permissions: false, fakeMic: true },
   ]) {
     const engine = playwright[view.engine];
     if (engine == null) { skip(`${view.engine} at ${view.width}x${view.height}`, "this playwright build has no such engine"); continue; }
@@ -2629,6 +2680,644 @@ async function legRelease() {
   return;
 }
 
+
+// ---- --leg call: the call screen on a phone, in WebKit ------------------------------------------
+//
+// VOICE-13. Jason recorded ChatGPT's voice mode on his iPhone and said "this is what I want". This leg
+// is the measurement of the thing he asked for: a press at 390x844 brings up a full-screen surface with
+// Titan alive in the middle, the five words in order across a turn, a typed line that still works, a
+// card that takes the middle, and an End that puts the person back on the newest line of their chat.
+//
+// WEBKIT, because the shell is a WKWebView over console.titanium.bot and WebKit is the engine that
+// ships the defects this screen can have. Two WebKit limits are PRINTED rather than worked around:
+// there is no CDP session, so a press is page.tap rather than a synthesised touch pair (the
+// one-thumb-two-events case stays a Chromium measurement and a unit case), and there is no
+// --use-file-for-fake-audio-capture, so the microphone is built out of Web Audio and the mic level is
+// driven through __voice._setCallLevels, which the output labels as injected.
+async function legCall() {
+  console.log(`verify-voice --leg call on ${MACHINE} (engine: webkit)`);
+  requireTheOtherItems(true);
+  if (!existsSync(path.join(repoRoot, "ui", "machine-room", "voice-call.css"))) {
+    missing("the call screen's stylesheet", ["ui/machine-room/voice-call.css is not on disk, so this leg would measure an unstyled div"]);
+    return;
+  }
+  const cp = await startControlPlane(9);
+  const { startStubRealtime } = await import(STUB_REALTIME);
+  const stub = await startStubRealtime({ audioFrames: 20 });
+  cleanups.push(() => { try { stub.close(); } catch { /* gone */ } });
+
+  const dir = mkdtempSync(path.join(os.tmpdir(), "voice-gate-call-"));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  const voiceJson = path.join(dir, "voice.json");
+  writeFileSync(voiceJson, `${JSON.stringify({ enabled: true, apiKey: `gate-not-a-real-key-${randomBytes(8).toString("hex")}`, vendor: "xai" })}\n`, { mode: 0o600 });
+
+  const relay = await startRelay({
+    port: Number(process.env.VOICE_GATE_PORT ?? 7793) + 9,
+    voiceJson, stubUrl: stub.url, policyUrl: cp.base, relayToken: cp.relayToken,
+  });
+  const session = await signIn(relay);
+  const settingsBefore = await ask(`${relay.base}/voice/settings`, { headers: { cookie: session.cookie } });
+  const roster = settingsBefore.body?.agents ?? [];
+  const scratch = /^(code gate|voice gate|gate)\b|^new agent$/i;
+  const chosen = roster.find((one) => !scratch.test(String(one.name ?? ""))) ?? roster[0] ?? null;
+  check(chosen != null, "the settings door lists this workspace's bots, so one can be chosen", `${roster.length} on the roster`);
+  if (chosen == null) {
+    missing("a bot on this workspace to talk to", [
+      "GET /voice/settings answered an empty roster, so the relay has nobody to hand a spoken turn to",
+      `the host gateway this relay reads is ${GATEWAY}; check it is up and that SAND_PROFILE_DIRS names the live profile`,
+    ]);
+    return;
+  }
+  await ask(`${relay.base}/voice/settings`, {
+    method: "POST",
+    headers: { cookie: session.cookie, "content-type": "application/json" },
+    body: JSON.stringify({ agentId: chosen?.id ?? "" }),
+  });
+  info(`this run talks to ${chosen?.name ?? "(nobody)"}`);
+
+  const playwright = await loadPlaywright();
+  const engine = playwright.webkit;
+  if (engine == null) { skip("webkit at 390x844", "this playwright build has no webkit"); return; }
+  let browser = null;
+  try { browser = await engine.launch({}); }
+  catch (error) { skip("webkit would not launch", String(error?.message ?? error).split("\n")[0]); return; }
+  cleanups.push(() => { try { browser.close(); } catch { /* gone */ } });
+
+  // WebKit ships no fake capture device, so the microphone is a real MediaStream out of a real Web
+  // Audio graph. What this is NOT is evidence about WebKit's own permission prompt, and the press below
+  // is granted the microphone through the context so it never ends on the no-microphone sentence --
+  // which a leg that forgot the grant would misread as a broken product.
+  const fakeWebkitMicrophone = () => {
+    const Ctx = window.AudioContext ?? window.webkitAudioContext;
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: async () => {
+          const ctx = new Ctx();
+          try { await ctx.resume(); } catch { /* silence still renders */ }
+          const osc = ctx.createOscillator();
+          osc.frequency.value = 440;
+          const gain = ctx.createGain();
+          gain.gain.value = 0.3;
+          const dest = ctx.createMediaStreamDestination();
+          osc.connect(gain);
+          gain.connect(dest);
+          osc.start();
+          return dest.stream;
+        },
+        enumerateDevices: async () => [],
+      },
+    });
+  };
+
+  const context = await browser.newContext({
+    userAgent: `${GATE_AGENT}`,
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3,
+    hasTouch: true,
+    isMobile: true,
+    permissions: ["microphone"],
+  });
+  await context.addInitScript(fakeWebkitMicrophone);
+  // PRESS-TO-VISIBLE IS STAMPED IN THE PAGE, by an observer installed before anything runs, so both
+  // timestamps come off one clock rather than off a Node clock and a browser clock.
+  await context.addInitScript(() => {
+    window.__gateCallUpAt = 0;
+    window.__gatePressAt = 0;
+    const watch = () => {
+      const node = document.getElementById("voice-call");
+      if (node != null && node.hidden === false && window.__gateCallUpAt === 0) window.__gateCallUpAt = performance.now();
+    };
+    // document.documentElement does not exist yet at addInitScript time in WebKit, and observe() throws
+    // on a null target -- which this leg then counted as the page throwing.
+    const arm = () => {
+      const root = document.documentElement ?? document.body;
+      if (root == null) { setTimeout(arm, 10); return; }
+      new MutationObserver(watch).observe(root, { attributes: true, childList: true, subtree: true });
+      watch();
+    };
+    arm();
+    document.addEventListener("pointerdown", () => { if (window.__gatePressAt === 0) window.__gatePressAt = performance.now(); }, true);
+    document.addEventListener("touchstart", () => { if (window.__gatePressAt === 0) window.__gatePressAt = performance.now(); }, true);
+  });
+  // THE INSETS, RESTATED THE WAY THE PHONE-LAYOUT GATE DOES IT. Playwright cannot synthesise a notch --
+  // MEASURED, env(safe-area-inset-top) and -bottom both compute 0px at 390x844 in both engines -- so the
+  // iPhone's own numbers are injected as the variables the sheet reads, and section J below says what
+  // that does and does not prove.
+  const page = await context.newPage();
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(String(error)));
+  await page.goto(`${relay.base}/login`, { waitUntil: "domcontentloaded" });
+  await page.fill('input[type="password"]', relay.password).catch(() => {});
+  await page.press('input[type="password"]', "Enter").catch(() => {});
+  await page.waitForLoadState("domcontentloaded");
+  await page.waitForFunction(() => window.__voice != null, null, { timeout: 40_000 }).catch(() => {});
+  await page.addStyleTag({ content: ":root { --sat: 59px; --sab: 34px; }" }).catch(() => {});
+
+  const SIX_SECONDS = `(async () => {
+    const marks = [];
+    let last = performance.now();
+    const started = last;
+    await new Promise((resolve) => {
+      const step_ = () => {
+        const now = performance.now();
+        marks.push(now - last);
+        last = now;
+        if (now - started < 6000) requestAnimationFrame(step_); else resolve();
+      };
+      requestAnimationFrame(step_);
+    });
+    const sorted = [...marks].sort((a, b) => a - b);
+    return { frames: marks.length, slow: marks.filter((one) => one > 20).length,
+      median: Math.round(sorted[Math.floor(sorted.length / 2)] * 100) / 100,
+      worst: Math.round(sorted[sorted.length - 1] * 100) / 100 };
+  })()`;
+  const RECTS = `(() => {
+    const r = (sel) => { const n = document.querySelector(sel); if (n == null) return null;
+      const b = n.getBoundingClientRect();
+      return { w: Math.round(b.width), h: Math.round(b.height), x: Math.round(b.left), y: Math.round(b.top) }; };
+    const screen = document.getElementById("voice-call");
+    const stats = window.__voice?.stats?.() ?? null;
+    const style = screen == null ? null : getComputedStyle(screen);
+    return {
+      shelf: r(".control-shelf"), composer: r("#composer"), talk: r("[data-voice-talk]"), box: r("#message-input"),
+      screen: screen == null ? null : {
+        hidden: screen.hidden === true, rect: r("#voice-call"),
+        position: style.position, z: style.zIndex,
+        onBody: screen.parentElement === document.body,
+        inSpace: screen.closest(".conversation-space") != null,
+        inShelf: screen.closest(".control-shelf") != null,
+        word: (document.querySelector("[data-voice-call-state]")?.textContent ?? "").trim(),
+        status: (document.querySelector("[data-voice-call-status]")?.textContent ?? "").trim(),
+        card: screen.getAttribute("data-voice-call-card"),
+        level: style.getPropertyValue("--voice-level").trim(),
+        halo: document.querySelector("[data-voice-call-halo]") == null ? "" : getComputedStyle(document.querySelector("[data-voice-call-halo]")).transform,
+        haloOpacity: document.querySelector("[data-voice-call-halo]") == null ? "" : getComputedStyle(document.querySelector("[data-voice-call-halo]")).opacity,
+        mascotTransform: document.querySelector("#voice-call titan-mascot") == null ? "none" : getComputedStyle(document.querySelector("#voice-call titan-mascot")).transform,
+        // THE CANVAS IS INSIDE THE KIT'S SHADOW ROOT, so a plain descendant selector finds nothing and
+        // the aspect reads 0 -- which would make the feedback-bug guard below compare 0 with 0 and pass
+        // whatever Titan looked like.
+        canvasAspect: (() => { const c = document.querySelector("#voice-call titan-mascot")?.shadowRoot?.querySelector("canvas");
+          if (c == null) return 0;
+          const b = c.getBoundingClientRect();
+          return b.height === 0 ? 0 : Math.round((b.width / b.height) * 1000) / 1000; })(),
+        canvasBacking: (() => { const c = document.querySelector("#voice-call titan-mascot")?.shadowRoot?.querySelector("canvas");
+          if (c == null) return 0;
+          const b = c.getBoundingClientRect();
+          return b.width === 0 ? 0 : Math.round((c.width / b.width) * 100) / 100; })(),
+        mascotWidth: (() => { const m = document.querySelector("#voice-call titan-mascot");
+          return m == null ? 0 : Math.round(m.getBoundingClientRect().width); })(),
+        still: document.querySelector("#voice-call .voice-call-still") != null,
+        endRect: r("[data-voice-call-end]"), muteRect: r("[data-voice-call-mute]"), inputRect: r("[data-voice-call-input]"),
+        endPad: document.querySelector("[data-voice-call-end]") == null ? "" : getComputedStyle(screen).paddingBottom,
+        talkButtons: document.querySelectorAll("[data-talk-button]").length,
+        onControls: document.querySelectorAll("[data-voice-call-end][data-talk-button], [data-voice-call-mute][data-talk-button]").length,
+      },
+      shelfKids: [...(document.querySelector(".control-shelf")?.children ?? [])]
+        .filter((n) => n.getBoundingClientRect().height > 0)
+        .map((n) => (n.id || n.className) + ":" + Math.round(n.getBoundingClientRect().height)),
+      bodyLock: document.body.dataset.voiceCall ?? "",
+      bodyOverflow: getComputedStyle(document.body).overflow,
+      shellInert: document.querySelector(".app-shell")?.inert === true,
+      note: (() => { const n = document.getElementById("voice-call-ended"); return n == null ? null : {
+        hidden: n.hidden === true, text: (n.textContent ?? "").trim(),
+        inSpace: n.closest(".conversation-space") != null, inShelf: n.closest(".control-shelf") != null || n.closest("#composer") != null }; })(),
+      line: (() => { const n = document.getElementById("voice-line"); return n == null ? null : {
+        hidden: n.hidden === true, text: (n.textContent ?? "").replace(/\\s+/g, " ").trim() }; })(),
+      sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      transcriptGap: (() => { const t = document.getElementById("transcript");
+        return t == null ? -1 : Math.round(t.scrollHeight - t.scrollTop - t.clientHeight); })(),
+      spokenRows: [...document.querySelectorAll(".message-row")]
+        .filter((row) => row.querySelector(".voice-spoken-chip") != null)
+        .map((row) => (row.querySelector(".message-bubble")?.textContent ?? "").replace(/\\s+/g, " ").trim()),
+      rows: [...document.querySelectorAll("#transcript .message-row")].length,
+      on: stats?.on === true, orb: stats?.orb ?? "", call: stats?.call ?? null,
+      mutedFrames: stats?.mutedFrames ?? 0, micLevel: stats?.micLevel ?? 0, level: stats?.level ?? 0,
+      lastHeard: stats?.lastHeard ?? "", talking: stats?.talking === true,
+      pressAt: window.__gatePressAt ?? 0, upAt: window.__gateCallUpAt ?? 0,
+      frames: window.__voiceCallAvatar?.frames ?? -1,
+    };
+  })()`;
+  const sameRect = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const runId = randomBytes(3).toString("hex");
+
+  const buttonAt = async () => {
+    for (let i = 0; i < 80; i += 1) {
+      const at = await page.evaluate(() => {
+        const node = document.querySelector("[data-voice-talk]");
+        if (node == null || node.disabled === true) return null;
+        const r = node.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return null;
+        const x = Math.round(r.left + r.width / 2);
+        const y = Math.round(r.top + r.height / 2);
+        const hit = document.elementFromPoint(x, y);
+        return node.contains(hit) || hit === node ? { x, y } : null;
+      });
+      if (at != null) return at;
+      await sleep(500);
+    }
+    return null;
+  };
+
+  // ---- A: the press opens the screen ------------------------------------------------------------
+  step("webkit 390x844 dpr 3: one press of Talk brings up the call screen");
+  const before = await page.evaluate(RECTS);
+  check(before.screen == null || before.screen.hidden === true, "there is no call screen before anybody presses anything",
+    before.screen == null ? "not mounted yet" : `hidden ${before.screen.hidden}`);
+  info(`footer before: shelf ${JSON.stringify(before.shelf)} composer ${JSON.stringify(before.composer)} talk ${JSON.stringify(before.talk)} on ${MACHINE}`);
+  // THE BASELINE FIRST, and it is what makes the budget number below mean anything. The brief asked for
+  // zero frames over 20 ms; this is the same page, same engine, same viewport, with no call screen on
+  // it, so a frame this Mac's scheduler lost either way is not charged to the screen.
+  const idle = await page.evaluate(SIX_SECONDS);
+  info(`six seconds of this page with NO call screen: ${idle.frames} frames (${Math.round((idle.frames / 6) * 10) / 10} fps), ${idle.slow} over 20 ms, median ${idle.median} ms, worst ${idle.worst} ms, webkit 390x844 dpr 3 on ${MACHINE}`);
+  const box = await buttonAt();
+  check(box != null, "a press really reaches the talk button rather than the boot cover over it", JSON.stringify(box));
+  if (box == null) { await context.close(); return; }
+  const pressedAt = Date.now();
+  await page.touchscreen.tap(box.x, box.y);
+  await page.waitForFunction(() => document.getElementById("voice-call")?.hidden === false, null, { timeout: 10_000 }).catch(() => {});
+  const opened = await page.evaluate(RECTS);
+  check(opened.screen?.hidden === false, "the screen is on the page", opened.screen?.hidden === false ? "up" : "still away");
+  const upIn = opened.upAt > 0 && opened.pressAt > 0 ? Math.round(opened.upAt - opened.pressAt) : Math.round(Date.now() - pressedAt);
+  check(upIn < 300, "and it was there in under 300 ms of the thumb, which is why it opens before the line does",
+    `${upIn} ms, both stamps off the page's own clock, webkit 390x844 on ${MACHINE}`);
+  check(opened.screen?.rect?.w === 390 && opened.screen?.rect?.h === 844 && opened.screen?.rect?.x === 0 && opened.screen?.rect?.y === 0,
+    "it covers the whole viewport", JSON.stringify(opened.screen?.rect));
+  check(opened.screen?.position === "fixed" && opened.screen?.z === "80",
+    "fixed at z-index 80: above the phone drawers at 70, below the toast at 100 so a toast is still readable over a call",
+    `${opened.screen?.position} z ${opened.screen?.z}`);
+  check(opened.screen?.onBody === true && opened.screen?.inSpace === false && opened.screen?.inShelf === false,
+    "and it is a child of the body, not of the conversation area and not of the footer",
+    JSON.stringify({ onBody: opened.screen?.onBody, inSpace: opened.screen?.inSpace, inShelf: opened.screen?.inShelf }));
+  const covered = await page.evaluate((at) => {
+    const hit = document.elementFromPoint(at.x, at.y);
+    return { inside: hit?.closest?.("#voice-call") != null, landedOn: hit?.className ?? hit?.tagName ?? "nothing" };
+  }, box);
+  check(covered.inside, "a thumb at the talk button's own centre now lands on the call screen, so it really is over the shelf",
+    JSON.stringify(covered));
+  check(opened.screen?.talkButtons === 1 && opened.screen?.onControls === 0,
+    "exactly one element still carries data-talk-button, and neither of the call screen's controls is it (docs/APPS.md counts that)",
+    `${opened.screen?.talkButtons} element(s), ${opened.screen?.onControls} of them on this screen`);
+  check(opened.bodyLock === "up" && opened.bodyOverflow === "hidden" && opened.shellInert === true,
+    "the chat behind it cannot be scrolled or pressed while the call is up", `data-voice-call ${JSON.stringify(opened.bodyLock)}, body overflow ${opened.bodyOverflow}, shell inert ${opened.shellInert}`);
+  check(opened.sideways === false, "and the page does not scroll sideways with it up", String(opened.sideways));
+  check(opened.talking === true, "the microphone is open hands free, with nothing held", String(opened.talking));
+  await stub.waitFor((events) => events.sessions.length >= 1, { timeoutMs: 30_000, label: "the bridge's session.update" }).catch(() => {});
+  check(stub.events.sessions.length >= 1, "and the press dialled one line", `${stub.events.sessions.length} session(s) in ${Date.now() - pressedAt} ms on ${MACHINE}`);
+  // THE FOOTER PROOF, and this is the reading that has no confound in it. Later in this leg a line is
+  // TYPED, and the console answers a sent message with its own working row inside the shelf -- which is
+  // app.js doing its job and has nothing to do with this screen. So the claim "the call screen does not
+  // move the footer" is measured here, between the press and anything being said.
+  check(sameRect(opened.shelf, before.shelf) && sameRect(opened.composer, before.composer)
+    && sameRect(opened.talk, before.talk) && sameRect(opened.box, before.box),
+    "THE FOOTER DID NOT MOVE when the screen came up, which is what mounting on the body rather than in the shelf buys",
+    `shelf ${JSON.stringify(opened.shelf)} composer ${JSON.stringify(opened.composer)} talk ${JSON.stringify(opened.talk)} box ${JSON.stringify(opened.box)} on ${MACHINE}`);
+
+  // ---- B: the five words, in order, across one stub turn ----------------------------------------
+  step("the five words across one turn, in the order a person hears them");
+  const words = [];
+  const watchWord = async (want, ms = 15_000) => {
+    await page.waitForFunction((w) => (document.querySelector("[data-voice-call-state]")?.textContent ?? "").trim() === w, want, { timeout: ms }).catch(() => {});
+    const now = await page.evaluate(() => (document.querySelector("[data-voice-call-state]")?.textContent ?? "").trim());
+    if (words.at(-1) !== now) words.push(now);
+    return now;
+  };
+  words.push(opened.screen?.word ?? "");
+  await watchWord("Listening");
+  stub.emitSpeechStart();
+  const said = `what is the team working on, call ${runId}`;
+  for (const part of ["what is", "what is the team", said]) {
+    stub.emitUserTranscript(part);
+    await sleep(120);
+  }
+  stub.emitUserTranscriptDone(said);
+  stub.emitSpeechStop();
+  await watchWord("Thinking");
+  stub.emitToolCall({ name: "titan", args: { message: said }, callId: `call_voice13_${runId}`, triple: true });
+  await page.waitForFunction((want) => window.__voice?.stats?.()?.lastHeard === want, said, { timeout: 20_000 }).catch(() => {});
+  const heard = await page.evaluate(RECTS);
+  check(heard.lastHeard === said, "the words the relay handed to the agent are the person's own bytes", JSON.stringify(heard.lastHeard));
+  const spoken = await page.evaluate(RECTS);
+  check(sameRect(spoken.shelf, before.shelf) && sameRect(spoken.box, before.box),
+    "and it did not move while the person's words were being heard and handed over either",
+    `shelf ${JSON.stringify(spoken.shelf)} box ${JSON.stringify(spoken.box)} on ${MACHINE}`);
+  await sleep(200);
+  void stub.speak("The team is on the settings surface this afternoon.");
+  await watchWord("Talking");
+  check(words.includes("Connecting") || words[0] === "Connecting", "the first word is Connecting, because the screen is up before the line is", JSON.stringify(words));
+  const order = ["Listening", "Thinking", "Talking"].map((one) => words.indexOf(one));
+  check(order.every((n, i) => n >= 0 && (i === 0 || n > order[i - 1])),
+    "and then Listening, Thinking and Talking in that order", `the whole observed sequence was ${JSON.stringify(words)}`);
+
+  // ---- C: the avatar moves, and nothing in its chain is scaled -----------------------------------
+  step("the avatar reacts to a level, and the mascot itself is never transformed");
+  // BOTH CHANNELS ARE INJECTED TOGETHER, on purpose: the avatar reads the microphone while the word is
+  // Listening and the playback while it is Talking, because the echo gate legitimately shuts the
+  // microphone there. A leg that injected only the microphone measured nothing at all mid-reply, which
+  // is how this was found.
+  const settle = async (mic, out) => {
+    await page.evaluate(async ([m, o]) => {
+      window.__voice._setCallLevels(m, o);
+      for (let i = 0; i < 45; i += 1) await new Promise((r) => requestAnimationFrame(r));
+    }, [mic, out]);
+    return page.evaluate(RECTS);
+  };
+  const atRest = await settle(0, 0);
+  const atPeak = await settle(0.26, 0.26);
+  info(`the word on the screen while the level is driven is ${JSON.stringify(atPeak.screen?.word)}, and Titan is ${atPeak.screen?.mascotWidth} px wide with a ${atPeak.screen?.canvasBacking}x backing store (webkit dpr 3 on ${MACHINE}: the kit clamps its own dpr at 2, so a real 3x iPhone screen upscales him 1.5x)`);
+  check(atRest.screen?.halo !== atPeak.screen?.halo && atPeak.screen?.level !== atRest.screen?.level,
+    "the halo's transform and the screen's own level both change with an INJECTED microphone level (injected, not measured: WebKit has no fake capture device)",
+    `level ${atRest.screen?.level} -> ${atPeak.screen?.level}, transform ${atRest.screen?.halo} -> ${atPeak.screen?.halo}`);
+  check(atRest.screen?.haloOpacity !== atPeak.screen?.haloOpacity, "and so does its opacity",
+    `${atRest.screen?.haloOpacity} -> ${atPeak.screen?.haloOpacity}`);
+  check(atRest.screen?.mascotTransform === "none" && atPeak.screen?.mascotTransform === "none",
+    "THE MASCOT ITSELF IS NEVER TRANSFORMED, at rest or at peak: the kit reads a transform-aware rect for its canvas and a scale there leaves Titan stretched for the rest of the call",
+    `${atRest.screen?.mascotTransform} then ${atPeak.screen?.mascotTransform}`);
+  check(atRest.screen?.canvasAspect > 0 && atRest.screen?.canvasAspect === atPeak.screen?.canvasAspect,
+    "and his canvas has exactly the same shape at both levels, which is the feedback bug's own guard",
+    `aspect ${atRest.screen?.canvasAspect} then ${atPeak.screen?.canvasAspect}, backing ${atRest.screen?.canvasBacking}x then ${atPeak.screen?.canvasBacking}x`);
+  await page.evaluate(() => window.__voice._setCallLevels(null, null));
+  const playing = await page.evaluate(RECTS);
+  info(`playback level from the stub's own 20-frame reply: ${playing.level} (measured, webkit 390x844 on ${MACHINE})`);
+  const live = await page.evaluate(async () => {
+    const a = window.__voiceCallAvatar?.frames ?? -1;
+    await new Promise((r) => setTimeout(r, 500));
+    return { a, b: window.__voiceCallAvatar?.frames ?? -1 };
+  });
+  check(live.b > live.a, "and his own animation loop is running rather than parked", `${live.a} then ${live.b} frames`);
+
+  // ---- what six seconds of it costs, measured HERE -----------------------------------------------
+  //
+  // Here and not at the end of the leg, and the reason is a measurement rather than a preference: with
+  // this window after the typed line, the box's answer landed inside it, app.js rewrote the whole
+  // transcript, and one frame took 222 ms. That is the console doing its job for a message that really
+  // was sent, and charging it to the call screen would have been a false number. At this point the call
+  // is up with a level on it and the transcript is quiet, which is what a person on a call has.
+  step("what six seconds of a live call costs, against the same page with no call on it");
+  await page.evaluate(() => window.__voice._setCallLevels(0.2, 0.2));
+  // The kit's first canvas allocation -- a 1264x860 backing store and its first gradients -- is not the
+  // budget either, so it is given a moment to land before the six seconds are counted.
+  await sleep(900);
+  const budget = await page.evaluate(SIX_SECONDS);
+  await page.evaluate(() => window.__voice._setCallLevels(null, null));
+  const fps = Math.round((budget.frames / 6) * 10) / 10;
+  check(fps >= 50 && budget.slow <= idle.slow + 1 && budget.median <= idle.median + 2,
+    "a live call holds the frame rate of the page it is over, with a level driving the avatar on every frame",
+    `${budget.frames} frames in 6 s (${fps} fps), ${budget.slow} over 20 ms against the idle page's ${idle.slow}, median ${budget.median} ms against ${idle.median} ms, worst ${budget.worst} ms, webkit 390x844 dpr 3 on ${MACHINE}. AN IPHONE IS UNMEASURED: this Mac draws the kit's 2x backing store, where a real 3x screen upscales Titan 1.5x.`);
+
+  // ---- the status line, from the chat's own tool receipts ----------------------------------------
+  step("the thin line under him is the chat's own tool receipt");
+  const status = await page.evaluate(async () => {
+    const transcript = document.getElementById("transcript");
+    if (transcript == null) return { why: "no transcript on the page" };
+    // A receipt in the words the console already writes them in. It is inserted rather than waited for
+    // because which tools a real bot reaches for is not this leg's claim; that the SCREEN shows the
+    // chat's own receipt is.
+    const row = document.createElement("article");
+    row.className = "message-row is-system";
+    row.setAttribute("data-message-id", `gate-receipt-${Date.now()}`);
+    row.innerHTML = '<div class="message-bubble">Searching 9 websites</div>';
+    transcript.appendChild(row);
+    window.__voice._state.orb = "thinking";
+    window.__voice._paintCall();
+    await new Promise((r) => requestAnimationFrame(r));
+    return { line: (document.querySelector("[data-voice-call-status]")?.textContent ?? "").trim(), from: window.__voice.stats().call.status };
+  });
+  check(status.line === "Searching 9 websites" && status.from === "Searching 9 websites",
+    "a tool receipt in the chat is the status line on the call screen, in the same words (the row was inserted by this leg, which is labelled: what is measured is the screen reading it)",
+    JSON.stringify(status));
+
+  // ---- a typed line, mid-call -------------------------------------------------------------------
+  step("a person can still type mid-call, and it goes out through the composer they already use");
+  const typedText = `typed on the call screen, ${runId}`;
+  await page.fill("[data-voice-call-input]", typedText);
+  await page.press("[data-voice-call-input]", "Enter");
+  await page.waitForFunction((want) => [...document.querySelectorAll("#transcript .message-row")]
+    .some((row) => (row.querySelector(".message-bubble")?.textContent ?? "").includes(want)), typedText, { timeout: 30_000 }).catch(() => {});
+  const typed = await page.evaluate((want) => ({
+    landed: [...document.querySelectorAll("#transcript .message-row")]
+      .filter((row) => (row.querySelector(".message-bubble")?.textContent ?? "").includes(want)).length,
+    field: document.querySelector("[data-voice-call-input]")?.value ?? "",
+    box: document.getElementById("message-input")?.value ?? "",
+    up: document.getElementById("voice-call")?.hidden === false,
+  }), typedText);
+  check(typed.landed === 1, "the typed line became exactly one chat line", `${typed.landed} row(s) reading it`);
+  check(typed.field === "" && typed.box === "", "and both boxes were left empty, so nothing is said twice", JSON.stringify(typed));
+  check(typed.up === true, "and the call is still up: typing is not leaving", String(typed.up));
+
+  // ---- a card takes the middle and the avatar shrinks -------------------------------------------
+  step("a reply carrying a card shrinks him to an orb and shows the card in the middle");
+  const card = await page.evaluate(async () => {
+    const transcript = document.getElementById("transcript");
+    const row = document.createElement("article");
+    row.className = "message-row";
+    row.setAttribute("data-message-id", `gate-card-${Date.now()}`);
+    row.innerHTML = '<div class="message-block"><div class="message-bubble"><div class="inline-card"><div class="inline-card-header">'
+      + '<span class="inline-card-copy"><strong>Tuesday</strong><small>18 degrees and clear</small></span></div>'
+      + '<div class="inline-card-actions"><button class="card-action" type="button">Open</button></div></div></div></div>';
+    transcript.appendChild(row);
+    window.__voice._paintCall();
+    // READ IN THE SAME TURN, with no frame in between. app.js rewrites #transcript's innerHTML
+    // wholesale on its own repaint, and this row is not in the adapter's model, so a row the LEG
+    // injected is dropped by the next repaint while a real reply's row is redrawn with its own id. The
+    // claim here is what the screen does with a card, not how long an injected row survives.
+    const slot = document.querySelector("[data-voice-call-card-slot]");
+    const mascot = document.querySelector("#voice-call titan-mascot");
+    return {
+      attr: document.getElementById("voice-call")?.getAttribute("data-voice-call-card") ?? "",
+      shown: (slot?.textContent ?? "").replace(/\s+/g, " ").trim(),
+      buttons: slot?.querySelectorAll("button").length ?? -1,
+      mascotWidth: mascot == null ? 0 : Math.round(mascot.getBoundingClientRect().width),
+      faceWidth: getComputedStyle(document.getElementById("voice-call")).getPropertyValue("--voice-call-face").trim(),
+      stat: window.__voice.stats().call.card,
+      slotRect: slot == null ? null : Math.round(slot.getBoundingClientRect().height),
+      transform: mascot == null ? "none" : getComputedStyle(mascot).transform,
+    };
+  });
+  check(card.attr === "up" && card.shown.includes("18 degrees and clear"),
+    "the card is in the middle of the call screen, in the words the chat wrote",
+    JSON.stringify({ attr: card.attr, shown: card.shown.slice(0, 60), stat: card.stat }));
+  check(card.buttons === 0, "and its controls were left in the chat, where they are the ones that work", `${card.buttons} control(s) on the copy`);
+  check(card.faceWidth === "190px" && card.transform === "none",
+    "he is a small orb above the bottom row now, and it is his WIDTH that changed rather than a scale on him",
+    `the face is ${card.faceWidth} (mid-transition it measured ${card.mascotWidth} px), transform ${card.transform}, card area ${card.slotRect} px tall`);
+  const grown = await page.evaluate(async () => {
+    for (const row of document.querySelectorAll("#transcript .message-row .inline-card")) row.closest(".message-row").remove();
+    window.__voice._paintCall();
+    await new Promise((r) => requestAnimationFrame(r));
+    return { attr: document.getElementById("voice-call")?.getAttribute("data-voice-call-card"),
+      width: getComputedStyle(document.getElementById("voice-call")).getPropertyValue("--voice-call-face").trim() };
+  });
+  check(grown.attr == null && grown.width !== card.faceWidth, "and he grows back when the card is no longer the newest thing",
+    `the face went from ${card.faceWidth} back to ${grown.width}`);
+
+  // ---- mute ------------------------------------------------------------------------------------
+  step("mute, which is this page's own fact and no frame on the wire");
+  const mutedBefore = (await page.evaluate(RECTS)).mutedFrames;
+  await page.tap("[data-voice-call-mute]");
+  await page.waitForFunction(() => (document.querySelector("[data-voice-call-state]")?.textContent ?? "").trim() === "Muted", null, { timeout: 5000 }).catch(() => {});
+  await sleep(600);
+  const muted = await page.evaluate(RECTS);
+  check(muted.screen?.word === "Muted", "the word is Muted while the microphone is shut", JSON.stringify(muted.screen?.word));
+  check(muted.mutedFrames > mutedBefore, "and the frames really are being dropped rather than sent", `${mutedBefore} -> ${muted.mutedFrames} muted frame(s)`);
+  await page.tap("[data-voice-call-mute]");
+  await sleep(300);
+  const unmuted = await page.evaluate(RECTS);
+  check(unmuted.screen?.word !== "Muted" && unmuted.talking === true, "and unmuting gives the word back", JSON.stringify(unmuted.screen?.word));
+
+  // ---- J: the insets, which Playwright cannot synthesise ----------------------------------------
+  step("the safe areas, and what this leg can and cannot prove about them");
+  // The console is served at the relay's root, so its own sheets are siblings of index.html. Read off
+  // the LIVE relay rather than off disk: what a phone gets is the served bytes.
+  let sheet = await ask(`${relay.base}/voice-call.css`, { headers: { cookie: session.cookie } });
+  if (sheet.status !== 200) sheet = await ask(`${relay.base}/machine-room/voice-call.css`, { headers: { cookie: session.cookie } });
+  const served = String(sheet.text ?? "");
+  check(served.includes("env(safe-area-inset-bottom)") && served.includes("max(18px, env(safe-area-inset-bottom))"),
+    "the served stylesheet really carries the house safe-area pattern under the bottom row",
+    `${served.length} bytes off the live relay, status ${sheet.status}`);
+  const zeroed = await page.evaluate(() => ({
+    top: getComputedStyle(document.documentElement).getPropertyValue("--sat").trim(),
+    bottom: getComputedStyle(document.documentElement).getPropertyValue("--sab").trim(),
+    env: getComputedStyle(document.getElementById("voice-call")).paddingBottom,
+  }));
+  info(`this engine computes the insets as zero and the leg injects --sat ${zeroed.top} --sab ${zeroed.bottom} the way the phone-layout gate does; the screen's own bottom padding reads ${zeroed.env}. A NOTCH CANNOT BE SYNTHESISED HERE -- the R750 screenshots in the scratchpad are the only thing a person can look at.`);
+  const controls = await page.evaluate(RECTS);
+  for (const [name, rect] of [["End", controls.screen?.endRect], ["Mute", controls.screen?.muteRect], ["the text field", controls.screen?.inputRect]]) {
+    check(rect != null && rect.h >= 44 && rect.y + rect.h <= 844 && rect.x >= 0,
+      `${name} is at least 44 px and fully on screen`, JSON.stringify(rect));
+  }
+
+  // ---- D: End ----------------------------------------------------------------------------------
+  step("End puts the person back on their chat at the newest line");
+  const beforeEnd = await page.evaluate(RECTS);
+  if (!sameRect(beforeEnd.shelf, before.shelf)) {
+    info(`the shelf is ${beforeEnd.shelf.h} px now against ${before.shelf.h} px at the start, because the typed line above really was sent and the console draws its own row for a message in flight: ${JSON.stringify(beforeEnd.shelfKids)} against ${JSON.stringify(before.shelfKids)}. The call screen's own footer reading is the one taken at the press.`);
+  }
+  const endedAt = Date.now();
+  await page.tap("[data-voice-call-end]");
+  await page.waitForFunction(() => document.getElementById("voice-call")?.hidden === true, null, { timeout: 5000 }).catch(() => {});
+  const closedIn = Date.now() - endedAt;
+  await sleep(400);
+  const after = await page.evaluate(RECTS);
+  check(after.screen?.hidden === true, "the screen went", `in ${closedIn} ms on ${MACHINE}`);
+  check(closedIn < 300, "and it went in under 300 ms", `${closedIn} ms`);
+  check(after.on === false, "the line is down with it", String(after.on));
+  check(after.bodyLock === "" && after.shellInert === false && after.bodyOverflow === before.bodyOverflow,
+    "the chat can be scrolled and pressed again, with the body's own overflow back to exactly what it was",
+    `lock ${JSON.stringify(after.bodyLock)}, inert ${after.shellInert}, overflow ${before.bodyOverflow} -> ${after.bodyOverflow}`);
+  check(after.note == null || after.note.hidden === true, "and no note, because somebody who pressed End knows the call ended", JSON.stringify(after.note));
+  const mine = after.spokenRows.filter((one) => one === said);
+  check(mine.length === 1, "the spoken line is in the chat exactly once, with its chip", `${mine.length} row(s) reading ${JSON.stringify(said)}`);
+  check(mine[0] === after.lastHeard, "and byte-identical to the words the relay confirmed", `${JSON.stringify(mine[0])} vs ${JSON.stringify(after.lastHeard)}`);
+  check(after.transcriptGap >= 0 && after.transcriptGap < 90, "the chat is pinned to the newest line", `${after.transcriptGap} px from the bottom`);
+  check(sameRect(after.shelf, beforeEnd.shelf) && sameRect(after.composer, beforeEnd.composer)
+    && sameRect(after.talk, beforeEnd.talk) && sameRect(after.box, beforeEnd.box),
+    "AND ENDING THE CALL MOVED NOTHING IN THE FOOTER either, which is the footer proof from the other side",
+    `shelf ${JSON.stringify(after.shelf)} composer ${JSON.stringify(after.composer)} talk ${JSON.stringify(after.talk)} box ${JSON.stringify(after.box)} on ${MACHINE}`);
+  check(after.sideways === false, "and the page still does not scroll sideways", String(after.sideways));
+
+  // ---- E: the lifecycle -------------------------------------------------------------------------
+  step("an app switch, a lock screen or a phone call ends the call cleanly and says so once");
+  const box2 = await buttonAt();
+  if (box2 != null) {
+    await page.touchscreen.tap(box2.x, box2.y);
+    await page.waitForFunction(() => document.getElementById("voice-call")?.hidden === false, null, { timeout: 10_000 }).catch(() => {});
+    await page.evaluate(() => {
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await sleep(400);
+    const hidden = await page.evaluate(RECTS);
+    check(hidden.on === false && hidden.screen?.hidden === true, "the phone going away ends the call", JSON.stringify({ on: hidden.on, screen: hidden.screen?.hidden }));
+    check(hidden.note?.hidden === false && hidden.note?.inSpace === true && hidden.note?.inShelf === false,
+      "and leaves one plain line in the conversation, never in the footer", JSON.stringify(hidden.note));
+    check(hidden.bodyLock === "" && hidden.shellInert === false, "with the background released on this path too", `lock ${JSON.stringify(hidden.bodyLock)} inert ${hidden.shellInert}`);
+    check(sameRect(hidden.shelf, beforeEnd.shelf) && sameRect(hidden.box, beforeEnd.box),
+      "and the footer still has not moved",
+      `shelf ${JSON.stringify(hidden.shelf)} box ${JSON.stringify(hidden.box)}`);
+    const noteWords = String(hidden.note?.text ?? "");
+    check(noteWords.length > 0 && !/error|fail|4001|socket|vendor/i.test(noteWords), "in plain words, with no condition name in them", JSON.stringify(noteWords));
+    // And it takes itself away once somebody is actually looking at it.
+    await page.evaluate(() => {
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.__voice._CALL_ENDED_MS;
+    });
+    await page.evaluate(() => { window.__voice._call.dismissEndedNote(); });
+    const cleared = await page.evaluate(RECTS);
+    check(cleared.note?.hidden === true, "and the note goes when the person is back and has read it", JSON.stringify(cleared.note));
+  }
+
+  // ---- F: Escape -------------------------------------------------------------------------------
+  step("Escape ends a call at 390x844");
+  const box3 = await buttonAt();
+  if (box3 != null) {
+    await page.touchscreen.tap(box3.x, box3.y);
+    await page.waitForFunction(() => document.getElementById("voice-call")?.hidden === false, null, { timeout: 10_000 }).catch(() => {});
+    const holding = await page.evaluate(() => document.querySelector("dialog[open]")?.id ?? document.body?.dataset?.drawer ?? "");
+    if (holding.length > 0) { info(`${holding} had the keyboard, so it takes the first Escape the way it should`); await page.keyboard.press("Escape"); await sleep(250); }
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => window.__voice?.stats?.()?.on === false, null, { timeout: 8000 }).catch(() => {});
+    const escaped = await page.evaluate(RECTS);
+    check(escaped.on === false && escaped.screen?.hidden === true, "Escape ends the call and takes the screen with it", JSON.stringify({ on: escaped.on, hidden: escaped.screen?.hidden }));
+    check(escaped.note == null || escaped.note.hidden === true, "and gets no note either, because a person pressed a key to leave", JSON.stringify(escaped.note));
+  }
+
+  check(pageErrors.length === 0, "and the page threw nothing through any of it", pageErrors.slice(0, 2).join(" | ") || "clean");
+  await context.close();
+
+  // ---- G: reduced motion -----------------------------------------------------------------------
+  step("a person who asked for less motion gets the still, and no loop at all");
+  const quiet = await browser.newContext({
+    userAgent: GATE_AGENT, viewport: { width: 390, height: 844 }, deviceScaleFactor: 3,
+    hasTouch: true, isMobile: true, permissions: ["microphone"], reducedMotion: "reduce",
+  });
+  await quiet.addInitScript(fakeWebkitMicrophone);
+  const quietPage = await quiet.newPage();
+  await quietPage.goto(`${relay.base}/login`, { waitUntil: "domcontentloaded" });
+  await quietPage.fill('input[type="password"]', relay.password).catch(() => {});
+  await quietPage.press('input[type="password"]', "Enter").catch(() => {});
+  await quietPage.waitForFunction(() => window.__voice != null, null, { timeout: 40_000 }).catch(() => {});
+  const quietBox = await (async () => {
+    for (let i = 0; i < 60; i += 1) {
+      const at = await quietPage.evaluate(() => {
+        const node = document.querySelector("[data-voice-talk]");
+        if (node == null) return null;
+        const r = node.getBoundingClientRect();
+        if (r.width === 0) return null;
+        const x = Math.round(r.left + r.width / 2);
+        const y = Math.round(r.top + r.height / 2);
+        const hit = document.elementFromPoint(x, y);
+        return node.contains(hit) || hit === node ? { x, y } : null;
+      });
+      if (at != null) return at;
+      await sleep(500);
+    }
+    return null;
+  })();
+  if (quietBox == null) skip("the reduced-motion screen", "the talk button never became pressable on this context");
+  else {
+    await quietPage.touchscreen.tap(quietBox.x, quietBox.y);
+    await quietPage.waitForFunction(() => document.getElementById("voice-call")?.hidden === false, null, { timeout: 10_000 }).catch(() => {});
+    await sleep(900);
+    const quietRead = await quietPage.evaluate(() => ({
+      still: document.querySelector("#voice-call .voice-call-still") != null,
+      mascot: document.querySelector("#voice-call titan-mascot") != null,
+      frames: window.__voiceCallAvatar?.frames ?? -1,
+      word: (document.querySelector("[data-voice-call-state]")?.textContent ?? "").trim(),
+    }));
+    check(quietRead.still === true && quietRead.mascot === false, "the still PNG is what is drawn, with no canvas at all", JSON.stringify(quietRead));
+    check(quietRead.frames === 0, "and the animation loop never ran, which is the claim a frame counter can actually prove", `${quietRead.frames} frames`);
+    check(quietRead.word.length > 0 && ["Connecting", "Listening", "Thinking", "Talking", "Muted"].includes(quietRead.word),
+      "and the words still work", JSON.stringify(quietRead.word));
+    await quietPage.evaluate(() => window.__voice.stop());
+  }
+  await quiet.close();
+  await browser.close();
+}
+
 // ---- run one leg ---------------------------------------------------------------------------------
 
 try {
@@ -2643,6 +3332,7 @@ try {
   else if (leg === "overlay") await legOverlay();
   else if (leg === "person") await legPerson();
   else if (leg === "release") await legRelease();
+  else if (leg === "call") await legCall();
 } catch (error) {
   failures += 1;
   console.log(`\n  FAIL  the leg threw: ${String(error?.stack ?? error).split("\n").slice(0, 4).join(" | ")}`);

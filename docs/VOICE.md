@@ -1095,3 +1095,184 @@ box at all.
 production server's operator keys door answers an empty set, so every transcript event in every gate
 came from the stub that speaks both services' event shapes. What the two services do on a live call is
 read from their documentation above and is marked as such.
+
+---
+
+## 14. The call screen on the phone (VOICE-13)
+
+Jason recorded ChatGPT's voice mode on his iPhone on 2026-09-10 and said **"this is what I want"**:
+press Talk and a full-screen surface comes up over the chat, Titan large and alive in the middle,
+hands free with no holding and no press per turn, a row at the bottom with somewhere to type, a mute
+and a round X, one thin line when he is working, and End puts you back in the conversation with the
+whole exchange in it.
+
+That is what a press at phone width does now. A laptop keeps section 13's shape, the strip and the
+words panel, unchanged.
+
+### It is not a new talk mode
+
+A phone call is always-listening with a different surface, and **the relay cannot tell the two
+apart**: the session frame is written once and byte-identically for the life of a socket with server
+turn detection at 700 ms of silence, and the only difference between push and always is the page's own
+`muted()` callback. So this wave added **no frame, no field and no relay change**. `talkMode()` is not
+touched either — Settings paints the Talk mode row from it, and a phone-shaped lie there would
+contradict the person's stored choice (SETTINGS-3). On a phone that row governs their laptop, which is
+a thing to say in a help line one day and not a reason to change the value.
+
+### Which windows get one
+
+`callWanted()` is a shell that names its own platform, **or** 690 px of width, **or** 500 px of
+height, read live on every press and never cached. Both numbers are the console's own: 690 px is the
+phone width four blocks of `styles.css` already use, and 500 px is the landscape-phone height the
+sheet already has a block for — which is what keeps a call screen up when somebody turns the phone
+mid-call.
+
+`LINE_SHELF_WIDTH` stays 900 and answers a **different** question: "is there room in a 358 px composer
+for a sentence" is not "is this a phone". A 740 px window gets the refusal line in the shelf and no
+call screen, and `--leg overlay` measures exactly that width for exactly that reason.
+
+`voice-call.css` carries **no breakpoint at all**. The module alone decides that the screen exists;
+the sheet is driven by attributes and custom properties and sizes itself in `vw` and `min()`, so the
+two cannot drift apart the way 690 and 900 already had.
+
+### A refusal takes the screen away
+
+This is the decision the wave turns on, and it is what makes opening the screen **optimistically**
+safe at all. The screen is up in tens of milliseconds; the line takes 224 ms on loopback and 1.6 to
+2.0 s through console.titanium.bot. Every refusal — no key, the day cap, a session cap, a box that is
+not running, a dropped line — arrives through `stop()`, which is the call screen's one close funnel.
+So the screen goes, and the sentence lands in its **one existing home** on the shelf's first row,
+where the person is already looking.
+
+The screen never carries a second copy of any refusal sentence. Two wordings for one condition drift;
+one wording cannot. And there is no "press again" clause anywhere on it, because that clause is what
+instructed the loop Jason was stuck in (VOICE-6). A press made while a refusal is standing **clears
+the sentence** and opens nothing, exactly as a hold and a toggle already do, and VOICE-11's cooldown
+is kept so a sentence somebody has had time to read is cleared **and** dialled by one press.
+
+### Five words, and no sixth
+
+| word | when |
+|---|---|
+| Connecting | the screen is up and the line is not yet |
+| Listening | the line is open and nobody is talking yet, or the person is |
+| Thinking | the person stopped and Titan is working |
+| Talking | Titan is speaking (Jason's word, not the wire's) |
+| Muted | the page's own fact, and it outranks the other four |
+
+The brief names four. Connecting is the fifth because it is honest: Thinking before the line exists
+would claim Titan is working on something nobody has said yet. The agent's reply is **never** drawn on
+this screen: `footer-line-is-refusals-only.md`, and the measured defect behind that rule was
+`#message-input` going 370.05 to 215.31 px at 1440x900.
+
+### The avatar, and the one rule that shapes it
+
+**Nothing in the mascot's ancestor chain is ever scaled.** The vendored kit sizes its canvas from
+`host.getBoundingClientRect().width`, which is transform-aware, while the `ResizeObserver` it fires
+from is not: with a scale on an ancestor and a resize landing, the kit read a 433.35 px host for a
+390 px element and left Titan 5.6% vertically stretched for the rest of the call, and WebKit logged a
+`ResizeObserver` error with it. So the two halo **siblings** take the transform and the opacity, and
+the mascot takes opacity and a drop-shadow, neither of which changes the rect the kit measures. The
+level is one custom property written once a frame on the screen, smoothed in JS because reduced motion
+flattens every CSS transition to 1 ms globally.
+
+Titan is `min(632px, 162vw)` wide, which is deliberate: his body is 0.422 of the canvas at every size
+and **stops growing** where the canvas hits the kit's own 430 px height clamp — an element width of
+632 px, giving 266.5 x 244 CSS px, 68% of a 390 px phone and the largest the shipped kit can draw. The
+kit clamps its dpr at 2, so a real 3x iPhone screen upscales him 1.5x. His three moods are the kit's
+own three and no others, because a fourth name **throws** a `RangeError`. Under
+`prefers-reduced-motion` the screen draws the still PNG, runs no animation loop at all, and still
+changes the still when the mood changes.
+
+### The three things the recording had that the design did not
+
+**A typed field.** A line typed on the call screen fills the console's own message box and submits the
+composer, so the pin, the attachments and the adapter are all kept once rather than twice. **Its
+answer is not spoken**, and that is a limit rather than a bug being hidden: the relay speaks a reply
+because it is the side that handed the turn to the box, and a typed turn goes straight from this
+console to the box with the relay not in it. The browser sends exactly three JSON shapes down the
+voice socket and none of them carries text, so speaking a typed line would be a new wire frame. The
+line and its answer are in the chat behind the screen, which is where a person looks when the call
+ends.
+
+**A status line.** The thin line under him while the word is Thinking is the chat's **own** tool
+receipt — the adapter summarises a tool step into a system row, app.js draws it, and the screen reads
+the newest one. A second source for that sentence would be a second wording to keep in step. Only a
+row newer than the moment the call opened is ever shown: a receipt from this morning is not what Titan
+is doing now.
+
+**A card in the middle.** When a reply carries a card or a tool result, the card takes the middle and
+Titan shrinks to a small orb above the bottom row, then grows back when the card is no longer the
+newest thing. The shrink is a **width** change, which is safe for the same reason as above: nothing is
+scaled, so the kit re-measures once and draws him smaller rather than stretched. The copy on the
+screen has its **controls removed** — every card's buttons are wired against its row in the transcript
+and carry its id, so the ones in the chat are the ones that work, and the copy is there to be read.
+
+### Where it lives, and what it locks
+
+A plain fixed div on `document.body` at `z-index: 80` — above the phone drawers at 70, below the toast
+at 100, so a toast is still readable over a call. Not `.conversation-space`, whose layer measures
+374x587 at 8,124 on a phone and covers the conversation only. Not a `<dialog>`, because the page
+refuses to act on Escape while any `dialog[open]` stands, and a dialog screen would make Escape refuse
+to end the call it is in. The five `showModal` dialogs live in the browser's top layer, so Settings
+opened from a refusal still paints over everything.
+
+While a call is up, `<body data-voice-call="up">` and the sheet's own rule lock the background, and
+`.app-shell` is `inert`. Both are released by the one close funnel on every path — End, Escape,
+`visibilitychange`, `pagehide`, `beforeunload`, the 4001-4004 refusals and the push idle timer all
+already reach `stop()`. A person left on a chat they cannot scroll is worse than the bug this wave
+fixes, which is why there is one release point rather than seven.
+
+On close, one animation frame after the synchronous work, the transcript is pinned to the newest line.
+An involuntary ending with no sentence to show raises one self-dismissing line in the conversation,
+"The call ended." — **not** the toast, whose 2.8 s is shorter than unlocking a phone, which is the
+exact case the note exists for. Its dismiss is armed on the next visible `visibilitychange` rather
+than on the ending.
+
+### MEASURED, `--leg call`, WebKit 390x844 dpr 3 with touch, on MacBook-Pro.local (darwin arm64) against grok-bot-local-vm behind this leg's own relay and the stub vendor
+
+62 of 62 checks.
+
+| | measured |
+|---|---|
+| press to the screen being visible | **29 ms**, both stamps off the page's own clock |
+| the screen's rect | 390x844 at 0,0, `position: fixed`, `z-index: 80`, a child of `<body>` |
+| the line the press dialled | 1 session at the stub in 57 ms |
+| the words observed across one turn | Connecting, Listening, Thinking, Talking, in that order |
+| the halo with a level driven 0 to 1 | `--voice-level` 0.020 to 1.000, scale 1.004 to 1.18, opacity 0.358 to 0.75 |
+| the mascot's own transform, at rest and at peak | `none` and `none`; canvas aspect 1.471 both times, backing store 2x both times |
+| the playback analyser on the stub's 20-frame reply | RMS 0.259 |
+| six seconds of a live call with a level on it | 347 frames, **57.8 fps**, 4 frames over 20 ms, median 17 ms, worst 233 ms |
+| the same page with no call screen on it | 267 frames, 44.5 fps, 12 over 20 ms, median 17 ms, worst 337 ms |
+| mute | the word reads Muted and the page dropped 6 frames in the window, with nothing sent to the relay for it |
+| the three controls | End 56x46, Mute 56x46, the text field 222x44, all fully on screen |
+| End to the screen being gone | **61 ms** |
+| the chat afterwards | the spoken line once with its chip, byte-identical to the confirmed bytes, 0 px from the bottom |
+| the footer when the screen came up | shelf 390x133 at 0,711, composer 358x56 at 16,778, talk 44x44 at 245,784 — byte-identical to before the press |
+| an app switch | the line closed, the screen went, one plain line in the conversation, the background released |
+
+**Injected, not measured:** the microphone level. WebKit ships no fake capture device and the leg's
+microphone is built out of Web Audio, so the avatar's reaction to a person's own voice is driven
+through `__voice._setCallLevels` and every line that reads it says "injected". The playback level in
+the same table is the stub's real audio through the real analyser.
+
+**Not measured by any browser:** the safe areas. `env(safe-area-inset-top)` and `-bottom` both compute
+`0px` at 390x844 in both engines and Playwright has no inset control, so the leg injects `--sat` and
+`--sab` the way the phone-layout gate does, asserts the house pattern in the **served** bytes of
+`voice-call.css` off the live relay (8755 bytes, status 200), and prints that the R750 screenshots are
+the only thing a person can actually look at.
+
+**Not measured at all:** an iPhone. Every number above is this Mac at device scale 3 against a kit
+that fills a 2x backing store. The frame budget is stated against the same page with no call screen on
+it rather than against zero, because this console at dpr 3 in WebKit does not hold a clean 60 fps
+idle either, and a "zero frames over 20 ms" claim would have been about this Mac's scheduler rather
+than about the screen.
+
+**The one-thumb case stays a Chromium measurement.** WebKit gives Playwright no CDP session, so a
+press in this leg is `page.touchscreen.tap`. That one real press fires `pointerdown` **and**
+`touchstart` is covered by a unit case instead: two `talkDown()` calls in one gesture open one screen
+and dial one line, because `openCall()` is idempotent and `pressSpent` guards only the hold.
+
+Section 13's 390x844 table was taken when a press at that width was a hold. Those numbers still
+describe the refusal line's own shelf home, which has not changed; what a press does there is this
+section.

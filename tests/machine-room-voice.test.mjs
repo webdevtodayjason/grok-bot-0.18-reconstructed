@@ -1587,7 +1587,11 @@ test("VOICE-7 panel: it is mounted over the conversation and NEVER inside the fo
   // inserted before #composer becomes a grid item of .control-shelf and adds a row to the footer,
   // which is the measured cause of VOICE-6. Nothing this panel does is inside that grid.
   const source = await read("ui/machine-room/voice.js");
-  const mount = source.slice(source.indexOf("function mountOverlay"), source.indexOf("function spaceMayTalk"));
+  // The slice ends at the comment that follows mountOverlay rather than at the next function several
+  // hundred lines away: VOICE-13's call screen now sits between the two, and it DOES read #composer --
+  // a line typed on the call screen goes through the composer a person already uses -- which is a
+  // different node for a different reason and was failing this claim about the panel.
+  const mount = source.slice(source.indexOf("function mountOverlay"), source.indexOf("// ------------------------------------------------------- VOICE-7: the panel's state machine"));
   assert.match(mount, /querySelector\("\.conversation-space"\)/);
   assert.ok(!mount.includes('getElementById("composer")'), "the panel found its way into the composer's own row");
   assert.ok(!mount.includes("beforebegin"), "beforebegin on #composer is exactly what makes an element a grid item of the shelf");
@@ -2203,7 +2207,10 @@ test("VOICE-7 modes: one pair of entry points, so the desktop app's hotkey inher
   assert.match(keys, /spaceMayTalk\(\)/, "the space bar must ask whether it is allowed to be the hold");
   assert.match(wired, /"blur", release/,
     "a window that loses focus never delivers the keyup for a space bar that is still down");
-  assert.match(wired, /if \(talkMode\(\) !== "push"\) toggle\(\)/,
+  // VOICE-13 sends this press through talkDown rather than straight to toggle(), so that a phone in
+  // always listening opens a call screen by this road like every other road. The guard is the claim and
+  // the guard is unchanged: in push to talk a click still does nothing on top of the hold.
+  assert.match(wired, /if \(talkMode\(\) !== "push"\) void talkDown\(\)/,
     "a click in push to talk must not toggle on top of the hold that pointerdown already handled");
 });
 
@@ -2458,4 +2465,356 @@ test("VOICE-8 rows: they register into the operator section's Talking group and 
   // registers on. Calling again is a no-op rather than four more rows.
   assert.equal(voice._registerTalkingRows(), true);
   assert.equal(registered.length, 4, "a second call registered the rows again");
+});
+
+// ------------------------------------------------------------------ VOICE-13: the call screen
+//
+// Jason recorded ChatGPT's voice mode on his iPhone and said "this is what I want". These cases pin the
+// four things that cannot be measured in a browser cheaply: which windows get a screen at all, which of
+// the five words is true, that one thumb's two events open ONE screen and dial ONE line, and that every
+// path out of a call puts the page back the way it found it.
+
+/**
+ * The smallest document this screen can be driven against. It is hand-rolled rather than a DOM library
+ * because the module only ever asks for five things -- getElementById, querySelector, querySelectorAll,
+ * body.insertAdjacentHTML and a node's attributes -- and a library would hide which of them the screen
+ * really depends on.
+ */
+function callDom(options = {}) {
+  const made = (attrs = {}) => {
+    const self = {
+      _attrs: { ...attrs }, _on: {}, _find: {}, _findAll: {}, _kids: [],
+      hidden: false, textContent: "", value: "", inert: false, dataset: {},
+      scrollHeight: 1000, scrollTop: 0,
+      style: { setProperty() {}, removeProperty() {} },
+      classList: { toggle() {}, add() {}, remove() {}, contains: () => false },
+      getAttribute: (k) => (Object.hasOwn(self._attrs, k) ? self._attrs[k] : null),
+      setAttribute: (k, v) => { self._attrs[k] = String(v); },
+      removeAttribute: (k) => { delete self._attrs[k]; },
+      addEventListener: (name, fn) => { (self._on[name] ??= []).push(fn); },
+      appendChild: (node) => { self._kids.push(node); return node; },
+      // Every node takes one and most do nothing with it: voice.js's own line mounts into #composer,
+      // which this document really does answer, and a node that cannot take HTML throws there.
+      insertAdjacentHTML: () => {},
+      remove: () => {},
+      cloneNode: () => made(self._attrs),
+      closest: (sel) => self._closest?.[sel] ?? null,
+      querySelector: (sel) => self._find[sel] ?? null,
+      querySelectorAll: (sel) => self._findAll[sel] ?? [],
+      fire: (name, event = {}) => { for (const fn of self._on[name] ?? []) fn({ preventDefault() {}, ...event }); },
+    };
+    return self;
+  };
+  const byId = new Map();
+  const screen = made({ id: "voice-call" });
+  for (const part of ["face", "halo", "status", "state", "mute", "card-slot", "input"]) {
+    screen._find[`[data-voice-call-${part}]`] = made();
+  }
+  screen._find["[data-voice-call-card-slot]"] = made();
+  const shell = made();
+  const space = made();
+  const transcript = made();
+  const composer = made();
+  const box = made();
+  let submitted = null;
+  composer.requestSubmit = () => { submitted = box.value; };
+  const note = made({ id: "voice-call-ended" });
+  note.hidden = true;
+  space.insertAdjacentHTML = () => { byId.set("voice-call-ended", note); };
+  const body = made();
+  body.insertAdjacentHTML = () => { byId.set("voice-call", screen); };
+  const document_ = {
+    readyState: "complete",
+    visibilityState: options.visibilityState ?? "visible",
+    hidden: false,
+    body,
+    head: { appendChild() {} },
+    createElement: () => made(),
+    getElementById: (id) => byId.get(id) ?? null,
+    querySelector: (sel) => ({
+      ".app-shell": shell, ".conversation-space": space, "#composer": composer,
+    }[sel] ?? null),
+    querySelectorAll: (sel) => document_._rows[sel] ?? [],
+    addEventListener: () => {},
+    _rows: {},
+  };
+  byId.set("transcript", transcript);
+  byId.set("composer", composer);
+  byId.set("message-input", box);
+  return { document: document_, screen, shell, space, transcript, box, note, made, submitted: () => submitted };
+}
+
+const systemRow = (make, id, words) => {
+  const row = make({ "data-message-id": id, class: "message-row is-system" });
+  const bubble = make();
+  bubble.textContent = words;
+  row._find[".message-bubble"] = bubble;
+  return row;
+};
+
+test("VOICE-13 call: which windows get a screen, and LINE_SHELF_WIDTH is not the same question", async () => {
+  const phone = await loadVoice({ window: { innerWidth: 390, innerHeight: 844 } });
+  assert.equal(phone.voice._callWanted(), true, "an iPhone gets a call screen");
+  const rotated = await loadVoice({ window: { innerWidth: 844, innerHeight: 390 } });
+  assert.equal(rotated.voice._callWanted(), true, "and it keeps one when the phone is turned sideways, which is what the height leg is for");
+  const laptop = await loadVoice({ window: { innerWidth: 1440, innerHeight: 900 } });
+  assert.equal(laptop.voice._callWanted(), false, "a laptop keeps VOICE-7's strip and panel");
+  // 740 px is BELOW LINE_SHELF_WIDTH and ABOVE the call width, which is the whole reason the two
+  // numbers have to be different: a narrow window has no room in its composer for a sentence, and it
+  // is still not a phone.
+  const narrow = await loadVoice({ window: { innerWidth: 740, innerHeight: 900 } });
+  assert.equal(narrow.voice._callWanted(), false, "a 740 px window is not a phone");
+  assert.ok(740 <= narrow.voice._LINE_SHELF_WIDTH, "and the refusal line still takes a row of the shelf there");
+  assert.equal(narrow.voice._CALL_WIDTH, 690);
+  assert.equal(narrow.voice._CALL_HEIGHT, 500);
+  // A web view the size of an iPad still gets a call screen, because the shell says what it is rather
+  // than this module guessing from a user agent.
+  const shell = await loadVoice({ window: { innerWidth: 1024, innerHeight: 1366, __titanbotShell: { platform: "ios" } } });
+  assert.equal(shell.voice._callWanted(), true, "a shell that names its platform gets a call screen at any size");
+  // And the sheet carries no breakpoint at all, so the two cannot disagree.
+  const sheet = await read("ui/machine-room/voice-call.css");
+  assert.ok(!/@media[^{]*width/.test(sheet), "voice-call.css grew a width breakpoint, which is the disagreement this design avoids");
+});
+
+test("VOICE-13 call: five words, Muted outranks the rest, and Connecting is honest", async () => {
+  const { voice } = await loadVoice();
+  assert.deepEqual(voice._CALL_WORDS, ["Connecting", "Listening", "Thinking", "Talking", "Muted"]);
+  voice._state.on = true;
+  voice._state.ready = null;
+  assert.equal(voice._call.stateWord(), "Connecting", "the screen is up before the line is, and Thinking there would be a lie");
+  voice._state.ready = { agentName: "Titan" };
+  voice._state.orb = "listening";
+  assert.equal(voice._call.stateWord(), "Listening");
+  voice._state.orb = "thinking";
+  assert.equal(voice._call.stateWord(), "Thinking");
+  voice._state.orb = "speaking";
+  assert.equal(voice._call.stateWord(), "Talking", "Jason's word, not the wire's");
+  voice._call.mute(true);
+  assert.equal(voice._call.stateWord(), "Muted", "and a muted microphone outranks whatever the line is doing");
+  assert.equal(voice._state.talking, false, "which is state.talking and nothing else: no frame is sent to the relay for it");
+  voice._call.mute(false);
+  assert.equal(voice._state.talking, true);
+  // Nothing a person reads on this screen names a condition, a vendor or a machine's noun.
+  const words = [...voice._CALL_WORDS, voice._CALL_ENDED_SENTENCE].join(" ");
+  for (const leak of ["xai", "openai", "grok", "realtime", "socket", "vad", "error", "failed", "4001"]) {
+    assert.doesNotMatch(words, new RegExp(leak, "i"), `"${leak}" reached a word on the call screen`);
+  }
+  voice._state.on = false;
+});
+
+test("VOICE-13 call: one thumb's two events open ONE screen and dial ONE line", async () => {
+  const dom = callDom();
+  const { voice, sent } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });
+  const dialsBefore = sent.json.length;
+  // A phone fires pointerdown AND touchstart for one thumb, microseconds apart, and both reach
+  // talkDown. pressSpent guards the HOLD only, so the call branch has to be idempotent itself.
+  await voice.talkDown();
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(voice._call.isUp(), true, "the press opened the screen");
+  assert.equal(dom.screen.hidden, false, "and the screen is really on the page rather than only in the module");
+  assert.equal(voice._state.on, true, "and one line");
+  assert.equal(voice._state.talking, true, "hands free: the microphone is open for the life of the screen, with no hold");
+  assert.equal(voice._state.held, false, "and nothing is being held, because there is no button under a thumb any more");
+  assert.equal(sent.json.length, dialsBefore, "no JSON went down a line that was only just opened");
+  assert.equal(voice.stats().call.up, true);
+  voice.stop();
+});
+
+test("VOICE-13 call: a press while a refusal is standing clears the sentence and opens nothing", async () => {
+  const dom = callDom();
+  const { voice, sent } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });
+  voice.stop("no-key");
+  assert.deepEqual(voice.stats().notes, ["no-key"], "a refusal is standing, the way it is on a workspace with talking switched off");
+  const dials = sent.json.length;
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(voice._call.isUp(), false, "the screen did NOT open over the standing refusal");
+  assert.deepEqual(voice.stats().notes, [], "the press cleared the sentence, which is what it is for (VOICE-6)");
+  assert.equal(voice._state.on, false, "and nothing dialled back into the refusal it had just cleared");
+  assert.equal(sent.json.filter((one) => one.t === "stop").length, sent.json.filter((one) => one.t === "stop").length);
+  // VOICE-11's cooldown is kept rather than re-broken: a sentence a person has had TIME to read is
+  // cleared and dialled by one press, so a refusal never costs two presses for ever.
+  voice.stop("no-key");
+  voice._state.notes[0].at = Date.now() - (voice._REARM_COOLDOWN_MS + 500);
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(voice._call.isUp(), true, "an old sentence is cleared AND the press opens a call");
+  assert.ok(sent.json.length >= dials);
+  voice.stop();
+});
+
+test("VOICE-13 call: every path out puts the page back, and the newest line is what a person lands on", async () => {
+  for (const exit of ["end", "escape", "hidden", "refused"]) {
+    const dom = callDom();
+    const { voice } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document, ...{} });
+    await voice.talkDown();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(voice._call.isUp(), true, `${exit}: the screen is up before it is closed`);
+    assert.equal(dom.document.body.dataset.voiceCall, "up", `${exit}: the background is locked while a call is up`);
+    assert.equal(dom.shell.inert, true, `${exit}: and the console behind it takes no presses`);
+    dom.transcript.scrollTop = 0;
+    if (exit === "end") dom.screen.fire("click", { target: { closest: (sel) => (sel.includes("voice-call-end") ? dom.screen : null) } });
+    else if (exit === "escape") voice._escapeStops();
+    else if (exit === "hidden") { dom.document.hidden = true; voice.stop(); }
+    else voice.stop("no-key");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(voice._call.isUp(), false, `${exit}: the screen went`);
+    assert.equal(dom.screen.hidden, true, `${exit}: and it is hidden on the page, not just in the module`);
+    assert.equal(dom.document.body.dataset.voiceCall, undefined, `${exit}: the background is scrollable again -- a person left on a chat they cannot scroll is worse than the bug this wave fixes`);
+    assert.equal(dom.shell.inert, false, `${exit}: and the console takes presses again`);
+    assert.equal(dom.transcript.scrollTop, dom.transcript.scrollHeight, `${exit}: and the chat is at the newest line, which is where somebody who has just been talking is looking`);
+    assert.equal(voice._call._endedTimer() == null || exit === "hidden", true, `${exit}: no timer was left armed`);
+    if (exit === "refused") {
+      assert.deepEqual(voice.stats().notes, ["no-key"], "a refusal takes the screen away and the sentence stands in its ONE home on the shelf");
+      assert.equal(voice._call.endedNoteUp(), false, "and it gets no second copy of that sentence on the screen it just closed");
+    }
+    if (exit === "end" || exit === "escape") {
+      assert.equal(voice._call.endedNoteUp(), false, "somebody who pressed End knows the call ended, so there is no note");
+    }
+    if (exit === "hidden") {
+      assert.equal(voice._call.endedNoteUp(), true, "a phone that was locked mid-call says so, once, in plain words");
+      assert.equal(dom.note.textContent, voice._CALL_ENDED_SENTENCE);
+      voice._call.dismissEndedNote();
+    }
+  }
+});
+
+test("VOICE-13 call: a line typed on the call screen goes out through the composer a person already uses", async () => {
+  const dom = callDom();
+  const { voice } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(voice._call.typed("what is the team working on"), true);
+  assert.equal(dom.box.value, "what is the team working on", "the console's own message box is what carries it");
+  assert.equal(dom.submitted(), "what is the team working on", "and the composer's own submit is what sends it, so the pin, the attachments and the adapter are kept once");
+  voice.stop();
+});
+
+test("VOICE-13 call: the status line is the chat's own tool receipt, and never a stale one", async () => {
+  const dom = callDom();
+  const { voice } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });
+  // A receipt from this morning is already on the page when the call opens.
+  dom.document._rows["#transcript .message-row.is-system"] = [systemRow(dom.made, "old", "Searching 2 websites")];
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(voice._call.statusText(), "", "the row that was newest when the call opened is not what Titan is doing now");
+  dom.document._rows["#transcript .message-row.is-system"].push(systemRow(dom.made, "new", "Searching 9 websites"));
+  assert.equal(voice._call.statusText(), "Searching 9 websites", "and a receipt from THIS call is the line under him, in the words the chat already says");
+  // It is drawn only while he is working: Listening and Talking are not a status.
+  voice._state.ready = { agentName: "Titan" };
+  voice._state.orb = "thinking";
+  voice._paintCall();
+  assert.equal(voice.stats().call.status, "Searching 9 websites");
+  voice._state.orb = "listening";
+  voice._paintCall();
+  assert.equal(voice.stats().call.status, "", "nothing is under him while he is waiting for somebody to talk");
+  voice.stop();
+});
+
+test("VOICE-13 call: a card takes the middle and the avatar shrinks, with the live controls left in the chat", async () => {
+  const dom = callDom();
+  const { voice } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const card = dom.made({ "data-message-id": "reply-1", class: "message-row" });
+  card._find[".inline-card, [data-attachment]"] = dom.made();
+  let cleared = 0;
+  card.cloneNode = () => {
+    const copy = dom.made({ "data-message-id": "reply-1" });
+    copy.querySelectorAll = () => [{ remove: () => { cleared += 1; } }];
+    return copy;
+  };
+  dom.document._rows["#transcript .message-row:not(.is-user)"] = [card];
+  voice._paintCall();
+  assert.equal(voice.stats().call.card, "reply-1", "the newest card in a reply is the one on screen");
+  assert.equal(dom.screen.getAttribute("data-voice-call-card"), "up", "which is what shrinks him to an orb above the bottom row");
+  assert.ok(cleared > 0, "the copy's controls are left behind: the ones in the chat are the ones that work");
+  // And he grows back when the card is no longer the newest thing in the conversation.
+  dom.document._rows["#transcript .message-row:not(.is-user)"] = [];
+  voice._paintCall();
+  assert.equal(dom.screen.getAttribute("data-voice-call-card"), null, "and he grows back");
+  voice.stop();
+});
+
+test("VOICE-13 call: the microphone has a level now, and the four numbers beside it did not move", async () => {
+  const { voice } = await loadTalking();
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const stats = voice._state.capture.stats;
+  assert.equal(stats.micLevel, 0, "nothing has been said yet");
+  // A frame of a known amplitude: 2400 samples at 0.5 is an RMS of 0.5.
+  const loud = new Float32Array(2400).fill(0.5);
+  capturePort.onmessage({ data: loud });
+  assert.ok(Math.abs(stats.micLevel - 0.5) < 1e-6, `the RMS of a 0.5 frame is 0.5, not ${stats.micLevel}`);
+  assert.equal(stats.micFrames, 1);
+  assert.equal(voice.stats().micLevel, stats.micLevel, "and it is published under micLevel, which is NOT stats().level -- that one is the playback analyser");
+  const sent = stats.sent;
+  const heldFrames = stats.heldFrames;
+  const heldMs = stats.heldMs;
+  const muted = stats.mutedFrames;
+  // A MUTED FRAME READS ZERO, and so does one the echo gate held while Titan was speaking. That is the
+  // truth of the frame rather than a missing reading, and it must not cost the other four numbers.
+  voice._call.mute(true);
+  capturePort.onmessage({ data: loud });
+  assert.equal(stats.micLevel, 0, "a frame a mute dropped has no voice in it to read a level off");
+  assert.equal(stats.mutedFrames, muted + 1, "and it is still counted as a muted frame, which is what --leg frames reads");
+  assert.equal(stats.sent, sent, "sent did not move");
+  assert.equal(stats.heldFrames, heldFrames, "heldFrames did not move");
+  assert.equal(stats.heldMs, heldMs, "heldMs did not move");
+  voice.stop();
+});
+
+test("VOICE-13 avatar: nothing in the mascot's chain is ever scaled, and the level is smoothed in JS", async () => {
+  // THE ONE RULE. The vendored kit sizes its canvas from host.getBoundingClientRect().width, which is
+  // transform-aware, so a resize landing while an ancestor is scaled leaves Titan 5.6% stretched for
+  // the rest of the call and makes WebKit log a ResizeObserver error. MEASURED on both engines. This
+  // case is the cheap half of that guard; --leg call reads the computed transform in a real browser.
+  const source = await read("ui/machine-room/voice-call-avatar.js");
+  const sheet = await read("ui/machine-room/voice-call.css");
+  const painted = source.slice(source.indexOf("function paint()"), source.indexOf("function tick()"));
+  assert.ok(!/mascot\.style\.transform/.test(painted), "a transform on the mascot is the feedback bug");
+  assert.ok(!/mascot\.style\.width/.test(painted), "writing the level into his width measured 16.8% of the main thread with 1419 layouts");
+  assert.match(painted, /halo\.style\.transform/, "the halo is the sibling that moves");
+  assert.match(painted, /setProperty\("--voice-level"/, "and the level is one custom property, once a frame, on the screen");
+  for (const rule of ["titan-mascot"]) assert.ok(sheet.includes(rule), `${rule} is not styled at all`);
+  assert.ok(!/titan-mascot[^}]*transform:\s*scale/.test(sheet), "the sheet scales the mascot, which is the same bug from the other side");
+
+  // The module runs on a fake window with no custom elements at all, which is also the reduced-motion
+  // path: the still, no loop, and a frame counter that proves the loop is not running.
+  const fake = {
+    document: { createElement: (tag) => ({ tag, style: {}, setAttribute() {}, appendChild() {}, remove() {}, querySelector: () => null }) },
+    matchMedia: () => ({ matches: false }),
+    requestAnimationFrame: (fn) => setTimeout(fn, 0),
+    cancelAnimationFrame: clearTimeout,
+  };
+  new Function("window", await read("ui/machine-room/voice-call-avatar.js"))(fake);
+  const avatar = fake.__voiceCallAvatar;
+  const face = { appendChild() {}, querySelector: () => null, closest: () => null };
+  assert.equal(avatar.mount(face, { levels: () => ({ mic: 1, out: 0 }) }), true);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(avatar.frames, 0, "with no custom elements there is a still PNG and no animation loop at all");
+  avatar.release();
+
+  // The smoothing: a fast rise, a slow fall, and a settle at exactly zero rather than an asymptote that
+  // keeps writing for ever. It is in JS because reduced motion flattens every CSS transition to 1 ms.
+  assert.ok(avatar._ATTACK > avatar._DECAY, "a voice arrives faster than it leaves");
+  let level = 0;
+  for (let i = 0; i < 40; i += 1) level = avatar._smooth(level, 1);
+  assert.equal(level, 1, "a level held high settles at full scale");
+  for (let i = 0; i < 200; i += 1) level = avatar._smooth(level, 0);
+  assert.equal(level, 0, "and silence settles at exactly zero");
+
+  // The kit has three moods and `set mood` THROWS a RangeError on a fourth, so every word this module
+  // can be given has to map onto one of the three.
+  for (const word of ["Connecting", "Listening", "Thinking", "Talking", "Muted"]) {
+    assert.ok(["calm", "curious", "excited"].includes(avatar._moodFor(word, 0)), `${word} asked the kit for a mood it does not have`);
+    assert.ok(["calm", "curious", "excited"].includes(avatar._moodFor(word, 1)), `${word} at a high level asked for a mood the kit does not have`);
+  }
+  assert.equal(avatar._moodFor("Listening", 0), "calm");
+  assert.equal(avatar._moodFor("Listening", 1), "curious", "somebody talking to him is what he looks up at");
+  // Which number each state reads. The echo gate legitimately shuts the microphone while he speaks.
+  assert.equal(avatar.levelFor("Listening", { mic: 0.4, out: 0.9 }), 0.4);
+  assert.equal(avatar.levelFor("Talking", { mic: 0.4, out: 0.9 }), 0.9);
+  assert.equal(avatar.levelFor("Muted", { mic: 0.4, out: 0.9 }), 0);
 });

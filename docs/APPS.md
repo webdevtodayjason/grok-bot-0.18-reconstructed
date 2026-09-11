@@ -966,6 +966,46 @@ one is a thing a person does:
 
 ---
 
+## 8c. What the shell must give the call screen (VOICE-13)
+
+On a phone a press of Talk no longer opens a strip: it brings up a full-screen call screen, hands
+free, and the page runs the whole of it over its own socket to `/voice/socket`. So the shells get **no
+new route, no new token and no push** for this. Five asks, each one line, and none of them can be done
+from inside the page.
+
+**1. Everything in 8b still applies, first.** The remote origin, the `WKUIDelegate` capture grant with
+`NSMicrophoneUsageDescription` beside it, and the audio session. Without the grant the press ends on
+"This app has not been given the microphone yet" — MEASURED in WebKit with the grant withheld — which
+a careless reading takes for a broken product rather than a permission nobody answered.
+
+**2. `AVAudioSession` matters more here than it did for a hold.** A call is hands free and the phone is
+likely on a table, so `.playAndRecord` with `[.defaultToSpeaker, .allowBluetooth]` is the difference
+between a conversation and a reply nobody can hear out of the earpiece.
+
+**3. Keep the screen awake while a call is up, if the shell can.** The one thing to watch is
+`<body data-voice-call="up">`, which the page sets while the screen is up and removes on every path
+out of it. The page also asks `navigator.wakeLock` and an optional
+`window.__titanbotShell.setKeepAwake(true | false)` on its own, both in a `try`, so a shell that
+implements neither is not a refused call — it is a screen that dims mid-sentence.
+
+**4. `window.__titanbotShell = { platform: "ios" }`, injected at document start**, is what gives an
+iPad-sized web view a call screen. The fallback without it is the 690 px width / 500 px height
+predicate, which is a guess about a window rather than a fact about a host.
+
+**5. A real phone call interrupting the audio needs no shell signal.** The page sees
+`visibilitychange`, ends the call cleanly and leaves one plain line in the conversation. A shell that
+suspends the web view without firing it should still call `window.__voice.stop()`.
+
+### The behaviour change the desktop shell has to be told about
+
+`data-talk-button` is still **exactly one** element — the count at section 11 holds, and neither the
+call screen's Mute nor its End carries it. But the shell's global hotkey presses that one element, and
+in a window **narrower than 690 px or shorter than 500 px** that press now opens a call screen rather
+than toggling a strip. A second press of the hotkey while a call is up does nothing on purpose: the way
+out is the End control on the screen, or Escape, which the page already honours.
+
+---
+
 ## 9. What the shells do NOT get, and why
 
 | | |
