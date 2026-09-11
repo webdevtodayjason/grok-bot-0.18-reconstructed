@@ -744,11 +744,12 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       // dark. Thinking and speaking still show through, because those happen after a release and they
       // are the truth of that moment.
       const shown = talkMode() === "push" && !state.talking && state.orb === "listening" ? "off" : state.orb;
-      if (node != null) node.setAttribute("data-state", shown);
+      if (node != null && node.getAttribute("data-state") !== shown) node.setAttribute("data-state", shown);
       // Engaged means "the microphone is open for me". In push to talk that is the hold and not the
       // line, which outlives it by a minute.
       const engaged = talkMode() === "push" ? state.held : state.on;
-      button.setAttribute("aria-pressed", engaged ? "true" : "false");
+      const pressed = engaged ? "true" : "false";
+      if (button.getAttribute("aria-pressed") !== pressed) button.setAttribute("aria-pressed", pressed);
       button.classList.toggle("is-live", state.on);
       button.classList.toggle("is-held", state.held);
     }
@@ -763,27 +764,45 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // textContent replaces child nodes: an unguarded write repaints on its own mutation forever.
     if (shown != null && shown.textContent !== text) shown.textContent = text;
     if (other != null && other.textContent !== "") other.textContent = "";
-    if (say != null) say.hidden = action != null || text.length === 0;
+    // AND SO IS EVERY ATTRIBUTE, which is the other half of that rule and was missing until VOICE-11.
+    // `hidden` is an attribute wearing a property's clothes: assigning it the boolean it already holds
+    // still calls setAttribute, and setting an attribute to the value it already has still emits a
+    // mutation record. MEASURED in real Chrome at 1440x900 on an idle console: forty wakes of the
+    // observer below produced forty records on each of five nodes, one per wake, for a paint that
+    // changed nothing. Nothing was broken by it -- no node is replaced and there is no flicker -- but
+    // it is exactly the "chasing its own mutation" the comment on that observer promises cannot
+    // happen, and a debounce is the only reason it did not.
+    if (say != null) hide(say, action != null || text.length === 0);
     if (does != null) {
-      does.hidden = action == null;
+      hide(does, action == null);
       // NO aria-label HERE, on purpose. An aria-label REPLACES a button's own text for a screen
       // reader, so labelling this "Open settings" would read the control out and swallow the sentence
       // that is the whole reason it is on screen. The sentence is the accessible NAME; the action's
       // words are the title, which is the accessible DESCRIPTION beside it.
-      if (action != null) does.setAttribute("title", action);
+      if (action != null && does.getAttribute("title") !== action) does.setAttribute("title", action);
     }
     if (say != null) {
-      if (text.length > 0) say.setAttribute("title", text); else say.removeAttribute("title");
+      if (text.length === 0) say.removeAttribute("title");
+      else if (say.getAttribute("title") !== text) say.setAttribute("title", text);
     }
-    line.hidden = text.length === 0;
+    hide(line, text.length === 0);
     // THE FIFTH TRACK COSTS NOTHING AT REST. An unconditional empty track was measured to take 4 px
     // off the message box through the composer's own 4 px gap, so the attribute the track hangs on
     // is written only while the line is really in the form with something to say.
     const form = document_.getElementById("composer");
     if (form != null) {
-      if (!line.hidden && line.parentElement === form) form.setAttribute("data-voice-line", "up");
-      else form.removeAttribute("data-voice-line");
+      if (!line.hidden && line.parentElement === form) {
+        if (form.getAttribute("data-voice-line") !== "up") form.setAttribute("data-voice-line", "up");
+      } else form.removeAttribute("data-voice-line");
     }
+  }
+
+  // `node.hidden = value` is a setAttribute in disguise and fires a mutation record even when the
+  // value does not change. One helper rather than three inline comparisons, because the next person
+  // to add a hidden node to this file will copy whichever line is nearest.
+  function hide(node, hidden) {
+    if (node == null || node.hidden === hidden) return;
+    node.hidden = hidden;
   }
 
   // ------------------------------------------------------------------ where the line lives
@@ -1007,7 +1026,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     const panel = node.querySelector("[data-voice-overlay-panel]");
     if (panel != null && typeof panel.scrollHeight === "number") panel.scrollTop = panel.scrollHeight;
     if (!state.heard.open) node.removeAttribute("data-phase");
-    node.hidden = !state.heard.open;
+    hide(node, !state.heard.open);
   }
 
   async function start(options = {}) {
@@ -2083,8 +2102,11 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       scheduled = true;
       (global.requestAnimationFrame ?? ((fn) => global.setTimeout(fn, 16)))(() => {
         scheduled = false;
-        // paint() mounts the line and then fills it, and every write it makes is guarded on a
-        // change, so putting it here cannot chase its own mutation round the loop.
+        // paint() mounts the line and then fills it, and every write it makes -- text AND attributes,
+        // `hidden` included -- is guarded on a change, so putting it here cannot chase its own
+        // mutation round the loop. The attribute half of that was NOT true until VOICE-11: five nodes
+        // were rewritten once per wake with the values they already held, and only the debounce above
+        // kept it off the loop it describes.
         paint();
         // The panel lives in .conversation-space, which app.js never rebuilds -- but the space itself
         // is not on screen until the console has booted, so it is mounted here rather than once.

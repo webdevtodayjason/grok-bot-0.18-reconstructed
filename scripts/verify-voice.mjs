@@ -2453,31 +2453,35 @@ async function legRelease() {
     await page.mouse.down();
     await sleep(1200);
     const spokeFrames = stub.events.appendFrames - appendsBefore;
-    // THE PRECONDITION THE WHOLE MEASUREMENT RESTS ON. The silence counted below can only be the
-    // release's own if the microphone was still producing sound at the moment of the release, so that
-    // is asserted rather than assumed -- it is what %noloop quietly broke on the first run of this leg.
+    // THE PRECONDITION THE WHOLE MEASUREMENT RESTS ON, and it is subtracted rather than required to be
+    // zero. The silence counted below can only be the release's own if it is silence that arrived
+    // AFTER the release, so whatever was already standing is measured first and taken off. Requiring
+    // zero read as a product failure once on the WebKit arm, whose microphone is a Web Audio graph
+    // that underruns a frame now and then (1 standing, against 0 on the run before it); what %noloop
+    // broke on the first run of this leg was bigger than that, and the ceiling below still catches it.
     const silentAtRelease = stub.events.trailingSilentFrames;
     const releasedAt = Date.now();
     await page.mouse.up();
 
     let silent = silentAtRelease;
     while (Date.now() - releasedAt < 4000) {
-      silent = stub.events.trailingSilentFrames;
+      silent = stub.events.trailingSilentFrames - silentAtRelease;
       if (silent >= 8) break;
       await sleep(25);
     }
     const tookMs = Date.now() - releasedAt;
     check(spokeFrames > 0, `${view.engine}: the hold itself reached the vendor`, `${spokeFrames} frame(s) of microphone in 1.2 s`);
-    check(silentAtRelease === 0, `${view.engine}: and it was still making sound at the moment of the release`, `${silentAtRelease} silent frame(s) standing at the end`);
+    check(silentAtRelease < 8, `${view.engine}: and it was still making sound up to the release, so the tail can be told from the room`,
+      `${silentAtRelease} silent frame(s) standing when the button came up`);
     check(silent >= 8 && tookMs <= 1000,
       `${view.engine}: eight frames of silence reached the vendor within a second of the release`,
       `${silent} frame(s) in ${tookMs} ms`);
     const stats = await readStats(page);
     check(stats?.tailFrames === 8, `${view.engine}: and the page says it sent eight and no more`, `tailFrames ${stats?.tailFrames}`);
     await sleep(400);
-    check(stub.events.trailingSilentFrames === 8,
+    check(stub.events.trailingSilentFrames - silentAtRelease === 8,
       `${view.engine}: exactly the release's eight, with the words before them and nothing after`,
-      `${stub.events.trailingSilentFrames} silent frame(s) at the end of ${stub.events.appendFrames}`);
+      `${stub.events.trailingSilentFrames} silent frame(s) at the end of ${stub.events.appendFrames}, ${silentAtRelease} of them standing before the release`);
     info(`${view.engine}: ${stub.events.appendFrames} frames at the vendor, ${stub.events.silentFrames} of them silent`);
 
     // ------------------------------------------------------------------------------ 2. a tap

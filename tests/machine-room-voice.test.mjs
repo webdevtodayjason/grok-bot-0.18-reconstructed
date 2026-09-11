@@ -1227,6 +1227,79 @@ test("VOICE-1 in a real browser: the button is on screen, a mouse can press it, 
   }
 });
 
+test("VOICE-11 paint: a repaint that changes nothing writes nothing, so the observer cannot chase itself", async (t) => {
+  // FOUND BY THE CONSOLE-6 FLICKER WORK, in this file rather than in theirs: the comment beside this
+  // module's body-wide MutationObserver claims "every write it makes is guarded on a change, so
+  // putting it here cannot chase its own mutation round the loop", and five of its writes were not
+  // guarded. Setting an attribute to the value it already holds still emits a mutation record, and so
+  // does assigning `.hidden` the boolean it already has. MEASURED on grok-bot-local-vm in real Chrome
+  // at 1440x900 on an idle console: 453 records in 15 s on each of the talk button, its orb, the line
+  // and the line's two spans -- 30 a second while another pane's repaint loop was running the page at
+  // 60 Hz, and 5 a second after they fixed that. Nothing was broken by it and no node was replaced;
+  // what was wrong was the claim, and a claim this file leans on to be allowed to live on that
+  // observer at all.
+  const playwright = PLAYWRIGHT_CANDIDATES.find((one) => existsSync(one));
+  if (!existsSync(CHROME) || playwright == null) {
+    t.skip(`tried Chrome at ${CHROME} and playwright-core at ${PLAYWRIGHT_CANDIDATES.join(", ")}`);
+    return;
+  }
+  const { chromium } = await import(playwright);
+  const { server } = serveConsole();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const browser = await chromium.launch({ executablePath: CHROME, headless: true, args: ["--no-sandbox"] });
+  try {
+    const context = await browser.newContext({ userAgent: GATE_AGENT, viewport: { width: 1440, height: 900 } });
+    const page = await context.newPage();
+    await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => window.__voice != null && document.getElementById("voice-line") != null,
+      null, { timeout: 30_000 });
+
+    // The line is driven up and back down first, so every node this module owns has been painted at
+    // least once and every attribute it writes is already at its settled value. A first paint writing
+    // attributes is not the defect; a two hundredth one writing the same attributes is.
+    await page.evaluate(() => { window.__voice.stop("no-key"); });
+    await page.waitForTimeout(200);
+    await page.evaluate(() => { window.__voice.stop(); });
+    await page.waitForTimeout(400);
+
+    const seen = await page.evaluate(async () => {
+      const mine = ["[data-voice-talk]", "[data-voice-orb]", "#voice-line", "[data-voice-line-say]", "[data-voice-line-do]"];
+      const nodes = mine.map((one) => document.querySelector(one)).filter((one) => one != null);
+      const records = [];
+      const observer = new MutationObserver((list) => {
+        for (const record of list) {
+          if (record.type !== "attributes") continue;
+          if (!nodes.includes(record.target)) continue;
+          records.push(`${record.target.id || record.target.className || record.target.tagName}.${record.attributeName}`);
+        }
+      });
+      observer.observe(document.body, { attributes: true, subtree: true });
+      // The module's own observer is what is being measured, so it is woken the way the console wakes
+      // it: a mutation somewhere else on the page, once a frame apart so the wakes are not coalesced.
+      const crumb = document.createElement("span");
+      for (let i = 0; i < 20; i += 1) {
+        document.body.appendChild(crumb);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        crumb.remove();
+        await new Promise((resolve) => setTimeout(resolve, 40));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      observer.disconnect();
+      const counted = {};
+      for (const one of records) counted[one] = (counted[one] ?? 0) + 1;
+      return { total: records.length, counted, nodes: nodes.length };
+    });
+    assert.equal(seen.nodes, 5, "the five nodes this module owns are not all on the page");
+    assert.deepEqual(seen.counted, {},
+      `forty wakes of the observer rewrote attributes that had not changed: ${JSON.stringify(seen.counted)}`);
+    assert.equal(seen.total, 0);
+  } finally {
+    await browser.close().catch(() => {});
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 // ================================================================== VOICE-7
 //
 // Jason, 2026-09-10 11:09: "a semi-transparent modal over the current chat window where that is
