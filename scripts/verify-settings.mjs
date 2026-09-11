@@ -1142,7 +1142,7 @@ try {
   await page.evaluate(() => { document.getElementById("panel-dialog")?.close(); window.__mrSettings?.open?.("general", null); });
   await page.waitForSelector('[data-settings-section="general"]', { timeout: within(20_000) }).catch(() => {});
   await page.waitForTimeout(1200);
-  const generalPhone = await page.evaluate(() => {
+  const generalPhoneLate = await page.evaluate(() => {
     const scroller = document.querySelector(".settings-body");
     const row = document.querySelector('[data-setting-row="background"]')?.getBoundingClientRect();
     return {
@@ -1151,14 +1151,14 @@ try {
       tiles: document.querySelectorAll('[data-settings-mount="background"] [data-bg-id]').length,
     };
   });
-  info(`General at ${PHONE.w}x${PHONE.h} on grok-bot-local-vm: ${generalPhone.scrollHeight} px in a ${generalPhone.clientHeight} px window`
-    + ` (${(generalPhone.scrollHeight / Math.max(1, generalPhone.clientHeight)).toFixed(2)}x), background row ${JSON.stringify(generalPhone.backgroundRow)},`
-    + ` ${generalPhone.tiles} tile faces inline, against ${GENERAL_BEFORE.phone} with the gallery inline.`);
-  check(generalPhone.tiles === 0, "and no tile face is left inline on the Background row at this width",
-    `${generalPhone.tiles} tile faces in the row's own slot`);
-  check(generalPhone.scrollHeight > 0 && generalPhone.scrollHeight < BASELINE.generalPhone,
+  info(`General at ${PHONE.w}x${PHONE.h} on grok-bot-local-vm: ${generalPhoneLate.scrollHeight} px in a ${generalPhoneLate.clientHeight} px window`
+    + ` (${(generalPhoneLate.scrollHeight / Math.max(1, generalPhoneLate.clientHeight)).toFixed(2)}x), background row ${JSON.stringify(generalPhoneLate.backgroundRow)},`
+    + ` ${generalPhoneLate.tiles} tile faces inline, against ${GENERAL_BEFORE.phone} with the gallery inline.`);
+  check(generalPhoneLate.tiles === 0, "and no tile face is left inline on the Background row at this width",
+    `${generalPhoneLate.tiles} tile faces in the row's own slot`);
+  check(generalPhoneLate.scrollHeight > 0 && generalPhoneLate.scrollHeight < BASELINE.generalPhone,
     `and General is shorter than the ${BASELINE.generalPhone} px it measured with the gallery inline`,
-    `${BASELINE.generalPhone} -> ${generalPhone.scrollHeight} px`);
+    `${BASELINE.generalPhone} -> ${generalPhoneLate.scrollHeight} px`);
 
   check(pageErrors.length === 0, "and nothing threw in either browser", pageErrors.length === 0 ? "no page errors" : pageErrors.slice(0, 3).join(" · "));
   await page.context().close();
