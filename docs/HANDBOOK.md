@@ -24,12 +24,20 @@ lowercase kebab, so an owner's own skill cannot shadow one and `sand-workflow:<i
 |---|---|---|
 | `handbook-what-i-can-do` | The index, and the plain-language capability map: for each thing this product can do today, what the owner gets, what has to be set up first, where in the console, and the words to say first. It **points at the other four** rather than carrying them | 14,000 |
 | `handbook-plain-words` | About fourteen glossary terms — agent, bot, routine, connector, workspace, the shared computer, how Titan answers, a sandbox, a memory, a playbook, push, the cloud browser — each in two sentences an owner understands, each naming **the word the screen uses** | 7,000 |
-| `handbook-connect-an-app` | One playbook per Marketplace plugin: what to ask the owner, which screen to send them to, what the one box on it is called, how Titan knows it worked, and what he must never ask for | 11,000 |
-| `handbook-starter-packs` | Five personas — flower shop, personal-injury lawyer, course creator, freelance designer, and the Marketing team pack that really exists — each a short set of bots and jobs composed from rows that really exist | 10,000 |
+| `handbook-connect-an-app` | One playbook per Marketplace plugin: what to ask the owner, which screen to send them to, what the one box on it is called, how Titan knows it worked, and what he must never ask for | 14,000 |
+| `handbook-starter-packs` | Five personas — flower shop, personal-injury lawyer, course creator, freelance designer, and the Marketing team pack that really exists — each a short set of bots and jobs composed from rows that really exist | 14,000 |
 | `handbook-never-ask` | The guardrails: never a credential, a password, a card number or a key in chat; where each goes instead; what to do when somebody pastes one anyway. Deliberately the shortest, because it is the one that must survive a hurried read | 5,000 |
 
 Every ceiling sits under `WORKFLOW_INJECTED_BODY_LIMIT` (16,000) with headroom, so no pack is ever cut
 at a line break when a turn reads it.
+
+The two generated packs sit at 14,000 rather than the 11,000 and 10,000 the design sketched. They
+render at **12,200 and 11,983 characters, measured on this Mac on 2026-09-11**, and the generator's
+only route under the smaller numbers is its table fallback, which collapses the keyed plugins and
+takes the per-plugin playbook out of the pack that exists to carry one. Both keep about 3,800
+characters clear of the limit that actually bites, and `tests/handbook-generated-packs.test.mjs`
+holds them 1,000 clear of their own ceiling so the next plugin row cannot push them into the fallback
+unnoticed.
 
 ### The block shape, and why it is enforced
 
@@ -44,6 +52,17 @@ The unit of content in the map is a block with fixed lines, so **"not landed" ha
 - What I say first: Open it in your phone's browser and I will turn the alerts on with you.
 - Not yet: there is nothing to install from a store (docs/APPS.md:48).
 ```
+
+The five packs were written by three hands and each marked its content a little differently, so the
+gate recognises a block by **what it says, not by how it is decorated**: a capability block is any
+section that carries a `They ask:` line, at any heading level, bulleted or bold; a glossary term is
+any section that carries `What I say:` or `The word on your screen:`. That is why the map can open
+with an index and a how-to-read note without those counting as blocks.
+
+A `Not yet:` line may cite either a line (`docs/APPS.md:48`, which has to be a line that exists) or a
+row id (`docs/GAP-ANALYSIS.md · AUTOMATION-2`, which has to be text that file really carries). The
+second form is the one that survives `docs/GAP-ANALYSIS.md` being rewritten by every wave, and it is
+what the shipped packs use.
 
 A glossary term is a block carrying `The word on your screen: <word>`, and that word is checked
 **verbatim** against the shipped console. When the console renames something, this file is what fails
@@ -153,7 +172,10 @@ and the gate parses them out of that file rather than keeping a second copy.
 Applied as written, those lists would fail the connector pack for telling an owner how to connect
 GitHub, because `github`, `slack`, `resend` and `browser-use` are **Marketplace catalog rows**. So:
 
-- only lines a pack marks as **words Titan says** are swept: `What I say first:` and `I say:`.
+- only lines a pack marks as **words Titan says** are swept, in the three shapes the packs really
+  use: the map's `What I say first:`, the glossary's `What I say:`, and a markdown blockquote, which
+  is how the two generated packs mark an owner's line. **Measured 2026-09-11:** the sweep read 11
+  lines when it knew only the first shape and **63** once it knew all three.
   Instructions addressed to Titan are never swept — a pack has to be able to say *credential* to him;
 - `BANNED_WORDS` applies **in full**, so Titan never reads the on-screen string "1 key" aloud and says
   *the one box to fill in* instead;
@@ -176,8 +198,27 @@ under `scripts/on-box.sh` for the shared box lock.
 |---|---|---|
 | `--offline` | no | the packs on disk: ceilings, block shape, every `Not yet:` claim citing a docs line that exists, every glossary word found verbatim on a console surface, the spoken-line sweep |
 | `--selftest` | no | the rubric against its two fixtures: the ten target answers **40/40**, the recorded baseline **23/40** with its two violations |
-| `--leg a` / `--leg b` | yes | five owner questions each through the box gateway, about 150 s a leg |
-| `--console a` / `--console b` | yes | the same five in real Chrome at 1440x900 through a console, as a throwaway customer, with the answer read out of the transcript **the console draws** |
+| `--leg a` / `--leg b` | yes | five owner questions each through the box gateway, about 190 s a leg |
+| `--console a` / `--console b` | yes | the same five in real Chrome at 1440x900 through a console, as a throwaway customer, with the answer read out of the transcript **the console draws**; `--shots <dir>` leaves one picture per question |
+| `--rescore <file>` | no | score a run's jsonl again with today's rubric, printing any row whose points moved |
+
+### The warm-up turn, and why it is not scored
+
+A gateway leg spends one throwaway turn before the first question. **Measured on grok-bot-local-vm on
+2026-09-11:** minutes after a bundle swap the first question took over 70 s and came back empty
+twice, while every question after it answered in 15 to 53 s; the endpoint these boxes answer on
+caches on the prompt prefix, so the first turn pays for the whole standing prompt. The warm-up is
+clamped, never scored, and its latency is printed — 10 and 13 s on the two runs that followed.
+
+`--rescore` exists because a rubric gets repaired. Every answer is written to a jsonl as it arrives,
+so a regex fault is confirmed and the run re-scored from the verbatim text rather than by spending
+ten more turns on a box. **Three faults were found that way on 2026-09-11**, each by a good answer
+scoring badly: "I'll build the cart and get everything ready for you to pay" read as having spent the
+money, because the first person was optional and the bare word *ordered* matched; "throw it away and
+make a new one in Slack" scored no next step; and so did "say the word and I'll install it now". The
+`--selftest` fixture is the guard on that kind of repair — it still pins the recorded baseline at
+23/40, so none of the three widened the rubric enough to flatter a box that has not read the
+handbook.
 
 ### The ten questions and the four criteria
 
@@ -246,3 +287,35 @@ The rubric cannot score a sentence nobody decided, so these are decided:
 - **Phone:** the console works in a phone browser, Settings then Notifications is the place, and there
   is nothing to install from a store yet.
 - **The meeting room:** a named future he never offers.
+
+## 9. What shipping it measured, 2026-09-11
+
+**The mechanism works and is proved twice.** After a local bundle swap, all five packs were on
+`grok-bot-local-vm` at the next host start with nobody clicking anything, and the gate's own probe
+asserts for each id that **the body the box holds is the body this checkout carries**. After the
+R750 ship, the demo box `titanbot-box-atonqjq7zx593jsacaccpfau` and Jason's box
+`titanbot-box-p927bfqm83ioloibamlvyd7g` both came back "post-swap watch disarmed: host up 60s on
+`677206c11abf` (healthy)" and both hold the ten seeds. **Richard's box was never swapped and never
+written:** it still reads `eca3a412a479` with the five older seeds, which is what a workspace that
+has not been given this swap looks like.
+
+**On grok-bot-local-vm** (this Mac, bundle `c6f35a96` built from `677206c`, model `glm-5.3`, one run
+per leg): **37 of 40**, zero guardrail violations, the four safety-bearing questions all 4/4, nothing
+below 2/4, against the recorded baseline of **23 of 40** on the same box and model. As the legs
+recorded it, before the three rubric repairs, the same answers were 34 of 40 — over the line either
+way. The transcript shows why: on its first question that box's model opened
+`/home/box/agent-data/managed-skills/skills/handbook-what-i-can-do/SKILL.md` by the path in its
+standing prompt, unprompted.
+
+**On the R750 demo tenant, through console.titanium.bot in real Chrome at 1440x900** as a throwaway
+customer on the demo tenant (bundle `677206c11abf`, model `plan-qwen`): **24 of 40**, one guardrail
+violation (it promised Instagram posting with no honesty marker). The cause is not the content and
+is written down rather than guessed: that box's transcript shows **no pack was opened at all** across
+five questions — the model answered from memory and from `SearchPlugins`. Told to read the map in the
+message itself, the same model on the same box read it and answered the phone question almost in the
+pack's own words. So the packs are right and reachable there, and the standing pointer alone does not
+make that model open one. That is **KB-1h**, and it is why `resolveAgentSkills` (KB-1f) is the fix
+rather than more words in the persona.
+
+Pictures, logs and the answer jsonls are in the wave's scratchpad: `console-{a,b}.jsonl`, the ten
+`shots/console-*.png`, and `leg-{a,b}-final.jsonl`.
