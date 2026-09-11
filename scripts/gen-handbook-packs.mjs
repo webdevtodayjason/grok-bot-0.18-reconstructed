@@ -319,7 +319,9 @@ function renderConnectorPackAt({ plugins, shellTools, taglines, byField, sweep, 
 
   const out = [];
   out.push("---");
-  out.push("name: Connecting an app for the owner");
+  // The frontmatter name is the directory id, which is what every other seed in this tree does and
+  // what the host writes back into the box's own copy. The prose title stays as the body's heading.
+  out.push("name: handbook-connect-an-app");
   out.push("description: >-");
   out.push("  Use when the owner wants one of their own apps joined up to you, asks what you can plug");
   out.push("  into, or offers you something private in the conversation. It carries the one place a");
@@ -438,7 +440,7 @@ function renderConnectorPackAt({ plugins, shellTools, taglines, byField, sweep, 
 export function renderStarterPack({ personas, sweep }) {
   const out = [];
   out.push("---");
-  out.push("name: Starter packs by trade");
+  out.push("name: handbook-starter-packs");
   out.push("description: >-");
   out.push("  Use when the owner says what kind of business they run and wants setting up, or asks what");
   out.push("  a shop, a law practice, a course business, a design studio or a marketing team should");

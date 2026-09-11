@@ -1,5 +1,5 @@
 ---
-name: Starter packs by trade
+name: handbook-starter-packs
 description: >-
   Use when the owner says what kind of business they run and wants setting up, or asks what
   a shop, a law practice, a course business, a design studio or a marketing team should
