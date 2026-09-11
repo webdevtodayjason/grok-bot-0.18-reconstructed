@@ -261,7 +261,14 @@ test("VOICE-1 capture: a MediaStream source is accepted whole, so a meeting need
   // `blocks` is VOICE-11's, and it is asked before any gate: it is the only honest answer to "is this
   // microphone producing anything at all", which is what a phone that hands over a device and then
   // never feeds it looks like from here.
-  assert.deepEqual(Object.keys(capture.stats).sort(), ["blocks", "bytes", "heldFrames", "heldMs", "mutedFrames", "sent"]);
+  // `micLevel` and `micFrames` are VOICE-13's, and they are the call screen's reason to exist at all:
+  // the microphone had no level anywhere in this console (stats().level is the PLAYBACK analyser), so
+  // the avatar on a phone call had nothing to react to while somebody was talking. It is an RMS of the
+  // frame that is about to go, taken inside this same loop, and it reads 0 for a frame a mute or the
+  // echo gate dropped. The four numbers above it are untouched, which is asserted in
+  // tests/machine-room-voice.test.mjs across a muted frame.
+  assert.deepEqual(Object.keys(capture.stats).sort(),
+    ["blocks", "bytes", "heldFrames", "heldMs", "micFrames", "micLevel", "mutedFrames", "sent"]);
   assert.equal(typeof capture.stop, "function");
 });
 

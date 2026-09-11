@@ -32,6 +32,8 @@
 // Nothing here writes to the box. It signs in as a customer and presses what a customer presses.
 const { chromium } = await import(`${process.env.PW}/node_modules/playwright-core/index.mjs`);
 import { mkdirSync } from "node:fs";
+import os from "node:os";
+import { execFile } from "node:child_process";
 import path from "node:path";
 // SIGNIN-1. This gate signs in at a real front door on a real server, so it says its own name there:
 // the Sign-in attempts panel could not otherwise tell it from a stranger. A hint, never a credential.
@@ -52,9 +54,13 @@ const info = (line) => console.log(`  INFO  ${line}`);
 const step = (what) => console.log(`\n== ${what}`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// VOICE-13 moved the second one. At 390x844 a press of Talk is now a CALL SCREEN rather than a hold, so
+// a row that held the button there would be measuring a behaviour the product no longer has. 740x900 is
+// still under the refusal line's 900 px shelf home and over the 690 px call width, so everything these
+// rows measure still applies. The phone is measured by the call-screen section at the foot of this file.
 const VIEWPORTS = [
   { name: "desktop", width: 1440, height: 900, hasTouch: false },
-  { name: "phone", width: 390, height: 844, hasTouch: true },
+  { name: "narrow", width: 740, height: 900, hasTouch: true },
 ];
 
 // Every rect that VOICE-6 measured, read in one go so nothing can move between two reads.
@@ -334,6 +340,251 @@ try {
   }
 } finally {
   await browser.close();
+}
+
+// ---- VOICE-13: the call screen, on the live server -----------------------------------------------
+//
+// TWO ENGINES, and each measures the half it can. A real spoken exchange needs a microphone that says
+// words: Chromium takes a WAV file as its capture device, so the turns are driven there with speech
+// made on this Mac by `say`. WebKit has no such switch -- and WebKit is what the iPhone app's web view
+// is -- so the SCREEN is measured there, at 390x844 with device scale 3 and the iPhone's own insets
+// restated as the phone-layout gate restates them, and its microphone is not the claim.
+//
+// BOTH OUTCOMES ARE WRITTEN DOWN IN ADVANCE so nobody fudges the difference: if this tenant's talking
+// door answers enabled false, the honest result is the refusal path measured live -- the screen opens,
+// the refusal takes it away, one plain sentence stands on the shelf -- and the spoken turn recorded as
+// NOT MEASURED, which is the same shape docs/VOICE.md 13 already uses.
+const speechWav = await (async () => {
+  const dir = path.join(os.tmpdir(), `voice13-speech-${Date.now()}`);
+  mkdirSync(dir, { recursive: true });
+  const aiff = path.join(dir, "said.aiff");
+  const wav = path.join(dir, "said.wav");
+  const run = (cmd, args) => new Promise((resolve, reject) => execFile(cmd, args, (error) => (error ? reject(error) : resolve())));
+  try {
+    await run("say", ["-o", aiff, "Hello Titan. In one short sentence, what is the team working on today?"]);
+    await run("ffmpeg", ["-y", "-i", aiff, "-ar", "48000", "-ac", "1", "-acodec", "pcm_s16le", wav]);
+    return wav;
+  } catch (error) {
+    info(`no speech file could be made on this Mac (${String(error?.message ?? error).split("\n")[0]}), so the spoken turns are NOT MEASURED and only the screen is`);
+    return null;
+  }
+})();
+
+const callShots = async (page, name) => { await page.screenshot({ path: path.join(SHOTS, `r750-call-${name}.png`) }).catch(() => {}); };
+
+const signInOn = async (page) => {
+  await page.goto(`${BASE}/login`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await page.fill('input[type="email"], input[name="email"]', EMAIL).catch(() => {});
+  await page.fill('input[type="password"]', PASSWORD).catch(() => {});
+  await page.press('input[type="password"]', "Enter").catch(() => {});
+  await page.waitForLoadState("domcontentloaded");
+  const ready = await page.waitForFunction(() => window.__voice !== undefined, null, { timeout: 60_000 }).then(() => true).catch(() => false);
+  await page.evaluate(() => { for (const d of document.querySelectorAll("dialog[open]")) { try { d.close(); } catch { /* not ours */ } } }).catch(() => {});
+  await page.waitForSelector("[data-voice-talk]", { timeout: 30_000 }).catch(() => {});
+  return ready;
+};
+
+const talkAt = async (page) => {
+  for (let i = 0; i < 60; i += 1) {
+    const at = await page.evaluate(() => {
+      const node = document.querySelector("[data-voice-talk]");
+      if (node == null || node.disabled === true) return null;
+      const r = node.getBoundingClientRect();
+      if (r.width === 0) return null;
+      const x = Math.round(r.left + r.width / 2);
+      const y = Math.round(r.top + r.height / 2);
+      const hit = document.elementFromPoint(x, y);
+      return node.contains(hit) || hit === node ? { x, y } : null;
+    });
+    if (at != null) return at;
+    await sleep(500);
+  }
+  return null;
+};
+
+const CALL_READ = `(() => {
+  const screen = document.getElementById("voice-call");
+  const style = screen == null ? null : getComputedStyle(screen);
+  const stats = window.__voice?.stats?.() ?? null;
+  const rect = (sel) => { const n = document.querySelector(sel); if (n == null) return null;
+    const b = n.getBoundingClientRect();
+    return { w: Math.round(b.width), h: Math.round(b.height), x: Math.round(b.left), y: Math.round(b.top) }; };
+  return {
+    up: screen != null && screen.hidden === false,
+    rect: rect("#voice-call"), z: style?.zIndex ?? "", position: style?.position ?? "",
+    padBottom: style?.paddingBottom ?? "", padTop: style?.paddingTop ?? "",
+    word: (document.querySelector("[data-voice-call-state]")?.textContent ?? "").trim(),
+    status: (document.querySelector("[data-voice-call-status]")?.textContent ?? "").trim(),
+    mascot: document.querySelector("#voice-call titan-mascot") != null,
+    end: rect("[data-voice-call-end]"), mute: rect("[data-voice-call-mute]"), field: rect("[data-voice-call-input]"),
+    line: (() => { const n = document.getElementById("voice-line"); return n == null ? null : {
+      hidden: n.hidden === true, text: (n.textContent ?? "").replace(/\s+/g, " ").trim() }; })(),
+    spokenRows: [...document.querySelectorAll(".message-row")]
+      .filter((row) => row.querySelector(".voice-spoken-chip") != null)
+      .map((row) => (row.querySelector(".message-bubble")?.textContent ?? "").replace(/\s+/g, " ").trim()),
+    rows: [...document.querySelectorAll("#transcript .message-row")].length,
+    on: stats?.on === true, orb: stats?.orb ?? "", lastHeard: stats?.lastHeard ?? "", lastSaid: stats?.lastSaid ?? "",
+    notes: stats?.notes ?? [], talking: stats?.talking === true, micLevel: stats?.micLevel ?? 0, level: stats?.level ?? 0,
+    gap: (() => { const t = document.getElementById("transcript");
+      return t == null ? -1 : Math.round(t.scrollHeight - t.scrollTop - t.clientHeight); })(),
+  };
+})()`;
+
+step("VOICE-13: the call screen at 390x844, in WebKit, with the iPhone's insets restated");
+const { webkit } = await import(`${process.env.PW}/node_modules/playwright-core/index.mjs`);
+let webkitBrowser = null;
+try { webkitBrowser = await webkit.launch({ headless: true }); }
+catch (error) { info(`webkit would not launch on this Mac (${String(error?.message ?? error).split("\n")[0]}), so the screen is not measured in the iPhone's own engine`); }
+if (webkitBrowser != null) {
+  const context = await webkitBrowser.newContext({
+    userAgent: GATE_AGENT, permissions: ["microphone"],
+    viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, hasTouch: true, isMobile: true,
+  });
+  // WebKit has no fake capture device, so the stream is a real MediaStream out of a real Web Audio
+  // graph. It is a tone and not speech: what it proves is that the microphone opens and frames flow,
+  // never what the vendor heard.
+  await context.addInitScript(() => {
+    const Ctx = window.AudioContext ?? window.webkitAudioContext;
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: async () => {
+          const ctx = new Ctx();
+          try { await ctx.resume(); } catch { /* silence still renders */ }
+          const osc = ctx.createOscillator();
+          osc.frequency.value = 220;
+          const gain = ctx.createGain();
+          gain.gain.value = 0.3;
+          const dest = ctx.createMediaStreamDestination();
+          osc.connect(gain);
+          gain.connect(dest);
+          osc.start();
+          return dest.stream;
+        },
+        enumerateDevices: async () => [],
+      },
+    });
+  });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e).slice(0, 200)));
+  const ready = await signInOn(page);
+  check(ready, "the throwaway customer signs in on the iPhone's own engine", ready ? "" : `still at ${page.url()}`);
+  if (ready) {
+    await page.addStyleTag({ content: ":root { --sat: 59px; --sab: 34px; }" }).catch(() => {});
+    const at = await talkAt(page);
+    check(at != null, "a thumb really reaches the talk button at 390x844", JSON.stringify(at));
+    if (at != null) {
+      const pressedAt = Date.now();
+      await page.touchscreen.tap(at.x, at.y);
+      await page.waitForFunction(() => document.getElementById("voice-call")?.hidden === false, null, { timeout: 10_000 }).catch(() => {});
+      const opened = await page.evaluate(CALL_READ);
+      check(opened.up === true, "one press brings the call screen up on the live server", `${Date.now() - pressedAt} ms, ${JSON.stringify(opened.rect)}`);
+      check(opened.rect?.w === 390 && opened.rect?.h === 844 && opened.position === "fixed" && opened.z === "80",
+        "covering the viewport, fixed, at z-index 80", `${JSON.stringify(opened.rect)} ${opened.position} z ${opened.z}`);
+      info(`the screen's own padding with the insets restated: top ${opened.padTop}, bottom ${opened.padBottom}. THIS is the reading Playwright cannot take on its own, and the screenshots beside it are what a person can look at.`);
+      check(opened.end != null && opened.end.h >= 44 && opened.mute != null && opened.mute.h >= 44 && opened.field != null && opened.field.h >= 44,
+        "with all three controls at 44 px or more and on screen",
+        `end ${JSON.stringify(opened.end)} mute ${JSON.stringify(opened.mute)} field ${JSON.stringify(opened.field)}`);
+      await callShots(page, "webkit-connecting");
+      const words = new Set([opened.word]);
+      for (let i = 0; i < 40; i += 1) {
+        const now = await page.evaluate(CALL_READ);
+        words.add(now.word);
+        if (now.up === false) break;
+        if (now.word === "Listening") { await callShots(page, "webkit-listening"); }
+        await sleep(500);
+        if (i === 6) { await page.tap("[data-voice-call-mute]").catch(() => {}); await sleep(400); await callShots(page, "webkit-muted"); await page.tap("[data-voice-call-mute]").catch(() => {}); }
+      }
+      const after = await page.evaluate(CALL_READ);
+      info(`the words this run saw on the live server: ${JSON.stringify([...words])}`);
+      if (after.up === true) {
+        await callShots(page, "webkit-live");
+        await page.tap("[data-voice-call-end]").catch(() => {});
+        await page.waitForFunction(() => document.getElementById("voice-call")?.hidden === true, null, { timeout: 6000 }).catch(() => {});
+        const ended = await page.evaluate(CALL_READ);
+        check(ended.up === false && ended.on === false, "and End takes it away and hangs up", JSON.stringify({ up: ended.up, on: ended.on }));
+        check(ended.gap >= 0 && ended.gap < 90, "leaving the chat at its newest line", `${ended.gap} px from the bottom`);
+      } else {
+        // The refusal path, measured live. Written in advance rather than discovered: a workspace with
+        // talking switched off closes the screen and puts ONE plain sentence on the shelf's own row.
+        check(after.notes.length <= 1, "the refusal closed the screen and left at most one sentence standing", JSON.stringify(after.notes));
+        check(after.line != null && after.line.hidden === false && after.line.text.length > 20,
+          "and the sentence a person reads is in its one home on the shelf, not on a screen that is gone",
+          JSON.stringify(after.line?.text));
+        info("A REAL SPOKEN TURN IS NOT MEASURED HERE: the screen opened, the relay refused the line, and the refusal path is what this run measured instead.");
+      }
+      await callShots(page, "webkit-chat-after");
+    }
+    check(errors.length === 0, "and WebKit threw nothing through any of it", errors.slice(0, 2).join(" | ") || "clean");
+  }
+  await webkitBrowser.close();
+}
+
+step("VOICE-13: two real spoken turns through the real vendor, in Chromium with speech as the microphone");
+if (speechWav == null) info("skipped: no speech file on this Mac");
+else {
+  const spoken = await chromium.launch({
+    ...(process.env.CHROME ? { executablePath: process.env.CHROME } : {}),
+    headless: true,
+    args: ["--no-sandbox", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
+      `--use-file-for-fake-audio-capture=${speechWav}`, "--autoplay-policy=no-user-gesture-required"],
+  });
+  try {
+    const context = await spoken.newContext({
+      userAgent: GATE_AGENT, permissions: ["microphone"],
+      viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true,
+    });
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(String(e).slice(0, 200)));
+    const ready = await signInOn(page);
+    check(ready, "the throwaway customer signs in for the spoken turns", ready ? "" : `still at ${page.url()}`);
+    if (ready) {
+      const before = await page.evaluate(CALL_READ);
+      const at = await talkAt(page);
+      if (at == null) no("a press reaches the talk button for the spoken turns");
+      else {
+        await page.touchscreen.tap(at.x, at.y);
+        await page.waitForFunction(() => document.getElementById("voice-call")?.hidden === false, null, { timeout: 10_000 }).catch(() => {});
+        await callShots(page, "chromium-connecting");
+        // TWO TURNS AND NO MORE. The vendor bills by the minute and this is his key.
+        const seen = new Set();
+        let heard = [];
+        let said = [];
+        const deadline = Date.now() + 150_000;
+        while (Date.now() < deadline) {
+          const now = await page.evaluate(CALL_READ);
+          seen.add(now.word);
+          if (now.word === "Thinking") await callShots(page, "chromium-thinking");
+          if (now.word === "Talking") await callShots(page, "chromium-talking");
+          if (now.lastHeard.length > 0 && !heard.includes(now.lastHeard)) heard.push(now.lastHeard);
+          if (now.lastSaid.length > 0 && !said.includes(now.lastSaid)) said.push(now.lastSaid);
+          if (now.up === false) { info(`the call ended on its own after ${JSON.stringify(now.notes)}`); break; }
+          if (heard.length >= 2 && said.length >= 2) break;
+          await sleep(1000);
+        }
+        const live = await page.evaluate(CALL_READ);
+        info(`the microphone's own level on the live call: ${live.micLevel}; the playback analyser: ${live.level}`);
+        check(heard.length >= 1, "the real vendor heard the person and the relay handed the words to the bot",
+          heard.length === 0 ? "nothing was confirmed inside 150 s" : JSON.stringify(heard));
+        check(said.length >= 1, "and the bot answered out loud", said.length === 0 ? "no reply inside 150 s" : JSON.stringify(said.map((one) => one.slice(0, 120))));
+        info(`turns heard: ${heard.length}, replies spoken: ${said.length}, state words seen: ${JSON.stringify([...seen])}`);
+        if (live.up === true) {
+          await page.tap("[data-voice-call-end]").catch(() => {});
+          await page.waitForFunction(() => document.getElementById("voice-call")?.hidden === true, null, { timeout: 6000 }).catch(() => {});
+        }
+        const ended = await page.evaluate(CALL_READ);
+        await callShots(page, "chromium-chat-after");
+        check(ended.up === false, "End put the person back in the chat", String(ended.up));
+        const mine = ended.spokenRows.filter((one) => heard.includes(one));
+        check(mine.length >= Math.min(1, heard.length), "and the exchange is in the transcript with the Spoken chip on the person's lines",
+          `${ended.spokenRows.length} spoken row(s) in all, ${mine.length} of them this run's; the chat grew ${before.rows} -> ${ended.rows} rows`);
+        check(ended.gap >= 0 && ended.gap < 90, "scrolled to the newest line", `${ended.gap} px from the bottom`);
+      }
+      check(errors.length === 0, "and the console threw nothing during the spoken turns", errors.slice(0, 2).join(" | ") || "clean");
+    }
+  } finally { await spoken.close(); }
 }
 
 console.log(`\nR750 through console.titanium.bot: ${pass} pass, ${fail} fail`);
