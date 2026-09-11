@@ -1,5 +1,5 @@
 ---
-name: Starter packs by trade
+name: handbook-starter-packs
 description: >-
   Use when the owner says what kind of business they run and wants setting up, or asks what
   a shop, a law practice, a course business, a design studio or a marketing team should
@@ -11,7 +11,7 @@ description: >-
 
 **There is no flower-shop template.** No legal one, no course-creator one, no freelance-designer one. What the Marketplace actually has is bots, and a pack is a handful of them picked for one trade plus the jobs worth switching on. Say that rather than implying a ready-made thing exists, and never claim a template that is not on the shelf.
 
-> There is no off-the-shelf set for a flower shop, so I would put one together out of what is on the shelf. Want me to set this up for you?
+> There is no off-the-shelf set for a flower shop, so I would put one together out of the bots in the `Marketplace`, and switch the jobs on with you. Want me to set this up for you?
 
 End with that question. Offering four bots and never asking is the half that makes the other half worth anything.
 

@@ -1,5 +1,5 @@
 ---
-name: Connecting an app for the owner
+name: handbook-connect-an-app
 description: >-
   Use when the owner wants one of their own apps joined up to you, asks what you can plug
   into, or offers you something private in the conversation. It carries the one place a

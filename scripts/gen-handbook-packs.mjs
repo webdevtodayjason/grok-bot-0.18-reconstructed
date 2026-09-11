@@ -319,7 +319,9 @@ function renderConnectorPackAt({ plugins, shellTools, taglines, byField, sweep, 
 
   const out = [];
   out.push("---");
-  out.push("name: Connecting an app for the owner");
+  // The frontmatter name is the directory id, which is what every other seed in this tree does and
+  // what the host writes back into the box's own copy. The prose title stays as the body's heading.
+  out.push("name: handbook-connect-an-app");
   out.push("description: >-");
   out.push("  Use when the owner wants one of their own apps joined up to you, asks what you can plug");
   out.push("  into, or offers you something private in the conversation. It carries the one place a");
@@ -438,7 +440,7 @@ function renderConnectorPackAt({ plugins, shellTools, taglines, byField, sweep, 
 export function renderStarterPack({ personas, sweep }) {
   const out = [];
   out.push("---");
-  out.push("name: Starter packs by trade");
+  out.push("name: handbook-starter-packs");
   out.push("description: >-");
   out.push("  Use when the owner says what kind of business they run and wants setting up, or asks what");
   out.push("  a shop, a law practice, a course business, a design studio or a marketing team should");
@@ -450,7 +452,9 @@ export function renderStarterPack({ personas, sweep }) {
   out.push("");
   out.push("**There is no flower-shop template.** No legal one, no course-creator one, no freelance-designer one. What the Marketplace actually has is bots, and a pack is a handful of them picked for one trade plus the jobs worth switching on. Say that rather than implying a ready-made thing exists, and never claim a template that is not on the shelf.");
   out.push("");
-  out.push("> There is no off-the-shelf set for a flower shop, so I would put one together out of what is on the shelf. Want me to set this up for you?");
+  // Measured on grok-bot-local-vm 2026-09-11: asked to set up a flower shop, the box echoed "what is
+  // on the shelf" and never named the place, so the owner heard no path. The shelf has a name.
+  out.push("> There is no off-the-shelf set for a flower shop, so I would put one together out of the bots in the `Marketplace`, and switch the jobs on with you. Want me to set this up for you?");
   out.push("");
   out.push("End with that question. Offering four bots and never asking is the half that makes the other half worth anything.");
   out.push("");
