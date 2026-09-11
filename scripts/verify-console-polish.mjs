@@ -1473,6 +1473,54 @@ const centreOf = (page, selector) => page.evaluate((sel) => {
   return { x: r.x + r.width / 2, y: r.y + r.height / 2, text: el.textContent ?? "" };
 }, selector);
 
+// The pill is half transparent, so the colour Chrome reports for the chip's background is not the
+// colour an eye compares the text against: the ratio is only honest against the pill composited down
+// over whatever sits behind it. Walked in the page, so the number comes off what the relay is
+// actually serving, and the root's theme is flipped the way the toggle flips it -- the light theme is
+// a different pair of values with its own floor to clear. A gradient has no backgroundColor and is
+// skipped, which is why this is read on the chip's own flat surfaces and not on a cream plate.
+const chipContrast = (page, selector) => page.evaluate((sel) => {
+  const parse = (text) => {
+    const n = (String(text).match(/[\d.]+/g) ?? []).map(Number);
+    return n.length >= 3 ? { r: n[0], g: n[1], b: n[2], a: n.length > 3 ? n[3] : 1 } : null;
+  };
+  const lum = (c) => {
+    const f = [c.r, c.g, c.b].map((v) => { const u = v / 255; return u <= 0.03928 ? u / 12.92 : ((u + 0.055) / 1.055) ** 2.4; });
+    return 0.2126 * f[0] + 0.7152 * f[1] + 0.0722 * f[2];
+  };
+  const over = (top, back) => ({ r: top.a * top.r + (1 - top.a) * back.r, g: top.a * top.g + (1 - top.a) * back.g,
+    b: top.a * top.b + (1 - top.a) * back.b, a: 1 });
+  // Front to back: each ancestor only fills in the share still transparent in front of it.
+  const behind = (el) => {
+    let out = { r: 0, g: 0, b: 0, a: 0 };
+    for (let node = el; node; node = node.parentElement) {
+      const c = parse(getComputedStyle(node).backgroundColor);
+      if (!c || c.a === 0) continue;
+      const share = (1 - out.a) * c.a;
+      out = { r: out.r + c.r * share, g: out.g + c.g * share, b: out.b + c.b * share, a: out.a + share };
+      if (out.a >= 0.999) break;
+    }
+    return out;
+  };
+  const read = () => {
+    const chip = document.querySelector(sel);
+    if (!chip) return null;
+    const fg = parse(getComputedStyle(chip).color);
+    const pill = behind(chip);
+    if (!fg || pill.a < 0.999) return null;
+    const [one, two] = [lum(over(fg, pill)), lum(pill)];
+    return { ratio: Math.round(((Math.max(one, two) + 0.05) / (Math.min(one, two) + 0.05)) * 100) / 100,
+      fg: getComputedStyle(chip).color, pill: `rgb(${[pill.r, pill.g, pill.b].map(Math.round).join(", ")})` };
+  };
+  const root = document.documentElement;
+  const was = root.dataset.theme;
+  const ink = read();
+  root.dataset.theme = "mist";
+  const mist = read();
+  if (was == null) delete root.dataset.theme; else root.dataset.theme = was;
+  return { ink, mist };
+}, selector);
+
 // The relay serves whatever checkout it was started from, which is not necessarily the tree being
 // built. So: ask the relay for its app.js first. If the chip is already in it, this leg runs against
 // the page as shipped and says so. If it is not, these four files are served out of THIS tree
@@ -1536,9 +1584,10 @@ async function legChips(page) {
   const first = paint.chips[0];
   info(`chip now: ${first.color} on ${first.background}, ${first.border} border ${first.borderColor}, radius ${first.radius}, ${first.size} ${first.font}, overflow-wrap ${first.wrap}`);
   info("chip before (grok-bot-local-vm, Chrome 1440x1000, 2026-09-10 16:03 UTC): rgba(255, 255, 255, 0.94) on rgba(255, 255, 255, 0.1), 0px border, radius 5px, 13.8px, overflow-wrap normal");
-  check(first.color === "rgb(255, 107, 107)", "the chip is the red-pink Jason pointed at, not body white", first.color);
+  info("chip at CONSOLE-5, before 5b repainted it: rgb(255, 107, 107) on rgba(10, 16, 20, 0.62), border rgba(255, 107, 107, 0.3)");
+  check(first.color === "rgb(143, 217, 230)", "the chip is the muted cyan the console already uses, not body white and not the red-pink Jason called harsh", first.color);
   check(first.color !== "rgb(255, 111, 114)", "and never --danger-500, which reads as a failed turn", "#ff6f72 is the error colour and is not this");
-  check(first.border !== "0px", "it carries a hairline border", `${first.border} ${first.borderColor}`);
+  check(first.border !== "0px" && first.borderColor === "rgba(0, 200, 240, 0.25)", "it carries a hairline border in the same cyan", `${first.border} ${first.borderColor}`);
   check(/mono/i.test(first.font) || first.font.includes("ui-monospace"), "monospace", first.font);
   check(paint.chips.every((c) => c.wrap === "anywhere"), "a chip with nothing to break on wraps rather than overflowing", `overflow-wrap ${first.wrap}`);
   check(paint.chips.every((c) => c.cursor === "pointer" && c.role === "button" && c.tab === "0"),
@@ -1547,6 +1596,14 @@ async function legChips(page) {
   check(long != null && long.w <= paint.inner + 1 && long.h > first.h,
     "a whole draft line wraps inside the panel instead of running past its edge",
     long ? `${long.w}x${long.h} of ${paint.inner} wide, ${long.text.length} characters` : "no long chip drawn");
+
+  // CONSOLE-5b. Quiet is not the same as unreadable, so the floor is stated and measured rather than
+  // eyeballed: 4.5:1 in BOTH themes, against the pill as it actually composites down.
+  const contrast = await chipContrast(page, "#panel-content code.code-chip");
+  for (const [theme, got] of [["ink", contrast.ink], ["mist", contrast.mist]]) {
+    check(got != null && got.ratio >= 4.5, `${theme}: the chip text clears 4.5:1 against its own pill, composited down`,
+      got ? `${got.ratio}:1, ${got.fg} on ${got.pill}` : "nothing opaque under the chip to compare it against");
+  }
   await shoot(page, `chips-panel-${Date.now()}`);
 
   // The chip's own text is the agent's text. Read off the live DOM after the browser has reparsed
@@ -1676,7 +1733,10 @@ async function legChips(page) {
     return;
   }
   check(live.count >= 3, "a real agent's reply draws a chip per backticked span", `${live.count} chips: ${live.texts.join(", ")}`);
-  check(live.color === "rgb(255, 107, 107)", "and they are the same red-pink in the transcript as in the panel", `${live.color} on ${live.background}`);
+  check(live.color === "rgb(143, 217, 230)", "and they are the same muted cyan in the transcript as in the panel", `${live.color} on ${live.background}`);
+  const liveContrast = await chipContrast(page, "#transcript .message-row:not(.is-user) code.code-chip");
+  check(liveContrast.ink != null && liveContrast.ink.ratio >= 4.5, "and on the agent's own bubble it clears 4.5:1 too",
+    liveContrast.ink ? `${liveContrast.ink.ratio}:1, ${liveContrast.ink.fg} on ${liveContrast.ink.pill}` : "nothing opaque under the chip to compare it against");
   info("this sub-leg proves the RENDERER on a prompted reply. Whether the model reaches for backticks unprompted is the standing persona's sentence, which lives in the host bundle and needs the swap.");
   // Scrolled to before the shot. The first run of this leg measured three chips in the DOM and
   // photographed a transcript sitting twenty messages above them, which is a claim with a picture of

@@ -849,26 +849,46 @@ select:focus-visible {
    radius 5px, no border, overflow-wrap normal. That is body white on a white wash, which is why a
    channel name did not read as different from the sentence around it.
 
-   The colours are local to this block on purpose. They are NOT --danger-500 (#ff6f72, one shade
-   away and reserved for failure): every identifier in the error colour would read to the operator
-   as a failed turn, which is the trap host-notes-read-as-errors.md is about. And they are not in
-   tokens.css, which is shared and would be a needless collision. */
+   CONSOLE-5b, 2026-09-10. The first build painted the chip #ff6b6b, the red-pink copied off the
+   original's screenshot, and Jason's reading of it was that it stands out too harsh. The chip is
+   the console's own muted cyan now -- the family the "Accepted by the host" chip text and the Talk
+   button already sit in -- desaturated so a paragraph carrying five of them does not glow. Same
+   hue as the rest of the product, and quieter than the prose holding it rather than louder: on the
+   ink bubble the chip composites to 11.4:1 against its own pill where the white prose is 14.5:1.
+
+   The colours are local to this block on purpose. They are NOT --danger-500 (#ff6f72, the failure
+   colour, and one shade off the red-pink this replaced): every identifier in the error colour
+   would read to the operator as a failed turn, which is the trap host-notes-read-as-errors.md is
+   about. And they are not in tokens.css, which is shared and would be a needless collision. */
 :root {
-  --code-chip-fg: #ff6b6b;
+  --code-chip-fg: #8fd9e6;
   --code-chip-bg: rgba(10, 16, 20, 0.62);
-  --code-chip-edge: rgba(255, 107, 107, 0.30);
+  --code-chip-edge: rgba(0, 200, 240, 0.25);
   --code-chip-tick: #67cf86;
 }
 
-/* Mist is a light theme on a cream card, where #ff6b6b washes out. A darkened rose instead:
-   #b3364a on mist's own ground measures 5.4:1, so an identifier stays readable. The operator's own
-   bubble is a cream plate in BOTH themes, so it borrows the same values. */
+/* A pale cyan washes out on a light plate, so the light surfaces take a deep teal of the same hue.
+   It has to clear 4.5:1 on BOTH light plates a chip can land on, and they are not equally light:
+   mist's own card, and -- in ink -- the operator's cream bubble, whose gradient ends at
+   rgba(232, 216, 190, 0.9). #065561 composites to 6.9:1 on the first and 4.8:1 on the darker end
+   of the second. The edge stays the foreground at 0.24, as the rose one was. */
 [data-theme="mist"],
 .is-user .message-bubble {
-  --code-chip-fg: #b3364a;
-  --code-chip-bg: rgba(179, 54, 74, 0.08);
-  --code-chip-edge: rgba(179, 54, 74, 0.24);
+  --code-chip-fg: #065561;
+  --code-chip-bg: rgba(0, 200, 240, 0.10);
+  --code-chip-edge: rgba(6, 85, 97, 0.24);
   --code-chip-tick: #2f7d4f;
+}
+
+/* The operator's own bubble is a cream plate in ink and a DARK slate one in mist, so in mist it
+   takes the ink values back. Without this rule a deep teal lands on that slate at 1.9:1, which is
+   an identifier nobody can read -- the rose did the same at 1.9:1 and went unnoticed because the
+   surface is only reached by an operator who writes backticks. With these it is 10.4:1. */
+[data-theme="mist"] .is-user .message-bubble {
+  --code-chip-fg: #8fd9e6;
+  --code-chip-bg: rgba(10, 16, 20, 0.62);
+  --code-chip-edge: rgba(0, 200, 240, 0.25);
+  --code-chip-tick: #67cf86;
 }
 
 /* The box is the box the old rule had, to the pixel: 1px 5px of padding with no border becomes 0 4px

@@ -1372,16 +1372,48 @@ have been two rules arguing over one element with the later stylesheet winning b
 
 ### The colour
 
-`--code-chip-fg: #ff6b6b` in ink, `#b3364a` in mist. They are defined local to the CONSOLE-5 block in
-`styles.css`, not in `tokens.css`, which is shared and would be a needless collision.
+`--code-chip-fg: #8fd9e6` in ink, `#065561` on the light plates. They are defined local to the
+CONSOLE-5 block in `styles.css`, not in `tokens.css`, which is shared and would be a needless
+collision.
 
-They are **not** `--danger-500` (`#ff6f72`), which is one shade away and is the error colour. Every
-identifier painted in the error colour would read to Jason as a failed turn — the exact trap
+**CONSOLE-5b, 2026-09-10.** The first build copied the original's red-pink, `#ff6b6b`. Jason, looking
+at it on his own transcript: *"change that highlighted color to something different, one of the
+complementary colors we've got here, something that makes sense but blends and doesn't stand out so
+harsh."* So the chip is now the console's own muted cyan, the family the *"Accepted by the host"*
+chip text and the Talk button already sit in, desaturated so a paragraph carrying five chips does not
+glow. It is the same hue as the rest of the product instead of the one hot hue on the page, and it
+reads quieter than the prose holding it rather than louder.
+
+They are **not** `--danger-500` (`#ff6f72`), the error colour, which the red-pink sat one shade from.
+Every identifier painted in the error colour would read to Jason as a failed turn, the exact trap
 `host-notes-read-as-errors.md` is about. The gate asserts the difference rather than trusting it.
 
-Mist is a light theme on a cream card, where `#ff6b6b` washes out; `#b3364a` on mist's own ground
-measures **5.4:1**. The operator's own bubble is a cream plate in both themes, so it borrows the mist
-values.
+A pale cyan washes out on a light plate, so the light surfaces take a deep teal of the same hue. It
+has to clear the floor on **both** light plates a chip can land on, and they are not equally light:
+mist's own card, and, in ink, the operator's cream bubble, whose gradient ends at
+`rgba(232, 216, 190, 0.9)`. `#065561` composites to **6.9:1** on the first and **4.8:1** on the darker
+end of the second. The operator's bubble is a cream plate in ink and a **dark slate** one in mist, so
+in mist it takes the ink values back; without that rule a deep teal landed on that slate at **1.9:1**,
+and the rose before it was no better at 1.9:1. That is a chip nobody could read, on the one surface
+only an operator who writes backticks ever reaches.
+
+**The floor is 4.5:1 and it is measured, not eyeballed.** `verify-console-polish --chips` composites
+the pill down over whatever sits behind it, because the pill is half transparent and the colour
+Chrome reports for its background is not the colour an eye compares the text against, and it checks
+the ratio in both themes, flipping `data-theme` on the root the way the toggle does.
+
+**Measured after 5b, on `grok-bot-local-vm`, this Mac, in Chrome at 1440x1000, 2026-09-10:** the chip
+is `rgb(143, 217, 230)` on `rgba(10, 16, 20, 0.62)`, border `rgba(0, 200, 240, 0.25)`, radius 5 px,
+11.96 px `ui-monospace`, `overflow-wrap anywhere`, which is the CONSOLE-5 box to the pixel. In the
+panel the ink chip clears **11.6:1** against a pill that composites to `rgb(14, 21, 25)`, and the
+mist chip `rgb(6, 85, 97)` clears **5.78:1** on `rgb(195, 218, 218)`. On a live agent reply carrying
+three chips, on the agent's own bubble: **11.44:1** on `rgb(15, 23, 27)`. The white prose beside it
+composites to 14.5:1, which is the point: the chip is the quieter thing in the paragraph, not the
+louder one.
+
+Nothing else about the chip moved with 5b: the box, the radius, the monospace stack, the wrapping, the
+click that copies, the tick and the accessible name are the CONSOLE-5 values, and
+`tests/machine-room-code-chip-pixels.test.mjs` still holds every other node on its old pixel.
 
 ### The habit that fills the chips
 

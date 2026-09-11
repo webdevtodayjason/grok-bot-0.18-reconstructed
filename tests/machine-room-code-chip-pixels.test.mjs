@@ -254,9 +254,10 @@ test("CONSOLE-5 in a real browser: the chip is the only thing that moved", async
       assert.notEqual(now.borderWidth, "0px", `chip ${i} has the hairline the original had`);
       assert.equal(now.overflowWrap, "anywhere", `chip ${i} may break anywhere`);
     }
-    // Red-pink, not white, and not the error colour: --danger-500 is #ff6f72 and the chip is
-    // #ff6b6b on purpose, because the whole point is that these are not failures.
-    assert.equal(after.chips[0].color, "rgb(255, 107, 107)", "the chip is the red-pink Jason pointed at");
+    // The console's own muted cyan, not white and not the error colour: --danger-500 is #ff6f72, and
+    // CONSOLE-5b took the chip off the red-pink #ff6b6b that sat one shade from it, because an
+    // identifier in the failure colour reads as a failed turn and because that red stood out harsh.
+    assert.equal(after.chips[0].color, "rgb(143, 217, 230)", "the chip is the muted cyan, not body white");
     assert.notEqual(after.chips[0].color, "rgb(255, 111, 114)", "and never --danger-500, which reads as a failed turn");
 
     // 4. The long chip wraps INSIDE the bubble instead of running out past its edge.
