@@ -393,6 +393,15 @@ routed through it would be swallowed in silence. The back control carries no act
 reason. The sub-view's body is **not** sent the `titanbot:settings-section` event: that event is the
 section body's, and the section body is not on screen.
 
+**Where the sub-view and the contributed rows meet, because two items of one wave landed in this one
+branch.** `paint()` decides what the body is in three cases, in this order: a sub-view that is already on
+screen is left exactly as it is, and one that is not is drawn; with no sub-view up an ordinary section's
+body is rebuilt; and an owner's body (the two `mounts` shells) is kept, in which case the rows other
+modules contributed to it are reconciled on their own and only when the SET of them changed. So a sub-view
+never loses what the person was doing in it, a half-typed operator field survives a repaint, and neither
+case can silently take the other's branch. The sub-view is also the reason the reconcile is skipped while
+one is up: the contributed rows live beside the section body, which is not on screen.
+
 The Notifications body carries `[data-push-mount]`, which is `push-settings.js`'s whole mount
 contract and what its legs match on; `.settings-list` is the operator stack's class and appears on no
 body this module draws. Modules that fill a slot listen for the

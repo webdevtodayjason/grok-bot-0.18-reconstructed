@@ -867,6 +867,17 @@ a private window, a browser set to refuse site data: in every one of those the b
 of it and the only thing lost is that the choice does not travel. With nothing stored anywhere the answer
 is **holding**, because a microphone that is open until you say otherwise is not a default.
 
+**And an answer that was already in the air when you chose does not land at all.** The boot read of this
+door and a press are two producers of one value, so the read carries the time it was asked at and an answer
+older than this page's own choice is thrown away: nothing is stored, nothing is painted, and the door has
+the newer value anyway because the press wrote it there. This is the same rule the settings surface holds
+for its own rows (SETTINGS-3, `docs/SETTINGS.md`), one layer down, and it was found by measurement rather
+than by reading: **MEASURED on MacBook-Pro.local, real Chrome, 2026-09-11, `verify-voice --leg overlay` at
+1440x900 and 390x844** — both always-listening combinations came up in *holding* before the guard, with the
+microphone shutting between presses and the Talk mode row reading *push to talk* while the door held always
+listening. 4 of 137 checks before, **137 of 137** after. A unit case in `tests/machine-room-voice.test.mjs`
+fails without it.
+
 **An answer that lands never cuts a call in half.** The settings row reaches the value through one door,
 `setTalkMode`, and that door ends the call you are in when the mode really changes — the alternative is a
 live microphone whose control has changed meaning underneath you. A value arriving from the route goes
