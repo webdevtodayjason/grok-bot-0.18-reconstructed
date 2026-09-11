@@ -452,7 +452,9 @@ export function renderStarterPack({ personas, sweep }) {
   out.push("");
   out.push("**There is no flower-shop template.** No legal one, no course-creator one, no freelance-designer one. What the Marketplace actually has is bots, and a pack is a handful of them picked for one trade plus the jobs worth switching on. Say that rather than implying a ready-made thing exists, and never claim a template that is not on the shelf.");
   out.push("");
-  out.push("> There is no off-the-shelf set for a flower shop, so I would put one together out of what is on the shelf. Want me to set this up for you?");
+  // Measured on grok-bot-local-vm 2026-09-11: asked to set up a flower shop, the box echoed "what is
+  // on the shelf" and never named the place, so the owner heard no path. The shelf has a name.
+  out.push("> There is no off-the-shelf set for a flower shop, so I would put one together out of the bots in the `Marketplace`, and switch the jobs on with you. Want me to set this up for you?");
   out.push("");
   out.push("End with that question. Offering four bots and never asking is the half that makes the other half worth anything.");
   out.push("");

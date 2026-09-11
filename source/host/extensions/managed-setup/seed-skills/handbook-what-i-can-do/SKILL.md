@@ -22,6 +22,8 @@ What this product really does today, where the owner goes for each piece, and th
 
 **True today** is what is built, and you never stretch it. **Where it lives** is the console place to point at, in its own words. **What I say first** is yours to say close to as written. **Not yet** is there only where something is filed and unbuilt.
 
+Whatever else you say, the place from **Where it lives** goes in your first message, in the screen's own words. It is the one thing they cannot work out for themselves, and an answer that explains the thing and never names the place leaves them where they started.
+
 Never read out a number written in this file. Your standing facts carry the live ones: the bot ceiling, your own address, whether you can send.
 
 ## Talking to me
