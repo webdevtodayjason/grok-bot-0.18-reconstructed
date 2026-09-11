@@ -31,6 +31,11 @@
 //                   three growing partials, one final, and one heard-confirmed whose text is
 //                   byte-identical to the tool argument and whose words are the words on the spoken
 //                   row in the transcript. Then the turns that never become a row.
+//   --leg person    VOICE-10: the talk mode follows the PERSON and not the browser. Always listening is
+//                   chosen in one browser, a SECOND browser signed in as the same person opens on it at
+//                   first paint with nothing pressed, and a third with no stored value and the route
+//                   blocked -- the private window -- still opens on push to talk. No box, no vendor: the
+//                   only thing dialled is the settings door.
 //
 // WHY A REFUSAL IS NEVER A DESTROYED SOCKET, which four of these legs exist to hold the line on.
 // MEASURED on this Mac 2026-09-09: an unknown upgrade path on this relay answers 0 bytes with no
@@ -67,7 +72,7 @@ const GATE_AGENT = gateUserAgent(import.meta.url);
 const MACHINE = process.env.GATE_MACHINE ?? `${os.hostname()} (${os.platform()} ${os.arch()})`;
 const GATEWAY = process.env.SAND_GATEWAY_URL ?? "http://127.0.0.1:1340";
 
-const LEGS = ["cp", "relay", "nokey", "caps", "origin", "refused", "browser", "frames", "overlay"];
+const LEGS = ["cp", "relay", "nokey", "caps", "origin", "refused", "browser", "frames", "overlay", "person"];
 const leg = (() => {
   const at = process.argv.indexOf("--leg");
   return at === -1 ? "" : String(process.argv[at + 1] ?? "");
@@ -87,6 +92,8 @@ if (process.argv.includes("--help") || process.argv.includes("-h") || leg.length
     "  relay    a relay against a stub vendor: the accepted socket, the ready frame, the claim first.",
     "  nokey    an empty voice.json answers one plain sentence over an ACCEPTED socket, and real",
     "           Chrome proves the footer does not move and that talk mode can be left.",
+    "  person   VOICE-10: the talk mode follows the person to a second browser, and a private window",
+    "           with no stored value and no route answer still opens on push to talk.",
     "  caps     a one minute policy refuses in words.",
     "  origin   a cross-origin upgrade is refused in words, never by a destroyed socket.",
     "  refused  a vendor that answers 401, and an address with nothing behind it: one sentence each.",
@@ -396,6 +403,19 @@ function requireTheOtherItems(forBrowser = false) {
  * A relay on loopback with a temp auth record, a temp tenant state directory, and the vendor address
  * pointed at the stub. Never ui/auth.json: that is somebody's working relay.
  */
+/**
+ * A port nothing is on, handed back the moment it is known to be free. The legs with fixed ports are
+ * left as they are -- they are load-bearing for the control-plane pairing above -- but a leg that only
+ * wants A relay should never be able to find somebody else's.
+ */
+async function freePort() {
+  const { createServer } = await import("node:net");
+  return new Promise((resolve) => {
+    const server = createServer();
+    server.listen(0, "127.0.0.1", () => { const { port } = server.address(); server.close(() => resolve(port)); });
+  });
+}
+
 async function startRelay({ port, voiceJson, stubUrl, policyUrl = "", relayToken = "", ledgerJsonl = "" }) {
   const { newAuthRecord } = await import(path.join(repoRoot, "ui", "auth.mjs"));
   const dir = mkdtempSync(path.join(os.tmpdir(), "voice-gate-relay-"));
@@ -1660,6 +1680,46 @@ async function legOverlay() {
         && document.getElementById("voice-overlay")?.closest(".control-shelf") == null);
       check(inSpace, "and it really is inside .conversation-space and outside .control-shelf", String(inSpace));
 
+      // THE FIRST COMBINATION DRIVES THE MODE THROUGH THE ROW A PERSON REALLY USES, and with no settle.
+      //
+      // Every other combination sets it with setTalkMode(), which proves the BEHAVIOUR; that is why 48
+      // of 48 green never saw SETTINGS-3, where the control on screen went back to the old value while
+      // the module and this browser both held the new one. So once per run the mode is changed the way a
+      // person changes it -- open Settings, change the select the instant the row exists -- and all three
+      // are read back rather than only the module.
+      if (turn === 1) {
+        const throughRow = await page.evaluate(async (want) => {
+          window.__voice.setTalkMode(want === "push" ? "always" : "push");
+          window.__mrSettings?.open?.("general", null);
+          // The row may not be on the synchronous paint of a FIRST open, because the facts are cold. One
+          // frame of patience, and no more: a settle is what hides the defect.
+          let select = document.querySelector('[data-setting-row="talk-mode"] select');
+          if (select == null) {
+            await new Promise((resolve) => setTimeout(resolve, 1200));
+            window.__mrSettings?.open?.("general", null);
+            select = document.querySelector('[data-setting-row="talk-mode"] select');
+          }
+          if (select == null) return { ok: false, why: "no Talk mode row on this page" };
+          select.value = want;
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+          return { ok: true };
+        }, mode);
+        if (throughRow.ok !== true) {
+          skip("the mode is driven through the Talk mode row a person really uses", throughRow.why);
+        } else {
+          await page.waitForTimeout(2000);
+          const agreed = await page.evaluate(() => ({
+            field: document.querySelector('[data-setting-row="talk-mode"] select')?.value ?? "gone",
+            mode: window.__voice?.talkMode?.() ?? "",
+            stored: (() => { try { return window.localStorage.getItem(window.__voice._TALK_MODE_KEY); } catch { return null; } })(),
+          }));
+          check(agreed.field === mode && agreed.mode === mode && agreed.stored === mode,
+            "the mode driven through the settings row with NO settle: the control, the module and this browser all agree (SETTINGS-3)",
+            JSON.stringify(agreed));
+        }
+        await page.evaluate(() => document.getElementById("panel-dialog")?.close());
+        await page.waitForTimeout(300);
+      }
       await page.evaluate((m) => window.__voice.setTalkMode(m), mode);
       const set = await page.evaluate(() => window.__voice.talkMode());
       check(set === mode, `the talk mode is ${mode}`, `the page says ${set}`);
@@ -1987,6 +2047,174 @@ async function legOverlay() {
   return;
 }
 
+/**
+ * VOICE-10 -- the talk mode follows the PERSON, with this browser as the fallback.
+ *
+ * WHAT IS BEING MEASURED AND WHAT IS NOT. The row was filed because a person who chooses always
+ * listening on a laptop got press-and-hold on their phone: the value lived in localStorage and nowhere
+ * else. It now lives on the voice door keyed on the session's own person claim -- the same key the device
+ * list and the notification settings use -- and the browser's copy is the FALLBACK, which is what still
+ * works in a private window and against a relay that has never heard of the field.
+ *
+ * So three contexts, which are the three cases:
+ *
+ *   A  chooses always listening. Its own storage holds it and the door is told.
+ *   B  a brand-new browser, no storage at all, signed in as the SAME person: it has to open on always
+ *      listening at first paint, with nothing pressed. This is the whole of the row.
+ *   C  a brand-new browser with the settings door BLOCKED -- the private window and the older relay,
+ *      which are the same case from the page's side: nothing comes back, and push to talk is still the
+ *      answer, because a microphone that is open until you say otherwise is not a default.
+ *
+ * No box and no vendor. The only thing dialled here is /voice/settings, so this leg is cheap and does not
+ * want the host's one global active agent.
+ */
+async function legPerson() {
+  console.log(`verify-voice --leg person on ${MACHINE}`);
+  requireTheOtherItems(true);
+
+  const dir = mkdtempSync(path.join(os.tmpdir(), "voice-gate-person-"));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  const voiceJson = path.join(dir, "voice.json");
+  // Talking switched OFF on purpose. This leg never opens a line, and a workspace with no key is the
+  // honest shape of every box on this Mac.
+  writeFileSync(voiceJson, `${JSON.stringify({ enabled: false, vendor: "xai" })}\n`, { mode: 0o600 });
+
+  // A FREE PORT, ASKED FOR RATHER THAN ASSUMED, and this is the lesson the overlay leg already carries
+  // in writing: a relay that cannot bind dies, `startRelay`'s readiness probe is answered by whatever IS
+  // on that port, and the leg then measures somebody else's service. MEASURED while building this -- a
+  // stale relay from an earlier attempt held the fixed port, the login page never took the password, and
+  // every check read `undefined`.
+  const relay = await startRelay({
+    port: await freePort(),
+    voiceJson, stubUrl: "ws://127.0.0.1:9/never",
+  });
+
+  const { chromium } = await loadPlaywright();
+  const browser = await chromium.launch();
+  cleanups.push(() => { try { browser.close(); } catch { /* gone */ } });
+
+  // A GATE THAT CANNOT SAY WHY IS ONE THE NEXT PERSON DEBUGS BY GUESSING. If the console does not boot
+  // -- a login that did not take, a host gateway that is not up, an asset that did not serve -- every
+  // check below reads `undefined` and reports three defects that are one condition. So this says so
+  // once, with the URL it ended on and what the page threw.
+  const signInOn = async (context, who) => {
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", (error) => errors.push(String(error)));
+    await page.goto(`${relay.base}/login`, { waitUntil: "domcontentloaded" });
+    await page.fill('input[type="password"]', relay.password).catch(() => {});
+    await page.press('input[type="password"]', "Enter").catch(() => {});
+    await page.waitForLoadState("domcontentloaded");
+    const booted = await page.waitForFunction(() => window.__voice != null, null, { timeout: 45_000 })
+      .then(() => true).catch(() => false);
+    if (!booted) {
+      const where = await page.evaluate(() => ({
+        url: location.pathname,
+        login: document.querySelector('input[type="password"]') != null,
+        talk: document.querySelector("[data-voice-talk]") != null,
+        settings: window.__mrSettings != null,
+      })).catch(() => null);
+      check(false, `${who}: the console booted and the voice module is on the page`,
+        `${JSON.stringify(where)} · page errors ${errors.slice(0, 2).join(" | ") || "none"} · relay ${relay.log().split("\n").slice(-4).join(" | ").slice(0, 400)}`);
+    }
+    return { page, errors, booted };
+  };
+
+  // ---- A: one browser chooses -----------------------------------------------------------------------
+  step("one browser chooses always listening");
+  const first = await browser.newContext({ userAgent: GATE_AGENT, viewport: { width: 1440, height: 900 } });
+  const a = await signInOn(first, "the first browser");
+  if (!a.booted) { await first.close(); return; }
+  const chose = await a.page.evaluate(async () => {
+    const was = window.__voice.talkMode();
+    window.__voice.setTalkMode("always");
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    return {
+      was,
+      now: window.__voice.talkMode(),
+      stored: (() => { try { return window.localStorage.getItem(window.__voice._TALK_MODE_KEY); } catch { return null; } })(),
+      onDoor: (await fetch("/voice/settings", { headers: { accept: "application/json" } }).then((r) => r.json())).talkMode ?? null,
+    };
+  });
+  check(chose.now === "always" && chose.stored === "always", "this browser holds it, which is the fallback and is written first",
+    JSON.stringify({ was: chose.was, now: chose.now, stored: chose.stored }));
+  check(chose.onDoor === "always", "and the person's own door was told, which is the half the row was filed for",
+    `GET /voice/settings answers talkMode ${JSON.stringify(chose.onDoor)}`);
+  check(a.errors.length === 0, "and nothing threw", a.errors.slice(0, 2).join(" | ") || "clean");
+  await first.close();
+
+  // ---- B: a second browser, same person, nothing pressed ------------------------------------------
+  step("a second browser signed in as the same person opens on it, at first paint, with nothing pressed");
+  const second = await browser.newContext({ userAgent: GATE_AGENT, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, deviceScaleFactor: 3 });
+  const b = await signInOn(second, "the second browser");
+  if (!b.booted) { await second.close(); return; }
+  const fresh = await b.page.evaluate(() => ({
+    storedAtFirstPaint: (() => { try { return window.localStorage.getItem(window.__voice._TALK_MODE_KEY); } catch { return null; } })(),
+    atFirstPaint: window.__voice.talkMode(),
+  }));
+  // A BROWSER WITH NOTHING STORED IS THE CONDITION, said before the claim: if this context had a stored
+  // value the leg would be measuring localStorage and not the door.
+  check(fresh.storedAtFirstPaint == null || fresh.storedAtFirstPaint === "push",
+    "this browser really starts with nothing of its own, so what it ends on came from the door",
+    `stored at first paint ${JSON.stringify(fresh.storedAtFirstPaint)}, mode ${fresh.atFirstPaint}`);
+  const adopted = await b.page.waitForFunction(() => window.__voice.talkMode() === "always", null, { timeout: 15_000 })
+    .then(() => true).catch(() => false);
+  const landed = await b.page.evaluate(() => ({
+    mode: window.__voice.talkMode(),
+    stored: (() => { try { return window.localStorage.getItem(window.__voice._TALK_MODE_KEY); } catch { return null; } })(),
+    pressed: window.__voice.stats().sent,
+    on: window.__voice._state.on,
+  }));
+  check(adopted && landed.mode === "always", "the second browser is on always listening without a press",
+    JSON.stringify(landed));
+  check(landed.pressed === 0 && landed.on === false, "and nothing was pressed and no line was opened to get there",
+    `${landed.pressed} frame(s) sent, line ${landed.on ? "up" : "down"}`);
+  // AND THE ROW ON SCREEN SAYS SO, because a module that knows and a control that does not is SETTINGS-3.
+  //
+  // THE WAIT DOES THE OPENING, and that is the lesson rather than a convenience. __mrSettings exists as
+  // soon as its script runs, but __mrUi.openPanel is app.js's and arrives later; open() called before it
+  // does answers FALSE and nothing reopens. MEASURED while building this: a single open() a second after
+  // boot, followed by a 20 s wait for the row, reported the row missing on a page that draws it at both
+  // viewports. So the poll asks for the surface until it is really openable, then waits for the row. It
+  // is not a settle that hides a race -- the change-racing-a-read window is measured with no settle at
+  // all by scripts/verify-settings.mjs -- it is the row existing at all.
+  const drawn = await b.page.waitForFunction(() => {
+    if (document.querySelector('[data-setting-row="talk-mode"] select') != null) return true;
+    try { window.__mrSettings?.open?.("general", null); } catch { /* not openable yet */ }
+    return false;
+  }, null, { timeout: 25_000, polling: 500 }).then(() => true).catch(() => false);
+  const row = await b.page.evaluate(() => ({
+    field: document.querySelector('[data-setting-row="talk-mode"] select')?.value ?? "gone",
+    section: document.querySelector('[data-setting-row="talk-mode"]')?.closest("[data-settings-section]")?.dataset.settingsSection ?? "",
+  }));
+  check(drawn && row.field === "always", "and the Talk mode row on that second browser opens reading always listening",
+    JSON.stringify(row));
+  check(b.errors.length === 0, "and nothing threw", b.errors.slice(0, 2).join(" | ") || "clean");
+  await second.close();
+
+  // ---- C: the private window, and the relay that never heard of the field -------------------------
+  step("a browser with nothing stored and no answer from the door still opens on push to talk");
+  const third = await browser.newContext({ userAgent: GATE_AGENT, viewport: { width: 1440, height: 900 } });
+  // BLOCKED, not slowed. This is the private window that refuses site data and the older relay that
+  // answers no such field, which from the page's side are the same thing: nothing comes back.
+  await third.route("**/voice/settings", (route) => route.abort());
+  const c = await signInOn(third, "the third browser");
+  if (!c.booted) { await third.close(); return; }
+  await c.page.waitForTimeout(2500);
+  const fallback = await c.page.evaluate(() => ({
+    mode: window.__voice.talkMode(),
+    stored: (() => { try { return window.localStorage.getItem(window.__voice._TALK_MODE_KEY); } catch { return null; } })(),
+  }));
+  check(fallback.mode === "push", "push to talk, which is the mode that cannot leave a microphone open",
+    JSON.stringify(fallback));
+  check(c.errors.length === 0, "and a blocked settings door threw nothing on the page", c.errors.slice(0, 2).join(" | ") || "clean");
+  await third.close();
+
+  step("what this leg did NOT measure, said out loud");
+  info("no line was opened and no vendor was dialled: this leg is about where the choice is kept, not about talking.");
+  info(`both browsers signed in through the instance password door, so the person key is "" on this relay -- the same key every other per-person read on it uses. Two NAMED accounts sharing one workspace is the control plane's shape and is measured on the R750.`);
+}
+
 // ---- run one leg ---------------------------------------------------------------------------------
 
 try {
@@ -1999,6 +2227,7 @@ try {
   else if (leg === "browser") await legBrowser();
   else if (leg === "frames") await legFrames();
   else if (leg === "overlay") await legOverlay();
+  else if (leg === "person") await legPerson();
 } catch (error) {
   failures += 1;
   console.log(`\n  FAIL  the leg threw: ${String(error?.stack ?? error).split("\n").slice(0, 4).join(" | ")}`);

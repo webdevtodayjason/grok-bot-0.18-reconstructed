@@ -177,8 +177,12 @@
   // Bounded at two seconds, because the relay drops audio more than three seconds ahead of its own
   // wall clock and counts it as a held frame.
   const PENDING_FRAME_CAP = 20;
-  // Where the choice is remembered. Per browser, beside Theme and Microphone on the same settings
-  // section, and docs/VOICE.md says in those words that per browser is not per person.
+  // Where the choice is remembered IN THIS BROWSER, beside Theme and Microphone on the same settings
+  // section. Since VOICE-10 this is the FALLBACK rather than the whole of it: the value also travels on
+  // the person's own key on /voice/settings, so a choice made on a laptop is there on a phone. This copy
+  // is what still works in a private window, in a browser that refuses site data, and against a relay
+  // that has never heard of the field -- and it is written FIRST, because the button is live before any
+  // route has answered. docs/VOICE.md 13 says which half is which.
   const TALK_MODE_KEY = "titanbot.voice.talkMode";
 
   const sentenceFor = (condition) => NOTES[condition] ?? NOTES["line-dropped"];
@@ -1107,9 +1111,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   //
   // THIS BROWSER, and the row that sets it sits under General > System beside Theme and Microphone,
   // which are remembered the same way. It is deliberately NOT /voice/settings: that is one file per
-  // WORKSPACE, and two people sharing one would fight over how their own button behaves. Per browser
-  // is not per person, and docs/VOICE.md says so in those words rather than leaving it to be
-  // discovered on a second device.
+  // WORKSPACE, and two people sharing one would fight over how their own button behaves. VOICE-10 is what
+  // closed that: the value travels on that door keyed on the session's own PERSON claim -- the same key
+  // the device list and the notification settings use -- so the file is still one per workspace and the
+  // choice is still one per person. This browser's copy below stays as the fallback.
   //
   // The module owns the value rather than the row, because the button is live the moment the console
   // paints and long before any settings surface has been opened.
@@ -1136,7 +1141,38 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     const changed = next !== state.talkMode;
     state.talkMode = next;
     writeStoredTalkMode(next);
+    // VOICE-10. AND ON THE PERSON'S OWN DOOR, so the choice follows them to their phone.
+    //
+    // This browser's copy above is written FIRST and is the behaviour. The route is told after, never
+    // waited for, and never able to fail the press: a relay that refuses, a relay that never answers, a
+    // private window that refuses site data -- each of those leaves the button doing exactly what was
+    // asked of it, and the only thing lost is that the choice does not travel. docs/VOICE.md 13 says
+    // which half is which.
+    void writeSettings({ talkMode: next }).then((saved) => { if (saved != null) state.settings = saved; }).catch(() => {});
     if (changed && state.on) { stop(); return next; }
+    paint();
+    return next;
+  }
+
+  /**
+   * VOICE-10. A talk mode that arrived from the person's own door rather than from a press.
+   *
+   * It deliberately does NOT go through setTalkMode. That door ends the call you are in when the mode
+   * really changes, which is right for a person choosing and wrong for an answer landing on its own --
+   * nobody pressed anything, and cutting a live call because a route answered is a microphone closing
+   * for no reason a person on the page could account for. A call that is up keeps the mode it was opened
+   * under and the answer is taken on the next boot.
+   *
+   * An unknown or absent value is no answer at all: this person has never chosen, and what this browser
+   * holds stays the behaviour.
+   */
+  function adoptTalkMode(mode) {
+    if (!TALK_MODES.includes(String(mode ?? ""))) return state.talkMode;
+    const next = talkModeOf(mode);
+    if (next === state.talkMode) return next;
+    if (state.on) return state.talkMode;
+    state.talkMode = next;
+    writeStoredTalkMode(next);
     paint();
     return next;
   }
@@ -1470,6 +1506,190 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     };
   }
 
+  // ------------------------------------------------------------------ VOICE-8: the operator's four rows
+  //
+  // WHAT WAS LOST AND WHY IT IS HERE. KEYS-1 deleted the Voice card whole, correctly: the key field on
+  // it was the operator's and belongs in the super admin console. Four operator controls went with it --
+  // which service does the talking, which model, which voice, and which assistant every spoken turn goes
+  // to -- and only two customer rows replaced them. The relay never stopped accepting those four writes,
+  // so for a day the only way to change the voice service was to edit a file on the server, which is
+  // exactly the hand operation the product is not allowed to need.
+  //
+  // They come back as ROWS on the settings surface's own registry, in the Operator section's Talking
+  // group, `operatorOnly`, so a customer never sees them. They carry the SAME four attributes the old
+  // card carried -- data-voice-vendor, data-voice-model, data-voice-voice, data-voice-agent -- so the
+  // gate's existing selectors measure the real thing rather than a new name for it.
+  //
+  // THEY CARRY NO data-settings-action, on purpose. The surface's act() has no default branch: an action
+  // it does not know is swallowed with no error and no toast, which is a control that looks wired and is
+  // not. So each one wires its own listener inside fill(), idempotently, which is the precedent
+  // push-settings.js set with its own bind().
+  //
+  // AND THE DOOR BEHIND THEM IS SHUT THE SAME WAY: ui/voice-edge.mjs refuses all four from a workspace
+  // that is not the operator's, in words. A client-side gate is not a gate -- these four are billed to
+  // his key.
+  const TALKING_ROWS = [
+    {
+      id: "voice-service", order: 10, label: "Service",
+      line: "Which service does the talking. The two are billed differently.",
+      // The labels come off the route and name no vendor: "flat rate for each minute you talk" and
+      // "charged by how much is said, not by the minute". That is a billing shape and not a comparison.
+      control: () => `<div class="setting-control"><select aria-label="Service" data-voice-vendor></select></div>`,
+    },
+    {
+      id: "voice-model", order: 20, label: "Model",
+      line: "Leave it empty and the service uses its own.",
+      control: () => `<div class="setting-control setting-control-field">`
+        + `<input type="text" autocomplete="off" placeholder="The service's own" aria-label="Model" data-voice-model data-settings-value />`
+        + `<button class="ghost-button" type="button" data-voice-save="model">Save</button></div>`,
+    },
+    {
+      id: "voice-voice", order: 30, label: "Voice",
+      line: "The voice it answers in. Leave it empty and the service uses its own.",
+      control: () => `<div class="setting-control setting-control-field">`
+        + `<input type="text" autocomplete="off" placeholder="The service's own" aria-label="Voice" data-voice-voice data-settings-value />`
+        + `<button class="ghost-button" type="button" data-voice-save="voice">Save</button></div>`,
+    },
+    {
+      id: "voice-agent", order: 40, label: "Who you are talking to",
+      line: "The head of your team, normally. Everything you say goes to this one assistant.",
+      control: () => `<div class="setting-control"><select aria-label="Who you are talking to" data-voice-agent></select></div>`,
+    },
+  ];
+
+  // What an empty agentId means, said out loud on the control rather than left as a blank option
+  // nobody can read. The relay works it out and prints which one it chose.
+  const ANY_AGENT = "Whoever is leading the team";
+
+  const escapeForRow = (value) => String(value ?? "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+  // ONE read for the four rows, not four. Every contributed row's fill() runs on every paint of its
+  // section, so four rows asking the door themselves would be four requests per paint. The answer is
+  // held for three seconds, which covers one paint and the repaint the settings surface fires when its
+  // facts land, and a save replaces it with what the door answered.
+  let talkingAsk = null;
+  let talkingAskAt = 0;
+  function talkingSettings(force = false) {
+    const nowMs = Date.now();
+    if (!force && talkingAsk != null && nowMs - talkingAskAt < 3000) return talkingAsk;
+    talkingAskAt = nowMs;
+    talkingAsk = readSettings().then((answer) => { state.settings = answer; return answer; }).catch(() => null);
+    return talkingAsk;
+  }
+
+  /**
+   * The values, from the door's own answer.
+   *
+   * A TEXT FIELD SOMEBODY IS TYPING IN IS LEFT ALONE, because a repaint landing mid-word would take the
+   * half-typed value out of their hands -- the same failure the settings surface's own keep rule exists
+   * to stop. A select is different: its value is one of a fixed set and the door's answer is the truth
+   * about which, so it is always written.
+   */
+  function paintTalking(root, settings) {
+    if (root == null || settings == null) return;
+    const focused = global.document?.activeElement ?? null;
+    const vendor = root.querySelector("[data-voice-vendor]");
+    if (vendor != null) {
+      const options = (Array.isArray(settings.vendors) ? settings.vendors : []).map((one) =>
+        `<option value="${escapeForRow(one.id)}"${one.id === settings.vendor ? " selected" : ""}>${escapeForRow(one.label)}</option>`).join("");
+      if (options.length > 0) { vendor.innerHTML = options; vendor.value = String(settings.vendor ?? ""); }
+    }
+    const agent = root.querySelector("[data-voice-agent]");
+    if (agent != null) {
+      const rows = [{ id: "", name: ANY_AGENT }, ...agentChoices(settings)];
+      agent.innerHTML = rows.map((one) =>
+        `<option value="${escapeForRow(one.id)}"${String(one.id) === String(settings.agentId ?? "") ? " selected" : ""}>${escapeForRow(one.name)}</option>`).join("");
+      agent.value = String(settings.agentId ?? "");
+    }
+    for (const [selector, field] of [["[data-voice-model]", "model"], ["[data-voice-voice]", "voice"]]) {
+      const node = root.querySelector(selector);
+      if (node == null || node === focused) continue;
+      node.value = String(settings[field] ?? "");
+    }
+  }
+
+  /**
+   * A save, and then the door's own answer back into the controls -- never what was typed. A field the
+   * relay refused or trimmed has to show what it really is, which is the KEYS-1 rule about a 200 that
+   * quietly drops a field, read from the other side.
+   */
+  async function saveTalking(patch, root) {
+    const say = (words) => { try { global.__mrUi?.showToast?.(words); } catch { /* a toast is not the save */ } };
+    try {
+      const saved = await writeSettings(patch);
+      if (saved != null) {
+        state.settings = saved;
+        talkingAsk = Promise.resolve(saved);
+        talkingAskAt = Date.now();
+        paintTalking(root, saved);
+      }
+      say("Saved.");
+    } catch (error) {
+      say(`That was not saved: ${error?.message ?? error}`);
+      const answer = await talkingSettings(true);
+      if (answer != null) paintTalking(root, answer);
+    }
+  }
+
+  function wireTalking(root) {
+    const once = (node, type, handler) => {
+      if (node == null || node.dataset.voiceWired === "1") return;
+      node.dataset.voiceWired = "1";
+      node.addEventListener(type, handler);
+    };
+    once(root.querySelector("[data-voice-vendor]"), "change", (event) => void saveTalking({ vendor: event.target.value }, root));
+    once(root.querySelector("[data-voice-agent]"), "change", (event) => void saveTalking({ agentId: event.target.value }, root));
+    for (const button of root.querySelectorAll("[data-voice-save]")) {
+      once(button, "click", (event) => {
+        const which = event.currentTarget.dataset.voiceSave === "model" ? "model" : "voice";
+        const field = root.querySelector(which === "model" ? "[data-voice-model]" : "[data-voice-voice]");
+        void saveTalking({ [which]: String(field?.value ?? "").trim() }, root);
+      });
+    }
+  }
+
+  /** Called with the painted body of the section these rows are on, after every paint of it. */
+  function fillTalking(root) {
+    if (root == null || typeof root.querySelector !== "function") return;
+    const mine = root.querySelector("[data-voice-vendor], [data-voice-model], [data-voice-voice], [data-voice-agent]");
+    if (mine == null) return;
+    wireTalking(root);
+    void talkingSettings().then((answer) => { if (answer != null) paintTalking(root, answer); });
+  }
+
+  /**
+   * Registered from boot() and not at load: index.html serves voice.js before settings.js, so
+   * window.__mrSettings does not exist while this file's own IIFE is running. It does by
+   * DOMContentLoaded, which is when boot() runs.
+   *
+   * ONCE, AND THE FLAG IS SET BEFORE THE FIRST register(). register() repaints the section when that
+   * section is the one on screen, and a repaint dispatches the surface's own section event -- which is
+   * what a console that served the two files in the other order registers on. Without the flag first
+   * that is a loop through this function four levels deep for no gain.
+   */
+  let talkingRegistered = false;
+  function registerTalkingRows() {
+    if (talkingRegistered) return true;
+    const surface = global.__mrSettings;
+    if (surface == null || typeof surface.register !== "function") return false;
+    talkingRegistered = true;
+    let ok = true;
+    for (const row of TALKING_ROWS) {
+      const drawn = surface.register({
+        id: row.id,
+        section: "operator",
+        group: "talking",
+        order: row.order,
+        operatorOnly: true,
+        markup: () => `<div><strong>${escapeForRow(row.label)}</strong><small>${escapeForRow(row.line)}</small></div>${row.control()}`,
+        fill: fillTalking,
+      });
+      ok = drawn === true && ok;
+    }
+    return ok;
+  }
+
   // ------------------------------------------------------------------ the way out of the note
   //
   // The line that says talking is not switched on IS the control that opens the row where it is.
@@ -1579,17 +1799,24 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   async function probe() {
     const document_ = global.document;
     const button = document_?.querySelector("[data-voice-talk]");
-    if (button == null) return;
     let available = true;
     try {
       const response = await relayFetch("/voice/settings", { headers: { accept: "application/json" } });
       available = response.status !== 404;
-      if (response.ok) state.settings = await response.json().catch(() => null);
+      if (response.ok) {
+        state.settings = await response.json().catch(() => null);
+        // VOICE-10. The person's own talk mode, adopted HERE rather than read on its own: boot already
+        // asks this door, and a second request for one field is a second chance for the two answers to
+        // disagree about the same thing. Absent -- an older relay, or a person who has never chosen --
+        // leaves this browser's stored value as the behaviour, which boot() already applied.
+        adoptTalkMode(state.settings?.talkMode);
+      }
     } catch {
       // A relay that did not answer at all may answer in a second. Leaving the button live is the
       // choice that lets the person find out in words rather than looking at a dead control.
       available = true;
     }
+    if (button == null) return;
     state.available = available;
     button.disabled = !available;
     if (!available) button.title = "This workspace is on an older relay that cannot talk yet.";
@@ -1605,6 +1832,20 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     mountOverlay();
     wire();
     observe();
+    // VOICE-8. The operator's four rows, onto the settings surface's own registry. Here rather than at
+    // load, because index.html serves this file before settings.js.
+    //
+    // AND IF THAT SURFACE IS NOT THERE YET, on the event it already dispatches when it paints a section
+    // -- not on a timer. A module that polls is a module that keeps a test's process open and a phone's
+    // radio awake for a row nobody is looking at, and a console that never serves the surface has no
+    // section to put these rows on anyway.
+    if (!registerTalkingRows()) {
+      const late = () => {
+        global.document?.removeEventListener?.("titanbot:settings-section", late);
+        if (!registerTalkingRows()) global.document?.addEventListener?.("titanbot:settings-section", late);
+      };
+      global.document?.addEventListener?.("titanbot:settings-section", late);
+    }
     probe();
   }
 
@@ -1687,6 +1928,16 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     _onClose: onClose,
     // VOICE-7. The panel, the two modes, and the one door the settings row calls.
     talkMode,
+    // VOICE-8. The operator's four rows, so a gate can assert they registered and a unit case can read
+    // their words without a browser.
+    _TALKING_ROWS: TALKING_ROWS,
+    _ANY_AGENT: ANY_AGENT,
+    _registerTalkingRows: registerTalkingRows,
+    _fillTalking: fillTalking,
+    _paintTalking: paintTalking,
+    _saveTalking: saveTalking,
+    // VOICE-10. The door that takes a value the person did not press for, and the one that does.
+    _adoptTalkMode: adoptTalkMode,
     // The same reader under the name docs/APPS.md gives the desktop shell's hotkey contract. One
     // function, two names, rather than two readers that could disagree.
     getTalkMode: talkMode,

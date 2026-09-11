@@ -21,7 +21,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -33,6 +33,26 @@ const GATE_AGENT = "titanbot-gate/machine-room-voice.test.mjs";
 // A classic script on a window global. Handed a fake window with a document that answers nothing,
 // which is what lets the message and close handlers be driven with no DOM at all: paint() asks for
 // the talk button and the strip, gets null for both, and does nothing.
+// PRE-EXISTING, FOUND WHILE BUILDING VOICE-8/VOICE-10 AND FIXED HERE RATHER THAN WALKED PAST.
+//
+// `node --test tests/machine-room-voice.test.mjs` passed every case and then NEVER EXITED -- measured
+// at the shared tip before any of this wave's edits: 53 ok, 0 not ok, no totals line, killed at 90 s.
+// Every test that opens a line arms voice.js's own `heldTimer` -- a 2 s setInterval that reports dropped
+// frames to the relay and is cleared only by stop() -- and a test that leaves the line up leaves that
+// interval armed on the real `setInterval` the fake window is handed. `npm test` is one process over
+// every suite (package.json, and tests/index.js imports them all), so one leaked interval here is the
+// whole suite never exiting.
+//
+// The fix is the file's own: each module it loads is remembered, and one `after` hook ends them all.
+// stop() is the module's single door for that and it is what a browser tab closing would do.
+const LOADED = [];
+after(() => {
+  for (const one of LOADED) {
+    try { one.stop(); } catch { /* a module with no page to paint is not a failure here */ }
+  }
+  LOADED.length = 0;
+});
+
 async function loadVoice(options = {}) {
   const source = await read("ui/machine-room/voice.js");
   const listeners = new Map();
@@ -52,6 +72,7 @@ async function loadVoice(options = {}) {
     ...options.window,
   };
   new Function("window", source)(fake);
+  if (fake.__voice != null) LOADED.push(fake.__voice);
   return { voice: fake.__voice, fake, listeners };
 }
 
@@ -529,8 +550,12 @@ test("VOICE-2 keys: the console's own side of talking has no key field left in i
   // this file is allowed to know. apiKey, the value, may not appear at all.
   assert.doesNotMatch(source, /\bapiKey\b(?!Set)/,
     "voice.js names the key itself somewhere, which means it can still write one");
-  // And the card's own container went with it, so nothing can mount one back by accident.
-  for (const gone of ["voiceCardMarkup", "mountCard", "openCard", "settings-section"]) {
+  // And the card's own container went with it, so nothing can mount one back by accident. The banned
+  // string is the card's own CLASS -- `<section class="settings-section" data-voice>` is what it used to
+  // be -- and not the bare words: since VOICE-8 this file listens for the settings surface's own
+  // "titanbot:settings-section" event, which is the sanctioned seam backgrounds.js mounts on too, and a
+  // ban on the substring would have forbidden the very thing that replaced the card.
+  for (const gone of ["voiceCardMarkup", "mountCard", "openCard", 'class="settings-section"', ".settings-section"]) {
     assert.ok(!source.includes(gone), `${gone} is still in voice.js`);
   }
   const { voice } = await loadVoice();
@@ -1849,31 +1874,141 @@ test("VOICE-7 row: the choice is a row under General > System, in plain words", 
   }
 });
 
-test("VOICE-7 row: the choice is the person's and never the workspace's", async () => {
-  // NOT THE WORKSPACE'S. /voice/settings is one file per workspace, and two people sharing one would
-  // fight over how their own button behaves. So this value never goes near that route: it is
-  // remembered in this browser, beside Theme, and the row reaches it through the module's own door.
+test("VOICE-10 row: the choice is the PERSON's, with this browser as the fallback", async () => {
+  // WHAT CHANGED AND WHY. Until VOICE-10 this value lived in the browser and nowhere else, and this
+  // test said so: /voice/settings is one file per workspace and two people sharing one would have
+  // fought over how their own button behaves. That reasoning was right about the FILE and wrong about
+  // the door. The door now keys the value on the session's own person claim -- the same key the device
+  // list and the notification settings use -- so two accounts on one workspace keep their own, and the
+  // browser's copy is what still works in a private window and on a relay that has never heard of the
+  // field.
+  //
+  // The order is the contract: this browser FIRST, always, and the route after. A relay that refuses or
+  // never answers must leave the button doing what was asked of it.
   const box = new Map();
   const storage = { getItem: (k) => box.get(k) ?? null, setItem: (k, v) => box.set(k, v) };
-  const { voice } = await loadVoice({ window: { localStorage: storage } });
+  const asked = [];
+  const fetch_ = async (path, init) => {
+    asked.push({ path, body: init?.body == null ? null : JSON.parse(init.body) });
+    return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
+  };
+  const { voice } = await loadVoice({ window: { localStorage: storage, fetch: fetch_ } });
   assert.equal(voice.getTalkMode(), "push", "nothing stored is push to talk, the mode that cannot leave a microphone open");
   assert.equal(voice.setTalkMode("always"), "always");
-  assert.equal(box.get(voice._TALK_MODE_KEY), "always", "the choice was not remembered at all");
+  assert.equal(box.get(voice._TALK_MODE_KEY), "always", "this browser's copy is written first and is the behaviour");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const write = asked.find((one) => one.body != null && one.body.talkMode != null);
+  assert.ok(write != null, "the person's own door was never told, so the choice cannot follow them to a phone");
+  assert.equal(write.path, "/voice/settings");
+  assert.deepEqual(write.body, { talkMode: "always" }, "one field, and nothing else of the workspace's is touched");
+
   // A second page in the same browser opens on the choice the first one made.
-  const again = await loadVoice({ window: { localStorage: storage } });
+  const again = await loadVoice({ window: { localStorage: storage, fetch: fetch_ } });
   assert.equal(again.voice.getTalkMode(), "always");
   // And a value nobody offered is refused rather than stored.
   assert.equal(voice.setTalkMode("whenever"), "push");
-
-  // The route this must never reach. The settings surface writes talking's own fields through
-  // voice.saveSettings; the talk mode is not one of them and has no field on that door.
   const source = await read("ui/machine-room/voice.js");
-  const writer = source.slice(source.indexOf("async function writeSettings"), source.indexOf("async function getSettings"));
-  assert.ok(!writer.includes("talkMode"), "the talk mode reached the workspace's own settings file");
-  // And no request body anywhere in this module carries it. The only places the name may appear are
-  // the state field, the reader, the setter, and the stats the gate reads.
-  for (const [, body] of source.matchAll(/JSON\.stringify\(([^)]*)\)/g)) {
-    assert.ok(!body.includes("talkMode"), `a request body carries the talk mode: ${body}`);
+  assert.ok(source.includes("localStorage?.setItem(TALK_MODE_KEY"), "this browser's copy is the fallback and it is still written");
+});
+
+test("VOICE-10 boot: a route that throws leaves this browser's stored value as the behaviour", async () => {
+  // THE PRIVATE WINDOW AND THE OLD RELAY, which are the same case from the page's side: nothing comes
+  // back, and the button still has to know which of the two things it is.
+  const box = new Map([["titanbot.voice.talkMode", "always"]]);
+  const storage = { getItem: (k) => box.get(k) ?? null, setItem: (k, v) => box.set(k, v) };
+  const { voice } = await loadVoice({
+    window: { localStorage: storage, fetch: async () => { throw new Error("the relay did not answer"); } },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(voice.getTalkMode(), "always", "a read that threw took the person's own choice away with it");
+
+  // And a relay that answers but has never heard of the field: an ABSENT talk mode is not a default
+  // arriving, it is nobody having chosen, so this browser keeps what it holds.
+  const older = await loadVoice({
+    window: {
+      localStorage: storage,
+      fetch: async () => ({ ok: true, status: 200, text: async () => "{}", json: async () => ({ enabled: false, available: false }) }),
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(older.voice.getTalkMode(), "always", "an answer with no talk mode in it was read as a default and overwrote a real choice");
+});
+
+test("VOICE-10 boot: a value adopted from the route never ends the call somebody is in", async () => {
+  // setTalkMode ENDS the call when the mode really changes, and that is right for a person choosing: a
+  // line that is up while the control which opened it has changed meaning underneath them is a
+  // microphone nobody on screen can account for. It is WRONG for an answer landing on its own, because
+  // nobody pressed anything. So the adopt door is a different door, and this is the case that says so.
+  const box = new Map();
+  const storage = { getItem: (k) => box.get(k) ?? null, setItem: (k, v) => box.set(k, v) };
+  const { voice, sent } = await loadTalking({ localStorage: storage });
+  assert.equal(voice.getTalkMode(), "push");
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(voice._state.on, true, "the line is up for this case to be about anything");
+
+  const stops = sent.json.filter((one) => one.t === "stop").length;
+  assert.equal(voice._adoptTalkMode("always"), "push", "the mode a live call was opened under is the mode it keeps");
+  assert.equal(voice._state.on, true, "a route answer cut a call in half");
+  assert.equal(sent.json.filter((one) => one.t === "stop").length, stops, "and told the relay to stop");
+
+  // With no call up it is taken, and remembered, so the next page in this browser opens on it too.
+  voice.stop();
+  assert.equal(voice._adoptTalkMode("always"), "always");
+  assert.equal(voice.getTalkMode(), "always");
+  assert.equal(box.get(voice._TALK_MODE_KEY), "always");
+  // And nonsense from a relay is not a mode. It is NOT the default either: a default arriving would
+  // overwrite a real choice with one nobody made.
+  assert.equal(voice._adoptTalkMode("sideways"), "always");
+  assert.equal(voice._adoptTalkMode(undefined), "always");
+});
+
+test("VOICE-8 rows: the operator's four, with the attributes the old card carried", async () => {
+  const { voice } = await loadVoice();
+  const rows = voice._TALKING_ROWS;
+  assert.deepEqual(rows.map((one) => one.id), ["voice-service", "voice-model", "voice-voice", "voice-agent"]);
+  assert.deepEqual(rows.map((one) => one.label), ["Service", "Model", "Voice", "Who you are talking to"]);
+  // THE SAME FOUR ATTRIBUTES, so the gate's existing selectors measure the real thing rather than a new
+  // name for it. The old card is at b1f9afa if anybody wants to read them side by side.
+  const markup = rows.map((one) => one.control()).join("");
+  for (const attribute of ["data-voice-vendor", "data-voice-model", "data-voice-voice", "data-voice-agent"]) {
+    assert.ok(markup.includes(attribute), `${attribute} is not on any of the four controls`);
   }
-  assert.ok(source.includes("localStorage?.setItem(TALK_MODE_KEY"), "it is remembered in this browser and nowhere else");
+  // ONE control each, and no data-settings-action on any of them: the surface's act() has no default
+  // branch, so an action it does not know is swallowed with no error -- a control that looks wired and
+  // is not.
+  for (const row of rows) {
+    const control = row.control();
+    assert.equal(control.match(/class="setting-control/g).length, 1, `${row.id} draws more than one control slot`);
+    assert.ok(!control.includes("data-settings-action"), `${row.id} carries a settings action the surface would swallow`);
+    assert.ok(row.line.length > 0, `${row.id} has no explanation line`);
+  }
+  // An empty model or voice means the service's own, and the placeholder is where that is said.
+  assert.ok(rows.find((one) => one.id === "voice-model").control().includes('placeholder="The service\'s own"'));
+  // NO KEY FIELD, and no password field, came back with them.
+  assert.ok(!markup.includes("password"), "a key field came back with the four rows");
+  assert.ok(!/\bapiKey\b/.test(markup));
+  // And no vendor's name on any of the copy: the Service labels come off the route, which names none.
+  const words = rows.map((one) => `${one.label} ${one.line}`).join(" ");
+  for (const leak of ["xAI", "OpenAI", "Grok", "realtime"]) assert.ok(!words.includes(leak), `${leak} is in the copy of these rows`);
+});
+
+test("VOICE-8 rows: they register into the operator section's Talking group and nowhere else", async () => {
+  const registered = [];
+  const { voice } = await loadVoice({
+    window: { __mrSettings: { register: (entry) => { registered.push(entry); return true; } } },
+  });
+  assert.equal(registered.length, 4, "boot did not register the four rows");
+  for (const entry of registered) {
+    assert.equal(entry.section, "operator", `${entry.id} registered on a customer's section`);
+    assert.equal(entry.group, "talking");
+    assert.equal(entry.operatorOnly, true, `${entry.id} would be drawn for a customer`);
+    assert.equal(typeof entry.markup, "function");
+    assert.equal(typeof entry.fill, "function");
+  }
+  // ONCE. register() repaints the section when it is the one on screen, and a repaint dispatches the
+  // surface's own section event -- which is what a console that served the two files in the other order
+  // registers on. Calling again is a no-op rather than four more rows.
+  assert.equal(voice._registerTalkingRows(), true);
+  assert.equal(registered.length, 4, "a second call registered the rows again");
 });

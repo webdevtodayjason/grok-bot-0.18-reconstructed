@@ -311,6 +311,163 @@ test("a save sets, clears or KEEPS the key, so the card can save the rest of the
   assert.equal(normalizeVoiceSettings({}).enabled, false, "voice is off until somebody turns it on");
 });
 
+// ---- VOICE-10 and VOICE-8: whose field is whose on this door --------------------------------------
+
+test("VOICE-10: a talk mode lands under the caller's own sub and is invisible to another", () => {
+  // TWO ACCOUNTS CAN SHARE ONE WORKSPACE -- cp/store.mjs puts no UNIQUE constraint on accounts.tenant
+  // -- and voice.json is one file for that workspace. So the talk mode is the one field on this door
+  // keyed on the SUB, which is the session's own person claim and the same key the device list and the
+  // notification settings use. A person writing theirs can neither read nor move anybody else's.
+  const empty = normalizeVoiceSettings({});
+  assert.deepEqual(empty.talkModes, {}, "a workspace nobody has chosen on carries an empty map, not a default");
+
+  const hers = mergeVoiceSettings(empty, { talkMode: "always" }, { sub: "person-a" });
+  assert.deepEqual(hers.talkModes, { "person-a": "always" });
+  const both = mergeVoiceSettings(hers, { talkMode: "push" }, { sub: "person-b" });
+  assert.deepEqual(both.talkModes, { "person-a": "always", "person-b": "push" },
+    "one person's write moved the other's choice");
+
+  // And the ANSWER carries one entry, never the map: there is no route on this relay that reads back
+  // how somebody else's button behaves.
+  const mine = voiceSettingsShape(both, { sub: "person-a" });
+  assert.equal(mine.talkMode, "always");
+  assert.equal(mine.talkModes, undefined, "the whole map came back in the answer");
+  assert.equal(voiceSettingsShape(both, { sub: "person-b" }).talkMode, "push");
+  // A person who has never chosen gets the field OMITTED rather than defaulted, which is the PROXY-1
+  // rule: it is how the page knows to keep its own browser's copy instead of being handed a value the
+  // relay made up.
+  assert.equal(voiceSettingsShape(both, { sub: "person-c" }).talkMode, undefined);
+  assert.equal(voiceSettingsShape(both).talkMode, undefined, "and no sub at all is not somebody's choice either");
+  // The instance-password door is "" everywhere else in this process, and it is a real person here too.
+  assert.equal(voiceSettingsShape(mergeVoiceSettings(empty, { talkMode: "always" }), { sub: "" }).talkMode, "always");
+
+  // A value this relay does not know is IGNORED and not defaulted, because a default written over a real
+  // choice is a choice silently thrown away. Null clears this person's entry and nobody else's.
+  assert.deepEqual(mergeVoiceSettings(both, { talkMode: "sideways" }, { sub: "person-a" }).talkModes, both.talkModes);
+  assert.deepEqual(mergeVoiceSettings(both, { talkMode: null }, { sub: "person-a" }).talkModes, { "person-b": "push" });
+  // A hand-edited file cannot break the route, and the map is bounded.
+  assert.deepEqual(normalizeVoiceSettings({ talkModes: "nonsense" }).talkModes, {});
+  assert.deepEqual(normalizeVoiceSettings({ talkModes: { who: "sideways", 7: "push" } }).talkModes, { 7: "push" });
+  const many = {};
+  for (let n = 0; n < 260; n += 1) many[`p${n}`] = "always";
+  assert.equal(Object.keys(normalizeVoiceSettings({ talkModes: many }).talkModes).length, 200,
+    "a state file that grows by one per person forever is one somebody finds at a gigabyte");
+});
+
+/** A request and a response this file can drive handleSettings with, and read back. */
+function fakeExchange({ method = "GET", body = null, sub = "" } = {}) {
+  const chunks = body == null ? [] : [JSON.stringify(body)];
+  const req = {
+    method,
+    headers: { "x-gate-sub": sub },
+    async *[Symbol.asyncIterator]() { for (const chunk of chunks) yield chunk; },
+  };
+  const out = { status: 0, headers: {}, text: "" };
+  const res = {
+    writeHead: (status, headers) => { out.status = status; out.headers = headers ?? {}; },
+    end: (text) => { out.text = String(text ?? ""); },
+  };
+  return { req, res, out, json: () => { try { return JSON.parse(out.text); } catch { return null; } } };
+}
+
+function settingsEdge({ dir, operator }) {
+  const t = {
+    slug: operator ? "titanium" : "acme", name: "Acme", operator,
+    gateway: "http://127.0.0.1:1/unused",
+    headers: () => ({}),
+    ensureDir: () => {},
+    voiceSettingsFile: path.join(dir, "voice.json"),
+    voiceLedgerFile: path.join(dir, "voice-minutes.jsonl"),
+  };
+  return makeVoiceEdge({
+    t,
+    call: async (command) => (command === "listAgents" ? { agents: [{ id: "a1", name: "Titan", isRunning: true }] } : {}),
+    policy: makeVoicePolicy({}),
+    // The one dep VOICE-10 added: who is asking. ui/server.mjs hands its own subOf down; here it is a
+    // header so one edge can answer as two people.
+    subOf: (req) => String(req.headers["x-gate-sub"] ?? ""),
+  });
+}
+
+test("VOICE-10: the route answers this caller's own talk mode and writes only theirs", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-talkmode-"));
+  try {
+    await writeVoiceSettings({ enabled: true, vendor: "xai", apiKey: PLANTED_KEY }, { file: path.join(dir, "voice.json") });
+    const edge = settingsEdge({ dir, operator: false });
+
+    const cold = fakeExchange({ sub: "person-a" });
+    await edge.handleSettings(cold.req, cold.res);
+    assert.equal(cold.out.status, 200);
+    assert.equal(cold.json().talkMode, undefined, "a person who has never chosen is handed a default");
+
+    const wrote = fakeExchange({ method: "POST", body: { talkMode: "always" }, sub: "person-a" });
+    await edge.handleSettings(wrote.req, wrote.res);
+    assert.equal(wrote.out.status, 200, wrote.out.text.slice(0, 140));
+    assert.equal(wrote.json().talkMode, "always");
+    // NOT THE OPERATOR'S, and no key anywhere in the answer: the customer wrote the one field that is
+    // theirs, on a workspace whose file holds a key, and it came back as a boolean the way it always did.
+    assert.equal(wrote.json().apiKey, undefined);
+    assert.equal(wrote.json().apiKeySet, true);
+    assert.ok(!wrote.out.text.includes(PLANTED_KEY));
+
+    const other = fakeExchange({ sub: "person-b" });
+    await edge.handleSettings(other.req, other.res);
+    assert.equal(other.json().talkMode, undefined, "one person's choice is on another person's screen");
+
+    const again = fakeExchange({ sub: "person-a" });
+    await edge.handleSettings(again.req, again.res);
+    assert.equal(again.json().talkMode, "always", "it did not survive the write");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("VOICE-8: the four the operator sets are refused from a customer's workspace, in words", async () => {
+  // WHY THIS IS NOT ONLY A CLIENT-SIDE GATE. The four rows are on the Operator section, which a customer
+  // never sees -- and until this shipped the route took all four from any signed-in session, so a
+  // customer with a browser console could point their own workspace's voice at a model the operator did
+  // not choose and have it billed to his key. A client-side gate is not a gate, which is the same thing
+  // KEYS-1 concluded about the key field itself.
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-operator-"));
+  try {
+    await writeVoiceSettings({ enabled: false, vendor: "xai", model: "chosen-by-the-operator", agentId: "a1" },
+      { file: path.join(dir, "voice.json") });
+    const customer = settingsEdge({ dir, operator: false });
+
+    for (const patch of [{ vendor: "openai" }, { model: "something-else" }, { voice: "another" }, { agentId: "a2" },
+      { vendor: "openai", model: "x" }]) {
+      const asked = fakeExchange({ method: "POST", body: patch, sub: "person-a" });
+      await customer.handleSettings(asked.req, asked.res);
+      assert.equal(asked.out.status, 400, `${JSON.stringify(patch)} was taken from a customer`);
+      assert.equal(asked.json().error, "not_yours");
+      // REFUSED AND NOT SILENTLY DROPPED. A 200 that quietly ignores a field the caller sent is the
+      // failure where the caller believes it worked, and the sentence has to be readable by a person.
+      assert.match(asked.json().message, /set by your operator/);
+      assert.deepEqual(asked.json().fields, Object.keys(patch));
+    }
+    // AND NOTHING WAS WRITTEN, which is the half that shows the refusal is a refusal.
+    const after = await readVoiceSettings(path.join(dir, "voice.json"));
+    assert.equal(after.vendor, "xai");
+    assert.equal(after.model, "chosen-by-the-operator");
+    assert.equal(after.agentId, "a1");
+
+    // The two fields that really are the workspace's and the person's own stay open to a customer.
+    for (const patch of [{ enabled: true }, { talkMode: "always" }]) {
+      const asked = fakeExchange({ method: "POST", body: patch, sub: "person-a" });
+      await customer.handleSettings(asked.req, asked.res);
+      assert.equal(asked.out.status, 200, `${JSON.stringify(patch)} was refused from the workspace it belongs to`);
+    }
+
+    // And the operator's own workspace writes all four, which is what the rows on his section do.
+    const operator = settingsEdge({ dir, operator: true });
+    const his = fakeExchange({ method: "POST", body: { vendor: "openai", model: "m", voice: "v", agentId: "a2" }, sub: "" });
+    await operator.handleSettings(his.req, his.res);
+    assert.equal(his.out.status, 200, his.out.text.slice(0, 140));
+    assert.equal(his.json().vendor, "openai");
+    assert.equal(his.json().model, "m");
+    assert.equal(his.json().voice, "v");
+    assert.equal(his.json().agentId, "a2");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 // ---- the harness: a real browser socket, a real stub, and a dial we can freeze -------------------
 //
 // Duplicated from tests/voice-turn.test.mjs on purpose. This wave owns exactly one test helper

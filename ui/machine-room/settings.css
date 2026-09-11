@@ -299,6 +299,12 @@
 .settings-operator { display: grid; gap: 12px; }
 .settings-operator .panel-intro { margin: 0; }
 
+/* VOICE-8. The rows a sibling module contributes to a section whose body belongs to somebody else.
+   .settings-body is not a grid, so the gap between the owner's stack and these groups is a margin here
+   rather than a gap there -- which is also why this rule cannot reach any other panel: it is the only
+   thing that carries this class. */
+.settings-contributed { margin-top: 20px; }
+
 /* backgrounds.js mounts its own grid into the Appearance card's control slot. */
 [data-settings-mount="background"] #bg-section { padding: 0; border: 0; background: transparent; }
 [data-settings-mount="background"] #bg-section h3,
