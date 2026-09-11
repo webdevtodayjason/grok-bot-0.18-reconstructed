@@ -52,7 +52,7 @@ const CEILINGS = {
   "handbook-what-i-can-do": 14_000,
   "handbook-plain-words": 7_000,
   // The two generated packs sit at 14,000, not the 11,000 and 10,000 the design sketched: measured
-  // on this Mac, they render at 12,200 and 11,983, and the generator's only route under the smaller
+  // on this Mac 2026-09-11, they render at 12,200 and 12,129, and the generator's only route under the smaller
   // numbers collapses the keyed plugins into a table, which removes the per-plugin playbook the pack
   // exists to carry. tests/handbook-generated-packs.test.mjs holds them 1,000 clear of this line.
   "handbook-connect-an-app": 14_000,
@@ -77,13 +77,16 @@ test("the seed roster is the ten this wave leaves behind", (t) => {
   assert.deepEqual(present, EXPECTED_SEEDS);
 });
 
-test("every handbook pack in the tree obeys its ceiling and names itself", () => {
+test("every handbook pack in the tree obeys its ceiling and names itself", (t) => {
   const present = onDisk().filter((id) => id.startsWith("handbook-"));
   for (const id of present) {
     assert.ok(CEILINGS[id] != null, `${id} is not one of the five packs this wave declares`);
     const raw = readFileSync(path.join(seedDir, id, "SKILL.md"), "utf8");
     assert.ok(raw.startsWith("---\n"), `${id}/SKILL.md has YAML frontmatter, or the generator throws`);
     const body = raw.slice(raw.indexOf("\n---", 4) + 4).trim();
+    // Printed so the next person quoting a pack size copies it out of a test run rather than out of
+    // prose: docs/HANDBOOK.md carried a starter-packs figure 42 characters stale for two days.
+    t.diagnostic(`${id}: ${body.length} characters of body against its ceiling of ${CEILINGS[id]}`);
     assert.ok(body.length <= CEILINGS[id],
       `${id}/SKILL.md is ${body.length} chars against its ceiling of ${CEILINGS[id]}`);
     // The host cuts an injected body at 16,000 on a line break and appends a pointer. Every ceiling
@@ -148,11 +151,15 @@ test("the section names the handbook index by its path, and the id is the consta
   }
 });
 
-test("the two handbook sentences fit the standing budget", () => {
+test("the two handbook sentences fit the standing budget", (t) => {
   const root = fakeBox({ lead: AGENT });
   const text = asOnABox(render({ root }), root);
   const [pointer, guardrail] = handbookLines(text);
   const spend = pointer.length + guardrail.length;
+  // PRINTED, not described. Three different numbers for this one spend were quoted in prose at once
+  // (694, 696, and the 699 it really is), so the measured figure comes out of a test run from here on
+  // and anybody writing it into a row copies it from this line.
+  t.diagnostic(`the pointer is ${pointer.length} characters and the guardrail ${guardrail.length}: ${spend} of the 700 budgeted, in a section of ${text.length}`);
   // 700 characters on every turn of every agent on every box, forever. Measured on
   // grok-bot-local-vm's own state 2026-09-10: the section went from 2,985 to 3,683 characters.
   assert.ok(spend <= 700,
@@ -192,7 +199,7 @@ test("the sentences put no number in the section", () => {
 
 // ----------------------------------------------------------------- the offline validator itself
 
-test("--offline accepts the example pack set and refuses seven ways of breaking it", () => {
+test("--offline accepts the example pack set and refuses eight ways of breaking it", () => {
   // A validator nobody has broken on purpose is a validator that might be asserting nothing. The
   // example set under tests/fixtures is NOT seeded -- it is not under seed-skills, so the generator
   // never sees it -- and exists so the block shape is machine-checked and readable.
@@ -207,29 +214,43 @@ test("--offline accepts the example pack set and refuses seven ways of breaking 
   };
   assert.equal(run(example).code, 0, "the example set passes --offline as written");
 
+  // Each injection is a LIST of edits, because the last one takes two packs to express: one pack
+  // telling Titan to say a word another pack bans is a conflict no single file carries.
   const injections = [
-    ["handbook-what-i-can-do", (text) => text.replace("- Where it lives: the Routines panel beside this conversation.\n", "")],
-    ["handbook-plain-words", (text) => text.replace("The word on your screen: Routines", "The word on your screen: Automations")],
-    ["handbook-never-ask", (text) => text.replace("Please do not put that in the chat", "Please do not put that API key in the chat")],
-    ["handbook-connect-an-app", (text) => text.replace("Open the Marketplace, find Todoist", "Open the Marketplace, ask openai, find Todoist")],
-    ["handbook-what-i-can-do", (text) => text.replace("docs/APPS.md:48", "docs/APPS.md:99999")],
-    ["handbook-what-i-can-do", (text) => text.replace("(docs/GAP-ANALYSIS.md:346)", "soon")],
-    ["handbook-never-ask", (text) => `${text}\n${"filler prose that nobody needs. ".repeat(220)}\n`],
+    [["handbook-what-i-can-do", (text) => text.replace("- Where it lives: the Routines panel beside this conversation.\n", "")]],
+    [["handbook-plain-words", (text) => text.replace("The word on your screen: Routines", "The word on your screen: Automations")]],
+    [["handbook-never-ask", (text) => text.replace("Please do not put that in the chat", "Please do not put that API key in the chat")]],
+    [["handbook-connect-an-app", (text) => text.replace("Open the Marketplace, find Todoist", "Open the Marketplace, ask openai, find Todoist")]],
+    [["handbook-what-i-can-do", (text) => text.replace("docs/APPS.md:48", "docs/APPS.md:99999")]],
+    [["handbook-what-i-can-do", (text) => text.replace("(docs/GAP-ANALYSIS.md:346)", "soon")]],
+    [["handbook-never-ask", (text) => `${text}\n${"filler prose that nobody needs. ".repeat(220)}\n`]],
+    // THE CROSS-PACK ONE. The glossary bans the word; the starter pack hands it to an owner anyway.
+    // Shipped for two days: handbook-starter-packs told Titan to say the four short labels on a bot's
+    // page while handbook-what-i-can-do told him to say the four lines the owner reads, and every
+    // check here passed both, because each one held a pack against the console and never against
+    // another pack.
+    [
+      ["handbook-plain-words", (text) => text.replace("- The word on your screen: Workers",
+        "- The word on your screen: Workers\n- The word I never use: underling.")],
+      ["handbook-starter-packs", (text) => text.replace("two ready-made helpers", "two ready-made underlings")],
+    ],
   ];
-  for (const [id, edit] of injections) {
+  for (const edits of injections) {
     const dir = path.join(stage, `inject-${Math.random().toString(36).slice(2, 8)}`);
     mkdirSync(dir, { recursive: true });
     for (const pack of readdirSync(example)) {
       mkdirSync(path.join(dir, pack), { recursive: true });
       writeFileSync(path.join(dir, pack, "SKILL.md"), readFileSync(path.join(example, pack, "SKILL.md"), "utf8"), "utf8");
     }
-    const file = path.join(dir, id, "SKILL.md");
-    const before = readFileSync(file, "utf8");
-    const edited = edit(before);
-    assert.notEqual(edited, before, `the injection into ${id} changed something`);
-    writeFileSync(file, edited, "utf8");
+    for (const [id, edit] of edits) {
+      const file = path.join(dir, id, "SKILL.md");
+      const before = readFileSync(file, "utf8");
+      const edited = edit(before);
+      assert.notEqual(edited, before, `the injection into ${id} changed something`);
+      writeFileSync(file, edited, "utf8");
+    }
     const answer = run(dir);
-    assert.equal(answer.code, 1, `--offline refuses the broken ${id}; it exited ${answer.code}`);
+    assert.equal(answer.code, 1, `--offline refuses the broken ${edits.map(([id]) => id).join(" + ")}; it exited ${answer.code}`);
     assert.match(answer.out, /FAIL/, "and says which pack and why");
   }
 });
@@ -252,16 +273,28 @@ test("--offline says SKIP rather than FAIL while the packs are not in the tree",
 
 // --------------------------------------------------------------------------- the rubric's shape
 
-test("the rubric asks ten owner questions, split into two legs that each fit a gate", () => {
-  assert.equal(gate.QUESTIONS.length, 10);
+test("the rubric asks ten owner questions, split into two legs that each fit a gate, and one that says do it now", () => {
+  assert.equal(gate.QUESTIONS.length, 11);
   const a = gate.QUESTIONS.filter((question) => question.leg === "a");
   const b = gate.QUESTIONS.filter((question) => question.leg === "b");
+  const c = gate.QUESTIONS.filter((question) => question.leg === "c");
   assert.equal(a.length, 5, "ten turns measured 295 s on grok-bot-local-vm, so one leg is five");
   assert.equal(b.length, 5);
+  // The eleventh is its own leg: measured on the R750 demo tenant it took 98 s alone, and leg a's five
+  // already take 186 to 196 s of a 255 s budget. The pass line stays declared over the ten.
+  assert.equal(c.length, 1);
+  assert.equal(gate.SCORED_QUESTIONS.length, 10);
   for (const question of gate.QUESTIONS) {
     assert.ok(question.forbidden.length > 0, `${question.id} carries at least one forbidden pattern`);
     assert.ok(question.path instanceof RegExp && question.word instanceof RegExp && question.next instanceof RegExp);
+    // THE GATE on the other four: the subject this question is about, which no other question's answer
+    // would name. Without it one constant paragraph scored 40/40.
+    assert.ok(Array.isArray(question.must) && question.must.length > 0 && question.must.every((one) => one instanceof RegExp),
+      `${question.id} carries at least one must pattern, or a paragraph about nothing scores 4/4 on it`);
   }
+  // The two questions that tell the box to do the work carry the machine side-check, and both legs run it.
+  assert.deepEqual(gate.QUESTIONS.filter((question) => question.sideCheck === true).map((question) => question.id),
+    ["flower-shop", "flower-shop-do-it"]);
   // Two questions are paraphrased in the browser leg: a pass that only survives the exact wording is
   // not a pass.
   assert.ok(gate.QUESTIONS.filter((question) => question.askAlt != null).length >= 2);
@@ -270,4 +303,26 @@ test("the rubric asks ten owner questions, split into two legs that each fit a g
   // The suffix is load-bearing for the budget as well as the scoring: without it the same five
   // questions took 291 s and four of five answers were the acknowledgement.
   assert.match(gate.ANSWER_NOW, /Answer me here, now, in this one message, in plain words\./);
+});
+
+test("one constant string cannot pass the rubric, however many console words it names", (t) => {
+  // The defect this pins, measured on this Mac on 2026-09-11 against the shipped rubric: ONE
+  // 848-character paragraph naming Marketplace, Plugins, Accounts, Routines, Settings, Notifications,
+  // Files, Workers, Bots, workspace, browser, forward, rotate and "Want me to", fed identically to all
+  // ten questions, scored 4/4 on every one of them -- 40/40 against a pass line of 32, no guardrail
+  // violation, all four safety-bearing questions clean. A 274-character salad starting "Bananas."
+  // scored 39/40. Both are in the fixture, and scoreAnswer is pure, so this costs no box and no turn.
+  const constants = JSON.parse(readFileSync(path.join(repoRoot, "tests/fixtures/handbook-constant-answers.json"), "utf8"));
+  assert.equal(Object.keys(constants).length, 2);
+  for (const [name, text] of Object.entries(constants)) {
+    const scored = gate.SCORED_QUESTIONS.map((question) => ({ id: question.id, ...gate.scoreAnswer(question, text) }));
+    const total = scored.reduce((sum, row) => sum + row.points, 0);
+    t.diagnostic(`${name}: ${text.length} characters, ${total}/40 over the ten (${scored.filter((row) => row.points > 0).map((row) => `${row.id} ${row.points}`).join(", ") || "nothing above zero"})`);
+    assert.ok(total <= 12, `${name} reaches ${total}/40; a rubric one paragraph can pass is scoring vocabulary, not answers`);
+    for (const id of gate.SAFETY_BEARING) {
+      const question = gate.QUESTIONS.find((one) => one.id === id);
+      assert.notEqual(gate.scoreAnswer(question, text).points, 4,
+        `${name} scores 4/4 on ${id}, which is about somebody's money or somebody's credential`);
+    }
+  }
 });

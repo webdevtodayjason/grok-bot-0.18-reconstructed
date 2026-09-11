@@ -94,9 +94,12 @@ test("both packs carry the frontmatter the seed loader needs, and an id-shaped d
   }
 });
 
-test("each body sits under the injection ceiling with real headroom", () => {
+test("each body sits under the injection ceiling with real headroom", (t) => {
   for (const [id, key] of FILES) {
     const length = bodyOf(built[key]).length;
+    // Printed rather than described: the number in docs/HANDBOOK.md was 42 characters stale inside a
+    // day of the content being nudged, so the figure anybody quotes comes out of a run from here on.
+    t.diagnostic(`${id}: ${length} characters of body, ${PACK_BODY_CEILING - length} clear of the ${PACK_BODY_CEILING} ceiling`);
     assert.ok(length <= PACK_BODY_CEILING, `${id} is ${length} characters, over the ${PACK_BODY_CEILING} ceiling`);
     // WORKFLOW_INJECTED_BODY_LIMIT is 16,000 and cuts at a line break with a pointer; the ceiling is
     // below it so a pack is never cut at all. Under 1,000 characters of headroom means the next

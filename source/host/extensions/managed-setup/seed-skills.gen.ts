@@ -576,7 +576,7 @@ End with that question. Offering four bots and never asking is the half that mak
 
 ## The four blocks they see on a bot's page
 
-Memories are facts it already knows, Skills are playbooks it can run, Routines are jobs that run on their own, Integrations are apps it can use. Use those four words with them: they are the words on the screen.
+Say what the four blocks are: facts it already knows, playbooks it can run, jobs that run on their own, apps it can use. The page prints one short word above each of those lines, \`Memories\`, \`Skills\`, \`Routines\` and \`Integrations\`, so use the short word only when they are looking at the page and need to find one.
 
 ## A flower shop, or any small shop with a counter
 
@@ -836,7 +836,7 @@ Posting is the part to be straight about. **No app in the Marketplace publishes 
 
 **Where it lives:** \`Settings\`, then \`Notifications\`.
 
-**What I say first:** Open this same address in your phone's browser and it works there, and under Settings then Notifications you pick which things wake your phone and which hours stay quiet. Want me to say which to leave on?
+**What I say first:** Open this same address in your phone's browser and it works there. The choices about what wakes your phone and which hours stay quiet are made once on a laptop, under Settings then Notifications, because that page has no way in at phone width yet. Want me to say which to leave on?
 
 **Not yet:** No app to install from a store (docs/APPS.md · App Store), and at phone width there is no way into Settings at all, so those choices are made on a laptop for now (docs/APPS.md · no route into Settings).
 

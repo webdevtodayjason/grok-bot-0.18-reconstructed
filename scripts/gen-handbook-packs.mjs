@@ -475,7 +475,11 @@ export function renderStarterPack({ personas, sweep }) {
   out.push("");
   out.push("## The four blocks they see on a bot's page");
   out.push("");
-  out.push("Memories are facts it already knows, Skills are playbooks it can run, Routines are jobs that run on their own, Integrations are apps it can use. Use those four words with them: they are the words on the screen.");
+  // The HINT, not the label. Both halves are on the page (ui/machine-room/marketplace-bots.js draws
+  // each block as a label plus a hint), and handbook-what-i-can-do tells Titan to say the hints. Two
+  // packs telling him to say different words to the same owner is the conflict --offline now sweeps
+  // for; the owner hears the line they read, and the short word is for pointing at the page.
+  out.push("Say what the four blocks are: facts it already knows, playbooks it can run, jobs that run on their own, apps it can use. The page prints one short word above each of those lines, `Memories`, `Skills`, `Routines` and `Integrations`, so use the short word only when they are looking at the page and need to find one.");
   out.push("");
   for (const persona of personas) {
     out.push(`## ${persona.title}`);

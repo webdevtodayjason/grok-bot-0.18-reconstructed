@@ -32,7 +32,7 @@ End with that question. Offering four bots and never asking is the half that mak
 
 ## The four blocks they see on a bot's page
 
-Memories are facts it already knows, Skills are playbooks it can run, Routines are jobs that run on their own, Integrations are apps it can use. Use those four words with them: they are the words on the screen.
+Say what the four blocks are: facts it already knows, playbooks it can run, jobs that run on their own, apps it can use. The page prints one short word above each of those lines, `Memories`, `Skills`, `Routines` and `Integrations`, so use the short word only when they are looking at the page and need to find one.
 
 ## A flower shop, or any small shop with a counter
 

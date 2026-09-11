@@ -24,13 +24,16 @@ const question = (id) => {
   return found;
 };
 
-test("--selftest scores the targets 40/40 and the recorded baseline 23/40", () => {
+test("--selftest scores the targets full marks, the recorded baseline 23/40, and a constant string nothing", () => {
   // The mode itself, exactly as the gate list runs it: no box, no model, no turns spent.
   const out = execFileSync(process.execPath, [path.join(repoRoot, "scripts/verify-handbook.mjs"), "--selftest"],
     { encoding: "utf8", timeout: 120_000 });
-  assert.match(out, /the ten target answers score 40\/40/);
+  assert.match(out, new RegExp(`the ${gate.QUESTIONS.length} target answers score ${gate.QUESTIONS.length * 4}/${gate.QUESTIONS.length * 4}`));
   assert.match(out, /scores 23\/40/);
   assert.match(out, /the two guardrail violations that run really had/);
+  // The third fixture: one paragraph, identical for all ten questions, used to score 40/40.
+  assert.match(out, /the constant string "the console-word blanket" cannot reach/);
+  assert.match(out, /the constant string "the word salad" cannot reach/);
   assert.ok(!out.includes("FAIL"), out);
 });
 
