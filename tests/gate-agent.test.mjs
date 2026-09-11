@@ -69,6 +69,11 @@ const GATES = [
   // as a throwaway customer on the demo tenant and then asking a real Titan ten owner questions. Its
   // box legs carry the name too, on the box gateway rather than at a door.
   "verify-handbook.mjs",
+  // CONSOLE-FLICKER-1, found failing this very test by the phone-layout wave and classified here
+  // rather than left: it signs in at console.titanium.bot as a throwaway customer with GATE_EMAIL
+  // and GATE_PASSWORD, which is a real front door, and it has carried the header since it shipped.
+  // It was simply in neither list.
+  "verify-console-flicker.mjs",
 ];
 
 test("the name is built from the calling file, not typed into it", () => {
