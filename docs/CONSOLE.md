@@ -1448,8 +1448,10 @@ the operator's own bubble at all. Only prose and the gate changed; the four toke
 shipped. **Measured on `grok-bot-local-vm`**, this Mac, real Chrome at 1440x1000, against a local
 relay on a spare port serving this tree: `verify-console-polish --chips` **27 passed, 0 failed, 0
 skipped**, the two new checks reading a chip on the operator's own row off the painted pixels at
-**6.03:1** in dusk, ink `rgb(9, 87, 99)` on plate `rgb(211, 224, 214)`, and **10.9:1** in mist, ink
-`rgb(140, 213, 226)` on plate `rgb(15, 24, 28)`, 1596 pixels each.
+**5.97:1** in dusk, ink `rgb(9, 87, 99)` on plate `rgb(210, 223, 212)`, and **11:1** in mist, ink
+`rgb(141, 214, 227)` on plate `rgb(16, 24, 28)`, 1596 pixels each. That plate moves a shade with
+whichever background picture the console happened to draw, so the dusk figure wobbles by a few
+hundredths between runs: the run before this one read 6.03:1 on `rgb(211, 224, 214)`.
 `tests/machine-room-code-chip-pixels.test.mjs` still passes.
 
 **Re-shipped relay-only and re-measured on the R750**, through `https://console.titanium.bot` in real
