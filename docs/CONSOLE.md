@@ -1398,15 +1398,15 @@ Every identifier painted in the error colour would read to Jason as a failed tur
 A pale cyan washes out on a light plate, so the light surfaces take a deep teal of the same hue. It
 has to clear the floor on **both** light plates a chip can land on, and they are not equally light:
 mist's own card, and, in ink, the operator's cream bubble. **Measured on the R750 at 1440x900**,
-through `https://console.titanium.bot`, on the plates those chips really land on: `#065561` reads
-**5.78:1** on the mist plate `rgb(195, 218, 218)` and **5.94:1** on the dusk cream plate
-`rgb(208, 221, 210)`. The `#0b7a8f` the ask sketched for the light theme would have read **3.13:1**
-and **3.26:1** on those same two plates. That last pair is arithmetic for a colour that was never
-shipped, not a reading off any screen, and it is why the shipped light value is darker than the ask.
-The operator's bubble is a cream plate in ink and a **dark slate** one in mist, so in mist it takes
-the ink values back; without that rule a deep teal lands on that slate at about **1.9:1** by the same
-arithmetic, and the rose before it sat there the same way. That is a chip nobody could read, on the
-one surface only an operator who writes backticks ever reaches.
+through `https://console.titanium.bot`, 2026-09-11, on the plates those chips really land on:
+`#065561` reads **5.78:1** on the mist plate `rgb(195, 218, 218)` and **5.97:1** on the dusk cream
+plate `rgb(207, 220, 209)`, that second one off the painted pixels. The `#0b7a8f` the ask sketched for
+the light theme is **3.42:1** and **3.53:1** on those same two plates. That second pair is arithmetic
+for a colour that was never shipped, not a reading off any screen, and it is why the shipped light
+value is darker than the ask. The operator's bubble is a cream plate in ink and a **dark slate** one in
+mist, so in mist it takes the ink values back; without that rule the deep teal sits on that slate at
+**2.12:1** by the same arithmetic, and the rose before it sat in the same place. That is a chip nobody
+could read, on the one surface only an operator who writes backticks ever reaches.
 
 **The floor is 4.5:1 and it is measured, not eyeballed.** `verify-console-polish --chips` composites
 the pill down over whatever sits behind it, because the pill is half transparent and the colour
@@ -1415,8 +1415,8 @@ the ratio in both themes, flipping `data-theme` on the root the way the toggle d
 
 **That walk skips a gradient, and the operator's own bubble is one**, so for a day the single surface
 5b's mist rule exists to protect was the single surface no check could read: the walk falls through
-the dusk bubble to the plate behind it and reports 1.55:1 where a person gets 5.94:1. CONSOLE-5's
-rose broke that same surface at about 1.9:1 and the gate said nothing. So the leg has a third
+the dusk bubble to the plate behind it and reports 1.55:1 where a person gets 5.97:1. CONSOLE-5's
+rose broke that same surface and the gate said nothing. So the leg has a third
 contrast check now, on a chip the **operator** typed, and it reads the pixels Chrome painted instead
 of the computed styles: the shot is clipped to the chip's own box, the colours are counted in the
 page, the commonest is the plate and the 2nd percentile of luminance is the ink. The ASK the leg
@@ -1451,6 +1451,22 @@ skipped**, the two new checks reading a chip on the operator's own row off the p
 **6.03:1** in dusk, ink `rgb(9, 87, 99)` on plate `rgb(211, 224, 214)`, and **10.9:1** in mist, ink
 `rgb(140, 213, 226)` on plate `rgb(15, 24, 28)`, 1596 pixels each.
 `tests/machine-room-code-chip-pixels.test.mjs` still passes.
+
+**Re-shipped relay-only and re-measured on the R750**, through `https://console.titanium.bot` in real
+Chrome at **1440x900**, as a throwaway customer on the demo tenant, 2026-09-11, on a reply this run
+asked for (*"The channel is `#chip5c-c5c208`, the host is `chip5c-box-01` and the address is
+`chip5c@myagents.email`."*): the served `styles.css` is 160,808 bytes and carries `#8fd9e6`, `#065561`,
+`#8fd9e6` as its three chip foregrounds, the agent's three chips are `rgb(143, 217, 230)` on
+`rgba(10, 16, 20, 0.62)` with a `rgba(0, 200, 240, 0.25)` hairline, radius 5 px, 13.8 px
+`ui-monospace`, `overflow-wrap anywhere`, `cursor pointer`, the first 126x18, and a press put
+`#chip5c-c5c208` on the clipboard with the green tick and a *"Copied"* in the live region. On the
+agent's bubble: **11.44:1** computed, **11.58:1** painted in dusk; **5.78:1** computed, **5.65:1**
+painted in mist. On the **operator's own** bubble, the surface the new checks exist for: dusk
+**5.97:1** painted, ink `rgb(6, 85, 97)` on plate `rgb(207, 220, 209)`, where the composite walk says
+1.55:1 because it cannot see the gradient; mist **11.33:1** painted, ink `rgb(143, 217, 230)` on plate
+`rgb(15, 24, 28)`, **11.28:1** computed. Both themes, both bubbles, over the 4.5:1 floor. Shipped
+relay-only: no host bundle installed, no box swap, no Coolify action, the relay restarted last, and
+the throwaway account removed afterwards.
 
 Nothing else about the chip moved with 5b: the box, the radius, the monospace stack, the wrapping, the
 click that copies, the tick and the accessible name are the CONSOLE-5 values, and

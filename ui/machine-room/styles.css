@@ -876,11 +876,11 @@ select:focus-visible {
 /* A pale cyan washes out on a light plate, so the light surfaces take a deep teal of the same hue.
    It has to clear 4.5:1 on BOTH light plates a chip can land on, and they are not equally light:
    mist's own card, and -- in ink -- the operator's cream bubble. MEASURED ON THE R750 at 1440x900
-   through console.titanium.bot: #065561 reads 5.78:1 on the mist plate rgb(195, 218, 218), and
-   5.94:1 off the painted pixels of a chip in the operator's own row, whose cream plate comes out
-   rgb(208, 221, 210). The #0b7a8f the ask sketched is 3.13:1 and 3.26:1 on those same two plates by
-   arithmetic, which is why the shipped value is darker than the ask. The edge stays the foreground
-   at 0.24, as the rose one was. */
+   through console.titanium.bot, 2026-09-11: #065561 reads 5.78:1 on the mist plate rgb(195, 218, 218)
+   and 5.97:1 off the painted pixels of a chip in the operator's own row, whose cream plate comes out
+   rgb(207, 220, 209). The #0b7a8f the ask sketched is 3.42:1 and 3.53:1 on those same two plates by
+   arithmetic, for a colour that was never shipped, which is why the shipped value is darker than the
+   ask. The edge stays the foreground at 0.24, as the rose one was. */
 [data-theme="mist"],
 .is-user .message-bubble {
   --code-chip-fg: #065561;
@@ -890,12 +890,12 @@ select:focus-visible {
 }
 
 /* The operator's own bubble is a cream plate in ink and a DARK slate one in mist, so in mist it
-   takes the ink values back. Without this rule a deep teal lands on that slate at about 1.9:1 by
-   arithmetic, an identifier nobody can read, and the rose sat there the same way for a day because
-   the surface is only reached by an operator who writes backticks. With these values, MEASURED ON
-   THE R750 at 1440x900 off the painted pixels, it is 11.12:1. The --chips gate reads this one
-   surface from the pixels rather than from a composite walk, because in dusk the same bubble is a
-   gradient and a walk cannot see a gradient at all. */
+   takes the ink values back. Without this rule the deep teal lands on that slate at 2.12:1 by
+   arithmetic against the slate measured there, an identifier nobody can read, and the rose sat in the
+   same place for a day because the surface is only reached by an operator who writes backticks. With
+   these values, MEASURED ON THE R750 at 1440x900 off the painted pixels, 2026-09-11, it is 11.33:1.
+   The --chips gate reads this one surface from the pixels rather than from a composite walk, because
+   in dusk the same bubble is a gradient and a walk cannot see a gradient at all. */
 [data-theme="mist"] .is-user .message-bubble {
   --code-chip-fg: #8fd9e6;
   --code-chip-bg: rgba(10, 16, 20, 0.62);
