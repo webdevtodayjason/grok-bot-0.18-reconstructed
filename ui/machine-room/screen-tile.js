@@ -501,6 +501,34 @@
     });
   }
 
+  // CONSOLE-6. WHERE THE KEYBOARD IS HANDED BACK TO, which SEAT-FOCUS-1 never said.
+  //
+  // blur() on the frame takes the keyboard off the reader and leaves it on <body>, which is nobody.
+  // A person typing a message when the reader wakes therefore loses the caret and every character
+  // after it, with nothing on screen to say why. Measured on grok-bot-local-vm in real Chrome
+  // 2026-09-11, typing two characters a second into the message box for 75 s: the caret sat in the
+  // box until 31.0 s, the idle reader mounted at 30.0 s, and from then on the caret was on <body>
+  // and 88 of 150 characters went nowhere. Jason, the same morning: "when it flickers I lose where
+  // my cursor is, so I have to target the field again to continue typing."
+  //
+  // So the page remembers the last thing a person actually put the caret in and puts it back. The
+  // memory is one listener for the life of the page, armed with the first reader, and it ignores the
+  // readers themselves: handing the keyboard back to the frame it was just taken from would be a
+  // loop, and the seat inside the desktop dialog is meant to keep the keys and is not a reader.
+  let lastFocus = null;
+  let focusMemoryArmed = false;
+  function rememberFocus() {
+    if (focusMemoryArmed) return;
+    const d = doc();
+    if (d == null || typeof d.addEventListener !== "function") return;
+    focusMemoryArmed = true;
+    d.addEventListener("focusin", (event) => {
+      const target = event?.target ?? null;
+      if (target == null || target === d.body || isReaderFrame(target)) return;
+      lastFocus = target;
+    }, true);
+  }
+
   /**
    * Arm the hand-back for one reader frame, and answer with the disarm its owner's teardown calls.
    * Safe to hand anything: a frame that is not one of the two readers is left alone, which is how
@@ -508,6 +536,7 @@
    */
   function keepKeyboardOff(frame) {
     if (!isReaderFrame(frame)) return () => {};
+    rememberFocus();
     let poll = null;
     let inner = null;
     const handBack = () => {
@@ -515,6 +544,12 @@
       if (d == null || d.activeElement !== frame) return false;
       try { frame.blur?.(); } catch { return false; }
       handBacks += 1;
+      // Back where it was, if that is still a thing on the page. preventScroll, because a caret put
+      // back is not a reason to move the conversation the person is reading.
+      const back = lastFocus;
+      if (back != null && back.isConnected === true && typeof back.focus === "function") {
+        try { back.focus({ preventScroll: true }); } catch { /* a node that will not take it */ }
+      }
       return true;
     };
     // The reach-in. Wrapped because reading contentDocument on a frame this page may not read throws

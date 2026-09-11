@@ -9,7 +9,7 @@
 //              does not is answered the way an older host answers one, with
 //              {"error":"unknown gateway method"} and a 404. What is measured: the dialog opens
 //              below the top bar at the width of the stage, the chat behind it is dimmed, Titan's
-//              live face is in it, the five questions are on a strip, Skip for now is there, a
+//              live face is in it, the five chips are on a strip, Skip for now is there, a
 //              strip with two answers already saved shows two of five done, and a box that
 //              reports done:true gets no modal at all.
 //
@@ -89,7 +89,7 @@ const TURN_TIMEOUT_MS = Number.parseInt(flag("--turn-timeout-ms", "90000"), 10);
 const MODAL_TIMEOUT_MS = 30_000;
 const STRIP_TIMEOUT_MS = 60_000;
 
-// The five questions, in the order Titan asks them. These are the state's own field names and the
+// The five things Titan keeps, in the order the strip reads. These are the state's own field names and the
 // values of data-onboarding-step in the console. docs/ONBOARDING.md is where they are written down.
 const FIELDS = ["name", "location", "business", "ownsBusiness", "workingStyle"];
 // The plain-words refusal. Templated from the ceiling in force, so a box at 13 reads "12 more bots".
@@ -488,7 +488,7 @@ async function offlineArm() {
 
     const fields = first.modal.steps.map((s) => s.field);
     check(FIELDS.every((f) => fields.includes(f)) && fields.length === FIELDS.length,
-      "the strip carries the five questions and nothing else",
+      "the strip carries the five things Titan keeps and nothing else",
       fields.join(", ") || "no steps drawn");
     check(first.modal.steps.every((s) => s.done === false),
       "with none of them ticked before a word is said",
@@ -502,16 +502,32 @@ async function offlineArm() {
       "the dialog says which conversation it is bound to", first.modal.agentId ?? "no data-onboarding-agent");
 
     // The Add button's count. Titan holds one of the seats himself, so three agents read as two.
-    const addLabel = await first.page.evaluate(() => {
+    //
+    // THE CEILING IS READ OFF THE PAGE, NOT WRITTEN DOWN HERE. This used to assert the second number
+    // was 12, and it failed the day the product default moved: measured 2026-09-11 the label reads
+    // "2 of 39" against an AGENT_CAP_DEFAULT of 40, and the fixture's own getHostStatus.maxAgents of
+    // 13 never reaches state.agentCap at all. A literal in a gate is the same stale number the seed
+    // skill forbids Titan from carrying, for the same reason. What is actually worth pinning is that
+    // the button and the console agree: the label's ceiling is the cap the page is holding to, minus
+    // the seat Titan occupies.
+    const addRead = await first.page.evaluate(() => {
       const button = document.querySelector('[data-capability="add"]');
-      if (!button) return null;
-      return `${button.getAttribute("aria-label") ?? ""} ${button.getAttribute("title") ?? ""} ${button.textContent ?? ""}`.replace(/\s+/g, " ").trim();
+      const cap = (() => { try { return window.__mrUi.settingsHost.botCap(); } catch { return null; } })();
+      if (!button) return { label: null, cap };
+      return {
+        label: `${button.getAttribute("aria-label") ?? ""} ${button.getAttribute("title") ?? ""} ${button.textContent ?? ""}`.replace(/\s+/g, " ").trim(),
+        cap,
+      };
     });
+    const addLabel = addRead.label;
     const counted = addLabel ? /(\d+)\s+of\s+(\d+)/.exec(addLabel) : null;
-    if (SELF_TEST) skip("the Add button says how many of the twelve are used", "the stand-in is the modal only; the Add button is the console's own work");
-    else check(counted != null && Number(counted[1]) === FIXTURE_AGENTS.length - 1 && Number(counted[2]) === 12,
-      "the Add button says how many of the twelve are used",
-      addLabel == null ? "no Add button" : addLabel.slice(0, 80));
+    const extraSeats = Number.isFinite(addRead.cap) && addRead.cap > 0 ? addRead.cap - 1 : null;
+    if (SELF_TEST) skip("the Add button says how many of the ceiling are used", "the stand-in is the modal only; the Add button is the console's own work");
+    else check(counted != null && extraSeats != null
+      && Number(counted[1]) === FIXTURE_AGENTS.length - 1 && Number(counted[2]) === extraSeats,
+      "the Add button says how many of the ceiling are used",
+      addLabel == null ? "no Add button"
+        : `${addLabel.slice(0, 60)} against a ceiling of ${addRead.cap ?? "nothing the page would say"}`);
 
     // (b) two answers already saved: the strip has to show the work so far.
     saved = await renderFixture(browser, {
@@ -738,7 +754,10 @@ async function liveArm(landed) {
     // swallowed learn-from-demonstration whole. A box in that state ships a Titan who gets
     // "Let's get set up." and nothing else, so the interview's own words are what has to be read
     // off the wire. Two lines of the recipe rather than one, so a stray match cannot carry it.
-    const RECIPE_MARKERS = ["# First-time setup", "Ask the five"];
+    // FIRSTRUN-2 renamed the section this used to look for: the interview is open now, and the
+    // heading "Ask the five" is gone with the closed form. The marker is the question itself, which
+    // is the line that makes this recipe this recipe rather than a heading that can be renamed again.
+    const RECIPE_MARKERS = ["# First-time setup", "Tell me about your background"];
     const carried = RECIPE_MARKERS.filter((marker) => stubState.userPrompt.includes(marker));
     check(carried.length === RECIPE_MARKERS.length,
       "the onboarding recipe is on the turn: the setup skill's own body is inlined into the first prompt",

@@ -38,6 +38,24 @@ test("the module publishes its global and mounts itself, which is what makes one
   assert.ok(!/innerHTML\s*=/.test(source.replace(/held\.outerHTML = markup;/, "")), "it may add siblings of its own, never rewrite somebody else's node");
 });
 
+// CONSOLE-6. The module's observer watches the whole body, so an unguarded write is a loop: the write
+// is a mutation, the mutation schedules a paint, the paint writes again, one per animation frame for
+// the life of the page. Measured in real Chrome on grok-bot-local-vm 2026-09-11, before the guard:
+// #rail-screen's children were replaced 603 times in 10 seconds on an idle console with nobody typing,
+// the strip's words identical every time, and the whole page's mutation rate was 211 records a second
+// against 6 afterwards. Jason's "the entire page flickers when I am typing in the bot" was this.
+test("CONSOLE-6: every write this module makes is guarded on a change, so its own observer cannot loop", async () => {
+  const source = await read("ui/machine-room/cloud-browser.js");
+  assert.match(source, /let paintedStrip = ""/, "the markup last written has to be remembered, or there is nothing to compare against");
+  assert.match(source, /else if \(markup !== paintedStrip\) \{\s*\n\s*held\.outerHTML = markup;/,
+    "the rail strip may only be rewritten when its markup actually changed");
+  assert.match(source, /__cloudBrowserMarkup === wanted\) continue;/,
+    "a take-over card already carrying the markup this module wants is left alone: the session id it compared before is absent on a session with no live view, so that test read null against \"\" and rebuilt the card every frame");
+  // Both branches have to set the memory or the next paint writes again regardless.
+  assert.match(source, /rail\.insertAdjacentHTML\("beforeend", markup\);\s*\n\s*paintedStrip = markup;/,
+    "the memory is set where the strip is first inserted too");
+});
+
 test("no vendor is named in anything the person reads on it", async () => {
   const source = await read("ui/machine-room/cloud-browser.js");
   // Comments explain which vendors exist; the strings a person is shown must not.

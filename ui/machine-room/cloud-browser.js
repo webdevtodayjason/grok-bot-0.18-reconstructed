@@ -215,6 +215,20 @@
   // hand-off card carries data-handoff-card and data-agent-id, and the rail's screen tile lives in
   // #rail-screen. Both are read, never written -- nothing here edits a node app.js owns, it only
   // adds a sibling of its own and removes the siblings it added.
+  //
+  // CONSOLE-6. EVERY WRITE BELOW IS GUARDED ON A CHANGE, and that is what stops this module from
+  // repainting the console sixty times a second for the life of the page. The observer under it
+  // watches the whole body, so a write made here is a mutation that wakes it, which schedules
+  // another paint one frame later, which writes again: an unconditional `held.outerHTML = markup`
+  // is a loop with nothing outside it to stop it. Measured on grok-bot-local-vm in real Chrome
+  // 2026-09-11, on an idle console with nobody typing: #rail-screen's children were replaced 603
+  // times in 10 seconds, one every 17 ms, with the strip's words identical every time. Jason, the
+  // same morning: "The entire page flickers when I am typing in the bot."
+  //
+  // So the last markup this module actually wrote is remembered and compared. Comparing against
+  // the element's own outerHTML would not do: the browser normalises attribute quoting and order,
+  // so a generated string and a parsed one are never equal and the loop would survive the guard.
+  let paintedStrip = "";
   function paint() {
     const document_ = global.document;
     if (document_ == null) return;
@@ -226,15 +240,22 @@
       const mine = existing != null && existing.hasAttribute && existing.hasAttribute("data-cloud-browser-card")
         ? existing
         : null;
-      if (session == null) {
+      const wanted = session == null ? "" : handoffRowMarkup(session);
+      if (wanted.length === 0) {
         if (mine != null) mine.remove();
         continue;
       }
       // Repainting a live iframe restarts the vendor's session view and throws away whatever the
-      // person had done in it, so an unchanged row is left exactly where it is.
-      if (mine != null && mine.getAttribute("data-session-id") === (session.sessionId || "")) continue;
+      // person had done in it, so an unchanged row is left exactly where it is. The markup itself
+      // is what is compared, on the node this module put there: the session id was compared before,
+      // and a session with no live view carries no data-session-id at all, so that test read null
+      // against "" and rebuilt the card on every frame -- the same loop as the strip, on a card in
+      // the middle of the conversation.
+      if (mine != null && mine.__cloudBrowserMarkup === wanted) continue;
       if (mine != null) mine.remove();
-      card.insertAdjacentHTML("afterend", handoffRowMarkup(session));
+      card.insertAdjacentHTML("afterend", wanted);
+      const added = card.nextElementSibling;
+      if (added != null) added.__cloudBrowserMarkup = wanted;
     }
 
     const rail = document_.querySelector("#rail-screen");
@@ -243,10 +264,13 @@
       const markup = computerStrip();
       if (markup.length === 0) {
         if (held != null) held.remove();
+        paintedStrip = "";
       } else if (held == null) {
         rail.insertAdjacentHTML("beforeend", markup);
-      } else {
+        paintedStrip = markup;
+      } else if (markup !== paintedStrip) {
         held.outerHTML = markup;
+        paintedStrip = markup;
       }
     }
   }
