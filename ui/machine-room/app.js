@@ -7713,14 +7713,25 @@
   // functions the stage uses (messageMarkup, adapter.sendMessage), so a message reads the same in
   // both places.
 
-  // The five questions, in the order Titan asks them. `field` is the key the host stores an answer
-  // under (save_onboarding_answer), so this list and docs/ONBOARDING.md are the same contract.
+  // The five things Titan is keeping, in the order the chips read. `field` is the key the host
+  // stores an answer under (save_onboarding_answer), so this list and docs/ONBOARDING.md are the
+  // same contract.
+  //
+  // FIRSTRUN-2: these are slots, not questions, and the labels say so. They read "Your name",
+  // "Where you are", "What kind of work", "Whether you own it", "How you want to work" -- five
+  // labels for five closed questions asked in a fixed order. Jason, 2026-09-11: "This should be
+  // more open-ended: 'Tell me about your work and how you work'. It should be 'Tell me about your
+  // background'." He then answered the work question with a paragraph covering his role, his
+  // company, four sites he writes on, two addresses and the calendar his day runs on, and expected
+  // Titan to absorb all of it. The seeded skill now asks three open questions and fills every slot
+  // an answer covers at once, so a chip can tick without a question of its own ever being asked --
+  // which is why each one now names what it holds rather than a question that may never be put.
   const ONBOARDING_STEPS = [
-    { field: "name", label: "Your name" },
+    { field: "name", label: "What to call you" },
     { field: "location", label: "Where you are" },
-    { field: "business", label: "What kind of work" },
+    { field: "business", label: "Your background and what you do" },
     { field: "ownsBusiness", label: "Whether you own it" },
-    { field: "workingStyle", label: "How you want to work" },
+    { field: "workingStyle", label: "How you want me to work" },
   ];
   // How long Titan looks pleased after an answer goes in. The crew's own celebration is 6s
   // (mascot-crew.js CELEBRATION_MS); this is the same beat, so the dialog does not feel like a
@@ -7784,7 +7795,7 @@
     const answered = onboardingAnsweredCount();
     return `<div class="onboarding-lede">
         ${face}
-        <p>This is Titan, the bot that leads the rest of them on this box. He is going to ask you a few short questions, then show you what he can take off your hands. It takes about a minute.</p>
+        <p>This is Titan, the bot that leads the rest of them on this box. He wants to hear a bit about you and your work, then he will show you what he can take off your hands. It takes about a minute.</p>
       </div>
       <ul class="onboarding-progress" aria-label="What Titan still needs">${onboardingStepsMarkup()}</ul>
       <p class="onboarding-count" data-onboarding-count>${answered} of ${ONBOARDING_STEPS.length} answered</p>
@@ -7820,11 +7831,29 @@
     if (still && crew && index >= 0) still.src = crew.stillFor(index, mood);
   }
 
+  // CONSOLE-6. The rows are written only when they have changed. This used to rebuild on every call,
+  // and the call arrives on the dialog's own 2.5 s poll whether or not Titan has said anything, so
+  // the only chat on screen during setup was thrown away and rebuilt four times a minute under the
+  // person reading it. Jason, 2026-09-11, inside the Meet Titan window: "only the text chat area is
+  // flashing, refreshing every 3 seconds or so."
+  //
+  // The markup is the signature, because the markup is the whole of what is on screen: a row whose
+  // time changed from "now" to a clock reading is a real change and gets drawn, and a poll that
+  // brought nothing new writes nothing at all.
+  // The element is half the signature, not only the markup: renderOnboarding rebuilds the dialog's
+  // whole body when an answer lands, so the box this last painted into can be a node that is no
+  // longer on the page, and comparing markup alone would then leave the new one empty for ever.
+  let onboardingPaintedRows = null;
+  let onboardingPaintedBox = null;
   function paintOnboardingTranscript() {
     const box = elements.onboardingContent.querySelector("#onboarding-transcript");
     if (!box) return;
+    const rows = contextMessages().map(messageMarkup).join("");
+    if (onboardingPaintedBox === box && onboardingPaintedRows === rows) return;
+    onboardingPaintedBox = box;
+    onboardingPaintedRows = rows;
     const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 90;
-    box.innerHTML = contextMessages().map(messageMarkup).join("");
+    box.innerHTML = rows;
     fillAttachments(box);
     if (nearBottom) requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
   }

@@ -249,6 +249,19 @@
   }
 
   // ------------------------------------------------------------------ finding the card itself
+  //
+  // CONSOLE-6. The write is guarded on a change, and that guard is what keeps this module from
+  // repainting the rail on every animation frame for the life of the page. The observer below
+  // watches the whole body, so writing the strip is itself a mutation that wakes it, which
+  // schedules another paint a frame later, which writes again. Measured in cloud-browser.js, which
+  // carried the same shape: 603 replacements of #rail-screen's children in 10 seconds on an idle
+  // console. The strip's own words change only when the box's task list does, which is every 15 s
+  // at most, so anything more than that is the loop rather than the news.
+  //
+  // The markup this module last wrote is what is compared, not the element's outerHTML: a browser
+  // normalises attribute quoting and order when it parses, so a generated string never equals a
+  // parsed one and a guard written that way stops nothing.
+  let painted = "";
   function paint() {
     const document_ = global.document;
     if (document_ == null) return;
@@ -258,10 +271,13 @@
     const markup = computerStrip();
     if (markup.length === 0) {
       if (held != null) held.remove();
+      painted = "";
       return;
     }
-    if (held == null) rail.insertAdjacentHTML("beforeend", markup);
-    else held.outerHTML = markup;
+    if (held == null) { rail.insertAdjacentHTML("beforeend", markup); painted = markup; return; }
+    if (markup === painted) return;
+    held.outerHTML = markup;
+    painted = markup;
   }
 
   // The Stop button, delegated off the document rather than bound per row: the strip is rebuilt on

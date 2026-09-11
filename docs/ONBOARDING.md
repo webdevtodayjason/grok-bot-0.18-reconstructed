@@ -32,7 +32,7 @@ are landed.
 They land on the console the way they always will. Over the top of it, coming down from just below
 the top bar and running the full width of the stage, is a dialog with Titan's face in the middle of
 it. The chat is behind it and dimmed. He says who he is: their main Titan, the one they will talk
-to, the one who runs the rest of the crew for them. Then he asks the five questions in section 2,
+to, the one who runs the rest of the crew for them. Then he asks the three open questions in section 2,
 one at a time, in his own words, as a conversation and never as a form. Each answer is saved as it
 arrives and lights up on a strip of five inside the dialog, so the person can see how far in they
 are. When the questions are done he walks through what he can do (section 3) and closes by asking
@@ -56,18 +56,40 @@ straight to `materializeSession` and never sets `introductionPending`. So `kicks
 (`agent-lifecycle.ts:120`) returns false on it and the opening turn nothing else would start has to
 be started by the console when it opens the dialog. See section 6.
 
-## 2. The five questions
+## 2. The five things he keeps, and the three things he asks
 
-| Field | What he asks | What he does with the answer |
+These are the state's five fields and the strip's five chips. They are **slots, not questions**:
+FIRSTRUN-2 made the interview open, and one paragraph can fill three of them at once.
+
+| Field | Chip | What he does with the answer |
 |---|---|---|
-| `name` | what to call them | saved to the state, and written to his own memory as a profile fact |
-| `location` | where they are, so he can get the time zone right | saved, turned into an IANA zone, and applied to the box (section 4) |
-| `business` | what kind of business they are in | saved, and written to his memory as a profile fact |
-| `ownsBusiness` | whether they own it, yes or no | saved as a boolean |
-| `workingStyle` | how they want to work with him: hands on, or hand things off | saved, and written to his memory as a profile fact |
+| `name` | What to call you | saved to the state, and written to his own memory as a profile fact |
+| `location` | Where you are | saved, turned into an IANA zone, and applied to the box (section 4) |
+| `business` | Your background and what you do | saved, and written to his memory as a profile fact |
+| `ownsBusiness` | Whether you own it | saved as a boolean |
+| `workingStyle` | How you want me to work | saved, and written to his memory as a profile fact |
 
-One at a time. He asks the next one after the last is answered, not all five at once, and he takes
-a person who answers two things in one sentence at their word rather than asking again.
+What he actually asks is three things, and then only whatever is still empty:
+
+1. what to call them — the one closed question
+2. **"Tell me about your background."**
+3. **"Tell me about your work and how you work."**
+
+Then, one at a time and only if the slot is still empty: whether they own it, how they want to be
+worked with, and where they are.
+
+Jason, 2026-09-11, on the closed form this replaced: "This should be more open-ended: 'Tell me about
+your work and how you work'. It should be 'Tell me about your background'." He answered the old work
+question with a paragraph carrying his role, his company, four sites he writes on, two addresses and
+the calendar his day runs on, and expected Titan to absorb all of it. So the rule is that after every
+answer Titan fills **every slot that answer covered**, in that same turn, and never asks again for
+something he has already been told. A chip can tick without its own question ever being put.
+
+Absorbing all of it needs two caps respected, and the recipe says both out loud. A saved answer stops
+at **400 characters** and `normalizeOnboardingAnswer` slices silently, so what goes in the field is
+one plain sentence. A remembered fact stops at **500 characters** and the seed path refuses a longer
+one rather than storing a cut one, so the detail goes into memory as several facts, one per call
+(section 3 of the recipe, and [skill-import-names-itself] in the project memory).
 
 Each answer reaches the box through the tool in section 5.4 the moment he has it, not in a batch at
 the end. That is what makes the strip fill, and it is what makes a person who closes the tab halfway
@@ -224,7 +246,7 @@ back. The recipe tells Titan to call it once, in the same turn he asks what they
 (section 7 step 6).
 
 **It is the only thing on the box that ends a finished interview.** Before it existed the record was
-written by the console's button alone, so a person who answered all five questions could leave that
+written by the console's button alone, so a person who filled all five slots could leave that
 window only through a control that said they were skipping, and closing the tab instead reopened the
 whole first run on the next load. Both tools disappear from the toolset the moment the record reads
 `done: true`, so a finished box carries neither.
@@ -323,7 +345,8 @@ the three that are already there. `node scripts/gen-seed-skills.mjs` bakes it in
 runtime. It has to make Titan:
 
 1. say who he is, in one or two sentences: their main Titan, their AI lead, the one who runs the crew
-2. ask the five questions in section 2, one at a time, in his own words, never as a form or a list
+2. ask the three open questions in section 2, one at a time, in his own words, never as a form or a list,
+   and fill every slot each answer covers rather than asking again for what he has been told
 3. call `save_onboarding_answer` the moment he has each answer, before asking the next
 4. walk through section 3
 5. close by asking what they want done first
@@ -425,7 +448,7 @@ node scripts/verify-onboarding.mjs --self-test    # the gate measuring itself, s
 **The fixture arm** serves `ui/machine-room` off its own static server and answers `/api` from a
 fixture, so the console hydrates live with no box behind it. It measures the modal: open below the
 top bar, the width of the stage, modal so the chat behind is dimmed and inert, Titan's face large and
-curious, the five questions on the strip, none ticked before a word is said, **Skip for now** in
+curious, the five chips on the strip, none ticked before a word is said, **Skip for now** in
 those words, the conversation and composer inside the dialog, two of five ticked on a state with two
 answers, and **no modal at all** on a box reporting `done: true`.
 
@@ -469,8 +492,8 @@ built from the gb tip by `node scripts/build-host.mjs --deploy`:**
 | What | What it answered |
 |---|---|
 | `verify-onboarding` all three arms | **58 passed, 0 failed, 1 not measured** |
-| the fixture arm against the real console | passes. The dialog opens below the top bar at the width of the stage, the chat behind it is dimmed, Titan's face is live at 131px and curious, the five questions are on the strip with none ticked, **Skip for now** is there, and a state reporting `done:true` opens straight into the console with no modal |
-| the box arm | passes. The flag went back to first run through `resetOnboarding`, the modal opened by itself, the console started Titan's turn with nobody typing (1 model call in 2s), that turn carried 5777 characters of user content holding the recipe's own `# First-time setup` and `Ask the five`, the turn was offered `save_onboarding_answer`, an answer typed in the dialog reached the box's own state, the strip read 1 of 5, **Skip for now** closed it, and the box read `done:true` with `doneReason:"skipped"` and the answer kept |
+| the fixture arm against the real console | passes. The dialog opens below the top bar at the width of the stage, the chat behind it is dimmed, Titan's face is live at 131px and curious, the five chips are on the strip with none ticked, **Skip for now** is there, and a state reporting `done:true` opens straight into the console with no modal |
+| the box arm | passes. The flag went back to first run through `resetOnboarding`, the modal opened by itself, the console started Titan's turn with nobody typing (1 model call in 2s), that turn carried 5777 characters of user content holding the recipe's own `# First-time setup` and `Ask the five` (FIRSTRUN-2 renamed that second marker to `Tell me about your background`; the box arm has not been rerun since), the turn was offered `save_onboarding_answer`, an answer typed in the dialog reached the box's own state, the strip read 1 of 5, **Skip for now** closed it, and the box read `done:true` with `doneReason:"skipped"` and the answer kept |
 | the ending, on the box | passes. Put back to first run and reloaded, the modal came back and the box refused to say Titan's opening twice (1 opening line before the reload, 1 after). The stub called `finish_onboarding` once, the record went to `done:true` with `doneReason:"completed"`, and the dialog closed with nobody pressing anything |
 | the migration rule on a used box | passes. 8 agents on this Mac and it answered `done:true`, `doneReason:"existing-box"`, at the first read. No agent was renamed and no modal opened |
 | the ceiling arm | passes. Default 13 with nothing set; a room does not spend one of the thirteen (bots 9 → 9 while `countAgents` went 9 → 10); at the ceiling `createAgent` and `duplicateAgent` both answer HTTP 409 with "This workspace holds Titan and 8 more bots. Remove one to add another."; neither refusal left a half-made agent; one place under the ceiling the same create goes through; the console shows the same sentence as a toast |

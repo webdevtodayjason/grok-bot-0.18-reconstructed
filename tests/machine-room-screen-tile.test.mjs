@@ -1105,3 +1105,88 @@ test("SEAT-FOCUS-1: app.js's hand-off thumb arms the same rule and drops it on t
   assert.ok(mount.indexOf("keepKeyboardOff") < mount.indexOf("boxHandoffTick"),
     "armed on the frame it just created, before the reader's own timer");
 });
+
+// -- CONSOLE-6: and where the keyboard is handed BACK to -------------------------------------------
+//
+// SEAT-FOCUS-1 took the keyboard off the reader and left it on <body>, which is nobody. A person
+// typing a message when the reader wakes therefore lost the caret and every character after it, with
+// nothing on screen saying why. MEASURED on grok-bot-local-vm in real Chrome 2026-09-11, typing two
+// characters a second into #message-input for 75 s: the caret sat in the box until 31.0 s, the idle
+// reader mounted at 30.0 s, and from then on the caret was on <body> and 88 of 150 characters went
+// nowhere. After: 150 of 150, and the caret never left. Jason: "when it flickers I lose where my
+// cursor is, so I have to target the field again to continue typing."
+
+const focusable = (win, id) => {
+  const el = makeElement("textarea", { id });
+  el.isConnected = true;
+  el.focuses = 0;
+  el.focus = (options) => { el.focuses += 1; el.focusOptions = options; win.document.activeElement = el; };
+  return el;
+};
+
+test("CONSOLE-6: the keyboard goes back to what the person was typing in, not to the body", () => {
+  const win = makeWindow();
+  const tile = load(win);
+  railTile(win, "titan");
+  tile.sync({ agentId: "titan", seat: 3, status: "working" });
+  const frame = clientOf(win);
+  assert.ok(frame, "a client was mounted");
+
+  // The person puts the caret in the message box. The module learns that from the page's own focusin.
+  const box = focusable(win, "message-input");
+  win.document.activeElement = box;
+  for (const fn of win.document.listeners.focusin ?? []) fn({ target: box });
+
+  giveKeyboardTo(win, frame);
+  assert.equal(win.document.activeElement, frame, "the reader has taken it, which is the case under test");
+  fireEvery(win, tile.limits.HANDBACK_POLL_MS);
+  assert.equal(frame.blurs, 1, "the reader was blurred");
+  assert.equal(win.document.activeElement, box, "and the caret is back in the message box, not on the body");
+  assert.equal(box.focuses, 1, "put back once, not on every poll tick");
+  assert.deepEqual(box.focusOptions, { preventScroll: true },
+    "without preventScroll, putting the caret back scrolls the conversation the person was reading");
+
+  // A second steal is handed back to the same place, and an idle poll puts nothing anywhere.
+  fireEvery(win, tile.limits.HANDBACK_POLL_MS);
+  assert.equal(box.focuses, 1, "an idle poll does not re-focus anything");
+  giveKeyboardTo(win, frame);
+  fireEvery(win, tile.limits.HANDBACK_POLL_MS);
+  assert.equal(box.focuses, 2, "the second steal is handed back the same way");
+});
+
+test("CONSOLE-6: the memory never holds a reader frame, so a hand-back cannot hand it straight back", () => {
+  const win = makeWindow();
+  const tile = load(win);
+  railTile(win, "titan");
+  tile.sync({ agentId: "titan", seat: 3, status: "working" });
+  const frame = clientOf(win);
+  frame.isConnected = true;
+  frame.focuses = 0;
+  frame.focus = () => { frame.focuses += 1; win.document.activeElement = frame; };
+
+  // The reader's own focus is what the page sees when the client takes the keyboard. Remembering it
+  // would make the hand-back give the keys straight back to the thing it just took them from.
+  for (const fn of win.document.listeners.focusin ?? []) fn({ target: frame });
+  for (const fn of win.document.listeners.focusin ?? []) fn({ target: win.document.body });
+  giveKeyboardTo(win, frame);
+  fireEvery(win, tile.limits.HANDBACK_POLL_MS);
+  assert.equal(frame.focuses, 0, "the reader is never focused by the rule meant to keep it unfocused");
+  assert.equal(win.document.activeElement, win.document.body,
+    "with nothing of the person's to go back to, the body is where it stays");
+});
+
+test("CONSOLE-6: a box that has gone off the page is not focused", () => {
+  const win = makeWindow();
+  const tile = load(win);
+  railTile(win, "titan");
+  tile.sync({ agentId: "titan", seat: 3, status: "working" });
+  const frame = clientOf(win);
+  const box = focusable(win, "message-input");
+  for (const fn of win.document.listeners.focusin ?? []) fn({ target: box });
+  // A panel closed, a conversation changed: the node the caret was in is no longer in the document.
+  box.isConnected = false;
+  giveKeyboardTo(win, frame);
+  fireEvery(win, tile.limits.HANDBACK_POLL_MS);
+  assert.equal(box.focuses, 0, "a detached node is not handed the keyboard");
+  assert.equal(win.document.activeElement, win.document.body);
+});

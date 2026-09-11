@@ -222,15 +222,18 @@ async function loadOnboarding({
 
 const seeded = (name, createdAt) => ({ id: name.toLowerCase(), name, createdAt, isGroup: false, status: "ready" });
 
-test("ONBOARD-1: the five questions are the ones Titan asks, in his order", async () => {
+test("ONBOARD-1: the five things Titan keeps are the host's own fields, in his order", async () => {
   const { ONBOARDING_STEPS } = await loadOnboarding({ workers: [seeded("Titan", 1)] });
   // These field names are the keys the host stores an answer under. Renaming one here without
   // renaming it there leaves a strip that never fills, so this list is the contract.
   assert.deepEqual(ONBOARDING_STEPS.map((step) => step.field),
     ["name", "location", "business", "ownsBusiness", "workingStyle"]);
-  // Plain words, the way a business owner reads them: no field names, no jargon on screen.
+  // Plain words, the way a business owner reads them: no field names, no jargon on screen. FIRSTRUN-2
+  // made the interview open, so each label names the thing Titan is keeping rather than a question he
+  // may never put: one paragraph can fill three of these at once and no question of their own is
+  // asked for the ones it covered.
   assert.deepEqual(ONBOARDING_STEPS.map((step) => step.label),
-    ["Your name", "Where you are", "What kind of work", "Whether you own it", "How you want to work"]);
+    ["What to call you", "Where you are", "Your background and what you do", "Whether you own it", "How you want me to work"]);
 });
 
 test("ONBOARD-1: the face is Titan's, the same way the roster picks him", async () => {

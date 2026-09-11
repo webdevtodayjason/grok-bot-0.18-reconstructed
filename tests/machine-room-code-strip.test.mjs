@@ -316,3 +316,20 @@ test("CODE-1: the coding skill is in the generated seed file, with frontmatter t
     assert.doesNotMatch(skill, new RegExp(leak, "i"), `${leak} must not be in what the agent is taught to say`);
   }
 });
+
+// ---- CONSOLE-6: the same repaint loop, in the same shape ---------------------------------------
+//
+// This module watches the whole body and repaints a frame later, so an unguarded write to its own
+// strip is a loop with nothing outside it to stop it. cloud-browser.js carried the identical shape
+// and was measured in real Chrome on grok-bot-local-vm 2026-09-11: #rail-screen's children replaced
+// 603 times in 10 seconds on an idle console, 211 mutation records a second across the page, against
+// 6 once the write was guarded. This one is dormant on a box with no coding tasks, which is the only
+// reason nobody saw it; a box with one would flicker the same way.
+test("CONSOLE-6: the strip is only rewritten when its markup changed, so the observer cannot loop", async () => {
+  const source = await read("ui/machine-room/code-tasks.js");
+  assert.match(source, /let painted = ""/, "the markup last written has to be remembered, or there is nothing to compare against");
+  assert.match(source, /if \(markup === painted\) return;\s*\n\s*held\.outerHTML = markup;/,
+    "an unchanged strip is left exactly where it is");
+  assert.match(source, /rail\.insertAdjacentHTML\("beforeend", markup\); painted = markup;/,
+    "the memory is set where the strip is first inserted too, or the next paint writes again regardless");
+});

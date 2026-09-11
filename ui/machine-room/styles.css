@@ -1665,7 +1665,13 @@ code.code-chip[data-copy-failed]::after {
   height: 54px;
   padding: 5px;
   border: 1px solid var(--glass-edge);
-  border-radius: var(--radius-pill);
+  /* COMPOSER-1. A rounded rectangle, not a pill. This was --radius-pill (999px), which on a 54px
+     box is a full half-circle at each end -- fine for one short line, and wrong the moment the box
+     grows: the text wraps inside an oval, and the Talk and Send buttons sit in the curve rather than
+     beside the words. Jason, 2026-09-11, with a screenshot of a pasted paragraph in it. --radius-md
+     is the 14px the rest of the console's cards already use, so the shelf now matches the panels
+     above it at every height the textarea takes. */
+  border-radius: var(--radius-md);
   background: rgba(15, 23, 27, 0.54);
   box-shadow: var(--inset-highlight);
 }
