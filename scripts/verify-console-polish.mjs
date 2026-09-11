@@ -16,6 +16,11 @@
 // reader takes the keyboard about two seconds after every mount, and from then on Escape does not
 // leave talk mode and the space bar does not talk.                                      --keys
 //
+// And the half of that row the first fix did not cover, found in review on 2026-09-11: the SEAT a
+// person opens is deliberately exempt from the readers' hand-back, so once it connects Escape stopped
+// closing the desktop dialog and the person had no keyboard way out of the agent's screen.
+//                                                                                  --seat-escape
+//
 // And one from 2026-09-10, which is SCREEN-TILE-1:
 //
 //   "the AI's desktop in the right-hand corner has a screenshot that does not stay up to
@@ -81,7 +86,7 @@ import { acquireBoxLock } from "./lib/box-lock.mjs";
 // requests were indistinguishable from a stranger's in the relay's sign-in ledger.
 import { gateUserAgent } from "./gate-agent.mjs";
 
-const LEGS = ["boot", "scroll", "picker", "badge", "tile", "tile-live", "keys", "files", "chips", "approval"];
+const LEGS = ["boot", "scroll", "picker", "badge", "tile", "tile-live", "keys", "seat-escape", "files", "chips", "approval"];
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(`--${name}`);
 const value = (name) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : null; };
@@ -90,7 +95,7 @@ const URL_TARGET = value("url");
 const READ_ONLY = URL_TARGET != null || flag("read-only");
 const chosen = flag("all") ? [...LEGS] : LEGS.filter((leg) => flag(leg));
 if (chosen.length === 0) {
-  console.log("usage: node scripts/verify-console-polish.mjs (--boot | --scroll | --picker | --badge | --tile | --tile-live | --keys | --files | --chips | --approval | --all)");
+  console.log("usage: node scripts/verify-console-polish.mjs (--boot | --scroll | --picker | --badge | --tile | --tile-live | --keys | --seat-escape | --files | --chips | --approval | --all)");
   console.log("       [--url https://console.titanium.bot]   read-only pass, CONSOLE_BEARER in the environment");
   console.log("");
   console.log("  --boot    the chosen background is on the page before first paint, and the cover lifts");
@@ -100,6 +105,7 @@ if (chosen.length === 0) {
   console.log("  --tile    the rail's screen tile shows a picture or a plate, and never a broken image");
   console.log("  --tile-live  the tile follows the agent's screen on its own, and what that costs");
   console.log("  --keys    the agent's screen never holds the keyboard: Escape leaves talk mode, the space bar talks");
+  console.log("  --seat-escape  Escape still closes the agent's screen once the seat itself has the keyboard");
   console.log("  --files   a file row opens a viewer and downloads");
   console.log("  --chips   a backticked span is a chip a mouse can press, and pressing it copies");
   console.log("  --approval  the auto-review card in every state, plus one real forced approval on the local box");
@@ -2087,9 +2093,123 @@ async function legApproval(page) {
   }
 }
 
+
+// ---- --seat-escape (SEAT-FOCUS-1b) ---------------------------------------------------------------
+//
+// THE HALF THE FIRST FIX LEFT OPEN. screen-tile.js's hand-back is scoped by attribute to the two
+// off-screen readers, and that scoping is correct: the seat inside the desktop dialog is the pane a
+// person opened to work on, the paste bridge depends on it, and taking its keyboard away would break
+// the thing it is for. But Escape is the DIALOG's own way out, and a <dialog> only closes on Escape
+// when the key reaches the document it lives in. Measured in review on grok-bot-local-vm: with the
+// dialog open and its seat connected, document.activeElement was the IFRAME, a real Escape reached a
+// capture-phase document listener 0 times, and the dialog did not close.
+//
+// So app.js reaches into the seat's own document -- same origin by construction, since its src is
+// built on window.location.origin -- and closes the dialog from there, on Escape and nothing else.
+// This leg proves the condition FIRST (the frame is holding the keyboard) and then that Escape still
+// gets the person out, which is the only claim worth making: a leg that pressed Escape on a dialog
+// whose seat never connected would pass with the defect present.
+async function legSeatEscape(page) {
+  console.log("\n== --seat-escape: Escape still closes the agent's screen once the seat has the keyboard (SEAT-FOCUS-1b)");
+  if (READ_ONLY) {
+    skip("Escape closes the desktop view with the seat connected", "read-only pass: opening this pane launches an app on a real seat");
+    return;
+  }
+  const booted = await bootConsole(page);
+  check(booted === true, "the console boots and the gateway adapter is on the page", booted === true ? "window.__machineRoomAdapter present" : "no adapter");
+  if (booted !== true) return;
+
+  // Opened the way a person opens it, hit-tested first, because a page.click() that resolved is not
+  // evidence anybody could reach the control.
+  const target = await hitTest(page, ".rail-screen-button");
+  if (!target.found) { skip("Escape closes the desktop view with the seat connected", "no .rail-screen-button on screen for the open conversation"); return; }
+  check(target.visible && target.hit, "the screen tile is where a mouse can actually reach it", `${target.w}x${target.h}, the element under its centre is ${target.on}`);
+  await page.click(".rail-screen-button", { timeout: 8000 }).catch(() => {});
+  const opened = await until(() => page.evaluate(() => (document.getElementById("desktop-dialog")?.open ? true : null)), within(25_000), 500);
+  check(opened === true, "the desktop view opens on the agent's screen", opened === true ? "#desktop-dialog is open" : "the dialog never opened");
+  if (opened !== true) return;
+
+  // THE CONDITION, PROVED BEFORE ANYTHING IS PRESSED: the seat's own client has the keyboard. This is
+  // what made the key disappear, and without it nothing below means anything.
+  const holding = await until(() => page.evaluate(() => {
+    const frame = document.querySelector("#desktop-window iframe[data-box-vnc]");
+    if (frame == null) return null;
+    if (document.activeElement !== frame) return null;
+    return { src: String(frame.getAttribute("src") ?? "").slice(0, 60), attrs: frame.getAttributeNames().join(",") };
+  }), within(45_000), 250);
+  check(holding != null, "the seat's client takes the keyboard, which is the condition this leg is about",
+    holding != null
+      ? `document.activeElement is the seat frame (${holding.attrs}), src ${holding.src}`
+      : "the seat never took the keyboard inside 45 s, so the swallow was NOT reproduced and nothing below would mean anything");
+  if (holding == null) return;
+
+  // A capture-phase listener on the page's own document, so the output says where the key went. With
+  // the frame holding focus this stays at 0 and the dialog closes anyway, which is the whole proof:
+  // the close came from inside the seat's document and not from the page.
+  await page.evaluate(() => {
+    window.__gateSeatEsc = 0;
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") window.__gateSeatEsc += 1; }, true);
+  });
+  await shoot(page, `seat-escape-open-${Date.now()}`);
+  await page.keyboard.press("Escape");
+  const closed = await until(() => page.evaluate(() => (document.getElementById("desktop-dialog")?.open === false
+    ? {
+      onPage: window.__gateSeatEsc,
+      active: document.activeElement?.tagName ?? "none",
+      attrs: document.activeElement?.getAttributeNames?.().join(",") ?? "",
+    } : null)), within(8000), 150);
+  check(closed != null, "one real Escape closes the agent's screen with its seat connected and holding the keyboard",
+    closed != null
+      ? `#desktop-dialog closed, the page's own document saw ${closed.onPage} Escape(s), activeElement is ${closed.active}${closed.attrs ? ` (${closed.attrs})` : ""}`
+      : `the dialog stayed open: the page's own document saw ${await page.evaluate(() => window.__gateSeatEsc)} Escape(s)`);
+  if (closed != null) {
+    // AND THE KEYS COME BACK TO THE PAGE. Not read once: the frame reads as activeElement for about a
+    // quarter second more while the closed dialog stops being rendered, so what is measured is how
+    // long until the keyboard is back, and then that a second real Escape actually reaches the page's
+    // own document -- which is the thing that stopped working, Escape leaving talk mode.
+    const backAt = Date.now();
+    const back = await until(() => page.evaluate(() => (document.activeElement?.getAttribute?.("data-box-vnc") == null
+      ? (document.activeElement?.tagName ?? "none") : null)), within(5000), 100);
+    check(back != null, "and the keyboard comes back to the page rather than staying in the pane that just closed",
+      back != null ? `activeElement is ${back} ${Date.now() - backAt} ms after the pane closed` : "it was still in the seat frame 5 s later");
+    await page.keyboard.press("Escape");
+    await sleep(200);
+    const reached = await page.evaluate(() => window.__gateSeatEsc);
+    check(reached > 0, "and the next real Escape reaches the page's own document, which is what leaves talk mode",
+      `${reached} Escape(s) on the document after the pane closed, ${closed.onPage} while it was open`);
+  }
+
+  // AND THE SEAT STILL GETS EVERY OTHER KEY, which is what makes this pane worth having. Reopened,
+  // clicked inside the frame the way a person does, then a letter: the frame keeps the keyboard and
+  // the dialog stays open, so nothing about working on the agent's screen changed.
+  await page.click(".rail-screen-button", { timeout: 8000 }).catch(() => {});
+  const again = await until(() => page.evaluate(() => {
+    const frame = document.querySelector("#desktop-window iframe[data-box-vnc]");
+    return document.getElementById("desktop-dialog")?.open && frame != null ? true : null;
+  }), within(25_000), 400);
+  if (again !== true) { skip("the seat still keeps every other key", "the desktop view did not come back up inside 25 s"); return; }
+  const box = await page.evaluate(() => {
+    const frame = document.querySelector("#desktop-window iframe[data-box-vnc]");
+    const rect = frame.getBoundingClientRect();
+    return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+  });
+  await page.mouse.click(box.x, box.y);
+  await page.keyboard.press("a");
+  await sleep(400);
+  const after = await page.evaluate(() => ({
+    open: document.getElementById("desktop-dialog")?.open === true,
+    active: document.activeElement?.tagName ?? "none",
+    seat: document.activeElement?.getAttribute?.("data-box-vnc") != null,
+  }));
+  check(after.open === true && after.seat === true,
+    "a click inside the seat and an ordinary key leave the keyboard with the agent's screen and the pane open",
+    `dialog ${after.open ? "open" : "closed"}, activeElement ${after.active}${after.seat ? " (the seat)" : ""}`);
+  await page.evaluate(() => document.getElementById("desktop-dialog")?.close());
+}
+
 // ---- the run --------------------------------------------------------------------------------------
 
-const RUNNER = { boot: legBoot, scroll: legScroll, picker: legPicker, badge: legBadge, tile: legTile, "tile-live": legTileLive, keys: legKeys, files: legFiles, chips: legChips, approval: legApproval };
+const RUNNER = { boot: legBoot, scroll: legScroll, picker: legPicker, badge: legBadge, tile: legTile, "tile-live": legTileLive, keys: legKeys, "seat-escape": legSeatEscape, files: legFiles, chips: legChips, approval: legApproval };
 
 try {
   console.log(`console-polish: ${chosen.join(", ")} against ${ORIGIN}${READ_ONLY ? " (read-only)" : ""}`);

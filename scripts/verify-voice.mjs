@@ -2168,17 +2168,29 @@ async function legPerson() {
   // ---- B: a second browser, same person, nothing pressed ------------------------------------------
   step("a second browser signed in as the same person opens on it, at first paint, with nothing pressed");
   const second = await browser.newContext({ userAgent: GATE_AGENT, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, deviceScaleFactor: 3 });
+  // THE PRECONDITION IS READ AT DOCUMENT START, BEFORE voice.js CAN TOUCH STORAGE. Reading it after
+  // boot raced the very thing it was there to rule out: probe() fetches /voice/settings and hands the
+  // answer to adoptTalkMode, which WRITES localStorage, so on a busy Mac the read landed after that
+  // write and the check failed three runs out of three while the product was fine. The key is named
+  // literally because window.__voice does not exist yet at this point, which is the point.
+  await second.addInitScript(() => {
+    try { window.__gateStoredAtStart = window.localStorage.getItem("titanbot.voice.talkMode"); }
+    catch { window.__gateStoredAtStart = null; }
+  });
   const b = await signInOn(second, "the second browser");
   if (!b.booted) { await second.close(); return; }
   const fresh = await b.page.evaluate(() => ({
-    storedAtFirstPaint: (() => { try { return window.localStorage.getItem(window.__voice._TALK_MODE_KEY); } catch { return null; } })(),
+    atStart: window.__gateStoredAtStart ?? null,
+    storedAfterBoot: (() => { try { return window.localStorage.getItem(window.__voice._TALK_MODE_KEY); } catch { return null; } })(),
     atFirstPaint: window.__voice.talkMode(),
   }));
   // A BROWSER WITH NOTHING STORED IS THE CONDITION, said before the claim: if this context had a stored
-  // value the leg would be measuring localStorage and not the door.
-  check(fresh.storedAtFirstPaint == null || fresh.storedAtFirstPaint === "push",
+  // value the leg would be measuring localStorage and not the door. Asserted on the document-start
+  // reading, which no amount of load can move; the after-boot reading is printed beside it because
+  // what it holds is the door's own write, which is what the claim below is about.
+  check(fresh.atStart == null || fresh.atStart === "push",
     "this browser really starts with nothing of its own, so what it ends on came from the door",
-    `stored at first paint ${JSON.stringify(fresh.storedAtFirstPaint)}, mode ${fresh.atFirstPaint}`);
+    `stored before any script ran ${JSON.stringify(fresh.atStart)}, stored after boot ${JSON.stringify(fresh.storedAfterBoot)}, mode ${fresh.atFirstPaint}`);
   const adopted = await b.page.waitForFunction(() => window.__voice.talkMode() === "always", null, { timeout: 15_000 })
     .then(() => true).catch(() => false);
   const landed = await b.page.evaluate(() => ({

@@ -690,6 +690,25 @@ Nothing else changed: no route, no loader, no request. Both blocks are still dra
 health loader out of the two answers it already had, which is why this panel costs nothing and why
 the readiness flag still counts eight loaders against ten panels.
 
+**And they are drawn whatever that loader's own read does** (KEYS-2b, found in review 2026-09-11).
+Because the blocks come out of `loadSystem`, a 503 on `/v1/admin/system` -- a route with nothing to do
+with either credential -- used to take the whole panel down with it: the operator landed on a heading,
+a paragraph and zero paste forms, with System health's own pointer still telling him the keys were over
+there. That is the same failure KEYS-2 was filed for, one layer further in. So the host read is wrapped:
+it is allowed to fail on its own, the keys are drawn either way out of their own two requests, and the
+host's failure is re-thrown afterwards so the banner and the Overview still report it. The panel also
+carries one line of its own, *"Reading the keys..."*, for the window before either block exists, which
+is gone the moment the forms are there or a draw's own card says why they are not.
+
+**MEASURED on this Mac (MacBook-Pro.local), `node scripts/verify-admin.mjs`, 541 checks, 0 failed, 1 skipped** (the skip is pre-existing, a fixture with no proxy configured).
+With `/v1/admin/system` fulfilled as 503 in the browser and every other route answering for real, at
+1440x900 in real headless Chromium, user agent `titanbot-gate/verify-admin.mjs`: the Keys panel holds
+**5 paste forms**, both `#productKeys` and `#pushDoors` are present, System health holds **0 cards**,
+and the banner still reads *"1 panel could not be loaded: the host could not be read"*. The leg reloads
+the page rather than navigating to another hash, because a hash-only `goto` is a same-document
+navigation: nothing re-runs, the blocks from the healthy load are still on the panel, and the leg would
+have passed while measuring nothing.
+
 **The three keys the product uses** are KEYS-1, added 2026-09-10, and they are the reason no customer
 in this product ever sees a key field again. Jason, looking at a customer's settings panel that day:
 *"A user is never going to put a resend key in. That's on the backend."*

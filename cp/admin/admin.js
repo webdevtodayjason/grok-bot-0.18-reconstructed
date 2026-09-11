@@ -1544,7 +1544,17 @@
   }
 
   async function loadSystem() {
-    const answer = await api("GET", "/v1/admin/system");
+    // KEYS-2b: THE KEYS ARE DRAWN WHATEVER THE HOST READ DOES. Both key blocks live on the Keys panel
+    // and are drawn from this loader, so for one wave a 503 on /v1/admin/system -- a route that has
+    // nothing to do with either credential -- left the Keys panel holding a heading and no paste
+    // forms at all, while System health's own pointer went on telling the operator the keys were over
+    // there. That is KEYS-2's failure shape again: the thing he came for is not where he was sent. So
+    // the host read is allowed to fail on its own, the keys are drawn either way, and the host's
+    // failure is re-thrown afterwards for the banner and the Overview chip that count on it.
+    sayOnKeysPanel("Reading the keys...");
+    let answer;
+    try { answer = await api("GET", "/v1/admin/system"); }
+    catch (error) { await drawKeysBlocks(); throw error; }
     summarise("panel-system", systemChips(answer));
     const host = $("system");
     clear(host);
@@ -1629,14 +1639,47 @@
     // reachable only from a build where index.html and admin.js are one deploy apart, which this
     // service makes impossible on purpose (cp/admin.mjs serves all three files no-store), so it is a
     // belt and not a behaviour.
-    const keysHost = $("keys") ?? host;
-    // Only when it really is the other container. The error card each draw function falls back to is
-    // appended to the HOST rather than to its own block, and nothing else clears #keys, so without
-    // this a control plane whose key route is down would stack one more card on every Refresh and on
-    // every successful paste. Clearing the fallback instead would wipe the cards drawn just above.
-    if (keysHost !== host) clear(keysHost);
+    await drawKeysBlocks();
+  }
+
+  // The two blocks, onto the Keys panel, and the one line that panel carries while neither is there
+  // yet. Its own function because loadSystem calls it on BOTH paths (KEYS-2b above): a panel that only
+  // draws when an unrelated route succeeds is a panel that reads as empty-by-design.
+  async function drawKeysBlocks() {
+    const keys = $("keys");
+    // The fallback is one token and it keeps a missing container from throwing on .parentNode. It is
+    // reachable only from a build where index.html and admin.js are one deploy apart, which this
+    // service makes impossible on purpose (cp/admin.mjs serves all three files no-store), so it is a
+    // belt and not a behaviour.
+    const keysHost = keys ?? $("system");
+    // Only the real container. The error card each draw function falls back to is appended to the
+    // HOST rather than to its own block, and nothing else clears #keys, so without this a control
+    // plane whose key route is down would stack one more card on every Refresh and on every
+    // successful paste. Clearing the fallback instead would wipe System health's own cards.
+    if (keys != null) clear(keys);
     await drawProductKeys(keysHost);
     await drawPushDoors(keysHost);
+    // By now the panel holds either the blocks or each draw's own card saying why it does not, and
+    // both of those say more than this line does.
+    sayOnKeysPanel(null);
+  }
+
+  // One line above the Keys panel's cards, for the window in which neither block is drawn yet. null
+  // takes it away. Written here rather than in cp/admin/index.html for the reason PUSH-1 recorded:
+  // the page file carries the shell and nothing that changes.
+  const KEYS_WAITING_ID = "keysWaiting";
+
+  function sayOnKeysPanel(text) {
+    const panel = document.getElementById("panel-keys");
+    if (panel == null) return;
+    const line = document.getElementById(KEYS_WAITING_ID);
+    if (text == null) { if (line != null) line.remove(); return; }
+    if (line != null) { line.textContent = text; return; }
+    const made = el("p", "quiet", text);
+    made.id = KEYS_WAITING_ID;
+    const cards = $("keys");
+    if (cards != null && cards.parentNode === panel) panel.insertBefore(made, cards);
+    else panel.appendChild(made);
   }
 
   // ---- PUSH-1: the two push credentials ---------------------------------------------------------

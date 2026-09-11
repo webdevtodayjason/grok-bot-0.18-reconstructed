@@ -1871,6 +1871,11 @@ if (!WANT_BROWSER) {
   // SIGNIN-1. Off until the leg that needs it, so every check before that one reads the ledger the
   // fixture actually wrote.
   let signInGateInjection = false;
+  // KEYS-2b. One route refused on purpose, for the last leg in the page: the two key blocks are drawn
+  // by the System health loader, so this is how a gate sees what the Keys panel holds when the route
+  // that loader reads is the one thing that is down. Off everywhere else, so no check before that leg
+  // ever meets a refusal it did not ask for.
+  let systemOutage = false;
 
   browser = await playwright.chromium.launch();
   // 1440x900 is the size ADMIN-3 is measured at: a laptop, which is where this console is read. The
@@ -1914,6 +1919,14 @@ if (!WANT_BROWSER) {
     const posted = request.postData();
     if (posted) { try { body = JSON.parse(posted); } catch { body = null; } }
     const pathname = new URL(request.url()).pathname;
+    // KEYS-2b. The host read, refused, while everything else on the console answers for real.
+    if (request.method() === "GET" && pathname === "/v1/admin/system" && systemOutage) {
+      await route.fulfill({
+        status: 503, contentType: "application/json",
+        body: JSON.stringify({ error: "gate", message: "the host could not be read" }),
+      });
+      return;
+    }
     // SIGNIN-1. The gate fields on the sign-ins answer belong to the route, so this run puts them on
     // the real answer the way the model block below is put on the clients answer -- IN THE SHAPE THE
     // ROUTE REALLY SENDS, which since the review of 2026-09-09 means the marker and nothing else:
@@ -2708,7 +2721,7 @@ if (!WANT_BROWSER) {
   const html = await page.content();
   check(!html.includes(PLANTED_KEY_ADD), "the key that was added is in no node of the page");
   check(!html.includes(PLANTED_KEY_ROLL), "and neither is the one it was rolled to");
-  const fieldValues = await page.evaluate(() => Array.from(document.querySelectorAll("input")).map((one) => one.value).join(" "));
+  const fieldValues = await page.evaluate(() => Array.from(document.querySelectorAll("input")).map((one) => one.value).join("\x00"));
   check(!fieldValues.includes(PLANTED_KEY_ADD) && !fieldValues.includes(PLANTED_KEY_ROLL),
     "and no field on the page is still holding one");
 
@@ -2947,6 +2960,52 @@ if (!WANT_BROWSER) {
   check(!wholePage.includes("—"), "no em dash on any of the ten panels");
 
   check(pageErrors.length === 0, "and the page threw nothing", pageErrors.slice(0, 2).join(" | "));
+
+  // ---- KEYS-2b: the Keys panel when the host read is the thing that is down ----------------------
+  //
+  // LAST in the page leg, after the error sweep, because it refuses a route on purpose and the
+  // console says so on its banner. Both key blocks are drawn by the System health loader, which means
+  // for one wave a 503 on /v1/admin/system -- a route with nothing to do with either credential --
+  // left the Keys panel holding a heading, a paragraph and zero paste forms, with System health's own
+  // pointer still telling the operator the keys were over there. That is KEYS-2's own shape: the thing
+  // he came for is not where he was sent. Nothing above this leg would have noticed, because every
+  // other check reads the panel on a console where every route answers.
+  //
+  // A RELOAD AND NOT A goto TO THE SAME PAGE WITH ANOTHER HASH. That is a same-document navigation:
+  // nothing re-runs, the blocks drawn by the healthy load are still on the panel, and the leg passes
+  // while measuring nothing. The reload keeps the hash, so the page comes back up on Keys.
+  await openPanel("panel-keys");
+  systemOutage = true;
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => document.body.getAttribute("data-admin-loaded") === "true", null, { timeout: 30_000 })
+    .catch(() => {});
+  const outage = await page.evaluate(() => {
+    const panel = document.getElementById("panel-keys");
+    return {
+      forms: panel == null ? -1 : panel.querySelectorAll("form.keyForm").length,
+      secretFields: panel == null ? -1 : panel.querySelectorAll('input[type="password"], textarea').length,
+      keys: document.getElementById("productKeys") != null,
+      push: document.getElementById("pushDoors") != null,
+      said: panel == null ? "" : String(panel.innerText).replace(/\s+/g, " ").trim(),
+      banner: String(document.getElementById("banner")?.textContent ?? ""),
+      // The panel that really is down, so this leg cannot pass on a console where nothing failed.
+      systemCards: document.querySelectorAll("#system .card").length,
+    };
+  });
+  check(outage.forms === 5 || /could not be read/.test(outage.said),
+    "with the host read refused the Keys panel still carries its five paste forms, or a sentence naming why it does not",
+    `${outage.forms} forms, productKeys ${outage.keys}, pushDoors ${outage.push}, ${outage.said.slice(0, 90)}`);
+  check(outage.keys === true && outage.push === true,
+    "both blocks are drawn even though the loader that draws them is the one that failed",
+    `productKeys ${outage.keys}, pushDoors ${outage.push}`);
+  check(!/Reading the keys/.test(outage.said),
+    "and the waiting line is gone once the forms are there rather than left on the panel", outage.said.slice(0, 90));
+  check(outage.systemCards === 0,
+    "and the host read really did fail, which is what makes the three checks above mean anything",
+    `${outage.systemCards} cards on System health`);
+  check(/could not be loaded/.test(outage.banner),
+    "and the host's failure is still reported, so drawing the keys anyway did not swallow it", outage.banner.slice(0, 90));
+  systemOutage = false;
   } catch (error) {
     check(false, "the page leg ran to the end", String(error?.message ?? error).split("\n")[0]);
   } finally {

@@ -890,6 +890,17 @@ browser with nothing stored, signed in as the same person, is on always listenin
 press and no line opened, and the Talk mode row on it opens reading always listening; a third browser with
 nothing stored and the settings door blocked outright opens on holding.
 
+**The precondition on that second browser is read before any script runs** (fixed in review 2026-09-11).
+The leg's own guard, *this browser really starts with nothing of its own*, used to read `localStorage`
+after the page had booted, which raced the thing it was there to rule out: `probe()` fetches
+`/voice/settings` and hands the answer to `adoptTalkMode`, which **writes** that key. On a busy Mac the
+read landed after the write and the leg failed three runs out of three with nothing wrong with the
+product. It is now captured in an `addInitScript` at document start, and the after-boot value is printed
+beside it because what that one holds is the door's own write. **MEASURED on MacBook-Pro.local,
+2026-09-11: 10 of 10 idle, and 10 of 10 on three consecutive runs at load average 9.7** with eight busy
+processes on the machine, two of which read `always` from storage after boot, which is exactly the
+reading the old check failed on.
+
 **And MEASURED on the R750 2026-09-11 01:24 UTC** through `console.titanium.bot` as a throwaway customer
 on the demo tenant, real headless Chromium at 1440x900, user agent `titanbot-gate/ship-customer-settings`:
 one browser context chose always listening and its own storage and `GET /voice/settings` both read

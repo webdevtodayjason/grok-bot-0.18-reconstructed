@@ -5714,6 +5714,71 @@
     if (banner) banner.hidden = !handoff;
   }
 
+  // SEAT-FOCUS-1b: ESCAPE STILL CLOSES THIS DIALOG ONCE THE SEAT HAS THE KEYBOARD.
+  //
+  // The seat inside this dialog is the one frame that is MEANT to hold the keys: the person opened it
+  // to work on that screen, the paste bridge depends on it, and screen-tile.js's hand-back is scoped
+  // by attribute to the two off-screen readers precisely so it never touches this one. But Escape is
+  // the dialog's own way out, and a <dialog> only closes on Escape when the key reaches the document
+  // the dialog is in. Once noVNC focuses its canvas the parent document sees nothing, so the keyboard
+  // way out of the agent's screen was gone: measured on grok-bot-local-vm, a real Escape reached a
+  // capture-phase document listener 0 times and the dialog stayed open.
+  //
+  // The seat is SAME ORIGIN by construction -- its src is built on window.location.origin, because the
+  // relay proxies the box's noVNC at /vnc/<display>/ -- so its document is readable and a capture
+  // keydown on it catches the key the parent never gets. Escape and nothing else: every other key,
+  // the space bar included, stays with the box, which is the whole reason this frame is exempt from
+  // the readers' rule. The poll is for the same reason keepKeyboardOff has one: the client's document
+  // arrives after the mount returns, and the frame is replaced whenever the display changes.
+  let desktopEscapeDisarm = null;
+
+  function armDesktopEscape() {
+    disarmDesktopEscape();
+    let inner = null;
+    let seen = null;
+    const onKey = (event) => {
+      if (event.key !== "Escape") return;
+      if (!elements.desktopDialog.open) return;
+      elements.desktopDialog.close();
+    };
+    const drop = () => {
+      if (inner == null) return;
+      try { inner.removeEventListener("keydown", onKey, true); } catch { /* gone with the frame */ }
+      inner = null;
+      seen = null;
+    };
+    const reachIn = () => {
+      const frame = elements.desktopWindow.querySelector("iframe[data-box-vnc]");
+      if (frame == null) { drop(); return; }
+      let document_ = null;
+      // Reading contentDocument on a frame this page may not read throws on the property access
+      // itself. That is not an error here -- it is the case a future image serving the client from the
+      // box's own address would put this in, and then there is nothing to install and nothing to do.
+      try { document_ = frame.contentDocument; } catch { return; }
+      if (document_ == null || typeof document_.addEventListener !== "function") return;
+      if (document_ === inner && frame === seen) return;
+      drop();
+      try { document_.addEventListener("keydown", onKey, true); inner = document_; seen = frame; } catch { /* nothing to do */ }
+    };
+    reachIn();
+    let poll = null;
+    try {
+      poll = window.setInterval(() => {
+        if (!elements.desktopDialog.open) { disarmDesktopEscape(); return; }
+        reachIn();
+      }, 250);
+    } catch { poll = null; }
+    desktopEscapeDisarm = () => {
+      if (poll != null) { try { window.clearInterval(poll); } catch { /* nothing to do */ } }
+      drop();
+      desktopEscapeDisarm = null;
+    };
+  }
+
+  function disarmDesktopEscape() {
+    if (desktopEscapeDisarm != null) desktopEscapeDisarm();
+  }
+
   // takeover is Take over, and only Take over: the view goes full window with the app dimmed
   // behind it and the banner across the top. The rail capsule and Open computer keep the centred
   // dialog the rest of the console has always had, so nothing regresses for ordinary use.
@@ -5723,6 +5788,7 @@
     else delete elements.desktopDialog.dataset.takeover;
     renderDesktop(appName);
     if (!elements.desktopDialog.open) elements.desktopDialog.showModal();
+    armDesktopEscape();
   }
 
   const clockText = (ms) => {
@@ -7098,6 +7164,17 @@
 
   document.querySelectorAll("[data-close-dialog]").forEach((button) => button.addEventListener("click", () => elements.panelDialog.close()));
   document.querySelectorAll("[data-close-desktop]").forEach((button) => button.addEventListener("click", () => elements.desktopDialog.close()));
+  // SEAT-FOCUS-1b's reach-in goes out with the dialog, however it was closed: the button, Escape
+  // itself, closeOpenDialogs, or the backdrop click. A <dialog> fires close on every one of those.
+  //
+  // AND NOTHING HERE HANDS THE KEYBOARD BACK, because the browser already does. MEASURED on
+  // grok-bot-local-vm with a real Escape on a connected seat: at the close event activeElement is
+  // already BODY, the frame reads as activeElement once more for about a quarter second while the
+  // closed dialog stops being rendered, and from 250 ms on it is BODY and stays there for at least
+  // three seconds. A blur() here fired on BODY and changed nothing, so it is not here. The gate
+  // measures the timing rather than trusting it, and presses a second Escape to prove the page's own
+  // document has the keys again.
+  elements.desktopDialog.addEventListener("close", disarmDesktopEscape);
   document.querySelectorAll("[data-desktop-app]").forEach((button) => button.addEventListener("click", () => renderDesktop(button.dataset.desktopApp)));
   elements.panelContent.addEventListener("click", handlePanelClick);
   elements.panelContent.addEventListener("input", handleTriggerInput);

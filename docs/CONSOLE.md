@@ -386,8 +386,9 @@ seconds after every mount the client focuses its own canvas and `document.active
 MEASURED on grok-bot-local-vm in real Chrome at 1440x900, 2026-09-10: with a reader focused, a real
 Escape and a real space bar produced **zero** keydown events on a capture-phase listener on `document`,
 so `voice.js`'s handlers never ran — **Escape did not leave talk mode, the space bar did not talk** —
-and an **open desktop dialog did not close on Escape** either. Nothing was logged and nothing on screen
-said why. An idle reader mounts, grabs and releases in about 2–3 s every 30 s and a working agent's
+and an **open desktop dialog did not close on Escape** either. That last one is the seat's own frame
+rather than a reader, and it is fixed separately under SEAT-FOCUS-1b below. Nothing was logged and
+nothing on screen said why. An idle reader mounts, grabs and releases in about 2–3 s every 30 s and a working agent's
 client is held for the whole turn, which is the one-in-three flakiness `verify-voice --leg nokey` had.
 
 So `screen-tile.js` arms a **hand-back** for each reader frame it creates, and `boxHandoffEnsureThumb`
@@ -440,6 +441,42 @@ the keys reach the page instead of disappearing into a picture nobody can click.
 gate can prove it **reproduced** the steal rather than measuring an empty page. That matters: one run
 in the reader pass had no reader on the page during the Escape loop and reported 20 of 20 with the
 defect present and unfixed.
+
+### Escape still closes the agent's screen (SEAT-FOCUS-1b)
+
+**The seat keeps every key except the one that is the pane's own way out.**
+
+The hand-back above is scoped to the two off-screen readers on purpose, so it never touched the seat in
+the desktop dialog, and that left one of the symptoms listed above still live. A `<dialog>` closes on
+Escape only when the key reaches the document the dialog is in, so once the seat connected there was no
+keyboard way out of the agent's screen at all. MEASURED on grok-bot-local-vm in review, 2026-09-11: with
+the dialog open and its seat connected, `document.activeElement` was the `[data-box-vnc]` **iframe**, a
+real Escape reached a capture-phase listener on `document` **0 times**, and the dialog **did not close**.
+
+The fix is the reach-in `keepKeyboardOff` already uses, pointed at this frame: the seat's `src` is built
+on `window.location.origin`, so its document is readable, and `openDesktop` installs a **capture-phase
+`keydown` listener on the seat's own document** that closes `#desktop-dialog` on **Escape and nothing
+else**. It is re-installed by a 250 ms poll for as long as the pane is open, because the client's
+document arrives after the mount returns and the frame is replaced whenever the display changes, and it
+goes out on the dialog's `close` event however it was closed. Every other key, the space bar included,
+stays with the box, which is the whole reason this frame is exempt from the readers' rule.
+
+**Nothing hands the keyboard back afterwards, because the browser already does.** At the `close` event
+`document.activeElement` is already `BODY`; the frame reads as `activeElement` once more for a moment
+while the closed dialog stops being rendered, and then it is `BODY` and stays there. A `blur()` in the
+close handler fired against `BODY` and changed nothing, so there is none.
+
+**MEASURED on grok-bot-local-vm, real Chrome 1440x1000, 2026-09-11, `verify-console-polish
+--seat-escape`, 8 of 8, three runs in a row:** the screen tile hit-tests to itself (233x146), the pane
+opens, the seat's client takes the keyboard (`activeElement` is the `data-box-vnc` frame, src
+`/vnc/9/vnc.html`), **one** real `keyboard.press("Escape")` closes the pane while the page's own document
+sees **0** Escapes, which is the proof the close came from inside the seat, and the keyboard is back on the
+page (`BODY`, 1,642 ms after the pane closed on the slowest run) and the **next** real Escape does reach
+the page's document, which is what leaves talk mode. Then a click inside the seat and an ordinary key
+leave the pane open with the keyboard still in the frame, so working on the agent's screen is unchanged.
+**With the fix switched off in the same tree the leg fails on exactly that check** ("the dialog stayed
+open: the page's own document saw 0 Escape(s)"), so the leg measures the product and not the page.
+`--keys` in the same pass still reads 7 of 7.
 
 ### The tile keeps up (SCREEN-TILE-1)
 
@@ -689,6 +726,7 @@ node scripts/verify-console-polish.mjs --boot     the plate is on <html> before 
                                        --tile     a picture or a plate, and never a broken image
                                        --tile-live the tile follows the agent's screen, and what that costs
                                        --keys     the reader never holds the keyboard: Escape leaves talk mode, the space bar talks
+                                       --seat-escape  Escape still closes the agent's screen once its seat has the keyboard
                                        --files    a file row opens a viewer and downloads
                                        --chips    a backticked span is a chip a mouse can press, and pressing it copies (§8)
                                        --approval the auto-review card in every state, and one real forced approval
