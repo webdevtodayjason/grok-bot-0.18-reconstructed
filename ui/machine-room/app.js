@@ -5779,6 +5779,38 @@
     if (desktopEscapeDisarm != null) desktopEscapeDisarm();
   }
 
+  // AND THE KEYBOARD COMES BACK WHEN THE PANE CLOSES, which is the second half of the same defect and
+  // the half one machine would have got wrong. MEASURED on grok-bot-local-vm: after a real Escape the
+  // browser handed it back on its own inside a quarter second, and a blur() at the close event fired
+  // against BODY and changed nothing. MEASURED on the live R750 through console.titanium.bot as a
+  // throwaway customer, same commit, same gate: `document.activeElement` was STILL the
+  // `[data-box-vnc]` frame six seconds after the pane closed and the next real Escape reached the
+  // page's own document 0 times, so talk mode could not be left at all. So it is handed back here
+  // rather than hoped for: blur now, and again on a 250 ms poll for two seconds, because the client
+  // can re-focus its own canvas after the dialog has stopped being rendered. Bounded on purpose -- a
+  // frame nobody can see is not worth an interval for the life of the page -- and it stops early if
+  // the pane is opened again. blur() is what screen-tile.js's hand-back uses on the readers, for the
+  // same reason and with the same measured result: activeElement goes to BODY and stays there.
+  function handSeatKeyboardBack() {
+    const frame = elements.desktopWindow.querySelector("iframe[data-box-vnc]");
+    if (frame == null) return;
+    const give = () => {
+      if (document.activeElement !== frame) return;
+      try { frame.blur(); } catch { /* the frame went with the pane */ }
+    };
+    give();
+    let tries = 8;
+    let poll = null;
+    const stop = () => { if (poll != null) { try { window.clearInterval(poll); } catch { /* nothing to do */ } poll = null; } };
+    try {
+      poll = window.setInterval(() => {
+        tries -= 1;
+        if (tries <= 0 || elements.desktopDialog.open || frame.isConnected === false) { stop(); return; }
+        give();
+      }, 250);
+    } catch { poll = null; }
+  }
+
   // takeover is Take over, and only Take over: the view goes full window with the app dimmed
   // behind it and the banner across the top. The rail capsule and Open computer keep the centred
   // dialog the rest of the console has always had, so nothing regresses for ordinary use.
@@ -7166,15 +7198,10 @@
   document.querySelectorAll("[data-close-desktop]").forEach((button) => button.addEventListener("click", () => elements.desktopDialog.close()));
   // SEAT-FOCUS-1b's reach-in goes out with the dialog, however it was closed: the button, Escape
   // itself, closeOpenDialogs, or the backdrop click. A <dialog> fires close on every one of those.
-  //
-  // AND NOTHING HERE HANDS THE KEYBOARD BACK, because the browser already does. MEASURED on
-  // grok-bot-local-vm with a real Escape on a connected seat: at the close event activeElement is
-  // already BODY, the frame reads as activeElement once more for about a quarter second while the
-  // closed dialog stops being rendered, and from 250 ms on it is BODY and stays there for at least
-  // three seconds. A blur() here fired on BODY and changed nothing, so it is not here. The gate
-  // measures the timing rather than trusting it, and presses a second Escape to prove the page's own
-  // document has the keys again.
-  elements.desktopDialog.addEventListener("close", disarmDesktopEscape);
+  elements.desktopDialog.addEventListener("close", () => {
+    disarmDesktopEscape();
+    handSeatKeyboardBack();
+  });
   document.querySelectorAll("[data-desktop-app]").forEach((button) => button.addEventListener("click", () => renderDesktop(button.dataset.desktopApp)));
   elements.panelContent.addEventListener("click", handlePanelClick);
   elements.panelContent.addEventListener("input", handleTriggerInput);

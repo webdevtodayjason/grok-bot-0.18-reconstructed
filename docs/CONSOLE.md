@@ -461,18 +461,24 @@ document arrives after the mount returns and the frame is replaced whenever the 
 goes out on the dialog's `close` event however it was closed. Every other key, the space bar included,
 stays with the box, which is the whole reason this frame is exempt from the readers' rule.
 
-**Nothing hands the keyboard back afterwards, because the browser already does.** At the `close` event
-`document.activeElement` is already `BODY`; the frame reads as `activeElement` once more for a moment
-while the closed dialog stops being rendered, and then it is `BODY` and stays there. A `blur()` in the
-close handler fired against `BODY` and changed nothing, so there is none.
+**And the keyboard is handed back when the pane closes**, which is the half one machine would have got
+wrong. On grok-bot-local-vm the browser did it on its own inside a quarter second and a `blur()` at the
+`close` event fired against `BODY`. On the **live R750**, at the same commit with the same gate, through
+`console.titanium.bot` as a throwaway customer, `document.activeElement` was **still the
+`[data-box-vnc]` frame six seconds after the pane closed** and the next real Escape reached the page's
+own document **0 times**, so talk mode could not be left at all. So the close handler hands it back
+rather than hoping: `frame.blur()` now, and again on a 250 ms poll for two seconds, because the client
+can re-focus its own canvas after the dialog has stopped being rendered. It is bounded, and it stops
+early if the pane is opened again, because a frame nobody can see is not worth an interval for the life
+of the page.
 
 **MEASURED on grok-bot-local-vm, real Chrome 1440x1000, 2026-09-11, `verify-console-polish
 --seat-escape`, 8 of 8, three runs in a row:** the screen tile hit-tests to itself (233x146), the pane
 opens, the seat's client takes the keyboard (`activeElement` is the `data-box-vnc` frame, src
 `/vnc/9/vnc.html`), **one** real `keyboard.press("Escape")` closes the pane while the page's own document
-sees **0** Escapes, which is the proof the close came from inside the seat, and the keyboard is back on the
-page (`BODY`, 1,642 ms after the pane closed on the slowest run) and the **next** real Escape does reach
-the page's document, which is what leaves talk mode. Then a click inside the seat and an ordinary key
+sees **0** Escapes, which is the proof the close came from inside the seat, the keyboard is back on the
+page (`BODY`, **102 ms** after the pane closed) and the **next** real Escape does reach the page's
+document, which is what leaves talk mode. Then a click inside the seat and an ordinary key
 leave the pane open with the keyboard still in the frame, so working on the agent's screen is unchanged.
 **With the fix switched off in the same tree the leg fails on exactly that check** ("the dialog stayed
 open: the page's own document saw 0 Escape(s)"), so the leg measures the product and not the page.
