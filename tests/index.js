@@ -47,6 +47,9 @@ import "./token-limit-classifier.test.mjs";
 import "./machine-room-plugins.test.mjs";
 import "./marketing-pack.test.mjs";
 import "./community-bots.test.mjs";
+// KB-1c. The two handbook packs generated off those same catalogs, and the validators that refuse a
+// pack which has drifted away from them.
+import "./handbook-generated-packs.test.mjs";
 // gate-pins passes its data root in explicitly, so it is safe in the shared process. Its sibling
 // cursor-loops-off.test.mjs is deliberately NOT here: it moves SAND_DATA_ROOT to prove a live box
 // takes a new backend setting from the settings file, and this runner loads every suite into one

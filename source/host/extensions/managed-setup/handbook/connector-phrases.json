@@ -1,0 +1,137 @@
+{
+  "$comment": [
+    "KB-1c. The plain words Titan may say out loud for each thing an app asks the owner to paste,",
+    "and the two catalog taglines that cannot be read aloud as written.",
+    "",
+    "WHY THIS FILE EXISTS. The console publishes the words a customer may never hear: key, keys,",
+    "token, tokens, secret, secrets, endpoint, endpoints, relay, proxy, webhook. Every credential",
+    "label the Marketplace carries is written for the operator and nearly all of them contain one",
+    "('GitHub personal access token', 'Linear personal API key'). Nothing sweeps what Titan SAYS, so",
+    "a pack that told him to read those labels out would put a banned word in his mouth on every",
+    "connection. This is the mapping, one entry per declared credential field.",
+    "",
+    "`replaces` IS THE ANTI-ROT CATCH. It carries the exact catalog label this phrase stands in for,",
+    "so scripts/gen-handbook-packs.mjs fails by name the day that string moves, instead of shipping a",
+    "phrase for a label nobody uses. A keyed plugin with no entry here is also a loud failure: a new",
+    "plugin cannot ship a banned word into an owner's ear by being forgotten.",
+    "",
+    "A phrase is itself swept, against the same published lists, with vendors that are Marketplace",
+    "rows exempted. So 'GitHub' is sayable and 'xai' is not, and neither fact is written down twice."
+  ],
+  "credentials": {
+    "GITHUB_PERSONAL_ACCESS_TOKEN": {
+      "plugin": "github",
+      "replaces": "GitHub personal access token",
+      "say": "the one thing GitHub gives you when you make a connection for me",
+      "why": "Three consumers, one box. The owner does not need to know it also reaches the command line in the box."
+    },
+    "SLACK_MCP_XOXP_TOKEN": {
+      "plugin": "slack",
+      "replaces": "Slack user OAuth token",
+      "say": "the one thing Slack gives you after you install the little app in your own workspace",
+      "why": "It acts as them, which is the fact that matters to them, and 'xoxp' is not a word anybody has to learn."
+    },
+    "LINEAR_API_KEY": {
+      "plugin": "linear",
+      "replaces": "Linear personal API key",
+      "say": "the one thing Linear gives you on your own account security page",
+      "why": "Shown once and never again, so naming the page is the part that saves a second trip."
+    },
+    "GOOGLE_CLIENT_ID": {
+      "plugin": "google",
+      "replaces": "Google OAuth client ID",
+      "say": "the first of three things Google gives you, the name of the connection",
+      "why": "Google is the row that proves one box per app is false. Numbering them is what stops the owner losing their place."
+    },
+    "GOOGLE_CLIENT_SECRET": {
+      "plugin": "google",
+      "replaces": "Google OAuth client secret",
+      "say": "the second of the three, the private half that goes with that name",
+      "why": "The catalog's own label is a banned word twice over. 'The private half' is what it is."
+    },
+    "GOOGLE_REFRESH_TOKEN": {
+      "plugin": "google",
+      "replaces": "Google refresh token",
+      "say": "the third of the three, the long one the sign-in page hands back at the end",
+      "why": "Named by where it comes from, because the mistake people make is pasting the short-lived one instead."
+    },
+    "TINYFISH_API_KEY": {
+      "plugin": "tinyfish",
+      "replaces": "TinyFish API key",
+      "say": "the one thing TinyFish gives you on your own dashboard",
+      "why": "One box reaches both the connector and the command line. The owner pastes once either way."
+    },
+    "NOTION_TOKEN": {
+      "plugin": "notion",
+      "replaces": "Notion internal integration token",
+      "say": "the one thing Notion gives you when you create an integration",
+      "why": "Creating the integration is the step people miss, so the phrase names the step and not the thing."
+    },
+    "AIRTABLE_API_KEY": {
+      "plugin": "airtable",
+      "replaces": "Airtable personal access token",
+      "say": "the one thing Airtable gives you when you create access for me",
+      "why": "Airtable makes them choose which bases it reaches while they create it, which is the useful half."
+    },
+    "TODOIST_API_KEY": {
+      "plugin": "todoist",
+      "replaces": "Todoist API token",
+      "say": "the one thing Todoist gives you under Settings, Integrations, Developer",
+      "why": "The worked example. The path is three clicks and saying it out loud removes the whole search."
+    },
+    "RESEND_API_KEY": {
+      "plugin": "resend",
+      "replaces": "Resend API key",
+      "say": "the one thing Resend gives you for sending, not the full-access kind",
+      "why": "The full-access one can delete their domains. Naming the narrower choice costs four words."
+    },
+    "STRIPE_API_KEY": {
+      "plugin": "stripe",
+      "replaces": "Stripe restricted API key",
+      "say": "the restricted one Stripe gives you, never your main one",
+      "why": "Stripe's own word is 'restricted', and this is the one row where pasting the wrong one is expensive."
+    },
+    "BROWSER_USE_API_KEY": {
+      "plugin": "browser-use",
+      "replaces": "Browser Use API key",
+      "say": "the one thing Browser Use gives you under Billing",
+      "why": "It spends a balance on every run, and it is filed under Billing for exactly that reason."
+    },
+    "BUFFER_API_KEY": {
+      "plugin": "buffer",
+      "replaces": "Buffer API key",
+      "say": "the one thing Buffer gives you under its own Settings",
+      "why": "Account-wide with no narrowing, so the right warning is about which account, not which permission."
+    },
+    "BROWSERBASE_API_KEY": {
+      "plugin": "browserbase",
+      "replaces": "Browserbase API key",
+      "say": "the private one from your Browserbase Settings page",
+      "why": "Read by the product itself and never handed to a bot, which is why it has no box on a connector page."
+    },
+    "BROWSERBASE_PROJECT_ID": {
+      "plugin": "browserbase",
+      "replaces": "Browserbase project id",
+      "say": "the project id on that same Browserbase Settings page",
+      "why": "Not private at all, and kept beside the other one because either alone opens nothing."
+    },
+    "CODERABBIT_API_KEY": {
+      "plugin": "coderabbit",
+      "replaces": "CodeRabbit Agentic API key",
+      "say": "the Agentic one from your CodeRabbit account, not the user or workspace kind",
+      "why": "The other two kinds are a different product and the command line refuses them outright."
+    }
+  },
+  "taglines": {
+    "linkedin": {
+      "replaces": "The application, the page and the token clock",
+      "say": "The application, the page, and the sixty-day clock",
+      "why": "The catalog's tagline is written for the operator and names a word a customer may never hear. Sixty days is the fact underneath it."
+    },
+    "buffer": {
+      "replaces": "Schedule to eleven networks with one self-serve key",
+      "say": "Schedule posts to eleven networks, and you can set it up yourself",
+      "why": "Same reason. 'Self-serve' is the point worth keeping: no application, no review."
+    }
+  }
+}

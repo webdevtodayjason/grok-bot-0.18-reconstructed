@@ -1,0 +1,118 @@
+{
+  "$comment": [
+    "KB-1c. The five starter packs, as groups of REAL catalog rows.",
+    "",
+    "WHAT THIS FILE IS NOT. It is not a set of templates. The Marketplace has no flower-shop bot, no",
+    "legal bot, no course-creator bot and no freelance-designer bot: the shelf is business-to-business",
+    "go-to-market, sales, marketing, recruiting, design and personal. So a pack here is a COMPOSITION",
+    "of rows that exist, and the generated skill says that in its first paragraph rather than letting",
+    "Titan imply a ready-made thing is on the shelf.",
+    "",
+    "WHAT THE GENERATOR CHECKS. Every bot id resolves against the live catalog; every bot named by a",
+    "persona has a line in `bots`; every routine cited under `routines` exists on that bot AND has a",
+    "cron that really resolved, because a routine whose cron came back null is not created at all and",
+    "calling it a schedule promises a job that is dead the day somebody switches it on; every routine",
+    "under `notCreated` exists and really has no cron, which is the same check pointing the other way.",
+    "Titles, categories, crons and the plain-words schedule all come out of the catalog, never out of",
+    "this file, so nothing here can claim a clock the box will not keep.",
+    "",
+    "Every line in `bots`, `theyAsk`, `whatTheyGet` and `spoken` is owner language and is swept."
+  ],
+  "bots": {
+    "frank": "Keeps the diary straight: what is on today, who is coming in, and who has gone quiet.",
+    "office-ops-desk": "Watches deliveries and anything broken on the premises, then writes the round-up.",
+    "customer-question-drafter": "Finds the answer to a customer question and drafts the reply for you to send.",
+    "leadsworth": "Scores the enquiries coming in, merges the duplicates, and flags the ones going cold.",
+    "site-audit": "Goes over your website and comes back with a ranked list of what to fix.",
+    "clip-bot": "Finds the good moments in a long recording and cuts them into short captioned clips.",
+    "call-follow-ups": "Turns a call into a recap, every promise made on it, and a dated list of what is owed.",
+    "company-docs-q-a": "Answers questions out of your own documents and always says which one it came from.",
+    "follow-through-agent": "Hunts down promises left behind in meetings and mail, and prepares the reply that closes each one.",
+    "course-note-taker": "Turns a lecture, a video or a reading into notes and a revision sheet.",
+    "writing-bot": "A writing partner for drafting and revising, working in your own words rather than over them.",
+    "human-copywriter": "Edits a draft so it reads like a person wrote it, shows every change, and invents nothing.",
+    "best-video-editor": "Turns raw footage into cut clips, burned-in captions and the right size for each place.",
+    "luma-pages": "Builds and keeps the event pages: the copy, the sign-up settings, the capacity and the waiting list.",
+    "critiquito": "Turns a screenshot or a design link into a critique with ranked, concrete fixes.",
+    "figma-bro": "Turns a design frame into a build spec, and checks the component set for drift.",
+    "imogen": "Writes short, copyable alt text for an image so a blind reader gets the important part.",
+    "sable-game-art": "Turns a game concept into a style guide, palettes and prompt sheets for your image tool.",
+    "image-gen-bot": "Pulls stills, thumbnails and short clips out of footage, sized for where they are going."
+  },
+  "personas": [
+    {
+      "id": "flower-shop",
+      "title": "A flower shop, or any small shop with a counter",
+      "theyAsk": "Set me up like a flower shop.",
+      "whatTheyGet": "Nothing on the shelf is built for a flower shop, so I would put one together: something watching the diary, something watching deliveries and anything broken, something drafting the replies to customers, something keeping the enquiries straight, and a pass over your website. Want me to set this up for you?",
+      "bots": ["frank", "office-ops-desk", "customer-question-drafter", "leadsworth", "site-audit", "clip-bot"],
+      "routines": [
+        { "bot": "office-ops-desk", "name": "Daily shipment status" },
+        { "bot": "office-ops-desk", "name": "Weekly facilities digest" },
+        { "bot": "leadsworth", "name": "Daily lead triage" },
+        { "bot": "site-audit", "name": "Monthly site re-audit" }
+      ],
+      "spoken": [
+        "I would start with two of them rather than all six, because six bots on day one is six things to read. The deliveries one and the enquiries one earn their keep first."
+      ]
+    },
+    {
+      "id": "injury-lawyer",
+      "title": "A personal-injury practice",
+      "theyAsk": "I run a small personal-injury firm. What would you put in for me?",
+      "whatTheyGet": "There is no legal set on the shelf, so I would build one around the thing that actually loses a case: a promise made on a call and never kept. Something turning every call into a recap and a dated list of what is owed, something answering questions out of your own documents, and something hunting the promises that got left behind.",
+      "bots": ["call-follow-ups", "company-docs-q-a", "follow-through-agent", "frank"],
+      "routines": [
+        { "bot": "call-follow-ups", "name": "Morning follow-up check" },
+        { "bot": "call-follow-ups", "name": "Weekly call patterns" },
+        { "bot": "frank", "name": "Exec interview-prep reminder" }
+      ],
+      "notCreated": [
+        { "bot": "follow-through-agent", "name": "Commitment-strand audit" }
+      ],
+      "spoken": [
+        "One of its jobs has no clock on it, so it does not get switched on at all when I set it up. Tell me what time of day you want it and I will add it myself.",
+        "Nothing here reads a privileged file unless you connect it to one, and nothing sends anything to anybody without you saying yes first."
+      ]
+    },
+    {
+      "id": "course-creator",
+      "title": "A course business",
+      "theyAsk": "I sell online courses. Can you help me keep up with the content?",
+      "whatTheyGet": "There is no course-creator set on the shelf either, so I would build one around the recording: something turning a lecture into notes and a revision sheet, something finding the clips worth cutting out of a long video, something cutting and captioning them, and a writing partner for the emails and the pages.",
+      "bots": ["course-note-taker", "clip-bot", "best-video-editor", "writing-bot", "human-copywriter", "luma-pages"],
+      "routines": [
+        { "bot": "clip-bot", "name": "Clip queue pass" },
+        { "bot": "clip-bot", "name": "Friday clip recap" },
+        { "bot": "best-video-editor", "name": "Weekly cut queue" },
+        { "bot": "human-copywriter", "name": "Weekly shipped check" }
+      ],
+      "spoken": [
+        "The clipping jobs want somewhere to put recordings, so the first thing to do after I set them up is show me where the files live."
+      ]
+    },
+    {
+      "id": "freelance-designer",
+      "title": "A freelance designer",
+      "theyAsk": "I design on my own for a handful of clients. What is worth having?",
+      "whatTheyGet": "There is no freelance-designer set on the shelf, so I would build one around review and handover: something critiquing a screen with ranked fixes, something turning a frame into a build spec and watching the component set for drift, something writing the alt text, and something pulling the stills out of your footage.",
+      "bots": ["critiquito", "figma-bro", "imogen", "image-gen-bot", "sable-game-art"],
+      "routines": [
+        { "bot": "critiquito", "name": "Weekly open fixes" },
+        { "bot": "figma-bro", "name": "Weekly library check" },
+        { "bot": "figma-bro", "name": "Ready for dev sweep" },
+        { "bot": "image-gen-bot", "name": "Weekly pull queue" }
+      ],
+      "spoken": [
+        "Your design tool is not one of the apps this product carries, so these work from a pasted link or a screenshot rather than reaching into the file. That is enough for a critique and a spec, and I will say so rather than pretending otherwise."
+      ]
+    },
+    {
+      "id": "marketing-team",
+      "title": "A marketing team, which is the one real pack on the shelf",
+      "theyAsk": "Can you run my social media for me?",
+      "whatTheyGet": "This one does exist as a set rather than something I put together: a coordinator and six specialists, with one profile per client holding the voice, the audiences and the list of things never to say. It drafts and it stops. Nothing goes out anywhere until you say yes.",
+      "team": "marketing-team"
+    }
+  ]
+}
