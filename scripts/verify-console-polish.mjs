@@ -1527,10 +1527,20 @@ const chipContrast = (page, selector) => page.evaluate((sel) => {
 // instead and that is said too -- "it works when I serve it" and "it works on the page" are two
 // different claims, and the file already refuses to blur them for the modules item A installed.
 const CHIP_FILES = ["app.js", "styles.css", "backgrounds.css", "files-viewer.css"];
+const CHIP_FG = "#8fd9e6";
 async function serveThisTree(page) {
-  const live = await fetch(`${ORIGIN}/app.js`, { headers, signal: AbortSignal.timeout(15_000) })
+  const fetchText = (file) => fetch(`${ORIGIN}/${file}`, { headers, signal: AbortSignal.timeout(15_000) })
     .then((r) => (r.ok ? r.text() : "")).catch(() => "");
-  if (live.includes("code-chip")) { info(`mode: the relay at ${ORIGIN} is already serving this build`); return "relay"; }
+  const live = await fetchText("app.js");
+  // BOTH files, because the renderer and the paint ship separately and this leg asserts a colour.
+  // app.js alone said "already serving this build" for a relay whose app.js had the chip in it and
+  // whose stylesheet was a wave behind, and then every colour assertion below would be read off a
+  // stylesheet nobody in this tree wrote. CONSOLE-5b's foreground is the marker.
+  const css = await fetchText("machine-room/styles.css");
+  if (live.includes("code-chip") && css.includes(`--code-chip-fg: ${CHIP_FG}`)) {
+    info(`mode: the relay at ${ORIGIN} is already serving this build`);
+    return "relay";
+  }
   for (const file of CHIP_FILES) {
     const body = readModule(file);
     if (body == null) continue;
