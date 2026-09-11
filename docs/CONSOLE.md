@@ -425,6 +425,17 @@ Escape then left talk mode. `--tile-live` in the same pass: the tile still follo
 in **1.01 s** (1.81 s counting the gate's own `docker exec`) for **120.5 KiB over 86 websocket frames**,
 so the hand-back costs the picture nothing.
 
+**And MEASURED on the live R750 demo tenant 2026-09-11 01:26 UTC** through `console.titanium.bot` as a
+throwaway customer (minted for the run and removed after it), real headless Chromium at 1440x1000, user
+agent `titanbot-gate/ship-seat-keyboard`: `window.__screenTile.keepKeyboardOff` is on the page with the
+poll at **250 ms** and both reader attributes published; a reader mounted and **1 hand-back** was
+recorded; `document.activeElement` was **never an iframe across 31 samples** and read `BODY` at the end;
+and **20 of 20** real `keyboard.press("Escape")` reached a capture-phase listener on `document`. A real
+space bar also reached the document there and opened nothing, which is correct on that tenant and worth
+saying plainly: `GET /voice/settings` answers `enabled: false, available: false` for the demo workspace,
+so there is nothing for the space bar to open. What the run proves is the thing SEAT-FOCUS-1 is about —
+the keys reach the page instead of disappearing into a picture nobody can click.
+
 `window.__screenTile.handBacks()` counts them, and `state().handBacks` carries the same number, so a
 gate can prove it **reproduced** the steal rather than measuring an empty page. That matters: one run
 in the reader pass had no reader on the page during the Escape loop and reported 20 of 20 with the

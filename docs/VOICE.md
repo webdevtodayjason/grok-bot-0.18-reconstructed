@@ -890,6 +890,14 @@ browser with nothing stored, signed in as the same person, is on always listenin
 press and no line opened, and the Talk mode row on it opens reading always listening; a third browser with
 nothing stored and the settings door blocked outright opens on holding.
 
+**And MEASURED on the R750 2026-09-11 01:24 UTC** through `console.titanium.bot` as a throwaway customer
+on the demo tenant, real headless Chromium at 1440x900, user agent `titanbot-gate/ship-customer-settings`:
+one browser context chose always listening and its own storage and `GET /voice/settings` both read
+`always`; a **second context signed in as the same person with nothing stored** opened reading *holding*
+at first paint, reached always listening on the door's answer with **no line opened**, and its Talk mode
+row then read always listening. Nothing threw in either context. That is the claim end to end on the live
+console rather than on a local relay.
+
 The desktop app's global hotkey is a later wave. It presses this same control through the same pair of
 entry points, so it inherits whichever mode is set rather than being a third behaviour to keep in
 step.

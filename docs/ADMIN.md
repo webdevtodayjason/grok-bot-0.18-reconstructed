@@ -737,9 +737,9 @@ Apple's paste-the-whole-file textarea, and the only word *key* on it belonged to
 
 **The after, MEASURED on MacBook-Pro.local** (darwin arm64, node v22.23.1) 2026-09-10 by
 `scripts/verify-admin.mjs` against its own spawned control plane in headless Chromium at **1440x900**,
-gate user agent `titanbot-gate/verify-admin.mjs`: **534 checks, 0 failed, 1 skipped** (the skip is the
-pre-existing one, a fixture with no proxy configured), against **515 checks** on the same gate before
-this change. With the Keys panel open and its `scrollTop` at 0 the *Talking, xAI* field **ends at
+gate user agent `titanbot-gate/verify-admin.mjs`: **536 checks, 0 failed, 1 skipped** (the skip is the
+pre-existing one, a fixture with no proxy configured) in **2.5 s**, against **515 checks** on the same
+gate before this change. The same count was taken again at the merged commit in the integration pass. With the Keys panel open and its `scrollTop` at 0 the *Talking, xAI* field **ends at
 352 px** where the panel's first screen ends at **853 px**: **236 px into 1,279 px of content in a
 771 px window**, so it is on the first screen with 501 px to spare, and `elementFromPoint` at its own
 centre answers the field itself. Ten panels were walked, each opened from its own hash and the only
@@ -747,11 +747,37 @@ one on screen, and every one measured `document.documentElement.scrollHeight` **
 window with the open panel's own `scrollWidth - clientWidth` at **0**. Tab reached **10 of 10** rail
 entries. The readiness flag still read **8 loaders**.
 
-**Still owed, and not measured here:** the same thing on the R750 through `api.titanium.bot/admin` as
-a throwaway super admin at 1440x1000, including the half that proves nothing was stored: a made-up
-key pasted into that field has to come back refused in the vendor's own words with the row still
-reading *Not set.* after a Refresh. A builder cannot take that measurement: the R750 is read-only to
-them, and the numbers above are this Mac's fixture, not the live console's.
+**The live after, MEASURED on the R750 2026-09-11 01:18 UTC** through `api.titanium.bot/admin` in real
+headless Chromium driven from a Mac, user agent `titanbot-gate/ship-keys-panel`, signed in as a
+throwaway super admin on the demo tenant (minted in the cp container for this run and removed after it,
+leaving three accounts):
+
+- **At 1440x1000, the Keys panel opens with the *Talking, xAI* field on the first screen.** The panel's
+  own scroller is **871 px of window over 1,279 px of content** with `scrollTop` 0; `#productKeys`
+  starts at **185 px** and `#pushDoors` at **729 px**, so the keys are above the push doors; the xAI
+  paste field sits **318 px to 352 px** into that 871 px window and `elementFromPoint` at its own centre
+  answers the field itself. Against the before on the same machine and viewport: **1,529 px, 658 px
+  below the fold.** `document.documentElement.scrollHeight` measured **1,000 px** in a 1,000 px window
+  and the panel's own `scrollWidth - clientWidth` was **0**. Three password fields, no plain ones, all
+  three rows reading *Not set.*
+- **A made-up key is refused in the vendor's own words and nothing is stored.** A synthetic value pasted
+  into that field came back **"xAI answered 400 when asked about that key, so it was not checked. Nothing
+  was stored."** The field was left empty, and after a full reload of the console the row still read
+  *Not set.* — which is the half that proves the refusal did not quietly keep it.
+- **System health carries the pointer and no longer carries the forms.** The last line on that panel is a
+  link reading *Keys*, `href="#panel-keys"`, painted `rgb(0, 200, 240)` rather than the browser's default
+  blue, on that panel's first screen; `#productKeys` and `#pushDoors` are both absent from it.
+- **The rail is ten entries** in the order Overview, Sign-in attempts, Clients and users, Box health,
+  System health, **Keys**, Spend, Providers, Feedback, Marketplace, and the page carries ten `.panel`
+  sections. `window.__adminLive` still reads `{panels: 8}`, which counts loaders and not panels. Nothing
+  threw on either panel.
+- **At 390x844 the keys are first on the panel but not all of them are on the first screen**, and that is
+  reported rather than claimed: the xAI field is `fields[0]` of the block, at **615 px** into a 595 px
+  window over 2,039 px of content, so it is one short scroll down at that width. The page itself does not
+  scroll (844 px) and the panel does not scroll sideways (0 px over) despite `.keyForm`'s 210 px minimum
+  inputs. The System health pointer is below the fold at that width.
+
+Screenshots of each of those screens are in this session's scratchpad under `sf-r750/shots/`.
 
 ### Spend
 

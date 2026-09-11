@@ -215,9 +215,15 @@ choose and have it billed to his key. A client-side gate is not a gate.
 each one label and one control slot, with the Service options reading *"flat rate for each minute you
 talk"* and *"charged by how much is said, not by the minute"*; choosing the other Service round-trips
 through `GET /voice/settings`; and the four are on **none** of the five customer sections and `[data-voice]`
-matches nothing anywhere on the page. On the R750 through console.titanium.bot as a throwaway customer
-the four are ABSENT, which is the only thing that server can show: operator-ness there is the WORKSPACE
-(section 3), and the demo tenant is not the operator's.
+matches nothing anywhere on the page.
+
+**And MEASURED on the R750 2026-09-11 01:24 UTC** through `console.titanium.bot` as a throwaway customer
+on the demo tenant (minted for the run and removed after it), real headless Chromium, user agent
+`titanbot-gate/ship-customer-settings`, at **1440x900 and 390x844**: the nav is the five customer sections
+with **no Operator entry**, and `data-voice-vendor`, `data-voice-model`, `data-voice-voice` and
+`data-voice-agent` each match **0** nodes, as does `[data-voice]`. That absence is the only thing that
+server can show: operator-ness there is the WORKSPACE (section 3), and the demo tenant is not the
+operator's.
 
 ---
 
@@ -454,6 +460,22 @@ Every number here names the machine it was taken on. **grok-bot-local-vm** is th
 gate knocking as `titanbot-gate/<script-name>`. Numbers taken there are **not** the R750's: this
 Mac's adapter answers false to `getHostStatus`, `updateBox` and `resetBox`, so Updates and both box
 buttons do not draw at all and the R750's panel is materially longer. Re-measure there.
+
+**The live console, MEASURED on the R750 2026-09-11 01:24 UTC** as a throwaway customer on the demo
+tenant through `console.titanium.bot`, real headless Chromium, user agent
+`titanbot-gate/ship-customer-settings`:
+
+| | 1440x900 | 390x844 |
+| --- | --- | --- |
+| General's own scroll | 937 px in a 676 px window (1.39x) | 1,380 px in a 645 px window (2.14x) |
+| the Background row | 816x63.63 px | 360x70 px |
+| what is in its control slot | 1 face, 0 tiles, 0 grids | 1 face, 0 tiles, 0 grids |
+| the face | *Titan Nebula*, labelled "Choose a background, now Titan Nebula" | the same |
+| pressing it | a sub-view of General: 18 tiles, back control *"← Back to General"*, title *Background*, 0 Background rows still painted | the same |
+| going back | 0 sub-views, 0 grids, the row reading the plate the page is on | the same |
+| the four Talking controls | 0 of them, and 0 `[data-voice]` | 0 and 0 |
+
+Nothing threw at either viewport. Screenshots are in this session's scratchpad under `sf-r750/shots/`.
 
 **The old panel, before this wave** (grok-bot-local-vm, signed in as the operator, `verify-mobile
 --settings`):
