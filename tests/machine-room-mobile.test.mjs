@@ -231,3 +231,110 @@ test("MOBILE-1: app.js's share of the drawers is small enough to name", async ()
   assert.match(block, /visualViewport/);
   assert.doesNotMatch(block, /style\.(width|height|left|top|transform)\s*=/, "no layout is written from the script");
 });
+
+// ---- PHONE-CONSOLE-1: the console inside the iPhone app ----------------------------------------
+//
+// scripts/verify-mobile.mjs --phone-app measures these in WebKit at 390x844 with the phone's own
+// insets restated, in two passes. What a browser cannot show is that the rules stayed inside the
+// breakpoint and that the numbers in them are the numbers that were measured, which is what the
+// cases below hold. Every one of them is a rule inside `@media (max-width: 690px)`; the case above,
+// "nothing else the phone pass added is outside its breakpoint", is what enforces that for the
+// safe-area insets and --kb, and it covers this wave's rules as well as MOBILE-1's.
+
+test("PHONE-CONSOLE-1: the capability dock leaves the bar and becomes the composer's + menu", async () => {
+  const source = await readFile(cssPath, "utf8");
+  const { blocks } = splitSheet(source);
+  const phone = phoneBody(blocks);
+  const dock = ruleFor(phone, ".capability-dock").join("\n");
+  // Out of the bar's flow entirely: a second row that is 56 px of dock and 6 px of gap was 62 of the
+  // 258 px of chrome that stood above the first message.
+  assert.match(dock, /position:\s*fixed/, "the dock is drawn above the shelf, not on the bar");
+  assert.match(dock, /display:\s*none/, "and only while the menu is open");
+  assert.match(phone, /body\[data-capability-menu\] \.capability-dock/);
+  // THE STACKING CONTEXT IS THE WHOLE OF IT. .window-bar is position: relative with z-index 20, so
+  // no z-index on a descendant can lift this above .stage (60) or the shelf (30) -- the same trap
+  // index.html records for the drawer scrim. The bar is raised instead.
+  assert.match(phone, /body\[data-capability-menu\] \.window-bar \{\s*z-index:\s*90/,
+    "a z-index on the dock itself cannot escape the bar's own stacking context");
+  const bar = ruleFor(phone, ".window-bar").join("\n");
+  assert.match(bar, /grid-template-rows:\s*auto;/,
+    "`auto auto` leaves the 6 px row gap behind even when the second row is empty");
+  // The menu's rows carry their words. Two rules above this one hide the label on the bar.
+  assert.match(phone, /\.capability-dock \.capability-button > span \{\s*display:\s*inline/,
+    "in a 44 px row the label is the control, and the count beside Add is the only number the bar had");
+});
+
+test("PHONE-CONSOLE-1: the insets are variables so that a gate can restate them", async () => {
+  const source = await readFile(cssPath, "utf8");
+  const phone = phoneBody(splitSheet(source).blocks);
+  const root = ruleFor(phone, ":root").join("\n");
+  assert.match(root, /--sat:\s*env\(safe-area-inset-top/, "env() is still the only source of the real value");
+  assert.match(root, /--sab:\s*env\(safe-area-inset-bottom/);
+  // THE FLOOR IS 59 AND NOT 56. A shell that reports no inset on a device that has one drew the
+  // bar's first row at y 8..52, entirely under a 59 px status band: the two drawer handles, the
+  // theme toggle and the gear. 56 px of floor would still leave the row's top 3 px inside the band,
+  // which is the number the gate measures, so the floor is the band.
+  const bar = ruleFor(phone, ".window-bar").join("\n");
+  assert.match(bar, /padding:\s*max\(calc\(8px \+ var\(--sat\)\),\s*59px\)/);
+  const drawers = ruleFor(phone, ".worker-roster").join("\n");
+  assert.match(drawers, /padding-top:\s*max\(calc\(14px \+ var\(--sat\)\),\s*59px\)/,
+    "the drawers are fixed at top 0 and start under the notch without it");
+});
+
+test("PHONE-CONSOLE-1: the drawer is the height of the screen", async () => {
+  const source = await readFile(cssPath, "utf8");
+  const { base, blocks } = splitSheet(source);
+  // The desktop column's rule, which is what makes the drawer 148 px tall: on an absolutely
+  // positioned box with top and bottom both 0, `align-self: start` means "do not stretch".
+  assert.match(ruleFor(base, ".worker-roster").join("\n"), /align-self:\s*start/,
+    "the base rule is the desktop column's and stays that way");
+  const phone = phoneBody(blocks);
+  const drawers = ruleFor(phone, ".worker-roster").join("\n");
+  const rail = ruleFor(phone, ".context-space").join("\n");
+  assert.match(rail, /align-self:\s*stretch/, "and the agent panel with it");
+  assert.match(drawers, /align-self:\s*stretch/,
+    "844 px with a list that scrolls, against 147.5 px with #worker-stack at height 0 and 1547 px of cards in it");
+});
+
+test("PHONE-CONSOLE-1: a message row may break a word rather than pan the page", async () => {
+  const source = await readFile(cssPath, "utf8");
+  const phone = phoneBody(splitSheet(source).blocks);
+  // `min-width: auto` is the automatic minimum every flex item carries, and it is min-content: one
+  // unbreakable URL took #transcript.scrollWidth to 585 against a 374 px client, a long chip to 747.
+  const rows = ruleFor(phone, ".message-row > .message-bubble").join("\n");
+  assert.match(rows, /min-width:\s*0/);
+  const bubble = ruleFor(phone, ".message-bubble p").join("\n");
+  assert.match(bubble, /overflow-wrap:\s*anywhere/);
+  // The code chips are not in it. A command is read by copying it, not by wrapping it, and
+  // CONSOLE-POLISH-3 owns those rules.
+  assert.ok(!/code\.code-chip/.test(rows + bubble), "the code chip's own rules belong to another wave");
+});
+
+test("PHONE-CONSOLE-1: the attach button's track is the attach button's width", async () => {
+  const source = await readFile(cssPath, "utf8");
+  const { blocks } = splitSheet(source);
+  const phone = phoneBody(blocks);
+  // .composer-plus carries min-width: 44px from the phone's 44 px floor, and the track it sits in
+  // was declared 38px, so the button hung 6 px over the message box.
+  for (const rule of ruleFor(phone, ".composer")) {
+    assert.match(rule, /grid-template-columns:\s*44px/, `a composer track that is not 44px: ${rule.trim()}`);
+  }
+  for (const rule of ruleFor(phone, ".composer[data-voice-line]")) {
+    assert.match(rule, /grid-template-columns:\s*44px/, "and the same while the live line is up");
+  }
+  const floor = ruleFor(phone, ".composer-plus").join("\n");
+  assert.match(floor, /min-width:\s*44px/, "the floor the track has to agree with");
+});
+
+test("PHONE-CONSOLE-1: the + menu's own row exists in the markup and only at phone widths", async () => {
+  const html = await readFile(htmlPath, "utf8");
+  assert.match(html, /data-capability="attach"/, "the menu's first row, and the only entry the bar never had");
+  assert.match(html, /class="capability-button is-attach"/);
+  const source = await readFile(cssPath, "utf8");
+  const { base, blocks } = splitSheet(source);
+  const wide = blocks.filter((b) => /min-width:\s*691px/.test(b.query)).map((b) => b.body).join("\n");
+  assert.match(ruleFor(wide, ".capability-button.is-attach").join("\n"), /display:\s*none/,
+    "above the breakpoint the + button picks a file itself, so this entry would be a second way to do one thing");
+  assert.equal(ruleFor(base, ".capability-button.is-attach").length, 0,
+    "and the reason lives with the width rather than in the base sheet");
+});

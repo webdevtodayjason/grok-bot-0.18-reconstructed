@@ -74,7 +74,10 @@ const value = (name) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? a
 const URL_TARGET = value("url");
 const READ_ONLY = URL_TARGET != null;
 const chosen = flag("all") ? [...LEGS] : LEGS.filter((leg) => flag(leg));
-if (chosen.length === 0) {
+// NOT IN LEGS, AND NOT IN --all. It opens a second browser engine and --all is already at its
+// budget ceiling with three legs skipping; folding this in would push more of them out.
+const PHONE_APP = flag("phone-app");
+if (chosen.length === 0 && !PHONE_APP) {
   console.log("usage: node scripts/verify-mobile.mjs (--all | --width | --reach | --scroll | --send | --drawers | --panels | --settings | --attach | --card | --fonts | --land | --demo | --desktop)");
   console.log("       [--url https://console.titanium.bot]  read-only, CONSOLE_BEARER in the environment");
   console.log("");
@@ -91,6 +94,7 @@ if (chosen.length === 0) {
   console.log("  --land     a phone turned sideways still has its composer on screen");
   console.log("  --demo     with the box down, both drawer handles are still pressable under the caption");
   console.log("  --desktop  1440x900 does not move by one pixel, against a relay from --baseline <sha>");
+  console.log("  --phone-app the iPhone app's own layout, in WebKit at 390x844, with the insets restated");
   console.log("");
   console.log("  --baseline <sha>  the commit the --desktop leg A/Bs against; default the merge base with main");
   process.exit(2);
@@ -160,7 +164,10 @@ async function startRelay(tree = repoRoot, extraEnv = {}) {
 
 // ---- the browser -----------------------------------------------------------------------------------
 
-const { chromium } = createRequire(path.join(PW_DIR, "package.json"))("playwright-core");
+const { chromium, webkit } = createRequire(path.join(PW_DIR, "package.json"))("playwright-core");
+// PHONE-CONSOLE-1 runs in WebKit, because the iPhone app is a WKWebView and mobile Safari is
+// WebKit: a phone-sized Chromium is a phone-sized Chromium. Opened only when that leg is asked for.
+let wk = null;
 const headers = BEARER ? { authorization: `Bearer ${BEARER}` } : {};
 let browser = null;
 let ORIGIN = URL_TARGET ?? "";
@@ -523,6 +530,11 @@ async function legDrawers(page, phone) {
 }
 
 async function legPanels(page, phone) {
+  // PHONE-CONSOLE-1: at this width the capabilities are behind the composer's + button, so the way
+  // to the marketplace starts with the menu. The dock is display: none until it is open, and a tap
+  // computed from a rect of 0x0 lands at the top left corner of the screen.
+  await tap(page, "#composer-plus");
+  await page.waitForTimeout(400);
   await tap(page, '[data-capability="marketplace"]');
   await page.waitForTimeout(2000);
   const market = await page.evaluate(OVERFLOW);
@@ -1352,6 +1364,272 @@ async function legDesktop() {
 
 // ================================================================================================
 
+// ================================================================================================
+// PHONE-CONSOLE-1: the console inside the iPhone app, in WebKit, with the phone's insets restated
+// ================================================================================================
+//
+// WHY THIS LEG IS NOT PART OF --all, AND WHY IT IS WEBKIT. The legs above run in Chromium, which is
+// the right engine for "does this layout hold at a phone size" and the wrong one for "does it hold
+// on an iPhone": the app is a Capacitor WKWebView over https://console.titanium.bot and mobile
+// Safari is WebKit, so the engine that lays this out has to be the engine that is measured. It runs
+// on its own flag because it opens a second browser and --all is already at its budget ceiling.
+//
+// AND THE INSETS ARE RESTATED RATHER THAN FAKED. A headless browser answers 0 to every
+// env(safe-area-inset-*), so nothing before this measured the console on a device with a notch at
+// all. The stylesheet reads those four values once into --sat/--sab/--sal/--sar (styles.css, the
+// PHONE-CONSOLE-1 block) and this injects `:root { --sat: 59px; --sab: 34px }` on top -- the same
+// arithmetic the phone runs, with the phone's own numbers. The app shell measured 62/34 on an
+// iPhone 17 simulator, so 59 is the conservative top. Rules elsewhere in the sheet that still call
+// env() directly are 0 in both passes; they are the shelf's own bottom padding and nothing this leg
+// asserts on.
+//
+// PASS TWO IS insets 0, which is mobile Safari and any shell that reports nothing, and it is where
+// the 59 px floor under the bar and the drawers is the only thing keeping the first row of controls
+// out from under the status band.
+const PHONE_APP_INSETS = [
+  { name: "insets 59/34", top: 59, bottom: 34 },
+  { name: "insets 0", top: 0, bottom: 0 },
+];
+// 160 px of chrome on an 844 px screen, insets included. 258 before this ship.
+const CHROME_CEILING = 160;
+// The band the conversation keeps whatever the keyboard does. app.js's own TRANSCRIPT_FLOOR.
+const BAND_FLOOR = 180;
+const STATUS_BAND = 59;
+
+async function webkitPhone(pass) {
+  const context = await wk.newContext({
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3, isMobile: true, hasTouch: true, userAgent: IPHONE_UA, extraHTTPHeaders: headers,
+  });
+  const page = await context.newPage();
+  page.on("pageerror", (e) => errors.push(`webkit: ${String(e)}`));
+  await page.goto(`${ORIGIN}/`, { waitUntil: "load", timeout: within(60_000) });
+  await page.waitForFunction(() => window.__machineRoomAdapter != null, { timeout: within(60_000) }).catch(() => {});
+  await page.waitForTimeout(3500);
+  if (pass.top || pass.bottom) {
+    await page.addStyleTag({ content: `:root { --sat: ${pass.top}px; --sab: ${pass.bottom}px; }` });
+    await page.waitForTimeout(300);
+  }
+  return page;
+}
+
+async function legPhoneApp(pass) {
+  const page = await webkitPhone(pass);
+  const where = `390x844 WebKit, ${pass.name}`;
+
+  // THE PRECONDITION. A console that fell back to the demo adapter lays out the same and proves
+  // nothing: its roster is a fixture, its transcript is three rows, and the drawer leg below would
+  // pass on a list that never scrolled because there was nothing in it.
+  const state = await page.evaluate(() => ({
+    live: window.__machineRoomLive === true,
+    demo: document.documentElement.hasAttribute("data-demo"),
+    error: window.__machineRoomError ?? "",
+  }));
+  check(state.live === true, `${where}: the page is on the live gateway`, state.error || "__machineRoomLive");
+  check(state.demo === false, `${where}: and the demo caption is not up`);
+  if (!state.live || state.demo) { await shoot(page, `phone-app-not-live-${pass.top}`); await page.context().close(); return; }
+
+  // ---- A1, the chrome above the conversation ---------------------------------------------------
+  const chrome = await page.evaluate(() => {
+    const bar = document.querySelector(".window-bar").getBoundingClientRect();
+    const box = document.querySelector("#transcript").getBoundingClientRect();
+    const capsule = document.querySelector(".room-capsule").getBoundingClientRect();
+    const dock = document.querySelector(".capability-dock");
+    return {
+      barBottom: Math.round(bar.bottom), barTop: Math.round(bar.top),
+      barPad: Math.round(parseFloat(getComputedStyle(document.querySelector(".window-bar")).paddingTop)),
+      capsule: Math.round(capsule.height),
+      conversationTop: Math.round(box.top),
+      dockOnTheBar: getComputedStyle(dock).display !== "none",
+    };
+  });
+  // The bar's own strip: what is left after the padding that clears the notch, which is the inset in
+  // the first pass and the 59 px floor in the second. 103 px of it before this ship, two rows of
+  // controls; one row now.
+  const barBelow = chrome.barBottom - chrome.barPad;
+  info(`${where}: bar padding ${chrome.barPad}, bar ends at ${chrome.barBottom}, capsule ${chrome.capsule} px, conversation starts at ${chrome.conversationTop}`);
+  check(chrome.dockOnTheBar === false, `${where}: the capability dock is not a row of the bar`, "it is the composer's + menu at this width");
+  check(barBelow < 56, `${where}: the bar is under 56 px below the inset`, `${barBelow} px (103 before this ship)`);
+  if (pass.top > 0) {
+    check(chrome.conversationTop < CHROME_CEILING, `${where}: the chrome above the conversation is under ${CHROME_CEILING} px`,
+      `${chrome.conversationTop} px, of which ${pass.top} is the status band (258 before this ship)`);
+  }
+
+  // ---- A3b, the first row of controls clears the status band -----------------------------------
+  const firstRow = await page.evaluate(() => ["#roster-drawer", "#context-drawer", "#theme-toggle", "#settings-button"]
+    .map((sel) => { const el = document.querySelector(sel); if (!el) return null; const r = el.getBoundingClientRect(); return { sel, top: Math.round(r.top), h: Math.round(r.height) }; })
+    .filter(Boolean));
+  const under = firstRow.filter((one) => one.top < STATUS_BAND);
+  check(under.length === 0, `${where}: every control on the bar's first row clears the ${STATUS_BAND} px status band`,
+    under.length ? under.map((o) => `${o.sel} at ${o.top}`).join(", ") : firstRow.map((o) => `${o.sel} ${o.top}`).join(", "));
+
+  // ---- A2, no sideways pan --------------------------------------------------------------------
+  // Two shapes, because they fail differently: a URL is one unbreakable token inside a paragraph,
+  // and the second is the same token sent through the composer, which is the path a person's own
+  // message takes into the row.
+  const url = await page.evaluate(() => {
+    const box = document.querySelector("#transcript");
+    const row = document.createElement("article");
+    row.className = "message-row";
+    row.innerHTML = '<div class="message-bubble"><p>https://console.titanium.bot/agents/titan/conversations/2026-09-11T05-00-34-968Z/receipts/a-single-token-that-cannot-be-broken-anywhere</p></div>';
+    box.appendChild(row);
+    return { sw: box.scrollWidth, cw: box.clientWidth, doc: document.scrollingElement.scrollWidth, visual: Math.round(window.visualViewport?.width ?? window.innerWidth) };
+  });
+  check(url.sw <= url.cw + 1, `${where}: a long URL does not pan the transcript sideways`, `scrollWidth ${url.sw} against ${url.cw} (585 against 374 before this ship)`);
+  check(url.doc <= url.visual + 1, `${where}: and the document does not move either`, `${url.doc} against ${url.visual}`);
+
+  const LONG = "PHONE-CONSOLE-1 gate: wrapping https://console.titanium.bot/tenants/demo/boxes/one/agents/titan/receipts/an-unbreakable-token-1234567890 and a chip";
+  await page.evaluate((text) => {
+    const input = document.querySelector("#message-input");
+    input.value = text;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }, LONG);
+  await page.waitForTimeout(200);
+  await tap(page, ".send-button");
+  await page.waitForTimeout(1500);
+  const sent = await page.evaluate((text) => {
+    const box = document.querySelector("#transcript");
+    const rows = [...box.querySelectorAll(".message-row")];
+    const mine = rows.some((row) => row.textContent.includes(text.slice(0, 40)));
+    return { mine, sw: box.scrollWidth, cw: box.clientWidth, doc: document.scrollingElement.scrollWidth, visual: Math.round(window.visualViewport?.width ?? window.innerWidth) };
+  }, LONG);
+  check(sent.mine === true, `${where}: the message sent from the composer is in the transcript`);
+  check(sent.sw <= sent.cw + 1, `${where}: and a long chip sent through the composer does not pan it either`, `scrollWidth ${sent.sw} against ${sent.cw} (747 before this ship)`);
+  await shoot(page, `phone-app-chrome-${pass.top}`);
+
+  // ---- B1, the reader stays at the newest line while the composer grows under him ---------------
+  const pin = await page.evaluate(() => {
+    const box = document.querySelector("#transcript");
+    box.scrollTop = box.scrollHeight;
+    return { from: Math.round(box.scrollHeight - box.scrollTop - box.clientHeight), composer: Math.round(document.querySelector("#message-input").getBoundingClientRect().height) };
+  });
+  await page.waitForTimeout(200);
+  await page.focus("#message-input");
+  await page.type("#message-input", "a long message typed a line at a time to grow the box under the reader, which is what took him 132 px away from the newest line, and it keeps going for a second line and a third and a fourth", { delay: 1 });
+  await page.waitForTimeout(600);
+  const grown = await page.evaluate(() => {
+    const box = document.querySelector("#transcript");
+    return { away: Math.round(box.scrollHeight - box.scrollTop - box.clientHeight), composer: Math.round(document.querySelector("#message-input").getBoundingClientRect().height) };
+  });
+  info(`${where}: the composer grew ${pin.composer} -> ${grown.composer} px`);
+  check(grown.composer > pin.composer, `${where}: typing grows the composer`, `${pin.composer} -> ${grown.composer} px`);
+  check(grown.away <= 2, `${where}: and a reader at the newest line is still there`, `${grown.away} px from the bottom (132 before this ship)`);
+  await page.evaluate(() => { const el = document.querySelector("#message-input"); el.value = ""; el.dispatchEvent(new Event("input", { bubbles: true })); });
+  await page.waitForTimeout(300);
+
+  // ---- B2, the keyboard may not take the conversation ------------------------------------------
+  // The iPhone's own keyboard is unmeasured -- no headless browser can raise one -- so this drives
+  // the visual viewport the way MOBILE-1's own keyboard leg does and measures the band that is left.
+  const kb = await page.evaluate(() => {
+    const band = () => Math.round(document.querySelector("#transcript").getBoundingClientRect().height);
+    const before = band();
+    Object.defineProperty(window.visualViewport, "height", { configurable: true, get: () => window.innerHeight - 336 });
+    window.visualViewport.dispatchEvent(new Event("resize"));
+    return { before, after: band(), kb: document.documentElement.style.getPropertyValue("--kb"), pad: Math.round(parseFloat(getComputedStyle(document.querySelector(".control-shelf")).paddingBottom)) };
+  });
+  info(`${where}: a 336 px keyboard wrote --kb ${kb.kb} and ${kb.pad} px of shelf padding`);
+  check(kb.after >= BAND_FLOOR, `${where}: with a 336 px keyboard up the conversation keeps at least ${BAND_FLOOR} px`,
+    `${kb.before} -> ${kb.after} px (54 px before this ship)`);
+  await shoot(page, `phone-app-keyboard-${pass.top}`);
+  await page.evaluate(() => {
+    Object.defineProperty(window.visualViewport, "height", { configurable: true, get: () => window.innerHeight });
+    window.visualViewport.dispatchEvent(new Event("resize"));
+  });
+  await page.waitForTimeout(300);
+
+  // ---- B3, a way back to the newest line -------------------------------------------------------
+  const parked = await page.evaluate(async () => {
+    const box = document.querySelector("#transcript");
+    const room = box.scrollHeight - box.clientHeight;
+    if (room < 200) return { short: Math.round(room) };
+    box.scrollTop = Math.max(0, room - Math.min(900, room));
+    await new Promise((r) => setTimeout(r, 250));
+    const before = document.querySelector(".jump-newest")?.hidden;
+    const row = document.createElement("article");
+    row.className = "message-row";
+    row.innerHTML = '<div class="message-bubble"><p>A reply arriving while the reader is parked up the conversation.</p></div>';
+    box.appendChild(row);
+    await new Promise((r) => setTimeout(r, 250));
+    const button = document.querySelector(".jump-newest");
+    return { before, shown: button != null && button.hidden === false, away: Math.round(box.scrollHeight - box.scrollTop - box.clientHeight) };
+  });
+  if (parked.short != null) skip(`${where}: the Newest button`, `this conversation is ${parked.short} px longer than the screen, which is not enough to park up`);
+  else check(parked.before === true, `${where}: the Newest button is away while the reader is at the newest line`);
+  if (parked.short == null) check(parked.shown === true, `${where}: a row arriving while he is parked up brings it back`, `he was ${parked.away} px from the bottom`);
+  if (parked.shown) {
+    await shoot(page, `phone-app-newest-${pass.top}`);
+    const pressed = await tap(page, ".jump-newest");
+    await page.waitForTimeout(400);
+    const landed = await page.evaluate(() => {
+      const box = document.querySelector("#transcript");
+      return { away: Math.round(box.scrollHeight - box.scrollTop - box.clientHeight), hidden: document.querySelector(".jump-newest").hidden };
+    });
+    check(pressed && landed.away <= 2, `${where}: and a press lands on the newest line`, `${landed.away} px from the bottom`);
+    check(landed.hidden === true, `${where}: which takes the button away again`);
+  }
+
+  // ---- A3, the roster drawer -------------------------------------------------------------------
+  await tap(page, "#roster-drawer");
+  await page.waitForTimeout(700);
+  const drawer = await page.evaluate((band) => {
+    const rail = document.querySelector(".worker-roster");
+    const stack = document.querySelector("#worker-stack");
+    const rect = rail.getBoundingClientRect();
+    const head = rail.querySelector(".roster-heading")?.getBoundingClientRect();
+    const first = stack.querySelector(".worker-card")?.getBoundingClientRect();
+    const at = first ? document.elementFromPoint(first.x + first.width / 2, first.y + first.height / 2) : null;
+    return {
+      open: document.body.dataset.drawer === "roster",
+      h: Math.round(rect.height), view: window.innerHeight,
+      headTop: head ? Math.round(head.top) : null,
+      cards: stack.querySelectorAll(".worker-card").length,
+      scrolls: stack.scrollHeight > stack.clientHeight + 1,
+      stack: { sh: stack.scrollHeight, ch: stack.clientHeight },
+      firstWhole: first != null && first.top >= band - 1 && first.bottom <= window.innerHeight + 1,
+      firstRect: first ? `${Math.round(first.top)}..${Math.round(first.bottom)}` : "none",
+      firstHit: at != null && at.closest(".worker-card") != null,
+    };
+  }, STATUS_BAND);
+  info(`${where}: the drawer is ${drawer.h} px of a ${drawer.view} px screen, ${drawer.cards} cards, stack ${drawer.stack.ch} of ${drawer.stack.sh}`);
+  check(drawer.open === true, `${where}: the roster drawer opens from the handle`);
+  check(drawer.h >= drawer.view - 1, `${where}: and it is the height of the screen`, `${drawer.h} px (147.5 before this ship)`);
+  check(drawer.scrolls === true, `${where}: with a list that scrolls`, `${drawer.stack.ch} px of ${drawer.stack.sh} px of cards (0 of 1547 before this ship)`);
+  check(drawer.firstWhole === true, `${where}: the first card is whole and below the status band`, drawer.firstRect);
+  check(drawer.firstHit === true, `${where}: and a thumb lands on it rather than on what is under it`);
+  check(drawer.headTop != null && drawer.headTop >= STATUS_BAND, `${where}: the drawer's head clears the ${STATUS_BAND} px status band`, `${drawer.headTop}`);
+  await shoot(page, `phone-app-drawer-${pass.top}`);
+  // OUTSIDE THE DRAWER, which is 335 px of a 390 px screen: a tap at a tenth of the width lands on a
+  // worker card and closes the drawer by choosing a conversation, which is not what this measures.
+  await page.touchscreen.tap(372, 420);
+  await page.waitForTimeout(500);
+  check(await page.evaluate(() => (document.body.dataset.drawer ?? "") === ""), `${where}: and a tap on the scrim beside it closes it`);
+
+  // ---- A1, the + menu is the phone's navigation ------------------------------------------------
+  await tap(page, "#composer-plus");
+  await page.waitForTimeout(500);
+  const menu = await page.evaluate(() => {
+    const dock = document.querySelector(".capability-dock");
+    const rows = [...dock.querySelectorAll(".capability-button")].map((el) => {
+      const r = el.getBoundingClientRect();
+      const at = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      return { id: el.dataset.capability, w: Math.round(r.width), h: Math.round(r.height), on: r.top >= 0 && r.bottom <= window.innerHeight + 1 && r.left >= 0 && r.right <= window.innerWidth + 1, hit: at != null && (at === el || el.contains(at)), label: el.textContent.trim().slice(0, 20) };
+    });
+    return { open: document.body.dataset.capabilityMenu != null, expanded: document.querySelector("#composer-plus").getAttribute("aria-expanded"), rows };
+  });
+  const bad = menu.rows.filter((one) => !one.on || !one.hit || one.h < 44 || one.w < 44);
+  check(menu.open === true, `${where}: the + button opens the capability menu`, `aria-expanded ${menu.expanded}`);
+  check(menu.rows.length >= 7, `${where}: with every capability on it, and the attach row`, menu.rows.map((o) => o.id).join(", "));
+  check(bad.length === 0, `${where}: every row of it is a 44 px target a thumb can reach`,
+    bad.length ? bad.map((o) => `${o.id} ${o.w}x${o.h} on=${o.on} hit=${o.hit}`).join(" | ") : `${menu.rows.length} rows, all ${menu.rows[0].w}x${menu.rows[0].h}`);
+  await shoot(page, `phone-app-menu-${pass.top}`);
+  await tap(page, "#composer-plus");
+  await page.waitForTimeout(300);
+  const closed = await page.evaluate(() => document.body.dataset.capabilityMenu == null);
+  check(closed === true, `${where}: and a second press closes it`);
+
+  await page.context().close();
+}
+
 let release = null;
 try {
   if (!READ_ONLY) {
@@ -1387,6 +1665,13 @@ try {
     }
   }
   if (chosen.includes("land")) { console.log("\n== sideways =="); for (const phone of PHONES) await legLand(phone); }
+  if (PHONE_APP) {
+    wk = await webkit.launch({ headless: true });
+    for (const pass of PHONE_APP_INSETS) {
+      console.log(`\n== 390x844 WebKit, device scale 3, touch, ${pass.name} ==`);
+      await legPhoneApp(pass);
+    }
+  }
   if (chosen.includes("desktop")) {
     console.log("\n== 1440x900, against the tree before the phone pass ==");
     await legBaseline();
@@ -1399,6 +1684,7 @@ try {
   check(false, "the gate ran to the end", String(error?.message ?? error));
 } finally {
   await browser?.close().catch(() => {});
+  await wk?.close().catch(() => {});
   relay?.stop();
   release?.();
 }

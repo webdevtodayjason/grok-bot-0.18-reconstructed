@@ -445,6 +445,13 @@ select:focus-visible {
   .worker-roster:has(.account-foot) .worker-stack {
     max-height: calc(100vh - 391px);
   }
+
+  /* PHONE-CONSOLE-1: the + menu's attach row. Above the breakpoint the attach button sits beside the
+     message box and this entry would be a second way to do the same thing, on a bar with no room
+     for it. Declared here rather than in the base sheet so the reason stays with the width. */
+  .capability-button.is-attach {
+    display: none;
+  }
 }
 
 .worker-card {
@@ -3247,8 +3254,10 @@ dialog[open] {
     display: none;
   }
 
+  /* PHONE-CONSOLE-1: 44px, not 38. `.composer-plus` carries `min-width: 44px` from the touch floor
+     at :4893, so a 38 px track had the attach button hanging 6 px over the message box. */
   .composer {
-    grid-template-columns: 38px minmax(0, 1fr) auto;
+    grid-template-columns: 44px minmax(0, 1fr) auto;
   }
 
   .send-button {
@@ -4838,7 +4847,8 @@ body[data-composer-drop="1"] .composer {
 
   /* The scrim keeps its `hidden` attribute and is drawn only while a drawer is open, so nothing
      paints over the console when no drawer has ever been opened. */
-  body[data-drawer] .drawer-scrim[hidden] {
+  body[data-drawer] .drawer-scrim[hidden],
+  body[data-capability-menu] .drawer-scrim[hidden] {
     display: block;
     position: fixed;
     inset: 0;
@@ -5018,6 +5028,259 @@ body[data-composer-drop="1"] .composer {
     grid-template-columns: minmax(0, 1fr);
     min-width: 0;
   }
+}
+/* PHONE-CONSOLE-1 ===================================================================
+   THE CONSOLE AT iPHONE WIDTH, and the three things a person still could not do on one after
+   MOBILE-1 put the rails behind drawers. Jason, 2026-09-11: "we're going to need to address how
+   this is laid out on Apple mobile." Measured in WebKit at 390x844, device scale 3, touch, with the
+   phone's own insets restated (top 59, bottom 34) -- the app shell reports 62/34 on an iPhone 17
+   simulator, so 59 is the conservative number:
+
+     258 px of chrome stood above the first message on an 844 px screen: 59 of status bar, 8 of bar
+       padding, a 44 px identity row, a 6 px row gap, a 56 px capability dock ON ITS OWN ROW, 10 of
+       stage padding, a 62 px room capsule and 13 px of transcript margin. The conversation got 512.
+     THE TRANSCRIPT PANNED SIDEWAYS: #transcript.scrollWidth 585 against a 374 px client, because
+       .message-row is a flex row whose children keep `min-width: auto`, so one unbreakable URL's
+       min-content beats the row's 94 % max-width.
+     THE ROSTER DRAWER WAS 148 px TALL with 1547 px of cards inside it and #worker-stack at height
+       0, so the list it exists to show was unreachable.
+
+   WHAT CHANGED, IN ONE SENTENCE EACH. The capability dock leaves the bar and becomes the composer's
+   + menu, which is the only move that keeps all six capabilities at full size -- squeezed into the
+   bar's first row the dock's track measured 94 px (the note at :4683 records that), and three and a
+   half of six behind a sideways scroll is not navigation. The bar is one row. The room capsule is a
+   thin strip with the name and the status on one line, its 44 px controls centred and allowed to
+   overhang it, because a 44 px target inside a 32 px strip is the only way to have both. The
+   drawers stretch. And the transcript's rows may break a word rather than pan the page. */
+@media (max-width: 690px) {
+  /* THE FOUR INSETS, READ ONCE INTO PROPERTIES A GATE CAN RESTATE. env() cannot be set from a test
+     and a headless browser reports 0 for all four, so the phone's real geometry was never measured
+     by anything: every inset this block depends on is declared here and used as a variable, and
+     `--sat: 59px` on <html> makes a gate run the same arithmetic the phone runs. The env() calls
+     themselves are still the only source of the real values. */
+  :root {
+    --sat: env(safe-area-inset-top, 0px);
+    --sab: env(safe-area-inset-bottom, 0px);
+    --sal: env(safe-area-inset-left, 0px);
+    --sar: env(safe-area-inset-right, 0px);
+  }
+
+  /* ONE ROW, AND A FLOOR UNDER IT. The dock is out of flow below, so the bar's second row and the
+     6 px row gap above it go with it: 103 px of bar becomes 52 px below the inset.
+
+     THE FLOOR IS 59 px AND NOT THE INSET ALONE. A shell that reports no inset on a device that has
+     one draws the bar's first row at y 8..52, entirely under a 59 px status band -- the handles,
+     the theme toggle and the gear all of them. `max(calc(8px + var(--sat)), 59px)` is 67 on a phone
+     that answers 59 and 59 on one that answers nothing, so the controls clear the band either way. */
+  .window-bar {
+    grid-template-rows: auto;
+    padding: max(calc(8px + var(--sat)), 59px) max(10px, var(--sar)) 0 max(10px, var(--sal));
+  }
+
+  /* The demo caption is fixed across the top at z 9999 and measured 47.6 px tall, so in that state
+     the bar starts below it -- the same 34 px MOBILE-1b added, on top of the floor. */
+  html[data-demo="true"] .window-bar {
+    padding-top: calc(max(calc(8px + var(--sat)), 59px) + 34px);
+  }
+
+  /* THE DOCK IS THE COMPOSER'S + MENU. It stays in the bar's markup, so every button keeps the
+     wiring app.js gave it at boot and the Add count keeps being filled; what changes is where it is
+     drawn. Fixed above the shelf, a column of full-width rows with their labels back -- at 44 px a
+     row there is space for the word, which is what the bar never had.
+
+     z-index IS ON THE BAR, NOT ON THIS. .window-bar is `position: relative; z-index: 20`, which
+     makes it a stacking context, so no z-index on a descendant can lift this above .stage (60) or
+     the shelf (30) -- the same trap index.html:197 records for the drawer scrim. The bar itself is
+     raised while the menu is open, and the scrim below sits at 65, between the two. */
+  .capability-dock {
+    position: fixed;
+    left: max(8px, var(--sal));
+    right: max(8px, var(--sar));
+    bottom: calc(max(10px, var(--sab)) + var(--kb, 0px));
+    display: none;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    min-height: 0;
+    max-height: 62dvh;
+    padding: 6px;
+    border: 1px solid var(--glass-edge);
+    border-radius: 18px;
+    /* THE DRAWERS' OWN GROUND, not the dock's. The bar's 0.44 alpha is a strip over the console's
+       own backdrop; over a conversation it is a sheet you can read the chat through -- measured in
+       WebKit at 390x844, every row of the menu had a line of the transcript running across it. */
+    background: rgba(9, 13, 20, 0.97);
+    box-shadow: var(--shadow-large);
+    /* Kept from the rule above rather than dropped: a set of capabilities longer than the screen
+       scrolls, and on this axis now as well as the other one. */
+    overflow-x: auto;
+    overflow-y: auto;
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+
+  body[data-capability-menu] .capability-dock {
+    display: flex;
+  }
+
+  body[data-capability-menu] .window-bar {
+    z-index: 90;
+  }
+
+  /* A row, not a tile: the icon, the word, and on Add the count. The base rule is
+     `display: grid; place-items: center`, which stacks all three. */
+  .capability-dock .capability-button {
+    grid-auto-flow: column;
+    grid-template-columns: 20px minmax(0, 1fr) auto;
+    justify-items: start;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-width: 0;
+    min-height: 44px;
+    padding: 0 12px;
+    border-radius: 12px;
+    font-size: 14px;
+    text-align: left;
+  }
+
+  /* The word comes back. :4745 hides it on the bar and the 940 block hides the last span with it;
+     both are bar rules, and in a menu row the label is the control. */
+  .capability-dock .capability-button > span {
+    display: inline;
+  }
+
+  .capability-dock .capability-button > small {
+    color: var(--text-tertiary);
+    font-size: 12px;
+  }
+
+  /* The divider between this conversation's capabilities and the box-wide ones turns with them. */
+  .capability-dock .capability-divider {
+    align-self: stretch;
+    width: auto;
+    height: 1px;
+    margin: 4px 10px;
+  }
+
+  /* THE ROOM CAPSULE IS A STRIP. 62 px of pill with the name stacked over the status becomes 32 px
+     with both on one line. The two controls keep their 44 px and OVERHANG it by 6 px top and bottom:
+     `.icon-button.compact` is transparent and has no frame (:311), so what a person sees is a
+     glyph on a strip, and what a thumb gets is a 44 px target. The overhang ends exactly where the
+     transcript's 6 px margin begins, so it covers no message. */
+  .room-capsule {
+    align-self: stretch;
+    gap: 8px;
+    height: 32px;
+    min-height: 0;
+    padding: 0 4px 0 12px;
+    overflow: visible;
+  }
+
+  .room-capsule > div:first-child {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .room-capsule > div:first-child strong,
+  .room-capsule > div:first-child span {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .room-capsule strong {
+    font-size: 14px;
+  }
+
+  .participant-cluster {
+    padding-left: 2px;
+  }
+
+  /* 10 px of stage and 13 of transcript margin were written for a 62 px pill. */
+  .stage {
+    padding-top: 6px;
+  }
+
+  .transcript {
+    margin-top: 6px;
+  }
+
+  /* NO SIDEWAYS PAN. `min-width: auto` is the automatic minimum every flex item carries, and it is
+     min-content -- one unbreakable URL took #transcript.scrollWidth to 585 against a 374 px client
+     and a long evidence chip to 747. `min-width: 0` lets the row be as narrow as it is told to be,
+     and `overflow-wrap: anywhere` is what the text then does instead. The code chips keep their own
+     rules: a command is read by copying it, not by wrapping it. */
+  .message-row > .message-block,
+  .message-row > .message-bubble {
+    min-width: 0;
+  }
+
+  .message-bubble,
+  .message-bubble p {
+    overflow-wrap: anywhere;
+  }
+
+  /* THE DRAWER IS THE WHOLE HEIGHT. `align-self: start` at :330 is the desktop column's rule, and
+     on an absolutely positioned box with top and bottom both 0 it means "do not stretch": the
+     drawer laid out 148 px tall with 1547 px of cards inside it and #worker-stack at height 0.
+     `stretch` is what top: 0 and bottom: 0 were written to mean. */
+  .worker-roster,
+  .context-space {
+    align-self: stretch;
+    padding-top: max(calc(14px + var(--sat)), 59px);
+  }
+
+  /* Boy-scout, one declaration: in a 335 px drawer the heading's four parts had no free space for
+     `margin-left: auto` to spend, so the Rooms tab and the bot count ran together as
+     "ROOMS20 / 40 BOTS". */
+  .roster-heading {
+    gap: 8px;
+  }
+
+  /* A WAY BACK TO THE NEWEST LINE. There was none: a reader who scrolled up, or whose composer grew
+     under them, had to drag back by hand. app.js appends this to .conversation-space -- which is
+     position: relative and which renderTranscript never rebuilds -- and shows it only while the
+     reader is parked up AND something has arrived since. Never in the speech overlay, which is
+     pointer-events: none and could not be pressed. */
+  .jump-newest {
+    position: absolute;
+    right: 14px;
+    bottom: 12px;
+    z-index: 11;
+    min-height: 44px;
+    padding: 0 18px;
+    border: 1px solid var(--glass-edge);
+    border-radius: 999px;
+    color: var(--text-primary);
+    background: var(--glass-strong);
+    box-shadow: var(--shadow-medium);
+    backdrop-filter: blur(var(--blur-soft)) saturate(118%);
+    font: inherit;
+    font-size: 13px;
+  }
+}
+
+/* The same button at desktop widths, where a reader can be parked up just as easily. One rule, and
+   it is a new selector, so nothing above it moves. */
+.jump-newest {
+  position: absolute;
+  right: 18px;
+  bottom: 14px;
+  z-index: 11;
+  min-height: 36px;
+  padding: 0 16px;
+  border: 1px solid var(--glass-edge);
+  border-radius: 999px;
+  color: var(--text-primary);
+  background: var(--glass-strong);
+  box-shadow: var(--shadow-medium);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
 }
 
 /* VOICE-1 ===========================================================================
@@ -5228,7 +5491,13 @@ body[data-composer-drop="1"] .composer {
   /* On a phone the textarea is the scarce thing, so the word goes and the orb stays -- the button
      keeps its aria-label, so it still says what it is to anyone not reading the screen. */
   .composer {
-    grid-template-columns: 38px minmax(0, 1fr) auto auto;
+    grid-template-columns: 44px minmax(0, 1fr) auto auto;
+  }
+
+  /* PHONE-CONSOLE-1: and the same first track while the live line is up, or the attach button is
+     back over the message box for the length of a refusal. */
+  .composer[data-voice-line] {
+    grid-template-columns: 44px minmax(0, 1fr) minmax(0, 0.7fr) auto auto;
   }
 
   /* VOICE-2, A BROKEN WINDOW CLOSED IN THE SAME PASS. This shipped at 38x38 to match the attach

@@ -78,8 +78,17 @@
           <strong class="window-eyebrow">Machine Room</strong>
         </div>
 
+        <!-- PHONE-CONSOLE-1: at phone widths this is not a dock on the bar, it is the menu behind the
+             composer's + button (styles.css, the PHONE-CONSOLE-1 block). The markup does not change
+             between the two, so every button keeps the handler app.js bound at boot and the Add
+             count keeps being filled; only where it is drawn does. -->
         <nav class="capability-dock" aria-label="Capabilities">
           <span class="capability-scope" id="capability-scope"></span>
+          <!-- PHONE-CONSOLE-1: the one entry that exists only in the menu. Above the breakpoint the
+               + button beside the message box picks a file itself, so this is hidden there. -->
+          <button class="capability-button is-attach" type="button" data-capability="attach" aria-label="Attach a file">
+            <span class="capability-icon">▱</span><span>Attach a file</span>
+          </button>
           <button class="capability-button is-contextual" type="button" data-capability="files" data-capability-scope="context" aria-label="Open files for the current context">
             <span class="capability-icon">▱</span><span>Files</span>
           </button>

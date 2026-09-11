@@ -1262,6 +1262,120 @@ point has to be the sliver on the far side — which is what `verify-mobile` alr
 |---|---|
 | `node --test tests/machine-room-mobile.test.mjs` | that the phone pass stayed inside its breakpoint: exactly one base rule, the shell's column track inside it and not outside, the dock really shrinkable, the composer's font and its eight-line cap moving together, the viewport meta, the scrim inside the stage, and a line-count ceiling on `app.js`'s share |
 | `node scripts/verify-mobile.mjs --all` | the browser legs at both device sizes on `grok-bot-local-vm`, then read-only on `console.titanium.bot` |
+| `node --test tests/machine-room-transcript-pin.test.mjs` | PHONE-CONSOLE-1's own half: the pin is lost by scrolling up and by nothing else, the re-pin cannot feed itself, the two files agree on 90 px, the keyboard's ceiling and the composer's cap while it is up |
+| `node scripts/verify-mobile.mjs --phone-app` | the iPhone app's own layout, in WebKit at 390x844 in two passes, insets restated at 59/34 and at 0. Not part of `--all`: it opens a second browser engine and `--all` is already at its budget ceiling. It needs a live gateway (`SAND_PROFILE_DIRS` in the environment), and says so rather than measuring a demo page |
+
+### The console inside the iPhone app (PHONE-CONSOLE-1)
+
+Jason, 2026-09-11: *"we're going to need to address how this is laid out on Apple mobile."* The phone
+pass above made the console fit a phone-sized window. It did not make it a phone layout, and the app
+is where that shows: a Capacitor WKWebView over `https://console.titanium.bot` at 402x874 points with
+safe-area insets of 62 top and 34 bottom.
+
+Everything below was measured in **WebKit at 390x844, device scale 3, touch**, on
+`grok-bot-local-vm`, with the phone's insets restated (59 top, 34 bottom — 59 rather than 62 because
+it is the conservative number). WebKit and not Chromium, because the app is a WKWebView and mobile
+Safari is WebKit; a phone-sized Chromium is a phone-sized Chromium.
+
+**258 px of chrome stood above the first message on an 844 px screen.** 59 of status bar, 8 of bar
+padding, a 44 px identity row, a 6 px row gap, a 56 px capability dock **on its own row**, 10 of stage
+padding, a 62 px room capsule and 13 px of transcript margin. It is **155 px** now, and the
+conversation went from 512 px to 556.
+
+| | Before | After |
+|---|---|---|
+| Chrome above the conversation, insets included | 258 px | 155 px |
+| The bar's own strip, below the notch | 103 px, two rows | 44 px, one row |
+| The room capsule | 62 px, name over status | 32 px, name and status on one line |
+| The transcript's `scrollWidth` against a 374 px client, one long URL | 585 px | 374 px |
+| The same, a long chip sent through the composer | 747 px | 374 px |
+| The roster drawer, open | 147.5 px tall, `#worker-stack` 0 px against 1547 px of cards | 844 px tall, 514 px of the same 1547 scrolling |
+| A reader at the newest line after typing a long message | 132 px away from it | 0 px |
+| The conversation band with a 336 px keyboard up | 54 px | 202 px |
+
+**The capability dock is the composer's + menu.** Taking the dock off the bar is the only move that
+buys the second row back, and squeezing it into the first was measured at 94 px of track for six
+buttons — three and a half of them, behind a sideways scroll nobody would find. So the same markup is
+drawn as a sheet above the shelf: seven full-width 44 px rows with their words back, the Add count
+with them, and an **Attach a file** row that is the job the + button used to do by itself. Nothing
+about the dock's wiring changes — every button keeps the handler `app.js` bound to it at boot — and
+above the breakpoint the dock is the bar's second row exactly as it was.
+
+The `z-index` for that sheet is on `.window-bar`, not on the dock. The bar is `position: relative;
+z-index: 20`, which makes it a stacking context, so no `z-index` on a descendant can lift the sheet
+above `.stage` (60) or the shelf (30) — the same trap the drawer scrim records. The bar goes to 90
+while the menu is open and the scrim at 65 sits between the two.
+
+**The insets are variables now, because a gate cannot set `env()`.** A headless browser answers 0 to
+every `env(safe-area-inset-*)`, so nothing had ever measured this console on a device with a notch.
+The phone block reads the four values once into `--sat`/`--sab`/`--sal`/`--sar` and uses those, and
+the gate restates them with an injected `:root` rule. `env()` is still the only source of the real
+number. Rules elsewhere in the sheet that still call `env()` directly — the shelf's own bottom
+padding — read 0 in both gate passes, which is stated rather than hidden.
+
+**The floor under the bar is 59 px and not the inset alone.** A shell that reports no inset on a
+device that has one drew the bar's first row at y 8..52, entirely under a 59 px status band: both
+drawer handles, the theme toggle and the gear. `max(calc(8px + var(--sat)), 59px)` is 67 on a phone
+that answers 59 and 59 on one that answers nothing. The drawers carry the same floor, so the roster's
+head clears the band in both passes (73 with insets, 59 without). The spec for this wave said 56 px;
+56 leaves the row's top 3 px inside the band the gate measures, so the floor is the band.
+
+**The room capsule keeps its 44 px targets by letting them overhang it.** 32 px of strip with a 44 px
+`•••` centred in it: `.icon-button.compact` is transparent and frameless, so what a person sees is a
+glyph on a strip and what a thumb gets is a full target. The overhang ends exactly where the
+transcript's 6 px margin begins, so it covers no message.
+
+**The transcript panned sideways because of a flexbox default.** `.message-row` is a flex row and its
+children keep `min-width: auto`, which is min-content, so one unbreakable URL beat the row's 94 %
+max-width. `min-width: 0` on the row's children with `overflow-wrap: anywhere` on the bubble is the
+fix. The code chips are deliberately not in it: a command is read by copying it, not by wrapping it.
+
+**The roster drawer was 148 px tall.** `align-self: start` at `.worker-roster` is the desktop
+column's rule, and on an absolutely positioned box with `top` and `bottom` both 0 it means *do not
+stretch* — the drawer shrank to its content and `#worker-stack` laid out at height 0 with 1547 px of
+cards inside it. `align-self: stretch` at phone width is what `top: 0; bottom: 0` was written to mean.
+
+#### The pin, and the keyboard's ceiling
+
+`renderTranscript`'s own rule (CONSOLE-4) is correct and was not touched: a tapped Send still lands 0
+to 1 px from the bottom, and the report that it did not does not reproduce. What was missing is that
+**nothing watched the box's own height.** Typing a long message grows the composer 44 → 176 px, which
+shrinks the transcript under a reader who was at the newest line and leaves him 132 px from it; a
+keyboard leaves him further still.
+
+A `ResizeObserver` on `#transcript` re-pins him, a frame later, writing `scrollTop` and nothing else —
+WebKit throws *"ResizeObserver loop completed with undelivered notifications"* at a callback that
+resizes anything, and a one-frame deferral with a single in-flight guard keeps this out of that class.
+
+The rule that took two cuts: **the pin is lost by scrolling up and by nothing else.** The first cut
+recomputed "is he at the bottom" on every scroll event, and measured 22 scroll events and 26 re-pins
+that each landed 0 px from the bottom with the reader still ending 132 px away — because the box
+shrinking under him leaves his `scrollTop` where it was and moves the bottom further down, the scroll
+event that follows reports a gap, and reading that gap as *he scrolled up* skipped the 147 re-pins
+after it. `scrollTop` going **down** is the reader's own drag and nothing else does it.
+
+`--kb` is written with a ceiling: whatever leaves the conversation 180 px with the composer at its
+own keyboard cap of three lines. Unclamped it wrote 336 px of shelf padding and left a 54 px band of
+chat. The CSS is unchanged and still reads `var(--kb, 0px)`.
+
+**The iPhone's own keyboard is still unmeasured.** No headless browser can raise one. The clamp is
+built to the platform rule and asserted against a simulated `visualViewport` resize, the same way
+MOBILE-1's own keyboard leg is, and that is the whole of the claim.
+
+**A way back to the newest line**, which this console never had: a `Newest` button in
+`.conversation-space` — which is `position: relative` and which `renderTranscript` never rebuilds —
+shown only while the reader is parked up **and** a row has arrived since, toggled by `hidden` and
+never by `style.display`. Not in `.voice-overlay`, which is `pointer-events: none` and could not be
+pressed, and not in the composer's grid, which is what moves the footer.
+
+#### What this leg does not cover
+
+The code chips in the transcript measure 118x18 and 176x18 at phone width, under the 44 px floor the
+rest of the console now keeps. That is **pre-existing** — it reproduces on the tree before this wave,
+on the same box and the same conversation — and the honest fix is a design decision about an inline
+chip inside a sentence, which belongs to the wave that owns those rules. It is filed as
+**PHONE-CHIP-1** in `docs/GAP-ANALYSIS.md` rather than fixed here.
+
 
 ---
 

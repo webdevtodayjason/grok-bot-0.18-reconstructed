@@ -7192,6 +7192,9 @@
     else if (capability === "skills") renderSkillsPanel();
     else if (capability === "marketplace") { marketplacePluginId = null; renderMarketplacePanel(); }
     else if (capability === "add") openPanel("Global creation", "Add to the Machine Room", addPanel());
+    // PHONE-CONSOLE-1: the entry that only exists in the + menu, doing exactly what the + button
+    // does above the breakpoint -- the same guard, the same picker, one function.
+    else if (capability === "attach") pickAttachment();
   }));
 
   document.querySelectorAll("[data-close-dialog]").forEach((button) => button.addEventListener("click", () => elements.panelDialog.close()));
@@ -7291,9 +7294,16 @@
       `<span class="tag">▱ ${escapeHtml(a.name)}${a.pending ? " · uploading…" : a.note ? ` · ${escapeHtml(a.note)}` : ""}<button class="member-remove" type="button" data-drop-attachment="${i}" aria-label="Remove ${escapeHtml(a.name)}">×</button></span>`).join("");
   }
 
-  document.getElementById("composer-plus").addEventListener("click", () => {
+  function pickAttachment() {
     if (activeContext().kind !== "worker") { showToast("Attach a file in a direct conversation — a room has no attachment store."); return; }
     document.getElementById("composer-file").click();
+  }
+
+  document.getElementById("composer-plus").addEventListener("click", () => {
+    // PHONE-CONSOLE-1: on a phone the capabilities live behind this button, so the first press opens
+    // the menu and "Attach a file" is the first row of it. Above the breakpoint nothing changes.
+    if (isPhoneWidth()) { setCapabilityMenu(!document.body.dataset.capabilityMenu); return; }
+    pickAttachment();
   });
 
   document.getElementById("attachment-tray").addEventListener("click", (event) => {
@@ -7369,6 +7379,149 @@
   }
   // --8<-- end QOL-COMPOSER paste helpers
 
+  // ---- PHONE-CONSOLE-1: the + menu, the transcript's pin, and the keyboard's ceiling ------------
+  // Three things a person could not do on an iPhone, all of them about where the newest line is.
+  // MEASURED in WebKit at 390x844 with the phone's insets restated: a reader at the newest line was
+  // left 132 px from it by typing a long message (the composer grows 44 to 176 px under him) and
+  // 336 px from it by the keyboard arriving, with nothing to re-pin him and no control to take him
+  // back. The keyboard's own padding was written with no ceiling, which left a 54 px band of chat.
+  //
+  // WHAT IS NOT CHANGED HERE. renderTranscript's rule (CONSOLE-4, :2222) is correct and a tapped
+  // Send still lands 0 to 1 px from the bottom; the report that it did not does not reproduce. What
+  // was missing is that nothing watched the box's own HEIGHT -- a rebuild is not the only thing that
+  // moves a reader away from the newest line.
+  function isPhoneWidth() {
+    return typeof window.matchMedia === "function" && window.matchMedia("(max-width: 690px)").matches;
+  }
+
+  // THE + MENU. The capability dock is the same markup at both widths (styles.css draws it as a
+  // sheet above the shelf on a phone), so there is no second set of buttons to wire: all this owns
+  // is whether the sheet is open.
+  function setCapabilityMenu(open) {
+    if (open) document.body.dataset.capabilityMenu = "open";
+    else delete document.body.dataset.capabilityMenu;
+    document.getElementById("composer-plus")?.setAttribute("aria-expanded", String(Boolean(open)));
+  }
+  // A press acts and the sheet goes: one left standing over the composer, behind the panel it just
+  // opened, is one more thing to dismiss by hand.
+  document.querySelector(".capability-dock")?.addEventListener("click", (event) => {
+    if (event.target.closest("[data-capability]")) setCapabilityMenu(false);
+  });
+  document.getElementById("drawer-scrim")?.addEventListener("click", () => setCapabilityMenu(false));
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") setCapabilityMenu(false); });
+
+  // The same 90 px CONSOLE-4's renderTranscript uses, so the two agree on what "at the bottom" is.
+  const NEAR_NEWEST = 90;
+  // What the conversation keeps whatever the keyboard and the composer do to it. 180 px is five
+  // lines of chat at this font, which is the least that is worth reading.
+  const TRANSCRIPT_FLOOR = 180;
+  const KEYBOARD_COMPOSER_LINES = 3;
+  let transcriptPinned = true;
+  let unseenWhileParked = 0;
+  let transcriptRowCount = 0;
+  let lastScrollTop = 0;
+  let repinFrame = 0;
+
+  const atNewest = () => {
+    const box = elements.transcript;
+    return box.scrollHeight - box.scrollTop - box.clientHeight < NEAR_NEWEST;
+  };
+  const keyboardTaken = () => parseFloat(document.documentElement.style.getPropertyValue("--kb")) || 0;
+  function keyboardUp() { return keyboardTaken() > 0; }
+
+  // A WAY BACK TO THE NEWEST LINE, which this console has never had. In .conversation-space, which
+  // is position: relative and which renderTranscript never rebuilds -- and NOT in .voice-overlay,
+  // which is pointer-events: none and could not be pressed.
+  const jumpNewest = document.createElement("button");
+  jumpNewest.className = "jump-newest";
+  jumpNewest.type = "button";
+  jumpNewest.dataset.jumpNewest = "";
+  jumpNewest.hidden = true;
+  jumpNewest.textContent = "Newest";
+  document.querySelector(".conversation-space")?.appendChild(jumpNewest);
+
+  // `hidden`, never style.display, and written only when it changes: this is called from inside an
+  // observer's callback, and an unguarded write there is the 60 Hz loop console-flicker paid for.
+  function paintJumpNewest() {
+    const wanted = !transcriptPinned && unseenWhileParked > 0;
+    if (jumpNewest.hidden === !wanted) return;
+    jumpNewest.hidden = !wanted;
+  }
+
+  function repinTranscript() {
+    if (!transcriptPinned || repinFrame) return;
+    repinFrame = requestAnimationFrame(() => {
+      repinFrame = 0;
+      const box = elements.transcript;
+      box.scrollTop = box.scrollHeight;
+    });
+  }
+
+  // HOW MUCH OF THE SCREEN THE KEYBOARD MAY TAKE: whatever leaves the conversation its floor with
+  // the composer at its own keyboard cap. It reads the band as it stands and adds back what it has
+  // already taken, so repeated calls settle rather than ratchet.
+  function keyboardCeiling() {
+    const box = elements.transcript;
+    if (!box) return Infinity;
+    const input = elements.messageInput;
+    const line = input ? parseFloat(getComputedStyle(input).lineHeight) || 22 : 22;
+    const room = input ? Math.max(0, Math.round(line * KEYBOARD_COMPOSER_LINES) - input.getBoundingClientRect().height) : 0;
+    return Math.max(0, Math.round(box.getBoundingClientRect().height + keyboardTaken() - TRANSCRIPT_FLOOR - room));
+  }
+
+  // A SCROLL EVENT IS NOT ALWAYS THE READER MOVING, and reading it as one is what made the first cut
+  // of this fail. MEASURED in WebKit at 390x844: typing a long message fired 22 scroll events and 26
+  // re-pins that each landed at 0 px from the bottom, and the reader still ended 132 px away. The
+  // box shrinks under him as the composer grows, which leaves his scrollTop where it was and the
+  // bottom further down; the scroll event that follows reports a gap, the first cut read that as
+  // "he scrolled up", and every re-pin after it was skipped.
+  //
+  // SO THE ONLY WAY TO LOSE THE PIN IS TO SCROLL UP. scrollTop going DOWN is the reader's own drag
+  // and nothing else does it; a gap that opens while scrollTop stands still is the floor moving,
+  // and the answer to that is to take him back rather than to leave him behind.
+  elements.transcript.addEventListener("scroll", () => {
+    const box = elements.transcript;
+    const top = box.scrollTop;
+    const draggedUp = top < lastScrollTop - 1;
+    lastScrollTop = top;
+    if (draggedUp) transcriptPinned = atNewest();
+    else if (atNewest()) transcriptPinned = true;
+    else if (transcriptPinned) repinTranscript();
+    if (transcriptPinned) unseenWhileParked = 0;
+    paintJumpNewest();
+  }, { passive: true });
+
+  jumpNewest.addEventListener("click", () => {
+    const box = elements.transcript;
+    box.scrollTop = box.scrollHeight;
+    transcriptPinned = true;
+    unseenWhileParked = 0;
+    paintJumpNewest();
+  });
+
+  // A row that ARRIVED while the reader was parked up is what the button counts. renderTranscript
+  // rewrites the whole list on every tick, so the count of rows is the only honest signal: a rebuild
+  // that lands the same rows is not news.
+  if (typeof MutationObserver === "function") {
+    new MutationObserver(() => {
+      const rows = elements.transcript.querySelectorAll(".message-row").length;
+      const grew = rows - transcriptRowCount;
+      transcriptRowCount = rows;
+      if (grew > 0 && !transcriptPinned) unseenWhileParked += grew;
+      paintJumpNewest();
+    }).observe(elements.transcript, { childList: true });
+  }
+
+  // THE BOX'S OWN HEIGHT, watched rather than a list of the things that change it: the composer
+  // growing, the keyboard arriving, a furniture row appearing in the shelf and a rotation all come
+  // through here. The re-pin is a frame later and writes scrollTop only, which resizes nothing --
+  // WebKit throws "ResizeObserver loop completed with undelivered notifications" at a callback that
+  // resizes anything, and the deferral plus the repinFrame guard keep this out of that class.
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(() => repinTranscript()).observe(elements.transcript);
+  }
+  // ---- end PHONE-CONSOLE-1 ---------------------------------------------------------------------
+
   // Eight lines is where a composer stops being a composer; past that the box scrolls itself.
   const COMPOSER_MAX_LINES = 8;
   function autosizeComposer() {
@@ -7378,7 +7531,12 @@
     // height and the cap is a plain multiple of the line box.
     const line = parseFloat(getComputedStyle(el).lineHeight) || 20;
     el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, Math.round(line * COMPOSER_MAX_LINES))}px`;
+    // PHONE-CONSOLE-1: eight lines is the cap with the keyboard down. With it up there is no room
+    // for eight -- growing 44 to 176 px took the reader 132 px away from the newest line and left
+    // the band under the floor -- so the box stops at KEYBOARD_LINES and scrolls itself.
+    const lines = keyboardUp() ? KEYBOARD_COMPOSER_LINES : COMPOSER_MAX_LINES;
+    el.style.height = `${Math.min(el.scrollHeight, Math.round(line * lines))}px`;
+    repinTranscript();
   }
   elements.messageInput.addEventListener("input", autosizeComposer);
   // After the submit handler above has cleared the value, not before it.
@@ -7418,7 +7576,9 @@
     const trackKeyboard = () => {
       const view = window.visualViewport;
       const kb = Math.max(0, Math.round(window.innerHeight - view.height - view.offsetTop));
-      document.documentElement.style.setProperty("--kb", `${kb}px`);
+      // PHONE-CONSOLE-1: never more than the conversation can spare. Unclamped this wrote 336 px of
+      // shelf padding on a 390x844 phone and left a 54 px band of chat.
+      document.documentElement.style.setProperty("--kb", `${Math.min(kb, keyboardCeiling())}px`);
     };
     window.visualViewport.addEventListener("resize", trackKeyboard);
     window.visualViewport.addEventListener("scroll", trackKeyboard);

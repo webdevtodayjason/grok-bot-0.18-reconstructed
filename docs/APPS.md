@@ -885,6 +885,20 @@ filed as **MOBILE-2c** with the phone pane as owner. The Notifications card itse
 phone viewport by opening Settings at a desktop width and then taking the viewport down, which is
 honest about what was and was not proved.
 
+### The insets the shell reports, and the floor the console keeps anyway (PHONE-CONSOLE-1)
+
+The shell is full-bleed over a `viewport-fit=cover` page and reports real safe-area insets: measured
+on an iPhone 17 simulator, iOS 26.4, `env(safe-area-inset-top)` resolves to **62** and
+`env(safe-area-inset-bottom)` to **34**, and Capacitor's `contentInset` moves nothing on such a page,
+so `always` and `never` measure identically. The console now reads those four values into
+`--sat`/`--sab`/`--sal`/`--sar` at phone width and pads the window bar and the two drawers with
+`max(calc(8px + var(--sat)), 59px)`. The floor is what a shell that reports **nothing** gets: mobile
+Safari, or any web view whose insets come back 0. Without it the bar's first row draws at y 8..52,
+entirely under a 59 px status band — both drawer handles, the theme toggle and the gear. Measured in
+WebKit at 390x844 in both states: 67 px of padding with the insets restated, 59 px without, and the
+bar's own strip 44 px either way. A shell author has nothing to do for this; a shell that starts
+reporting insets it did not report before simply gets the larger of the two.
+
 ---
 
 ## 8b. What the shell must give voice (VOICE-11)
