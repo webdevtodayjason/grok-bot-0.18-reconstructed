@@ -5189,6 +5189,8 @@
   function boxHandoffTeardown() {
     if (!boxHandoffThumb) return;
     window.clearInterval(boxHandoffThumb.timer);
+    // SEAT-FOCUS-1. The hand-back goes out with the frame it was armed for.
+    try { boxHandoffThumb.keyboard?.(); } catch { /* nothing to do */ }
     boxHandoffThumb.frame?.remove();
     boxHandoffThumb = null;
   }
@@ -5215,7 +5217,14 @@
       + `?path=${encodeURIComponent(`/vnc/${display}/websockify`)}`
       + "&autoconnect=1&resize=scale&reconnect=1&bell=0&view_only=1";
     document.body.appendChild(frame);
-    boxHandoffThumb = { agentId, requestId, display, frame, timer: window.setInterval(boxHandoffTick, 3000) };
+    // SEAT-FOCUS-1. noVNC focuses its own canvas a couple of seconds after this client connects, and
+    // from that moment document.activeElement is this IFRAME: Escape stops leaving talk mode and the
+    // space bar stops talking, silently, because voice.js's handlers are on the document. The rule is
+    // screen-tile.js's, which owns the other reader of exactly this shape, so this mount arms it for
+    // its own frame rather than keeping a second copy of it. No pointer can ever reach this frame
+    // (off-screen, pointer-events:none, view_only), so it never has any business holding keys.
+    const keyboard = window.__screenTile?.keepKeyboardOff?.(frame) ?? null;
+    boxHandoffThumb = { agentId, requestId, display, frame, keyboard, timer: window.setInterval(boxHandoffTick, 3000) };
   }
 
   function boxHandoffTick() {

@@ -55,6 +55,14 @@ function makeElement(tag, attrs = {}) {
       }
     },
     getAttribute(name) { return this.attributes[name] ?? null; },
+    // SEAT-FOCUS-1. A reader frame is handed the keyboard back with blur(), and the rule arms a load
+    // listener on it, so the stub answers both. `blurs` is counted rather than the document model
+    // being guessed at: the test that cares wires activeElement itself.
+    blurs: 0,
+    blur() { this.blurs += 1; this.onblur?.(); },
+    listeners: {},
+    addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); },
+    removeEventListener(type, fn) { const list = this.listeners[type]; if (list) list.splice(list.indexOf(fn), 1); },
     // SCREEN-TILE-1 asks the tile whether the browser is painting it. checkVisibility is the real
     // answer and the one the module prefers; the bounding box is its fallback for a browser too old
     // to have it, and both are stubbed so both paths are exercised.
@@ -103,6 +111,8 @@ function makeWindow({ seat = undefined, storageThrows = false } = {}) {
     document: {
       visibilityState: "visible",
       body,
+      // SEAT-FOCUS-1 reads this and nothing else to decide whether a reader is holding the keyboard.
+      activeElement: null,
       listeners: {},
       createElement: (tag) => {
         const el = makeElement(tag);
@@ -179,6 +189,16 @@ const REAL_SAMPLE = `data:image/webp;base64,${"B".repeat(7591 - 23)}`;
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const tickOnce = (win) => { for (const timer of win.__timers.values()) timer.fn(); };
+// SEAT-FOCUS-1's poll is 250 ms and the reader's cadence is 1 s or 3 s, so a test can fire one
+// without firing the other. Copied out of the map first: a hand-back that disarms its own poll
+// deletes the entry it is being iterated from.
+const fireEvery = (win, ms) => { for (const timer of [...win.__timers.values()]) if (timer.ms === ms) timer.fn(); };
+// What a browser does when a client inside an off-screen frame focuses its own canvas: the PARENT
+// document's activeElement becomes the iframe, and blur() gives it back to the body.
+const giveKeyboardTo = (win, frame) => {
+  win.document.activeElement = frame;
+  frame.onblur = () => { win.document.activeElement = win.document.body; };
+};
 
 // The pixels behind the two samples. spreadOf steps four pixels in both axes, so a frame small
 // enough that only one pixel is sampled would read as flat whatever is in it -- these are 16x16
@@ -380,9 +400,10 @@ test("sync mounts at most one client, whatever it is called with", () => {
   for (let i = 0; i < 6; i += 1) tile.sync({ agentId: "titan", seat: 3, status: "working" });
   const clients = win.document.body.children.filter((el) => el.tagName === "IFRAME");
   assert.equal(clients.length, 1, "six renders, one client");
-  // Two intervals and no more: the reader's own cadence, and SCREEN-TILE-1's one-second caption
-  // clock. Six renders adding six of either is exactly the leak these counts exist to catch.
-  assert.equal(win.__timers.size, 2, "and one reader interval beside the caption's clock");
+  // Three intervals and no more: the reader's own cadence, SCREEN-TILE-1's one-second caption clock,
+  // and SEAT-FOCUS-1's 250 ms hand-back poll. Six renders adding six of any of them is exactly the
+  // leak these counts exist to catch.
+  assert.equal(win.__timers.size, 3, "and one reader interval beside the caption's clock and the hand-back poll");
 });
 
 test("the client is view_only, on the page's own origin, and built on the seat it was given", () => {
@@ -412,7 +433,7 @@ test("the conversation moving to another agent tears the client down and mounts 
   assert.equal(clients.length, 1, "still one client");
   assert.notEqual(clients[0], first, "and it is a new one");
   assert.equal(tile.state().agentId, "dispatch");
-  assert.equal(win.__timers.size, 2, "the old reader's timer went with it, leaving one reader interval and the caption clock");
+  assert.equal(win.__timers.size, 3, "the old reader's timer and its hand-back poll went with it, leaving one of each and the caption clock");
 });
 
 test("a render that merely carried no display does NOT tear the client down", () => {
@@ -495,7 +516,7 @@ test("SCREEN-TILE-1 reversal: a live agent holds its client at three seconds; an
   tile.sync({ agentId: "titan", seat: 3, status: "working" });
   assert.equal(tile.state().everyMs, tile.limits.LIVE_REFRESH_MS, "a working agent is watched, not photographed");
   assert.equal(tile.state().live, true);
-  assert.equal(win.__timers.size, 2, "the reader's interval and the caption's one-second clock, and nothing else");
+  assert.equal(win.__timers.size, 3, "the reader's interval, the caption's one-second clock and the hand-back poll, and nothing else");
 
   // The turn ends. The client it already paid a handshake for stays until its next frame, and then
   // tick() lets it go -- which is the mount-grab-release half of the rule that did not change.
@@ -946,4 +967,141 @@ test("the module writes only its own storage prefix", () => {
   for (const target of writes) {
     assert.ok(/IDLE_PREFIX|IDLE_INDEX/.test(target), `writes to ${target}, which is outside this module's own keys`);
   }
+});
+
+// -- SEAT-FOCUS-1: a picture nobody can click never holds the keyboard -----------------------------
+//
+// The off-screen reader takes the keyboard about two seconds after every mount, and from that moment
+// every document-level key goes into it: Escape stops leaving talk mode and the space bar stops
+// talking, with nothing logged and nothing on screen. MEASURED on grok-bot-local-vm in real Chrome at
+// 1440x900: with a reader focused, a real Escape and a real space bar produced ZERO keydowns on a
+// capture-phase listener on document, and an OPEN desktop dialog did not close on Escape either.
+//
+// The filed row proposed listening for `focus` on the iframe ELEMENT. That event does not fire for a
+// focus that lands inside the frame -- 0 in the product and 0 in an isolated harness -- so the two
+// things that do work are pinned here: a focusin listener reaching into the frame's own document, and
+// a 250 ms poll for the frame's lifetime.
+
+test("SEAT-FOCUS-1: a reader that takes the keyboard is handed it straight back by the poll", () => {
+  const win = makeWindow();
+  const tile = load(win);
+  railTile(win, "titan");
+  tile.sync({ agentId: "titan", seat: 3, status: "working" });
+  const frame = clientOf(win);
+  assert.ok(frame, "a client was mounted");
+  assert.equal(tile.handBacks(), 0, "nothing has taken the keyboard yet");
+
+  // The client focuses its own canvas, which in the parent document looks exactly like this.
+  giveKeyboardTo(win, frame);
+  assert.equal(win.document.activeElement, frame, "the reader holds the keyboard, which is the defect");
+  fireEvery(win, tile.limits.HANDBACK_POLL_MS);
+  assert.equal(frame.blurs, 1, "the poll blurred the frame");
+  assert.equal(win.document.activeElement, win.document.body, "and the document has the keyboard back");
+  assert.equal(tile.handBacks(), 1, "the module counts it, so a gate can prove it reproduced the steal");
+  assert.equal(tile.state().handBacks, 1, "and state() carries the same number");
+
+  // A poll tick with nothing focused is not a hand-back, so the count a gate reads means something.
+  fireEvery(win, tile.limits.HANDBACK_POLL_MS);
+  assert.equal(tile.handBacks(), 1, "an idle poll does not inflate the count");
+  assert.equal(frame.blurs, 1);
+});
+
+test("SEAT-FOCUS-1: the listener inside the frame's own document hands it back without the poll", () => {
+  const win = makeWindow();
+  const tile = load(win);
+  railTile(win, "titan");
+  tile.sync({ agentId: "titan", seat: 3, status: "working" });
+  const frame = clientOf(win);
+  // The reach-in is armed on creation and again on the frame's load, because the client's document
+  // arrives after this mount returns. This is the load.
+  const inner = { listeners: {}, addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }, removeEventListener() {} };
+  frame.contentDocument = inner;
+  for (const fn of frame.listeners.load ?? []) fn();
+  assert.equal((inner.listeners.focusin ?? []).length, 1, "a focusin listener is installed inside the frame, in capture");
+
+  giveKeyboardTo(win, frame);
+  inner.listeners.focusin[0]();
+  assert.equal(tile.handBacks(), 1, "handed back the moment the canvas took focus, before any poll ran");
+  assert.equal(win.document.activeElement, win.document.body);
+});
+
+test("SEAT-FOCUS-1: a frame whose own document cannot be read still gets the poll", () => {
+  const win = makeWindow();
+  const tile = load(win);
+  railTile(win, "titan");
+  tile.sync({ agentId: "titan", seat: 3, status: "working" });
+  const frame = clientOf(win);
+  // What a frame served from another origin does on the property access itself. Both readers are
+  // same-origin by construction today; if that ever changes this is the half that has to carry it.
+  Object.defineProperty(frame, "contentDocument", { get() { throw new Error("cross-origin"); } });
+  for (const fn of frame.listeners.load ?? []) fn();
+  giveKeyboardTo(win, frame);
+  fireEvery(win, tile.limits.HANDBACK_POLL_MS);
+  assert.equal(tile.handBacks(), 1, "the poll is the answer when the reach-in cannot be armed");
+  assert.equal(win.document.activeElement, win.document.body);
+});
+
+test("SEAT-FOCUS-1: teardown takes the hand-back poll out with the frame", () => {
+  const win = makeWindow();
+  const tile = load(win);
+  railTile(win, "titan");
+  tile.sync({ agentId: "titan", seat: 3, status: "working" });
+  const frame = clientOf(win);
+  assert.equal(win.__timers.size, 3, "the reader's cadence, the caption's clock and the hand-back poll");
+  tile.teardown();
+  assert.equal(win.__timers.size, 1, "only the caption's clock is left");
+  // And a frame out of the document is never blurred by a poll that should no longer exist.
+  giveKeyboardTo(win, frame);
+  fireEvery(win, tile.limits.HANDBACK_POLL_MS);
+  assert.equal(tile.handBacks(), 0);
+});
+
+test("SEAT-FOCUS-1: a poll whose frame left the document on its own disarms itself", () => {
+  const win = makeWindow();
+  const tile = load(win);
+  railTile(win, "titan");
+  tile.sync({ agentId: "titan", seat: 3, status: "working" });
+  const frame = clientOf(win);
+  frame.isConnected = false;
+  fireEvery(win, tile.limits.HANDBACK_POLL_MS);
+  assert.equal(win.__timers.size, 2, "the poll stopped itself rather than running for the life of the page");
+});
+
+test("SEAT-FOCUS-1: the rule touches the two off-screen readers and NOTHING else", () => {
+  const win = makeWindow();
+  const tile = load(win);
+  assert.deepEqual(tile.limits.READER_FRAME_ATTRIBUTES, ["data-screen-tile-source", "data-box-handoff-thumb-source"],
+    "the two frames no pointer can reach, and no third one");
+
+  // The seat inside the desktop dialog is the pane a person opened. It is MEANT to hold the keys:
+  // its own copy says so, app.js's paste bridge depends on it, and the teach dialog's cover doctrine
+  // is built on it. Handing it to this rule must be a no-op.
+  const seat = makeElement("iframe", { "data-box-vnc": "1" });
+  win.document.body.appendChild(seat);
+  const before = win.__timers.size;
+  const disarm = tile.keepKeyboardOff(seat);
+  assert.equal(typeof disarm, "function", "it always answers a disarm, so a caller needs no branch");
+  assert.equal(win.__timers.size, before, "and it armed nothing at all for the seat");
+  giveKeyboardTo(win, seat);
+  for (const timer of [...win.__timers.values()]) timer.fn();
+  assert.equal(seat.blurs, 0, "the seat keeps the keyboard a person gave it");
+  assert.equal(win.document.activeElement, seat);
+  assert.equal(tile.handBacks(), 0);
+
+  // And neither is anything that is not a frame.
+  assert.equal(typeof tile.keepKeyboardOff(null), "function");
+  assert.equal(typeof tile.keepKeyboardOff(makeElement("div", { "data-screen-tile-source": "1" })), "function");
+  assert.equal(win.__timers.size, before, "a div carrying the attribute is still not a frame");
+});
+
+test("SEAT-FOCUS-1: app.js's hand-off thumb arms the same rule and drops it on teardown", () => {
+  // Both readers are the same shape and the rule lives in one file, so the other mount borrows it
+  // rather than keeping a second copy that can drift.
+  assert.match(appSource, /window\.__screenTile\?\.keepKeyboardOff\?\.\(frame\)/,
+    "boxHandoffEnsureThumb arms the hand-back for its own frame");
+  assert.match(appSource, /boxHandoffThumb\.keyboard\?\.\(\)/,
+    "and boxHandoffTeardown drops it");
+  const mount = appSource.slice(appSource.indexOf("function boxHandoffEnsureThumb"));
+  assert.ok(mount.indexOf("keepKeyboardOff") < mount.indexOf("boxHandoffTick"),
+    "armed on the frame it just created, before the reader's own timer");
 });

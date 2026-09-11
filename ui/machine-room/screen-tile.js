@@ -147,6 +147,10 @@
   const ACTIVITY_WINDOW_MS = 60_000;
   // The caption's own clock. It rewrites one text node and nothing else.
   const AGE_TICK_MS = 1000;
+  // SEAT-FOCUS-1's fallback cadence. The reach-in listener below hands the keyboard back before a
+  // person could notice; this is what covers a frame whose own document cannot be read, and a
+  // quarter of a second is the worst it costs.
+  const HANDBACK_POLL_MS = 250;
 
   // The blank-frame guard's two thresholds. 2,048 sits an order above the 1,043-character white
   // sample and well under the 7,591-character real one, and the spread is read off the pixels.
@@ -445,10 +449,114 @@
     idleWake = { agentId, at, timer };
   }
 
+  // ---- SEAT-FOCUS-1: a picture nobody can click never holds the keyboard -----------------------
+  //
+  // There are two of these readers -- this module's, and app.js's hand-off thumb. Both are 1280x800
+  // noVNC clients parked at left:-10000px with pointer-events:none, opacity 0, aria-hidden and
+  // view_only=1. About two seconds after each mount the client inside focuses its own canvas, and
+  // from that moment document.activeElement is the IFRAME: every document-level key goes into the
+  // frame and never reaches the page.
+  //
+  // MEASURED on grok-bot-local-vm, real Chrome, 1440x900, 2026-09-10: with a reader holding the
+  // keyboard, a real Escape and a real space bar produced ZERO keydown events on a capture-phase
+  // listener on document. So voice.js's own handlers never ran -- Escape did not leave talk mode and
+  // the space bar did not talk -- and an OPEN desktop dialog did not close on Escape either. Nothing
+  // was logged and nothing on screen said why. The filed row blamed the desktop dialog's seat; the
+  // thief is this off-screen picture, and the window is 2 to 3 s per idle grab and the whole time a
+  // working agent's client is held, which is the one-in-three flakiness verify-voice --leg nokey had.
+  //
+  // THE MECHANISM THE ROW PROPOSED DOES NOT FIRE, measured twice. A focus that lands INSIDE an iframe
+  // raises no `focus` event on the iframe ELEMENT and no `focusin` on the parent document: 0 and 0 in
+  // the product across a mount a 250 ms poll caught seven times, and 0 and 0 again in an isolated
+  // harness whose same-origin child focuses a <canvas tabindex=0>, which is noVNC's exact shape.
+  // `inert` on the frame does not stop the steal either. Two things do, and both are armed here:
+  //
+  //   A focusin listener on the FRAME'S OWN document. Readable because both readers build their src
+  //   on window.location.origin, so the client is same origin by construction -- it is NOT cross
+  //   origin, which is the other thing the filed row had wrong. In the harness this handed the
+  //   keyboard back before the poll saw anything at all, and the very first Escape reached the page.
+  //
+  //   A 250 ms poll for the frame's lifetime, which catches the steal within a quarter second. It
+  //   stays even though the listener works: if a future image ever serves the client from the box's
+  //   own address the listener silently stops installing, and this is what is left.
+  //
+  // blur() is enough and it sticks -- activeElement stayed BODY for 14 s and the client never took it
+  // back. That is narrower than the blanket claim beside app.js's teach frame that a VNC client keeps
+  // focus whatever the page does: that claim holds for a frame a PERSON clicks, whose pointer events
+  // re-focus it. These two get no pointer events at all.
+  //
+  // SCOPED TO THE TWO READERS AND NOTHING ELSE, by their own attributes. The seat inside the desktop
+  // dialog is the pane a person opened, is meant to hold the keys, says so in its own copy, and
+  // app.js's paste bridge depends on it. Because the readers are unreachable by any pointer the rule
+  // needs no "unless the person put it there" exception -- which is just as well, since a pointerdown
+  // inside an iframe is not visible to the parent document at all.
+  const READER_FRAME_ATTRIBUTES = ["data-screen-tile-source", "data-box-handoff-thumb-source"];
+  let handBacks = 0;
+
+  function isReaderFrame(frame) {
+    if (frame == null) return false;
+    if (String(frame.tagName ?? "").toUpperCase() !== "IFRAME") return false;
+    return READER_FRAME_ATTRIBUTES.some((name) => {
+      try { return frame.getAttribute?.(name) != null; } catch { return false; }
+    });
+  }
+
+  /**
+   * Arm the hand-back for one reader frame, and answer with the disarm its owner's teardown calls.
+   * Safe to hand anything: a frame that is not one of the two readers is left alone, which is how
+   * the rule stays off the seat a person opened.
+   */
+  function keepKeyboardOff(frame) {
+    if (!isReaderFrame(frame)) return () => {};
+    let poll = null;
+    let inner = null;
+    const handBack = () => {
+      const d = doc();
+      if (d == null || d.activeElement !== frame) return false;
+      try { frame.blur?.(); } catch { return false; }
+      handBacks += 1;
+      return true;
+    };
+    // The reach-in. Wrapped because reading contentDocument on a frame this page may not read throws
+    // on the property access itself, and that is not an error -- it is the case the poll is for.
+    const reachIn = () => {
+      try {
+        const document_ = frame.contentDocument;
+        if (document_ == null || typeof document_.addEventListener !== "function") return;
+        if (document_ === inner) return;
+        inner = document_;
+        document_.addEventListener("focusin", handBack, true);
+      } catch { /* the poll still covers it */ }
+    };
+    function disarm() {
+      if (poll != null) { try { global.clearInterval(poll); } catch { /* nothing to do */ } poll = null; }
+      try { frame.removeEventListener?.("load", reachIn); } catch { /* a stub element */ }
+      if (inner != null) {
+        try { inner.removeEventListener?.("focusin", handBack, true); } catch { /* gone with the frame */ }
+        inner = null;
+      }
+    }
+    reachIn();
+    // And again when the client's own document arrives, which is after this mount returns.
+    try { frame.addEventListener?.("load", reachIn); } catch { /* a stub element */ }
+    try {
+      poll = global.setInterval(() => {
+        // A frame already out of the document cannot hold anything, and its owner may not have been
+        // the one that took it out.
+        if (frame.isConnected === false) { disarm(); return; }
+        reachIn();
+        handBack();
+      }, HANDBACK_POLL_MS);
+    } catch { poll = null; }
+    return disarm;
+  }
+
   function teardown() {
     disarmIdle();
     if (!reader) return;
     try { global.clearInterval(reader.timer); } catch { /* nothing to do */ }
+    // SEAT-FOCUS-1's hand-back goes out with the frame it was armed for.
+    try { reader.keyboard?.(); } catch { /* nothing to do */ }
     try { reader.frame.remove(); } catch { /* already gone with the document */ }
     reader = null;
   }
@@ -492,6 +600,8 @@
       hold: hold === true,
       startedAt: now(),
       timer: global.setInterval(tick, everyMs),
+      // SEAT-FOCUS-1. A picture nobody can click never holds the keyboard.
+      keyboard: keepKeyboardOff(frame),
     };
   }
 
@@ -745,6 +855,9 @@
       live: reader?.hold === true,
       idleWakeAt: idleWake?.at ?? null,
       capturedAt: capturedAtFor(forAgent),
+      // SEAT-FOCUS-1. How many times a reader took the keyboard and was handed it straight back. A
+      // gate reads this to prove it reproduced the swallow rather than measuring an empty page.
+      handBacks,
     };
   }
 
@@ -756,6 +869,10 @@
     // something is connecting.
     reading: (agentId) => reader != null && reader.agentId === agentId,
     teardown,
+    // SEAT-FOCUS-1. app.js's hand-off thumb is the other reader of exactly this shape, so the rule
+    // lives here once and that mount arms it for its own frame. Handing it anything else is a no-op.
+    keepKeyboardOff,
+    handBacks: () => handBacks,
     // Read-only, for the gate and the unit test. Nothing in the app calls these.
     state: readState,
     frameLooksReal,
@@ -763,7 +880,7 @@
     ageWords,
     capturedAtFor,
     forget,
-    limits: { MIN_FRAME_CHARS, MIN_SPREAD, IDLE_KEEP, IDLE_PREFIX, IDLE_PREFIX_AT, IDLE_INDEX, LIVE_REFRESH_MS, IDLE_REFRESH_MS, WARMUP_POLL_MS, WARMUP_CEILING_MS, ACTIVITY_WINDOW_MS, AGE_TICK_MS, THUMB_W, THUMB_H },
+    limits: { MIN_FRAME_CHARS, MIN_SPREAD, IDLE_KEEP, IDLE_PREFIX, IDLE_PREFIX_AT, IDLE_INDEX, LIVE_REFRESH_MS, IDLE_REFRESH_MS, WARMUP_POLL_MS, WARMUP_CEILING_MS, ACTIVITY_WINDOW_MS, AGE_TICK_MS, HANDBACK_POLL_MS, THUMB_W, THUMB_H, READER_FRAME_ATTRIBUTES },
     // app.js hands over its gateway caller here. Without one this module never asks the host
     // anything and simply uses the seat it is given.
     configure(options) {

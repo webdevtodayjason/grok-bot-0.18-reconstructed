@@ -12,6 +12,14 @@
  * mounts into General -> Appearance and nowhere else. tests/machine-room-settings.test.mjs pins
  * that, because nothing pinned the old guard.
  *
+ * BG-PICKER-1: the tiles used to sit INLINE in the Background row's one control slot -- 18 faces plus
+ * an Upload label, the busiest row left on the surface, and the reason settings.css had to cap the grid
+ * at 300 px (220 px on a phone) to keep General under its ceiling. The row is now one Choose control
+ * whose face names the chosen plate, and the gallery is a SUB-VIEW of General: a back control, a title,
+ * and the same grid with no cap on it, because in a sub-view the gallery is the whole body. Measured on
+ * grok-bot-local-vm, real Chrome, 2026-09-10, before the change: the row was 816x441.63 at 1440x900 and
+ * 360x361.63 at 390x844, and taking the grid out of it gives back 362 px and 282 px of General.
+ *
  * Uploads stay in this browser. There is no upload endpoint, and inventing one would mean writing
  * operator files into the served directory -- so the picture is downscaled in a canvas and kept in
  * localStorage, and the panel says so out loud rather than implying it synced anywhere.
@@ -79,6 +87,10 @@
 
   const customs = () => read(CUSTOM_KEY, []);
   const all = () => [...BUILT_IN, ...customs()];
+  const chosenPlate = () => {
+    const id = read(CHOICE_KEY, DEFAULT_CHOICE);
+    return all().find((b) => b.id === id) ?? null;
+  };
 
   function choose(id) {
     write(CHOICE_KEY, id);
@@ -158,33 +170,79 @@
       </section>`;
   }
 
-  function inject() {
-    const slot = appearanceSlot();
-    if (!slot || doc.getElementById("bg-section")) return;
-    slot.insertAdjacentHTML("beforeend", sectionMarkup());
-    const panel = doc.getElementById("panel-content");
+  // BG-PICKER-1: the row's one control. Its FACE is the plate that is chosen, which is the whole value
+  // of the row -- a person reading General sees what the background is without opening anything. The
+  // accessible name says what pressing it does, because "Titan Nebula" on its own does not.
+  function rowMarkup() {
+    const face = chosenPlate()?.name ?? "Choose a picture";
+    return `<button class="ghost-button" type="button" data-bg-open aria-label="Choose a background, now ${esc(face)}">${esc(face)}</button>`;
+  }
 
-    const redraw = () => { doc.getElementById("bg-section")?.remove(); inject(); };
+  // Every listener the gallery needs, on the gallery's own root rather than on the whole panel, so the
+  // same wiring serves the sub-view and the inline fallback below. Idempotent: the surface re-fills a
+  // sub-view on every paint and this must not stack listeners.
+  function wireSection(root) {
+    if (!root || root.dataset.bgWired === "1") return;
+    root.dataset.bgWired = "1";
+    // A redraw is for the list CHANGING -- an upload added, a custom removed -- and it rebuilds the
+    // gallery in place, wherever it is.
+    const redraw = () => {
+      const parent = root.parentNode;
+      if (!parent) return;
+      root.remove();
+      parent.insertAdjacentHTML("beforeend", sectionMarkup());
+      wireSection(parent.querySelector("#bg-section"));
+    };
 
-    panel.querySelectorAll("[data-bg-id]").forEach((el) => {
+    root.querySelectorAll("[data-bg-id]").forEach((el) => {
       el.addEventListener("click", (event) => {
         const remove = event.target.closest("[data-bg-remove]");
         if (remove) { event.stopPropagation(); removeCustom(remove.dataset.bgRemove, redraw); return; }
+        // Applied the moment it is pressed, the way it always was. Back is not a Save.
         choose(el.dataset.bgId);
-        panel.querySelectorAll("[data-bg-id]").forEach((x) => x.setAttribute("aria-pressed", String(x === el)));
+        root.querySelectorAll("[data-bg-id]").forEach((x) => x.setAttribute("aria-pressed", String(x === el)));
       });
     });
 
-    panel.querySelector("#bg-upload")?.addEventListener("change", async (event) => {
+    root.querySelector("#bg-upload")?.addEventListener("change", async (event) => {
       const file = event.target.files?.[0];
       if (!file) return;
-      const note = panel.querySelector(".bg-note");
+      const note = root.querySelector(".bg-note");
       try {
         await addCustom(file, redraw);
       } catch (error) {
         if (note) note.textContent = `Could not add that one: ${error.message}`;
       }
     });
+  }
+
+  // The gallery as a sub-view of General. settings.js paints the body, keeps it through its own
+  // repaints, and calls fill on each one; this module draws what is inside it and wires it.
+  function openPicker() {
+    global.__mrSettings.openSubview({
+      id: "background",
+      section: "general",
+      title: "Background",
+      markup: sectionMarkup,
+      fill: (host) => wireSection(host.querySelector("#bg-section")),
+    });
+  }
+
+  function inject() {
+    const slot = appearanceSlot();
+    if (!slot) return;
+    // NO SEAM, NO BUTTON. A Choose control on a console whose settings module cannot open a sub-view
+    // would be a button that does nothing, silently -- the exact failure shape this wave keeps finding.
+    // So where the seam is absent the tiles go back inline, which is what shipped before.
+    if (typeof global.__mrSettings?.openSubview !== "function") {
+      if (doc.getElementById("bg-section")) return;
+      slot.insertAdjacentHTML("beforeend", sectionMarkup());
+      wireSection(doc.getElementById("bg-section"));
+      return;
+    }
+    if (slot.querySelector("[data-bg-open]")) return;
+    slot.insertAdjacentHTML("beforeend", rowMarkup());
+    slot.querySelector("[data-bg-open]").addEventListener("click", openPicker);
   }
 
   // The two constants above are the whole of what tests/titan-crew.test.mjs reads, and it loads

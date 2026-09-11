@@ -631,6 +631,28 @@
       + `</div>`;
   }
 
+  /**
+   * BG-PICKER-1's SUB-VIEW. One module's whole body for one section: a back control that says where it
+   * goes, a title, and markup that module drew. It carries data-settings-section like an ordinary body
+   * so everything that asks "which section is on screen" keeps answering, and data-settings-subview so
+   * a gate and paint() can tell the two apart.
+   *
+   * The background gallery is what this exists for: 18 tile faces in one row's control slot is the
+   * busiest thing left on the surface, and a row should be a label, a line and one control. Behind a
+   * Choose button the gallery becomes the whole body, which is also why settings.css's 300 px and
+   * 220 px caps on the inline grid do not apply here -- in a sub-view the gallery IS the section.
+   */
+  function subviewMarkup(view, section) {
+    return `<div class="settings-subview" data-settings-subview="${esc(view.id)}" data-settings-section="${esc(section.id)}">`
+      + `<header class="settings-head settings-subview-head">`
+      + `<button class="ghost-button settings-back" type="button" data-settings-back>`
+      + `<span aria-hidden="true">&#8592;</span> Back to ${esc(section.title)}</button>`
+      + `<h2 data-settings-title>${esc(view.title)}</h2>`
+      + `</header>`
+      + `<div class="settings-subview-body" data-settings-subview-body>${view.markup()}</div>`
+      + `</div>`;
+  }
+
   /** One section's body. The Notifications and Operator bodies are filled by their own owners. */
   function bodyMarkup(section, facts) {
     const head = `<header class="settings-head"><h2 data-settings-title>${esc(section.title)}</h2><p data-settings-subtitle>${esc(section.subtitle)}</p></header>`;
@@ -671,6 +693,8 @@
   let current = null;
   let armedUpdate = null;
   let wired = false;
+  // BG-PICKER-1. The one sub-view that can be open, and the section it belongs to. Null almost always.
+  let subview = null;
 
   // ---- SETTINGS-3: a read that started before a person's change may not paint over it -------------
   //
@@ -917,18 +941,37 @@
     // the open section, and a notification switch turned off a moment earlier came back on and saved
     // as on. Their fills below run either way, so live values still land -- fillEndpoints, fillJobBus
     // and fillMail have always written into a card that was already there.
+    // BG-PICKER-1. A SUB-VIEW IS NOT REBUILT WHILE IT IS ON SCREEN either, and for the same reason the
+    // two mounts shells are not: it is another module's body, and throwing it away takes whatever the
+    // person was doing in it with no sign anything happened. Measured on grok-bot-local-vm at 390x844:
+    // account-menu.js calls refresh() 2.5 s after boot, refresh() calls paint(), and paint() rebuilds
+    // every body that is not already somebody's -- which is the same mechanism that was caught putting
+    // a stored notification switch back under a person's hand. A sub-view belongs to ONE section, so a
+    // paint of any other section ends it.
+    if (subview != null && subview.section !== section.id) subview = null;
     const standing = body.querySelector(`[data-settings-section="${section.id}"]`);
     const keep = section.mounts != null && standing != null;
-    if (!keep) body.innerHTML = bodyMarkup(section, facts);
-    // VOICE-8. The owner's body is kept, so the rows OTHER modules contributed to it are reconciled on
-    // their own -- and only when the SET of them changed, never merely because a repaint happened. A
-    // module that registers while its section is already open gets its markup here; a repaint a second
-    // later leaves a half-typed field exactly where the person left it.
+    // BG-PICKER-1 and VOICE-8 meet on this one branch, so the three cases are spelled out in order.
+    // A sub-view that is already on screen is left alone; otherwise it is drawn. With no sub-view up,
+    // an ordinary body is rebuilt, and an owner's body is kept -- in which case the rows OTHER modules
+    // contributed to it are reconciled on their own, and only when the SET of them changed, never
+    // merely because a repaint happened. A module that registers while its section is already open
+    // gets its markup here; a repaint a second later leaves a half-typed field where the person left it.
+    if (subview != null) {
+      if (body.querySelector(`[data-settings-subview="${subview.id}"]`) == null) body.innerHTML = subviewMarkup(subview, section);
+    } else if (!keep) body.innerHTML = bodyMarkup(section, facts);
     else syncContributed(body, section);
     for (const button of shell.querySelectorAll("[data-settings-nav]")) {
       const active = button.dataset.settingsNav === section.id;
       button.classList.toggle("is-active", active);
       button.setAttribute("aria-selected", String(active));
+    }
+    if (subview != null) {
+      // The owner's fill, exactly as a mounts shell gets one, and nothing else: the contributed rows,
+      // the mount slots and the section event all belong to the section body, which is not on screen.
+      try { subview.fill?.(body.querySelector("[data-settings-subview-body]") ?? body); }
+      catch { /* one sub-view short beats a blank body */ }
+      return true;
     }
     const mount = body.querySelector(`[data-settings-section="${section.id}"]`);
     // Where the contributed rows really are. On an ordinary section that is inside the body's own
@@ -979,10 +1022,50 @@
     return true;
   }
 
+  /**
+   * BG-PICKER-1's seam, and the smallest one that works.
+   *
+   * openSubview({ id, section, title, markup, fill, onBack }) paints the section's body as a sub-view
+   * and remembers it, so paint() leaves it alone until something ends it. closeSubview() forgets it
+   * and repaints the section. A nav press, a search that lands somewhere else, and open() all end it,
+   * so a person can never be left with a body the nav says is something else.
+   *
+   * register() is untouched: a module that wants a sub-view draws its own control in its own mount
+   * slot and wires its own press, which is what backgrounds.js already does for its tiles. That keeps
+   * this out of act() and out of the registry.
+   */
+  function openSubview(entry) {
+    if (entry == null || typeof entry.id !== "string" || entry.id.length === 0) return false;
+    const sectionId = typeof entry.section === "string" ? entry.section : (current ?? "general");
+    const section = sectionById(sectionId);
+    if (section == null) return false;
+    subview = {
+      id: entry.id,
+      section: sectionId,
+      title: typeof entry.title === "string" && entry.title.length > 0 ? entry.title : section.title,
+      markup: typeof entry.markup === "function" ? entry.markup : () => "",
+      fill: typeof entry.fill === "function" ? entry.fill : null,
+      onBack: typeof entry.onBack === "function" ? entry.onBack : null,
+    };
+    return paint(sectionId, null);
+  }
+
+  function closeSubview() {
+    const was = subview;
+    subview = null;
+    if (was == null) return false;
+    if (was.onBack != null) { try { was.onBack(); } catch { /* the owner's problem, not the surface's */ } }
+    if (surface() != null) paint(was.section, null);
+    return true;
+  }
+
   function open(sectionId = "general", rowId = null) {
     const openPanel = ui().openPanel;
     if (typeof openPanel !== "function" || doc() == null) return false;
     if (typeof host().markOpen === "function") host().markOpen();
+    // BG-PICKER-1. A surface that opens fresh opens on the section, never on a sub-view somebody left
+    // open the last time.
+    subview = null;
     openPanel("Your workspace", "Settings", shellMarkup(sectionId, facts.operator === true));
     dialog()?.classList.add("is-settings");
     current = sectionId;
@@ -1024,7 +1107,8 @@
     if (empty != null) empty.hidden = matches.length > 0;
     // One match left is an answer, not a filter: typing "quiet" should land on Notifications rather
     // than leave the person with one more button to press.
-    if (needle.length > 1 && matches.length === 1 && matches[0] !== current) paint(matches[0], null);
+    // BG-PICKER-1: a search that lands somewhere else ends a sub-view, the same as a nav press.
+    if (needle.length > 1 && matches.length === 1 && matches[0] !== current) { subview = null; paint(matches[0], null); }
   }
 
   // ---- the controls -----------------------------------------------------------------------------
@@ -1186,8 +1270,13 @@
     if (node == null) return;
     wired = true;
     node.addEventListener("click", (event) => {
+      // BG-PICKER-1's back control. It carries no action name on purpose: act() has no default branch,
+      // so a control that went through it would be swallowed in silence.
+      if (event.target.closest?.("[data-settings-back]") != null) { closeSubview(); return; }
       const nav = event.target.closest?.("[data-settings-nav]");
-      if (nav != null) { paint(nav.dataset.settingsNav, null); return; }
+      // A nav press ends a sub-view even when it names the section the sub-view belongs to: somebody
+      // pressing General is asking for General.
+      if (nav != null) { subview = null; paint(nav.dataset.settingsNav, null); return; }
       const control = event.target.closest?.("[data-settings-action]");
       if (control == null || control.tagName === "SELECT") return;
       if (surface() == null) return;
@@ -1262,12 +1351,18 @@
     shown,
     refresh,
     paint,
+    // BG-PICKER-1. A module's own body for one section, with a way back. backgrounds.js is the one
+    // caller; item B's Talking card does not use this, which is what keeps the two edits apart.
+    openSubview,
+    closeSubview,
     facts: () => facts,
     _readFacts: readFacts,
     // SETTINGS-3. What the guard knows, so a gate can tell "the control agrees" from "the control
     // agrees because nothing ever raced it".
     _changeLog: () => CHANGE_LOG.map((one) => ({ ...one })),
     _noteChange: noteChange,
+    _subview: () => (subview == null ? null : { id: subview.id, section: subview.section }),
+    _subviewMarkup: subviewMarkup,
     _shellMarkup: shellMarkup,
     _bodyMarkup: bodyMarkup,
     _rowMarkup: rowMarkup,

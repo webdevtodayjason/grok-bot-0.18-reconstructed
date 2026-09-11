@@ -659,3 +659,143 @@ test("settings.css sizes the dialog and never touches styles.css's own rules", a
     && !/is-settings|settings-card|settings-surface/.test(selector));
   assert.deepEqual(loose, [], `these rules reach outside the surface: ${loose.join(" | ")}`);
 });
+
+// -- BG-PICKER-1: the Background row is one control, and the gallery is a sub-view ------------------
+//
+// The row used to hold the whole 18-tile grid inline in its one control slot -- 19 pressable faces,
+// the busiest row left on the surface, and the reason settings.css had to cap the grid at 300 px
+// (220 px on a phone) to keep General under its ceiling. MEASURED on grok-bot-local-vm, real Chrome,
+// 2026-09-10: the row was 816x441.63 at 1440x900 and 360x361.63 at 390x844, and taking the grid out
+// of it gives back 362 px and 282 px of General.
+//
+// What CANNOT be pinned here is the survival of a sub-view across a repaint: settings.js's live half
+// needs a real document, this suite evaluates it against a stub with none, and there is no DOM library
+// in this repo. The pure state machine and the shape of the body are pinned here; the survival is
+// measured in a real browser by scripts/verify-settings.mjs, which opens the sub-view and reads it
+// again four seconds later -- past account-menu.js's own refresh, which is the repaint that would
+// wipe it.
+
+test("the Background row is still one mount slot, and nothing else changed about it", () => {
+  const mr = pure();
+  const row = mr.rowsFor("general", FULL_FACTS).find((one) => one.id === "background");
+  assert.ok(row != null, "the row is still there");
+  assert.equal(row.group, "appearance");
+  assert.equal(row.control.kind, "mount", "one slot, filled by the module that owns the pictures");
+  assert.equal(row.control.mount, "background");
+  assert.equal(row.label, "Background");
+  assert.match(row.line, /picture behind your conversations/);
+});
+
+test("BG-PICKER-1: backgrounds.js puts ONE control in the row and opens the gallery as a sub-view", async () => {
+  const source = await read("ui/machine-room/backgrounds.js");
+  assert.match(source, /data-bg-open/, "the row's one control has a name a gate can find");
+  assert.match(source, /__mrSettings\.openSubview\(\{/, "and pressing it opens a sub-view rather than growing the row");
+  // The face of the control is the chosen plate, which is the whole value of the row: a person reading
+  // General sees what the background is without opening anything.
+  assert.match(source, /function rowMarkup\(\)/);
+  assert.match(source, /chosenPlate\(\)\?\.name/, "the button's face is the plate that is chosen");
+  // One button and nothing else in the slot. The grid, the upload and the note all travel together.
+  const row = source.slice(source.indexOf("function rowMarkup()"), source.indexOf("function wireSection"));
+  assert.equal((row.match(/<button/g) ?? []).length, 1, "the row's control is a single button");
+  assert.ok(!/bg-grid|bg-upload|bg-note/.test(row), "and the grid, the upload and the note are not in it");
+  // The gallery markup is unchanged and is what the sub-view draws, so nothing about choosing moved.
+  assert.match(source, /markup: sectionMarkup/);
+  assert.match(source, /fill: \(host\) => wireSection\(host\.querySelector\("#bg-section"\)\)/,
+    "the surface re-fills a sub-view on every paint, so the wiring has to be idempotent and is");
+  assert.match(source, /dataset\.bgWired/, "which is what stops listeners stacking up");
+  // A button that opens nothing would be worse than a busy row, so no seam means no button.
+  assert.match(source, /typeof global\.__mrSettings\?\.openSubview !== "function"/,
+    "with no sub-view seam the tiles go back inline, which is what shipped before");
+});
+
+test("BG-PICKER-1: openSubview records one sub-view, keyed to one section, and closeSubview forgets it", () => {
+  const mr = pure();
+  assert.equal(typeof mr.openSubview, "function");
+  assert.equal(typeof mr.closeSubview, "function");
+  assert.equal(mr._subview(), null, "nothing is open to begin with");
+
+  // With no document paint() answers false, which is why this reads the record rather than the DOM.
+  mr.openSubview({ id: "background", section: "general", title: "Background", markup: () => "<p>tiles</p>" });
+  assert.deepEqual(mr._subview(), { id: "background", section: "general" });
+
+  // One at a time: a second replaces the first rather than stacking.
+  mr.openSubview({ id: "other", section: "computer", title: "Other", markup: () => "" });
+  assert.deepEqual(mr._subview(), { id: "other", section: "computer" });
+
+  assert.equal(mr.closeSubview(), true);
+  assert.equal(mr._subview(), null, "and back forgets it");
+  assert.equal(mr.closeSubview(), false, "pressing back twice is not an error and not a second repaint");
+
+  // A section nobody has is not a sub-view, and an entry with no id is not one either.
+  assert.equal(mr.openSubview({ id: "x", section: "nowhere", markup: () => "" }), false);
+  assert.equal(mr.openSubview({ section: "general", markup: () => "" }), false);
+  assert.equal(mr._subview(), null);
+
+  // onBack is the owner's, and it runs before the repaint.
+  let backs = 0;
+  mr.openSubview({ id: "background", section: "general", markup: () => "", onBack: () => { backs += 1; } });
+  mr.closeSubview();
+  assert.equal(backs, 1);
+  // An onBack that throws is the owner's problem and must not take the surface down.
+  mr.openSubview({ id: "background", section: "general", markup: () => "", onBack: () => { throw new Error("boom"); } });
+  assert.equal(mr.closeSubview(), true);
+  assert.equal(mr._subview(), null);
+});
+
+test("BG-PICKER-1: a sub-view's body is a back control that says where it goes, a title, and the owner's markup", () => {
+  const mr = pure();
+  const general = mr.SECTIONS.find((one) => one.id === "general");
+  const html = mr._subviewMarkup({ id: "background", title: "Background", markup: () => '<div class="bg-grid"></div>' }, general);
+  assert.match(html, /data-settings-subview="background"/, "the attribute a gate and paint() tell it by");
+  assert.match(html, /data-settings-section="general"/, "it is still General on screen, so everything that asks keeps answering");
+  assert.match(html, /data-settings-back/, "a back control");
+  assert.match(html, /Back to General/, "that says what it goes back to, in plain words");
+  assert.match(html, /data-settings-title>Background</);
+  assert.match(html, /data-settings-subview-body><div class="bg-grid">/, "and the owner's markup inside its own box");
+  // The back control carries no action name on purpose: act() has no default branch, so a control
+  // routed through it would be swallowed in silence.
+  assert.ok(!/data-settings-action/.test(html));
+  assert.ok(!/[—]/.test(html), "no em dash in anything a person reads");
+});
+
+test("BG-PICKER-1: paint() leaves a sub-view alone, and a nav press or a jump in the search ends it", async () => {
+  const source = await read("ui/machine-room/settings.js");
+  // The rule, in the order it has to be in: the sub-view is decided BEFORE the body is rebuilt, or the
+  // rebuild has already happened. Without it the sub-view is wiped 2.5 s after Settings opens, because
+  // account-menu.js calls refresh(), refresh() calls paint(), and paint() rebuilds every body that is
+  // not already somebody's -- the same mechanism that was measured putting a stored notification
+  // switch back under a person's hand.
+  const paint = source.slice(source.indexOf("function paint(sectionId, rowId)"), source.indexOf("async function refresh"));
+  assert.match(paint, /if \(subview != null && subview\.section !== section\.id\) subview = null;/,
+    "a paint of any other section ends the sub-view");
+  assert.ok(paint.indexOf("if (subview != null) {") < paint.indexOf("body.innerHTML = bodyMarkup"),
+    "and the sub-view branch comes before the section body would be rebuilt");
+  assert.match(paint, /if \(body\.querySelector\(`\[data-settings-subview="\$\{subview\.id\}"\]`\) == null\) body\.innerHTML = subviewMarkup/,
+    "a sub-view already on screen is never rebuilt, the same rule the two mounts shells get");
+  assert.match(paint, /subview\.fill\?\.\(/, "its owner's fill still runs on every paint, so live values land");
+
+  const wire = source.slice(source.indexOf("function wire()"));
+  assert.ok(wire.indexOf('data-settings-back') < wire.indexOf("data-settings-nav"),
+    "the back control is read before the nav, because it sits inside the body the nav painted");
+  assert.match(wire, /if \(nav != null\) \{ subview = null; paint\(/,
+    "a nav press ends a sub-view even when it names the sub-view's own section");
+  assert.match(source, /matches\[0\] !== current\) \{ subview = null; paint\(matches\[0\], null\); \}/,
+    "and a search that lands somewhere else ends it too");
+  const open = source.slice(source.indexOf('function open(sectionId = "general"'));
+  assert.match(open, /subview = null;\n    openPanel\("Your workspace"/,
+    "and a surface that opens fresh opens on the section, never on a sub-view somebody left open");
+});
+
+test("BG-PICKER-1: settings.css uncaps the gallery in a sub-view and caps it only in the row", async () => {
+  const sheet = await read("ui/machine-room/settings.css");
+  const rules = sheet.replace(/\/\*[\s\S]*?\*\//g, "");
+  // The two caps stay, scoped to the inline mount, which is now only the fallback.
+  assert.match(rules, /\[data-settings-mount="background"\] \.bg-grid \{\s*max-height: 300px;/);
+  assert.match(rules, /\[data-settings-mount="background"\] \.bg-grid \{ max-height: 220px; \}/);
+  // And nothing caps the sub-view's, because opening it is the whole point.
+  assert.ok(!/\[data-settings-subview\][^{]*\.bg-grid \{[^}]*max-height/.test(rules),
+    "a sub-view that still capped the gallery at 300 px would give General nothing back");
+  assert.match(rules, /\[data-settings-subview\] #bg-section \{ padding: 0; border: 0; background: transparent; \}/,
+    "the gallery is the body here, so it keeps no card of its own");
+  assert.match(rules, /\.settings-back \{ align-self: flex-start; \}/);
+});
