@@ -1119,6 +1119,15 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   // The module owns the value rather than the row, because the button is live the moment the console
   // paints and long before any settings surface has been opened.
   const talkModeOf = (value) => (TALK_MODES.includes(String(value)) ? String(value) : TALK_MODE_DEFAULT);
+  // VOICE-10 / SETTINGS-3, the same defect in the voice module: boot asks the person's own door and the
+  // answer can land AFTER a press has already chosen, in which case adopting it puts the older value
+  // under the person's hand with nothing on screen to say why. MEASURED on MacBook-Pro.local 2026-09-11,
+  // --leg overlay at 1440x900 and 390x844: a combination that set always listening after the boot read
+  // had started came up in push -- the microphone shut between presses and the Talk mode row read push --
+  // 2 of 2 viewports. So a read carries the time it was ASKED at, and an answer older than this page's
+  // own choice is no answer at all.
+  let talkModeChosenAt = 0;
+  const clockNow = () => (typeof Date.now === "function" ? Date.now() : 0);
 
   function readStoredTalkMode() {
     try { return talkModeOf(global.localStorage?.getItem(TALK_MODE_KEY)); }
@@ -1140,6 +1149,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     const next = talkModeOf(mode);
     const changed = next !== state.talkMode;
     state.talkMode = next;
+    // WHEN THIS PAGE LAST CHOSE, so an answer that was already in the air when the person chose cannot
+    // publish an older value over it. The same rule the settings surface holds for its own rows, one
+    // layer down, because the door's answer and the press are two producers of one value.
+    talkModeChosenAt = clockNow();
     writeStoredTalkMode(next);
     // VOICE-10. AND ON THE PERSON'S OWN DOOR, so the choice follows them to their phone.
     //
@@ -1166,11 +1179,15 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
    * An unknown or absent value is no answer at all: this person has never chosen, and what this browser
    * holds stays the behaviour.
    */
-  function adoptTalkMode(mode) {
+  function adoptTalkMode(mode, askedAt = clockNow()) {
     if (!TALK_MODES.includes(String(mode ?? ""))) return state.talkMode;
     const next = talkModeOf(mode);
     if (next === state.talkMode) return next;
     if (state.on) return state.talkMode;
+    // A READ THAT WAS ALREADY IN FLIGHT WHEN THIS PAGE CHOSE LOSES. Nothing is stored and nothing is
+    // painted: the person's own choice stands, and the door has the newer value anyway because
+    // setTalkMode wrote it there.
+    if (talkModeChosenAt > 0 && askedAt <= talkModeChosenAt) return state.talkMode;
     state.talkMode = next;
     writeStoredTalkMode(next);
     paint();
@@ -1800,6 +1817,9 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     const document_ = global.document;
     const button = document_?.querySelector("[data-voice-talk]");
     let available = true;
+    // The moment this read was ASKED at, carried down to the adopt so a press made while it was in the
+    // air wins. docs/VOICE.md 13.
+    const askedAt = clockNow();
     try {
       const response = await relayFetch("/voice/settings", { headers: { accept: "application/json" } });
       available = response.status !== 404;
@@ -1809,7 +1829,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
         // asks this door, and a second request for one field is a second chance for the two answers to
         // disagree about the same thing. Absent -- an older relay, or a person who has never chosen --
         // leaves this browser's stored value as the behaviour, which boot() already applied.
-        adoptTalkMode(state.settings?.talkMode);
+        adoptTalkMode(state.settings?.talkMode, askedAt);
       }
     } catch {
       // A relay that did not answer at all may answer in a second. Leaving the button live is the

@@ -126,6 +126,13 @@ const pass = (what, detail = "") => { checks += 1; console.log(`  PASS  ${what}$
 const fail = (what, detail = "") => { checks += 1; failures += 1; console.log(`  FAIL  ${what}${detail ? `  (${detail})` : ""}`); };
 const check = (ok, what, detail = "") => (ok ? pass(what, detail) : fail(what, detail));
 const info = (line) => console.log(`  INFO  ${line}`);
+// A LEG THAT COULD NOT REACH ITS CONDITION SAYS SO AND COUNTS AS A SKIP, never as a pass and never as a
+// crash. Item B's first-combination block called this before it existed, so a console that had not yet
+// published its Settings seam turned a measurement into `ReferenceError: skip is not defined` and took
+// the rest of the leg with it. MEASURED on MacBook-Pro.local 2026-09-11, --leg overlay, 2 of 3 with the
+// leg reported as thrown rather than as a condition it could not set up.
+let skips = 0;
+const skip = (what, why = "") => { skips += 1; console.log(`  SKIP  ${what}${why ? `  (${why})` : ""}`); };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const missing = (what, tried) => {
   console.error(`\n${what} is not available, so this leg measured nothing.`);
@@ -930,12 +937,22 @@ async function legCaps() {
   // An earlier version of this leg set a cap for a slug the relay never asks about and planted the
   // spend at the control plane, so it passed the first two checks and then watched the relay dial
   // anyway. A leg that sets up a condition the product does not read is worse than no leg.
+  // ANCHORED TO TODAY'S UTC MIDNIGHT, NOT TO AN OFFSET FROM NOW, and this is the whole leg. A closed
+  // row counts against the day it STARTED on (ui/voice-edge.mjs daySecondsUsed), so rows placed three,
+  // two and one hour before `now` land on YESTERDAY for every run between 00:00 and 03:00 UTC and the
+  // relay reads a day with nothing spent on it. MEASURED at the shared tip on MacBook-Pro.local at
+  // 00:35 UTC on 2026-09-11: 2 of 5, "a note arrives ([])" and the vendor dialled -- the product was
+  // right and the fixture planted the condition on the wrong day. The planted wall clock is a NUMBER
+  // the relay reads out of its own ledger and never checks against the clock, which is why three
+  // forty-five minute rows are legal here an hour into the day; a real ledger reaches 135 minutes
+  // later in the afternoon and is read exactly the same way.
+  const dayStartMsUTC = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate());
   const spentLedger = [0, 1, 2].map((i) => JSON.stringify({
     sessionId: `spent-${i}-${randomBytes(3).toString("hex")}`,
     slug: "gate", agentId: "gate", agentName: "gate", vendor: "xai", model: "gate",
     // Today, UTC, because the day window is UTC midnight to UTC midnight.
-    startedAt: new Date(Date.now() - (3 - i) * 60 * 60 * 1000).toISOString(),
-    state: "closed", endedAt: new Date().toISOString(),
+    startedAt: new Date(dayStartMsUTC + (i + 1) * 60_000).toISOString(),
+    state: "closed", endedAt: new Date(dayStartMsUTC + (i + 1) * 60_000 + 45 * 60 * 1000).toISOString(),
     // Three closed sessions of forty five minutes is 135, over the relay's own 120 minute day.
     wallSeconds: 45 * 60, audioInSeconds: 0, audioOutSeconds: 0,
     billedItemEvents: 0, toolCalls: 0, heldFrames: 0, closeReason: "the gate planted this",
@@ -1690,15 +1707,21 @@ async function legOverlay() {
         const throughRow = await page.evaluate(async (want) => {
           window.__voice.setTalkMode(want === "push" ? "always" : "push");
           window.__mrSettings?.open?.("general", null);
-          // The row may not be on the synchronous paint of a FIRST open, because the facts are cold. One
-          // frame of patience, and no more: a settle is what hides the defect.
-          let select = document.querySelector('[data-setting-row="talk-mode"] select');
-          if (select == null) {
-            await new Promise((resolve) => setTimeout(resolve, 1200));
+          // WAITING FOR THE ROW IS NOT SETTLING. open() answers false until app.js has published its own
+          // panel opener, so a single press a second after boot can open nothing at all and the leg then
+          // measured "no Talk mode row on this page" on a console that had one. So the open is asked for
+          // again every 200 ms until the row EXISTS -- and the change is made on the first frame it does,
+          // which is what keeps the race the defect needs. A settle would be waiting after it appeared.
+          let select = null;
+          for (let tries = 0; tries < 40 && select == null; tries += 1) {
+            select = document.querySelector('[data-setting-row="talk-mode"] select');
+            if (select != null) break;
             window.__mrSettings?.open?.("general", null);
             select = document.querySelector('[data-setting-row="talk-mode"] select');
+            if (select != null) break;
+            await new Promise((resolve) => setTimeout(resolve, 200));
           }
-          if (select == null) return { ok: false, why: "no Talk mode row on this page" };
+          if (select == null) return { ok: false, why: "no Talk mode row on this page after 8 s of asking for General" };
           select.value = want;
           select.dispatchEvent(new Event("change", { bubbles: true }));
           return { ok: true };
@@ -2234,6 +2257,6 @@ try {
   onExit();
 }
 
-console.log(`\n--leg ${leg} on ${MACHINE}: ${checks - failures} of ${checks} checks passed`);
+console.log(`\n--leg ${leg} on ${MACHINE}: ${checks - failures} of ${checks} checks passed${skips > 0 ? `, ${skips} condition(s) this box could not set up` : ""}`);
 console.log(failures === 0 ? `PASS  verify-voice --leg ${leg}  (${MACHINE})` : `FAIL  verify-voice --leg ${leg}  (${failures} of ${checks} on ${MACHINE})`);
 process.exit(failures === 0 ? 0 : 1);

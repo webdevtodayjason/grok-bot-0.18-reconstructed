@@ -833,8 +833,14 @@ gesture, and the release ends it, so the next press opens a line normally.
 open takes Escape first, which is right, and the call is still there afterwards. But when the box's
 own screen has the keyboard, nothing typed reaches the console at all: the screen is a frame and the
 browser hands every keystroke to the machine on the other side. Measured while building this: after a
-scroll that put the focus in that frame, Escape never arrived. There is no fix for that and none is
-wanted — the way out then is the button, which is always on the screen.
+scroll that put the focus in that frame, Escape never arrived.
+
+Half of that is now fixed and half of it is still true on purpose. Since SEAT-FOCUS-1 a picture nobody
+can click no longer holds the keyboard: the small screens the console keeps reading in the background are
+handed the keyboard back the moment they take it, so Escape leaves talk mode and the space bar talks while
+those are on the page. The screen a person opened themselves still keeps what they put in it, because that
+is the pane they are typing into, and the way out then is the button, which is always on the screen. The
+rule and its measurement are in `docs/CONSOLE.md`.
 
 ### Where the choice is stored: the person, with this browser as the fallback (VOICE-10)
 

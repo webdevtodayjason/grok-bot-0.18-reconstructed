@@ -1963,6 +1963,33 @@ test("VOICE-10 boot: a value adopted from the route never ends the call somebody
   assert.equal(voice._adoptTalkMode(undefined), "always");
 });
 
+test("VOICE-10 boot: an answer already in the air when this page chose does not publish the older value", async () => {
+  // THE DEFECT THIS PINS, and it shipped green through every unit suite. The boot read of the person's
+  // own door and a press are two producers of one value. MEASURED on MacBook-Pro.local 2026-09-11 by
+  // verify-voice --leg overlay at 1440x900 and 390x844: a combination that chose always listening after
+  // that read had started came up in PUSH -- the microphone shut between presses and the Talk mode row
+  // on screen read push -- at both viewports, while the door held always. Same shape as SETTINGS-3 one
+  // layer down, and the rule is the same: a read that was in flight when the page chose loses.
+  const box = new Map();
+  const storage = { getItem: (k) => box.get(k) ?? null, setItem: (k, v) => box.set(k, v) };
+  const { voice } = await loadTalking({ localStorage: storage });
+  assert.equal(voice.getTalkMode(), "push");
+
+  // The read starts, the person chooses, and only then does the answer land.
+  const askedAt = Date.now();
+  voice.setTalkMode("always");
+  assert.equal(voice.getTalkMode(), "always", "the press itself did not take");
+  assert.equal(voice._adoptTalkMode("push", askedAt), "always",
+    "a door answer older than the page's own choice was published over it");
+  assert.equal(voice.getTalkMode(), "always");
+  assert.equal(box.get(voice._TALK_MODE_KEY), "always", "and it was stored over too");
+
+  // An answer that was asked for AFTER the choice is a real answer and is taken: that is the same
+  // person choosing somewhere else, which is the whole point of VOICE-10.
+  assert.equal(voice._adoptTalkMode("push", Date.now() + 5), "push");
+  assert.equal(voice.getTalkMode(), "push");
+});
+
 test("VOICE-8 rows: the operator's four, with the attributes the old card carried", async () => {
   const { voice } = await loadVoice();
   const rows = voice._TALKING_ROWS;
