@@ -850,11 +850,17 @@ select:focus-visible {
    channel name did not read as different from the sentence around it.
 
    CONSOLE-5b, 2026-09-10. The first build painted the chip #ff6b6b, the red-pink copied off the
-   original's screenshot, and Jason's reading of it was that it stands out too harsh. The chip is
-   the console's own muted cyan now -- the family the "Accepted by the host" chip text and the Talk
-   button already sit in -- desaturated so a paragraph carrying five of them does not glow. Same
-   hue as the rest of the product, and quieter than the prose holding it rather than louder: on the
-   ink bubble the chip composites to 11.4:1 against its own pill where the white prose is 14.5:1.
+   original's screenshot, and Jason's reading of it was that it stands out too harsh. The chip is a
+   muted cyan now, desaturated so a paragraph carrying five of them does not glow.
+
+   Where the colour comes from, exactly, because the first write-up of 5b got this wrong and said the
+   chip took the colour the "Accepted by the host" chip text and the Talk button already use. It does
+   not. Those two are --teal-300 and --teal-500, #7fe3dc and #31b6b8, thirteen degrees of hue off
+   this. The EDGE is brand: rgba(0, 200, 240, 0.25) is Signal Cyan #00C8F0 at a quarter. The
+   foreground #8fd9e6 is a NEW value in that same family, the hex Jason's ask named. What was true
+   all along is the family and the intent: the same hue range as the rest of the product, and quieter
+   than the prose holding it rather than louder -- on the ink bubble the chip composites to 11.4:1
+   against its own pill where the white prose is 14.5:1.
 
    The colours are local to this block on purpose. They are NOT --danger-500 (#ff6f72, the failure
    colour, and one shade off the red-pink this replaced): every identifier in the error colour
@@ -869,9 +875,12 @@ select:focus-visible {
 
 /* A pale cyan washes out on a light plate, so the light surfaces take a deep teal of the same hue.
    It has to clear 4.5:1 on BOTH light plates a chip can land on, and they are not equally light:
-   mist's own card, and -- in ink -- the operator's cream bubble, whose gradient ends at
-   rgba(232, 216, 190, 0.9). #065561 composites to 6.9:1 on the first and 4.8:1 on the darker end
-   of the second. The edge stays the foreground at 0.24, as the rose one was. */
+   mist's own card, and -- in ink -- the operator's cream bubble. MEASURED ON THE R750 at 1440x900
+   through console.titanium.bot: #065561 reads 5.78:1 on the mist plate rgb(195, 218, 218), and
+   5.94:1 off the painted pixels of a chip in the operator's own row, whose cream plate comes out
+   rgb(208, 221, 210). The #0b7a8f the ask sketched is 3.13:1 and 3.26:1 on those same two plates by
+   arithmetic, which is why the shipped value is darker than the ask. The edge stays the foreground
+   at 0.24, as the rose one was. */
 [data-theme="mist"],
 .is-user .message-bubble {
   --code-chip-fg: #065561;
@@ -881,9 +890,12 @@ select:focus-visible {
 }
 
 /* The operator's own bubble is a cream plate in ink and a DARK slate one in mist, so in mist it
-   takes the ink values back. Without this rule a deep teal lands on that slate at 1.9:1, which is
-   an identifier nobody can read -- the rose did the same at 1.9:1 and went unnoticed because the
-   surface is only reached by an operator who writes backticks. With these it is 10.4:1. */
+   takes the ink values back. Without this rule a deep teal lands on that slate at about 1.9:1 by
+   arithmetic, an identifier nobody can read, and the rose sat there the same way for a day because
+   the surface is only reached by an operator who writes backticks. With these values, MEASURED ON
+   THE R750 at 1440x900 off the painted pixels, it is 11.12:1. The --chips gate reads this one
+   surface from the pixels rather than from a composite walk, because in dusk the same bubble is a
+   gradient and a walk cannot see a gradient at all. */
 [data-theme="mist"] .is-user .message-bubble {
   --code-chip-fg: #8fd9e6;
   --code-chip-bg: rgba(10, 16, 20, 0.62);

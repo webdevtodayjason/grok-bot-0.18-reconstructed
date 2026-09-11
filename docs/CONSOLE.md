@@ -1379,10 +1379,17 @@ collision.
 **CONSOLE-5b, 2026-09-10.** The first build copied the original's red-pink, `#ff6b6b`. Jason, looking
 at it on his own transcript: *"change that highlighted color to something different, one of the
 complementary colors we've got here, something that makes sense but blends and doesn't stand out so
-harsh."* So the chip is now the console's own muted cyan, the family the *"Accepted by the host"*
-chip text and the Talk button already sit in, desaturated so a paragraph carrying five chips does not
-glow. It is the same hue as the rest of the product instead of the one hot hue on the page, and it
-reads quieter than the prose holding it rather than louder.
+harsh."* So the chip is a muted cyan now, desaturated so a paragraph carrying five chips does not
+glow. It sits in the same hue family as the rest of the product instead of the one hot hue on the
+page, and it reads quieter than the prose holding it rather than louder.
+
+Be exact about where that colour comes from, because the first write-up of 5b was not. It said the
+chip takes the colour the *"Accepted by the host"* chip text and the Talk button already use. It does
+not. Those two are `--teal-300` and `--teal-500`, `#7fe3dc` and `#31b6b8`, about thirteen degrees of
+hue away from this. What IS the brand's own is the chip's **edge**: `rgba(0, 200, 240, 0.25)` is
+Signal Cyan `#00C8F0` at a quarter. The foreground `#8fd9e6` is a new value in that same family, and
+it is the hex Jason's ask named. Same family and same intent as the claim; one literal more than the
+claim allowed for.
 
 They are **not** `--danger-500` (`#ff6f72`), the error colour, which the red-pink sat one shade from.
 Every identifier painted in the error colour would read to Jason as a failed turn, the exact trap
@@ -1390,17 +1397,31 @@ Every identifier painted in the error colour would read to Jason as a failed tur
 
 A pale cyan washes out on a light plate, so the light surfaces take a deep teal of the same hue. It
 has to clear the floor on **both** light plates a chip can land on, and they are not equally light:
-mist's own card, and, in ink, the operator's cream bubble, whose gradient ends at
-`rgba(232, 216, 190, 0.9)`. `#065561` composites to **6.9:1** on the first and **4.8:1** on the darker
-end of the second. The operator's bubble is a cream plate in ink and a **dark slate** one in mist, so
-in mist it takes the ink values back; without that rule a deep teal landed on that slate at **1.9:1**,
-and the rose before it was no better at 1.9:1. That is a chip nobody could read, on the one surface
-only an operator who writes backticks ever reaches.
+mist's own card, and, in ink, the operator's cream bubble. **Measured on the R750 at 1440x900**,
+through `https://console.titanium.bot`, on the plates those chips really land on: `#065561` reads
+**5.78:1** on the mist plate `rgb(195, 218, 218)` and **5.94:1** on the dusk cream plate
+`rgb(208, 221, 210)`. The `#0b7a8f` the ask sketched for the light theme would have read **3.13:1**
+and **3.26:1** on those same two plates. That last pair is arithmetic for a colour that was never
+shipped, not a reading off any screen, and it is why the shipped light value is darker than the ask.
+The operator's bubble is a cream plate in ink and a **dark slate** one in mist, so in mist it takes
+the ink values back; without that rule a deep teal lands on that slate at about **1.9:1** by the same
+arithmetic, and the rose before it sat there the same way. That is a chip nobody could read, on the
+one surface only an operator who writes backticks ever reaches.
 
 **The floor is 4.5:1 and it is measured, not eyeballed.** `verify-console-polish --chips` composites
 the pill down over whatever sits behind it, because the pill is half transparent and the colour
 Chrome reports for its background is not the colour an eye compares the text against, and it checks
 the ratio in both themes, flipping `data-theme` on the root the way the toggle does.
+
+**That walk skips a gradient, and the operator's own bubble is one**, so for a day the single surface
+5b's mist rule exists to protect was the single surface no check could read: the walk falls through
+the dusk bubble to the plate behind it and reports 1.55:1 where a person gets 5.94:1. CONSOLE-5's
+rose broke that same surface at about 1.9:1 and the gate said nothing. So the leg has a third
+contrast check now, on a chip the **operator** typed, and it reads the pixels Chrome painted instead
+of the computed styles: the shot is clipped to the chip's own box, the colours are counted in the
+page, the commonest is the plate and the 2nd percentile of luminance is the ink. The ASK the leg
+sends now carries its own backticks, which is what puts three chips on the operator's row for it to
+photograph.
 
 **Measured after 5b, on `grok-bot-local-vm`, this Mac, in Chrome at 1440x1000, 2026-09-10:** the chip
 is `rgb(143, 217, 230)` on `rgba(10, 16, 20, 0.62)`, border `rgba(0, 200, 240, 0.25)`, radius 5 px,
@@ -1419,6 +1440,17 @@ throwaway customer on the demo tenant, 2026-09-10, on a reply this run asked for
 **11.44:1** against a pill compositing to `rgb(15, 23, 27)`; flipped to mist on the same row,
 `rgb(6, 85, 97)` on `rgb(195, 218, 218)`, **5.78:1**. Shipped relay-only: no host bundle change, no
 box swap, the relay restarted last.
+
+**Review pass, 2026-09-10.** Three things in the paragraphs above were wrong and are corrected here:
+the chip's provenance (it is a new value in the cyan family, not the colour two existing controls
+use), four contrast figures that were arithmetic rather than readings, and a gate that could not see
+the operator's own bubble at all. Only prose and the gate changed; the four tokens are the ones that
+shipped. **Measured on `grok-bot-local-vm`**, this Mac, real Chrome at 1440x1000, against a local
+relay on a spare port serving this tree: `verify-console-polish --chips` **27 passed, 0 failed, 0
+skipped**, the two new checks reading a chip on the operator's own row off the painted pixels at
+**6.03:1** in dusk, ink `rgb(9, 87, 99)` on plate `rgb(211, 224, 214)`, and **10.9:1** in mist, ink
+`rgb(140, 213, 226)` on plate `rgb(15, 24, 28)`, 1596 pixels each.
+`tests/machine-room-code-chip-pixels.test.mjs` still passes.
 
 Nothing else about the chip moved with 5b: the box, the radius, the monospace stack, the wrapping, the
 click that copies, the tick and the accessible name are the CONSOLE-5 values, and

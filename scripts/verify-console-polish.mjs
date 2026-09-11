@@ -1521,6 +1521,64 @@ const chipContrast = (page, selector) => page.evaluate((sel) => {
   return { ink, mist };
 }, selector);
 
+// The walk above skips a gradient, and in dusk the operator's OWN bubble is a gradient: the walk
+// falls straight through it to the cream plate behind and reports a ratio for a colour nobody sees
+// (1.55:1 where the eye gets 5.94:1). That is the one surface the mist rule in the CONSOLE-5 block
+// exists to protect, so it cannot be the one surface no contrast check can reach. This reads the
+// PAINTED PIXELS instead: clip a shot to the chip's own box, count the colours in the page, take the
+// commonest as the plate and the 2nd percentile of luminance as the ink -- the 98th on a dark plate,
+// where the ink is the lighter of the two. It needs a screenshot per theme, so it is used only where
+// the walk cannot go.
+const paintedChipContrast = async (page, selector, holds) => {
+  const found = await page.evaluate(([sel, want]) => {
+    const chip = [...document.querySelectorAll(sel)].find((c) => c.textContent.includes(want));
+    if (!chip) return null;
+    chip.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+    const r = chip.getBoundingClientRect();
+    if (r.width < 10 || r.height < 10) return null;
+    // Inset 2 px all round, so the pill's rounded corners and its hairline are not counted as ink.
+    return { text: chip.textContent, fg: getComputedStyle(chip).color,
+      clip: { x: Math.round(r.x) + 2, y: Math.round(r.y) + 2,
+        width: Math.round(r.width) - 4, height: Math.round(r.height) - 4 } };
+  }, [selector, holds]);
+  if (!found) return null;
+  await sleep(250);
+  const shot = await page.screenshot({ clip: found.clip }).catch(() => null);
+  if (!shot) return null;
+  const read = await page.evaluate((dataUrl) => new Promise((resolve) => {
+    const img = new Image();
+    img.onerror = () => resolve(null);
+    img.onload = () => {
+      const c = document.createElement("canvas");
+      c.width = img.width; c.height = img.height;
+      const g = c.getContext("2d", { willReadFrequently: true });
+      g.drawImage(img, 0, 0);
+      const d = g.getImageData(0, 0, c.width, c.height).data;
+      const lum = (r0, g0, b0) => {
+        const f = [r0, g0, b0].map((v) => { const u = v / 255; return u <= 0.03928 ? u / 12.92 : ((u + 0.055) / 1.055) ** 2.4; });
+        return 0.2126 * f[0] + 0.7152 * f[1] + 0.0722 * f[2];
+      };
+      const counts = new Map();
+      const all = [];
+      for (let i = 0; i < d.length; i += 4) {
+        const key = `${d[i]},${d[i + 1]},${d[i + 2]}`;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+        all.push({ key, L: lum(d[i], d[i + 1], d[i + 2]) });
+      }
+      if (all.length === 0) return resolve(null);
+      const plateKey = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+      const plateL = lum(...plateKey.split(",").map(Number));
+      const sorted = all.slice().sort((a, b) => a.L - b.L);
+      const ink = plateL > 0.2 ? sorted[Math.floor(all.length * 0.02)] : sorted[Math.floor(all.length * 0.98)];
+      const [hi, lo] = [Math.max(plateL, ink.L), Math.min(plateL, ink.L)];
+      resolve({ plate: `rgb(${plateKey.split(",").join(", ")})`, ink: `rgb(${ink.key.split(",").join(", ")})`,
+        ratio: Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100, pixels: all.length });
+    };
+    img.src = dataUrl;
+  }), `data:image/png;base64,${shot.toString("base64")}`);
+  return read ? { ...read, text: found.text, fg: found.fg } : null;
+};
+
 // The relay serves whatever checkout it was started from, which is not necessarily the tree being
 // built. So: ask the relay for its app.js first. If the chip is already in it, this leg runs against
 // the page as shipped and says so. If it is not, these four files are served out of THIS tree
@@ -1595,7 +1653,10 @@ async function legChips(page) {
   info(`chip now: ${first.color} on ${first.background}, ${first.border} border ${first.borderColor}, radius ${first.radius}, ${first.size} ${first.font}, overflow-wrap ${first.wrap}`);
   info("chip before (grok-bot-local-vm, Chrome 1440x1000, 2026-09-10 16:03 UTC): rgba(255, 255, 255, 0.94) on rgba(255, 255, 255, 0.1), 0px border, radius 5px, 13.8px, overflow-wrap normal");
   info("chip at CONSOLE-5, before 5b repainted it: rgb(255, 107, 107) on rgba(10, 16, 20, 0.62), border rgba(255, 107, 107, 0.3)");
-  check(first.color === "rgb(143, 217, 230)", "the chip is the muted cyan the console already uses, not body white and not the red-pink Jason called harsh", first.color);
+  // Not "the colour the Accepted chip and the Talk button use" -- those are --teal-300 and
+  // --teal-500, thirteen degrees of hue off this. #8fd9e6 is a new value in the same cyan family,
+  // and its edge is brand Signal Cyan at a quarter. The assertion is the hex, not the story.
+  check(first.color === "rgb(143, 217, 230)", "the chip is 5b's muted cyan, not body white and not the red-pink Jason called harsh", first.color);
   check(first.color !== "rgb(255, 111, 114)", "and never --danger-500, which reads as a failed turn", "#ff6f72 is the error colour and is not this");
   check(first.border !== "0px" && first.borderColor === "rgba(0, 200, 240, 0.25)", "it carries a hairline border in the same cyan", `${first.border} ${first.borderColor}`);
   check(/mono/i.test(first.font) || first.font.includes("ui-monospace"), "monospace", first.font);
@@ -1724,8 +1785,10 @@ async function legChips(page) {
   const roster = await api("listAgents").then((r) => r.value).catch(() => null);
   const worker = (Array.isArray(roster) ? roster : []).find((a) => !a.isGroup);
   if (!worker) { skip("a real agent's reply draws chips in the transcript", "no worker agent on this box to ask"); return; }
-  const ASK = "Reply with one short sentence and nothing else, naming the channel #titan-alerts, "
-    + "the host titan-box-01 and the address titan@myagents.email, each one wrapped in backticks.";
+  // The names are backticked in the ASK as well as asked for in the reply, which costs nothing and
+  // puts three chips on the OPERATOR's own row -- the surface the painted sub-leg below measures.
+  const ASK = "Reply with one short sentence and nothing else, naming the channel `#titan-alerts`, "
+    + "the host `titan-box-01` and the address `titan@myagents.email`, each one wrapped in backticks.";
   const sent = await api("sendPrompt", { agentId: worker.id, prompt: ASK, clientNonce: `chips-${Date.now()}` }, within(30_000))
     .then(() => true).catch((e) => String(e.message));
   if (sent !== true) { skip("a real agent's reply draws chips in the transcript", `the box would not take a turn: ${String(sent).slice(0, 120)}`); return; }
@@ -1755,6 +1818,39 @@ async function legChips(page) {
     ?.scrollIntoView({ block: "center", behavior: "instant" }));
   await sleep(400);
   await shoot(page, `chips-live-${Date.now()}`);
+
+  // ---- the operator's OWN bubble, read off the pixels -----------------------------------------
+  //
+  // CONSOLE-5b review, 2026-09-10. Every contrast number above comes from the composite walk, and the
+  // walk skips a gradient. The operator's own bubble is a cream gradient in dusk and a dark slate in
+  // mist, which makes it BOTH the surface whose pair of values 5b's mist rule exists to protect and
+  // the one surface the walk cannot read: it falls through to the plate behind and reports 1.55:1
+  // where a person gets 5.94:1. CONSOLE-5's rose broke this exact surface at about 1.9:1 and no gate
+  // noticed for a day. So this one is measured off the pixels Chrome painted, in both themes.
+  if (budgetLeft() < 20_000) { skip("a chip the operator typed clears 4.5:1 on their own bubble", `${seconds(budgetLeft())} left`); return; }
+  const mineReady = await until(() => page.evaluate(() => [...document.querySelectorAll("#transcript .message-row.is-user code.code-chip")]
+    .some((c) => c.textContent.includes("titan-alerts")) || null), within(20_000), 1000);
+  if (!mineReady) {
+    skip("a chip the operator typed clears 4.5:1 on their own bubble",
+      "the ASK's own backticked names never drew a chip on the operator's row");
+    return;
+  }
+  const wasTheme = await page.evaluate(() => document.documentElement.dataset.theme ?? null);
+  const mine = {};
+  for (const theme of ["dusk", "mist"]) {
+    await page.evaluate((t) => { document.documentElement.dataset.theme = t; }, theme);
+    await sleep(500);
+    mine[theme] = await paintedChipContrast(page, "#transcript .message-row.is-user code.code-chip", "titan-alerts");
+    await shoot(page, `chips-user-bubble-${theme}-${Date.now()}`);
+  }
+  await page.evaluate((t) => { if (t == null) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = t; }, wasTheme);
+  for (const theme of ["dusk", "mist"]) {
+    const got = mine[theme];
+    check(got != null && got.ratio >= 4.5,
+      `${theme}: a chip the OPERATOR typed clears 4.5:1 on their own bubble, off the painted pixels`,
+      got ? `${got.ratio}:1, ink ${got.ink} on plate ${got.plate}, ${got.pixels} px, computed colour ${got.fg}`
+        : "no chip on the operator's own row could be photographed");
+  }
 }
 
 // ---- --approval -----------------------------------------------------------------------------
