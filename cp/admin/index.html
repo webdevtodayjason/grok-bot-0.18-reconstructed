@@ -19,6 +19,14 @@
   something rather than to find out what happened, and Feedback after it because it is the one
   somebody else fills in: what the agents reported and their operators chose to send on
   (FEEDBACK-1).
+
+  KEYS-2 MADE IT TEN. Jason, 2026-09-10 16:34, on this console looking for the place to paste the
+  keys the product dials with: "I didn't see a section to put it in." The block was there and it
+  drew, 1381 px down inside System health's own scroller, under two other paste forms, on a page
+  whose document measured exactly the height of the window -- so nothing on the screen said there
+  was anything below. The five paste forms on this console are one act, so they get one entry:
+  Keys, between System health and Spend, holding the three keys the product uses and the two push
+  credentials. System health keeps a line at its foot saying where they went.
 -->
 <html lang="en">
 <head>
@@ -75,6 +83,7 @@
     <a href="#panel-clients">Clients and users</a>
     <a href="#panel-boxes">Box health</a>
     <a href="#panel-system">System health</a>
+    <a href="#panel-keys">Keys</a>
     <a href="#panel-spend">Spend</a>
     <a href="#panel-providers">Providers</a>
     <a href="#panel-feedback">Feedback</a>
@@ -225,9 +234,35 @@
     <div class="strip"></div>
     <p class="quiet">The machine everything runs on, as far as this service can see it.</p>
     <div id="system" class="cards"></div>
+    <!--
+      KEYS-2. Static markup, so it needs no idempotency: the two blocks that used to sit under this
+      div are built in script and re-drawn on every paste, and a pointer drawn by the same code would
+      have to remember whether it had already drawn itself.
+    -->
+    <p class="quiet">Keys and push credentials moved to <a href="#panel-keys">Keys</a>.</p>
   </section>
 
-  <!-- 5. Spend ------------------------------------------------------------------------------ -->
+  <!-- 5. Keys ------------------------------------------------------------------------------- -->
+  <!--
+    KEYS-2. The five paste forms on this console, in one place, because they are one act: three keys
+    the product dials vendors with (KEYS-1) and the two credentials that wake a phone (PUSH-1). Both
+    blocks are built in script and appended to this section, so this file holds only the shell.
+
+    No .strip. Nothing calls summarise for this panel, and a strip that never fills is furniture:
+    `.strip:empty { display: none }` would hide it, which is just a way of saying it should not be
+    written. No loader either -- the readiness flag counts loaders and this panel costs no request
+    of its own, because the two blocks are drawn by the System health loader that already fetched
+    their answers.
+  -->
+  <section class="panel" id="panel-keys" data-panel="keys" hidden>
+    <h2>Keys</h2>
+    <p class="quiet">Everything this deployment needs a credential for, pasted once. Nothing here
+      ever shows a stored value again, every one is checked with the vendor before it is stored, and
+      none of them is ever pushed into a customer's box.</p>
+    <div id="keys" class="cards"></div>
+  </section>
+
+  <!-- 6. Spend ------------------------------------------------------------------------------ -->
   <section class="panel" id="panel-spend" data-panel="spend" hidden>
     <h2>Spend</h2>
     <div class="strip"></div>
@@ -243,7 +278,7 @@
       here when Stripe is wired in.</p>
   </section>
 
-  <!-- 6. Providers, keys and plan models ----------------------------------------------------- -->
+  <!-- 7. Providers, keys and plan models ----------------------------------------------------- -->
   <!--
     PROVIDERS-1. The panel that stops this being a text file and a restart.
 
@@ -351,7 +386,7 @@
       customer can open.</p>
   </section>
 
-  <!-- 7. Feedback ---------------------------------------------------------------------------- -->
+  <!-- 8. Feedback ---------------------------------------------------------------------------- -->
   <!--
     FEEDBACK-1. Jason, 2026-09-07: "Titan tried to cover up failure. We need to instill in the
     agents that failure must be reported."
@@ -406,7 +441,7 @@
     </form>
   </section>
 
-  <!-- 8. Marketplace ------------------------------------------------------------------------- -->
+  <!-- 9. Marketplace ------------------------------------------------------------------------- -->
   <!--
     MARKET-26 and CLOUD-BROWSER-1. The panel for the two things about the Marketplace that go wrong
     quietly: a row that still tells a customer something the vendor stopped documenting, and a cloud

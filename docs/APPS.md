@@ -764,7 +764,8 @@ forms are read now, and both are pinned in `tests/push-edge.test.mjs`.
 ### The credentials, and what runs without them
 
 The Apple `.p8` signing key and the Firebase service account JSON are pasted **once** into the super
-admin console (`api.titanium.bot/admin`, System health, "Waking a phone"), proved with the vendor
+admin console (`api.titanium.bot/admin`, Keys, "Waking a phone"; the block sat on System health until
+KEYS-2 gave the five paste forms their own rail entry), proved with the vendor
 before they are stored, and never answered back. The relay reads them through
 `GET /v1/relay/push/credentials` behind `CP_RELAY_TOKEN`, at boot and every 5 minutes, keeping the
 last good copy in memory so a control-plane outage degrades to the stub rather than to an exception.

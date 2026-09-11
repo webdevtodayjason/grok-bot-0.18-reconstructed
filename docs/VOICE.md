@@ -539,7 +539,8 @@ is a websocket, so with `catalogPath` empty the proof falls through to POSTing `
 failed". Both rows are **deleted** (PROVIDERS-10, closing VOICE-4), `tests/cp-voice.test.mjs` asserts
 they are gone *and* that no row on that panel carries a `wss://` address or the word `realtime`, and
 the panel carries one line saying where the key does go: the **"Keys the product uses"** block on the
-same console's System health panel — section 2 — which proves an xAI key against
+same console's **Keys** panel — section 2; it was appended to System health until KEYS-2 gave it its
+own rail entry — which proves an xAI key against
 `https://api.x.ai/v1/models` and an OpenAI key against `https://api.openai.com/v1/models`. The same
 key serves chat and realtime at both vendors.
 

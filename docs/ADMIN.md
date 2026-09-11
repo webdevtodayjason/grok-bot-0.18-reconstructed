@@ -272,16 +272,26 @@ Jason, 2026-09-09 12:13: "I think we're going to have to turn that into more of 
 left-hand nav, your standard dashboard, because stuff is all jumbled and there is a lot of
 scrolling." It was one long page with eight panels stacked down it.
 
-So there is a **left-hand rail with nine entries and one panel on screen at a time**. The URL hash
+So there is a **left-hand rail with ten entries and one panel on screen at a time**. The URL hash
 names the panel, so a link opens the panel it points at and the browser's own back button walks
 where you have been. Each panel carries its own summary strip and scrolls inside itself rather than
 scrolling the page. The rail entries are ordinary links, so Tab and Enter reach every one of them
 with no keyboard handling of our own.
 
-The nine, in rail order, are **Overview**, Sign-in attempts, Clients and users, Box health, System
-health, Spend, Providers, Feedback and Marketplace. Overview is new and is a summary of the other
-eight; the eight themselves are the same panels with the same buttons on the same routes, moved into
-a rail rather than rewritten.
+The ten, in rail order, are **Overview**, Sign-in attempts, Clients and users, Box health, System
+health, **Keys**, Spend, Providers, Feedback and Marketplace. Overview is a summary of the others;
+the eight that were there before the rail are the same panels with the same buttons on the same
+routes, moved into a rail rather than rewritten.
+
+**Keys is the tenth and it was added by KEYS-2 on 2026-09-10.** Jason, 16:34, on this console looking
+for the place to paste the keys the product dials with: *"I didn't see a section to put it in."* The
+block was there and it drew, 1,381 px down inside System health's own scroller, under the two phone
+credential forms. Giving it a rail entry is not a new surface: no route, no loader and no request
+moved, and the two blocks are still drawn by the System health loader out of the two answers it
+already fetched. **So the numbers on this console are ten panels and eight loaders**, and they are
+different on purpose: the Overview is drawn from a registry the eight write to, and Keys is drawn by
+a loader on another panel. The readiness flag a gate waits on counts loaders, so it still reads
+eight.
 
 Every number carries the moment it was measured. Anything that could not be measured says **"not
 measured"** and why, and never a zero, a dash, or a green tick. That rule is the reason the Overview
@@ -656,13 +666,33 @@ makes it if it is not there yet, and says whether the record is being written an
 not. The failure also goes to the container log with the path in it, and it is retried on the next
 sign-in rather than remembered for the life of the process.
 
-#### Waking a phone, and Keys the product uses
+**The last line on this panel is a pointer.** *"Keys and push credentials moved to Keys."* It is
+static markup in `cp/admin/index.html` rather than drawn with the blocks, so it needs no idempotency,
+and the gate asserts its link is `#panel-keys`: without it an operator who remembers the forms being
+at the foot of this panel finds twelve cards and nothing else.
 
-Two blocks at the foot of this panel, both **write-only paste forms** and both appended in script
-rather than written into `cp/admin/index.html`. The first is the two push credentials (PUSH-1). The
-second is KEYS-1, added 2026-09-10, and it is the reason no customer in this product ever sees a key
-field again. Jason, looking at a customer's settings panel that day: *"A user is never going to put a
-resend key in. That's on the backend."*
+### Keys
+
+**Controls: five paste forms, and nothing else on this panel.** Three keys the product dials vendors
+with (KEYS-1) and the two credentials that wake a phone (PUSH-1), all **write-only**, all appended in
+script rather than written into `cp/admin/index.html`.
+
+**Why it is a panel of its own.** Both blocks used to sit at the foot of System health, under a dozen
+cards and two other forms. Jason, 2026-09-10 16:34, on the live console, looking for where to paste
+the keys the product talks with: *"I didn't see a section to put it in."* They were 1,381 px down
+inside that panel's own scroller, on a page whose document measures exactly the height of the window,
+so nothing on the screen said there was anything below. Five paste forms are one act, so KEYS-2 gave
+them one rail entry between System health and Spend and left a line behind on System health saying
+where they went. **The keys are drawn first and the phone credentials under them**, because the
+order is paint order and the keys are what an operator opens this panel for.
+
+Nothing else changed: no route, no loader, no request. Both blocks are still drawn by the System
+health loader out of the two answers it already had, which is why this panel costs nothing and why
+the readiness flag still counts eight loaders against ten panels.
+
+**The three keys the product uses** are KEYS-1, added 2026-09-10, and they are the reason no customer
+in this product ever sees a key field again. Jason, looking at a customer's settings panel that day:
+*"A user is never going to put a resend key in. That's on the backend."*
 
 | Row | What it is | Without it |
 |---|---|---|
@@ -693,6 +723,35 @@ screen and he has to know which account a key came from.
 than a vendor credential — when two workspaces claim one mail domain, the one whose secret verifies
 *this body* gets the message — so one global value would let the first claimant read another
 customer's mail. docs/MAIL.md §1a is the argument in full.
+
+#### What KEYS-2 measured, and on which machine
+
+**The before, MEASURED on the R750 2026-09-10 22:12 UTC** through `api.titanium.bot/admin` in headless
+Chromium from a Mac, viewport **1440x1000**, signed in as a throwaway super admin on the demo tenant
+(minted and removed in the same session): the System health panel's own scroller was **871 px of
+window over 1,854 px of content**, `#productKeys` started at **1,381 px** into it and the *Talking,
+xAI* paste field at **1,529 px**, 1.76 panel-screens down and **658 px below the fold**, while
+`document.documentElement.scrollHeight` measured exactly **1,000 px** in a 1,000 px window, so the
+page itself carried no scrollbar to hint that anything was down there. The first screen ended on
+Apple's paste-the-whole-file textarea, and the only word *key* on it belonged to Apple's key id field.
+
+**The after, MEASURED on MacBook-Pro.local** (darwin arm64, node v22.23.1) 2026-09-10 by
+`scripts/verify-admin.mjs` against its own spawned control plane in headless Chromium at **1440x900**,
+gate user agent `titanbot-gate/verify-admin.mjs`: **534 checks, 0 failed, 1 skipped** (the skip is the
+pre-existing one, a fixture with no proxy configured), against **515 checks** on the same gate before
+this change. With the Keys panel open and its `scrollTop` at 0 the *Talking, xAI* field **ends at
+352 px** where the panel's first screen ends at **853 px**: **236 px into 1,279 px of content in a
+771 px window**, so it is on the first screen with 501 px to spare, and `elementFromPoint` at its own
+centre answers the field itself. Ten panels were walked, each opened from its own hash and the only
+one on screen, and every one measured `document.documentElement.scrollHeight` **900** in a 900 px
+window with the open panel's own `scrollWidth - clientWidth` at **0**. Tab reached **10 of 10** rail
+entries. The readiness flag still read **8 loaders**.
+
+**Still owed, and not measured here:** the same thing on the R750 through `api.titanium.bot/admin` as
+a throwaway super admin at 1440x1000, including the half that proves nothing was stored: a made-up
+key pasted into that field has to come back refused in the vendor's own words with the row still
+reading *Not set.* after a Refresh. A builder cannot take that measurement: the R750 is read-only to
+them, and the numbers above are this Mac's fixture, not the live console's.
 
 ### Spend
 
@@ -985,8 +1044,8 @@ cannot keep.
 
 ### Marketplace
 
-The ninth rail entry, and the one this document never had a section for: the heading above it used
-to say eight panels and the numbered subsections stopped at seven. That was not only a counting
+The last rail entry, tenth since KEYS-2, and the one this document never had a section for: the
+heading above it used to say eight panels and the numbered subsections stopped at seven. That was not only a counting
 mistake in prose. The page's own markup had the same hole: the Feedback section was never closed,
 so Marketplace was parsed as a child of it, which is a thing you cannot see until something tries to
 hide one panel and takes the other with it. Both are closed now, and this section is the other half
@@ -996,7 +1055,7 @@ of that fix.
 can install, and the panel is where an entry is added, edited, published or taken back down.
 
 **Its numbers and its behaviour belong to the marketplace work, not to this document.** What this
-section is for is the rail: Marketplace is a panel like the other eight, reachable by its own hash,
+section is for is the rail: Marketplace is a panel like the other nine, reachable by its own hash,
 with its own summary strip and its own scroll, and every button it had before the rail it still has.
 
 ## What changed, and how long it is kept
