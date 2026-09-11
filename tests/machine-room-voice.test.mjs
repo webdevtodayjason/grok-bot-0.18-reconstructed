@@ -210,10 +210,15 @@ test("VOICE-7: the line is refusals and NOTHING ELSE, so no ordinary turn can mo
   assert.doesNotMatch(source, /case "said":\s*\n\s*caption\(/, "the reply is being painted into the footer again");
 });
 
-test("VOICE-1 notes: each of the six conditions produces its own plain sentence", async () => {
+test("VOICE-1 notes: each condition produces its own plain sentence", async () => {
   const { voice } = await loadVoice();
-  const conditions = ["no-microphone", "no-key", "day-cap", "session-cap", "box-not-running", "line-dropped"];
-  assert.deepEqual(Object.keys(voice._NOTES).sort(), [...conditions].sort(), "six conditions, no more and no fewer");
+  // VOICE-11 added four. Three of them split one shipped sentence that told a device with no
+  // microphone at all to allow one, and the fourth is what a tap reads on a control whose whole
+  // instruction is to hold it. The list is still exhaustive, because a condition with no sentence is
+  // silence, which is the whole of UX-ERR-1.
+  const conditions = ["no-microphone", "no-key", "day-cap", "session-cap", "box-not-running", "line-dropped",
+    "no-microphone-device", "no-recording", "no-sound", "hold-to-talk"];
+  assert.deepEqual(Object.keys(voice._NOTES).sort(), [...conditions].sort(), "every condition has a sentence, no more and no fewer");
   for (const condition of conditions) {
     voice._state.notes = [];
     voice.stop(condition);
@@ -1262,13 +1267,16 @@ const fakeAudioWindow = () => ({
 
 /** A voice with a socket that opens, a microphone that works, and a record of what reached the wire. */
 async function loadTalking(extra = {}) {
-  const sent = { frames: 0, json: [] };
+  const sent = { frames: 0, json: [], audio: [] };
   class OpenSocket {
     constructor() { this.readyState = 1; this.handlers = {}; setTimeout(() => this.handlers.open?.({}), 0); }
     addEventListener(name, fn) { this.handlers[name] = fn; }
     send(payload) {
       sent.frames += 1;
       if (typeof payload === "string") { try { sent.json.push(JSON.parse(payload)); } catch { /* audio */ } }
+      // VOICE-11 keeps the audio too, in order, because the release's tail is a claim about BYTES --
+      // that they are zeroes, that there are eight of them, and that they came after the speech.
+      else sent.audio.push(payload);
     }
     close() { this.readyState = 3; }
   }
@@ -1563,6 +1571,10 @@ test("VOICE-7 modes: push to talk holds while the button is down and shuts the m
   assert.equal(voice._state.held, true);
   assert.equal(voice._state.talking, true);
 
+  // VOICE-11: a hold that said something. A release before the first frame has gone is a TAP and keeps
+  // the microphone open for a moment longer, which is its own case below; this one is a real hold, so
+  // one 100 ms frame goes through the capture first.
+  capturePort.onmessage({ data: new Float32Array(2400) });
   voice.talkUp();
   assert.equal(voice._state.held, false);
   assert.equal(voice._state.talking, false, "the microphone shuts on the release");
@@ -1761,6 +1773,341 @@ test("VOICE-7 modes: a forgotten hold does not spend a workspace's day", async (
   always.voice.talkUp();
   assert.equal(always.voice._state.talking, true, "always listening does not shut the microphone on a release");
   always.voice.stop();
+});
+
+// ================================================================== VOICE-11
+//
+// THE RELEASE. holdEnd shut the microphone and sent nothing, and the only thing that ends a turn is
+// the service's own turn detection, which fires on audio that keeps arriving. MEASURED on
+// grok-bot-local-vm in Chromium and WebKit: a 900 ms hold and a release put 0 bytes and 0 JSON on the
+// wire for 1.5 s while 15 captured frames were dropped. What a browser has to answer -- that a thumb's
+// release really reaches the vendor, and that a phone's microphone context resumes inside the press --
+// is scripts/verify-voice.mjs --leg release.
+
+const settle = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/** One 100 ms block of real sound, so a frame that is speech can be told from a frame that is silence. */
+const loudBlock = () => {
+  const block = new Float32Array(2400);
+  for (let i = 0; i < block.length; i += 1) block[i] = 0.5;
+  return block;
+};
+const isSilent = (buffer) => new Int16Array(buffer).every((sample) => sample === 0);
+
+test("VOICE-11 release: the release sends the silence, eight frames of it, and they are really zeroes", async () => {
+  const { voice, sent } = await loadTalking();
+  await voice.talkDown();
+  await settle(10);
+  capturePort.onmessage({ data: loudBlock() });
+  assert.equal(sent.audio.length, 1, "the hold's own frame went");
+  assert.equal(isSilent(sent.audio[0]), false, "and it is sound, not silence");
+
+  voice.talkUp();
+  assert.equal(voice.stats().tailFrames, 1, "the first frame of it goes on the release itself, which is when the person stopped");
+  await settle(900);
+  assert.equal(voice.stats().tailFrames, voice._TAIL_FRAMES);
+  const tail = sent.audio.slice(1);
+  assert.equal(tail.length, 8, "eight frames, which is 800 ms against the relay's 700 ms window");
+  for (const one of tail) {
+    assert.equal(one.byteLength, voice._FRAME_BYTES, "a tail frame is the same 100 ms frame the microphone sends");
+    assert.ok(isSilent(one), "a tail frame is silence, never a repeat of the last thing said");
+  }
+  assert.equal(voice.stats().sent, 1, "and the microphone's own count did not grow: nobody said these");
+  assert.equal(sent.json.filter((one) => one.t === "stop").length, 0, "a release is still not a hang-up");
+  voice.stop();
+});
+
+test("VOICE-11 release: the tail is longer than the window the relay asks the service to wait", async () => {
+  const { voice } = await loadVoice();
+  const { TURN_DETECTION } = await import("../ui/voice-edge.mjs");
+  // READ OFF THE RELAY, not retyped. The whole point of the tail is that it outlasts the silence the
+  // service is told to wait for, so the two numbers cannot be allowed to drift apart in two files.
+  assert.ok(voice._RELEASE_TAIL_MS > TURN_DETECTION.silence_duration_ms,
+    `the tail is ${voice._RELEASE_TAIL_MS} ms and the service waits ${TURN_DETECTION.silence_duration_ms} ms before it calls a turn over`);
+  assert.equal(voice._FRAME_MS, 100, "the pacing is the frame, derived rather than repeated");
+  assert.equal(voice._TAIL_FRAMES, Math.ceil(voice._RELEASE_TAIL_MS / voice._FRAME_MS));
+
+  // AND IT IS NOT THE MANUAL COMMIT. Both vendors document one, and it needs turn detection switched
+  // off in the session frame -- which this bridge writes once and byte-identically for the life of the
+  // socket, because rewriting it re-bills the whole conversation on one of the two services.
+  const source = await read("ui/machine-room/voice.js");
+  assert.doesNotMatch(source, /["'`]input_audio_buffer\.commit/,
+    "the page must not reach for the provider's manual commit; the silence is what ends the turn");
+});
+
+test("VOICE-11 release: a tap says something instead of dialling an empty line", async () => {
+  const { voice, sent } = await loadTalking();
+  await voice.talkDown();
+  await settle(10);
+  // Released before a single frame has gone, which at the 1800 ms dial console.titanium.bot has is
+  // every tap: shipped, this opened a whole line and said nothing into it.
+  voice.talkUp();
+  assert.equal(voice._state.held, false, "the hold is over as far as the button is concerned");
+  assert.equal(voice._state.talking, true, "but the microphone stays open until a frame has gone or the window ends");
+  await settle(voice._MIN_HOLD_MS + 80);
+  assert.equal(voice._state.talking, false);
+  assert.equal(voice.stats().tailFrames, 0, "no silence is sent for a hold that said nothing");
+  assert.equal(sent.audio.length, 0);
+  assert.deepEqual(voice.stats().notes, ["hold-to-talk"]);
+  assert.equal(voice._NOTES["hold-to-talk"], "Hold the button while you talk.");
+  voice.stop();
+
+  // AND A HOLD THAT WAS ONLY JUST LONG ENOUGH PAYS NOTHING FOR THAT RULE: the first frame closes the
+  // window rather than the timer doing it.
+  const second = await loadTalking();
+  await second.voice.talkDown();
+  await settle(10);
+  second.voice.talkUp();
+  capturePort.onmessage({ data: loudBlock() });
+  assert.equal(second.voice._state.talking, false, "the frame closed the window");
+  assert.equal(second.voice.stats().tailFrames, 1, "and the release sent its silence after it");
+  assert.deepEqual(second.voice.stats().notes, [], "nothing was said to somebody who really did hold it");
+  second.voice.stop();
+});
+
+test("VOICE-11 release: a new hold drops what is left of the last release's silence", async () => {
+  const { voice } = await loadTalking();
+  await voice.talkDown();
+  await settle(10);
+  capturePort.onmessage({ data: loudBlock() });
+  voice.talkUp();
+  await settle(150);
+  const partway = voice.stats().tailFrames;
+  assert.ok(partway >= 1 && partway < voice._TAIL_FRAMES, `the tail is part way through: ${partway} of ${voice._TAIL_FRAMES}`);
+  await voice.talkDown();
+  await settle(500);
+  assert.equal(voice.stats().tailFrames, partway,
+    "the rest of it was dropped: silence arriving under a new hold would end the turn the person is still speaking into");
+  voice.stop();
+});
+
+test("VOICE-11 release: at a line that was still opening, the silence queues behind the words", async () => {
+  // Push to talk captures BEFORE the line is up and the dial is 1.6 to 2.0 s, so a short hold is
+  // entirely inside it: the words AND the release's silence are both queued, and the order is the
+  // whole claim -- silence flushed before the words would end a turn that had not started.
+  const sent = { frames: 0, json: [], audio: [] };
+  class LateSocket {
+    constructor() {
+      this.readyState = 0;
+      this.handlers = {};
+      setTimeout(() => { this.readyState = 1; this.handlers.open?.({}); }, 300);
+    }
+    addEventListener(name, fn) { this.handlers[name] = fn; }
+    send(payload) {
+      sent.frames += 1;
+      if (typeof payload === "string") { try { sent.json.push(JSON.parse(payload)); } catch { /* audio */ } }
+      else sent.audio.push(payload);
+    }
+    close() { this.readyState = 3; }
+  }
+  const { voice } = await loadVoice({ window: { __voiceSocketClass: LateSocket, ...fakeAudioWindow() } });
+  void voice.talkDown();
+  await settle(20);
+  capturePort.onmessage({ data: loudBlock() });
+  capturePort.onmessage({ data: loudBlock() });
+  assert.equal(sent.audio.length, 0, "nothing has reached the wire yet, because the line is still opening");
+  voice.talkUp();
+  await settle(1200);
+
+  assert.equal(sent.audio.length, 10, "two frames of speech and eight of silence");
+  assert.deepEqual(sent.audio.map((one) => isSilent(one)),
+    [false, false, true, true, true, true, true, true, true, true],
+    "the words went first and the silence after them");
+  voice.stop();
+});
+
+test("VOICE-11 re-arm: a refusal eats one press and no more", async () => {
+  const { voice, listeners } = await loadTalking();
+  const button = { disabled: false };
+  const event = { target: { closest: (selector) => (selector.includes("data-voice-talk") ? button : null) }, preventDefault() {} };
+  const down = listeners.get("pointerdown");
+  const up = listeners.get("pointerup");
+
+  voice.stop("no-key");
+  assert.deepEqual(voice.stats().notes, ["no-key"]);
+  await down(event);
+  await settle(20);
+  assert.equal(voice._state.on, false, "a press into a refusal that just went up clears it and does not dial back into it");
+  assert.deepEqual(voice.stats().notes, []);
+  up(event);
+
+  // THE SAME REFUSAL, ONCE THE PERSON HAS HAD TIME TO READ IT. Shipped, this press was eaten too --
+  // however long the sentence had been up -- so every start while one was standing cost two presses
+  // with nothing on screen to say the first had been spent.
+  voice.stop("no-key");
+  voice._state.notes[0].at -= voice._REARM_COOLDOWN_MS + 100;
+  await down(event);
+  await settle(20);
+  assert.equal(voice._state.on, true, "the next press clears the sentence AND opens a line, in one press");
+  assert.deepEqual(voice.stats().notes, []);
+  voice.stop();
+});
+
+test("VOICE-11 re-arm: a gesture whose release was lost does not eat every press after it", async () => {
+  const { voice, listeners } = await loadTalking();
+  const button = { disabled: false };
+  const event = { target: { closest: (selector) => (selector.includes("data-voice-talk") ? button : null) }, preventDefault() {} };
+  const down = listeners.get("pointerdown");
+
+  voice.stop("no-key");
+  // The press that clears the sentence, and no pointerup, touchend or blur ever arrives for it.
+  await down(event);
+  await settle(20);
+  assert.equal(voice._state.on, false);
+  await settle(voice._GESTURE_MS + 80);
+  await down(event);
+  await settle(20);
+  assert.equal(voice._state.on, true,
+    "a spent gesture with no release used to eat every press for the life of the page");
+  voice.stop();
+
+  // AND THE HOLD ITSELF. A talkDown arriving while a hold is already live is the second event of one
+  // gesture if it is this close to it, and a NEW press whose predecessor's release was lost if it is not.
+  const { voice: second } = await loadTalking();
+  await second.talkDown();
+  await settle(10);
+  capturePort.onmessage({ data: loudBlock() });
+  await second.talkDown();
+  assert.equal(second.stats().tailFrames, 0, "the second event of one gesture does not end the hold it belongs to");
+  await settle(second._GESTURE_MS + 80);
+  await second.talkDown();
+  assert.equal(second._state.held, true, "the new press is holding");
+  assert.equal(second.stats().tailFrames, 1,
+    "and the hold it replaced was ended properly rather than left open underneath it");
+  second.stop();
+});
+
+test("VOICE-11 re-arm: a hold whose release never arrives closes the microphone on its own", async () => {
+  // The window's own setTimeout is what the module takes its timers from, so thirty seconds can be
+  // made to pass without waiting thirty of them. Only the ceiling is shortened; every other timer in
+  // the module keeps its real number, and the constant is asserted here so a change to it fails loudly
+  // rather than silently making this test measure a timer that no longer exists.
+  const { voice } = await loadTalking({ setTimeout: (fn, ms) => setTimeout(fn, ms === 30_000 ? 30 : ms) });
+  assert.equal(voice._MAX_HOLD_MS, 30_000);
+  await voice.talkDown();
+  await settle(10);
+  capturePort.onmessage({ data: loudBlock() });
+  // No pointerup, no touchend, no pointercancel, no blur, no keyup: a phone that backgrounded the tab
+  // mid-hold delivers none of them, and nothing but a release ever closed this microphone.
+  await settle(150);
+  assert.equal(voice._state.held, false, "the ceiling ended the hold");
+  assert.equal(voice._state.talking, false, "and closed the microphone");
+  assert.ok(voice.stats().tailFrames >= 1, `the words that were said still became a turn (${voice.stats().tailFrames} frames of silence after them)`);
+  assert.equal(voice._state.on, true, "and it is not a hang-up: the line is still warm for the next press");
+  voice.stop();
+});
+
+test("VOICE-11 microphone: three ways it can refuse, three different sentences", async () => {
+  const { voice } = await loadVoice();
+  for (const [name, condition] of [
+    ["NotAllowedError", "no-microphone"], ["SecurityError", "no-microphone"],
+    ["NotFoundError", "no-microphone-device"], ["OverconstrainedError", "no-microphone-device"],
+  ]) {
+    assert.equal(voice._micConditionFor({ name }), condition, `${name} reads as ${condition}`);
+  }
+  assert.equal(voice._micConditionFor(Object.assign(new Error("no worklet"), { cannotRecord: true })), "no-recording");
+  const three = new Set(["no-microphone", "no-microphone-device", "no-recording"].map((one) => voice._sentenceFor(one)));
+  assert.equal(three.size, 3, "three conditions, three sentences, where one sentence used to serve all of them");
+
+  // Through the real path, which is what shipped wrong: every one of these ended on the sentence that
+  // tells somebody to allow a microphone they do not have.
+  const absent = await loadTalking({
+    navigator: { mediaDevices: { getUserMedia: async () => { throw Object.assign(new Error("none"), { name: "NotFoundError" }); } } },
+  });
+  await absent.voice.talkDown();
+  await settle(40);
+  assert.deepEqual(absent.voice.stats().notes, ["no-microphone-device"]);
+
+  const cannot = await loadTalking({ navigator: {} });
+  await cannot.voice.talkDown();
+  await settle(40);
+  assert.deepEqual(cannot.voice.stats().notes, ["no-recording"],
+    "a browser with no mediaDevices at all threw a TypeError on a property read, which reads as a bug in this file");
+});
+
+test("VOICE-11 microphone: in the app the denied sentence names iPhone Settings, and no user agent decides it", async () => {
+  const { voice } = await loadVoice();
+  const shell = await loadVoice({
+    window: { __titanbotShell: { platform: "ios", build: "1", canOpenAppSettings: true } },
+  });
+  assert.match(voice._sentenceFor("no-microphone"), /browser/i, "in a browser it is the browser's permission");
+  assert.match(shell.voice._sentenceFor("no-microphone"), /iPhone Settings/,
+    "in the app it is the app's, and 'allow it in your browser' is advice nobody can follow there");
+  assert.doesNotMatch(shell.voice._sentenceFor("no-microphone"), /browser/i);
+  // A shell that cannot open its own settings gets the browser wording, because that is what it can do.
+  const plain = await loadVoice({ window: { __titanbotShell: { platform: "macos", build: "1", canOpenAppSettings: false } } });
+  assert.equal(plain.voice._sentenceFor("no-microphone"), voice._sentenceFor("no-microphone"));
+  // And every other sentence is the same in both, because only this one is about a permission.
+  for (const condition of Object.keys(voice._NOTES)) {
+    if (condition === "no-microphone") continue;
+    assert.equal(shell.voice._sentenceFor(condition), voice._sentenceFor(condition), `${condition} is the same in the app`);
+  }
+  const source = await read("ui/machine-room/voice.js");
+  assert.doesNotMatch(source, /userAgent/, "which host this is, is a thing the host says, never a string that is sniffed");
+});
+
+test("VOICE-11 microphone: a microphone that opened and produces nothing says so", async () => {
+  // A live button over a dead microphone is the worst of the microphone conditions, because nothing on
+  // screen looks wrong. The worklet posts a block every 128 samples once the graph is running, so a
+  // second with no block at all is a graph that is not running -- a context a phone never resumed.
+  const { voice } = await loadTalking();
+  await voice.talkDown();
+  await settle(20);
+  assert.deepEqual(voice.stats().notes, [], "nothing is said while the second is still running");
+  await settle(voice._SOUND_WATCH_MS + 150);
+  assert.deepEqual(voice.stats().notes, ["no-sound"]);
+  voice.stop();
+
+  const working = await loadTalking();
+  await working.voice.talkDown();
+  await settle(20);
+  capturePort.onmessage({ data: loudBlock() });
+  assert.equal(working.voice.stats().blocks, 1);
+  await settle(working.voice._SOUND_WATCH_MS + 150);
+  assert.deepEqual(working.voice.stats().notes, [], "and a microphone that is producing is left alone");
+  working.voice.stop();
+});
+
+test("VOICE-11 capture: the audio context is made and resumed before the microphone is asked for", async () => {
+  // WebKit births an AudioContext SUSPENDED and only a user gesture resumes one, and the gesture is
+  // spent by the first await in the handler. A context created after `await getUserMedia` -- which is
+  // what shipped -- stays suspended on a phone: the worklet never runs and the page draws a live button
+  // over a microphone that produces nothing. This is the whole reason voice does nothing in the app.
+  const order = [];
+  let resumed = 0;
+  class SuspendedContext {
+    constructor() {
+      order.push("context");
+      this.state = "suspended";
+      this.audioWorklet = { addModule: async () => { order.push("worklet"); } };
+      this.currentTime = 0;
+    }
+    resume() { resumed += 1; this.state = "running"; order.push("resume"); return new Promise(() => {}); }
+    createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+    createAnalyser() { return { fftSize: 2048, connect() {}, getFloatTimeDomainData() {} }; }
+    close() { order.push("close"); }
+  }
+  const { voice } = await loadTalking({
+    AudioContext: SuspendedContext,
+    navigator: { mediaDevices: { getUserMedia: async () => { order.push("getUserMedia"); return { getTracks: () => [] }; } } },
+  });
+  await voice.talkDown();
+  await settle(30);
+  assert.deepEqual(order.slice(0, 3), ["context", "resume", "getUserMedia"],
+    "the context is born and resumed inside the press, and nothing is awaited above the microphone");
+  assert.equal(resumed, 1);
+  voice.stop();
+
+  // AND A REFUSED PRESS GIVES THE CONTEXT BACK. It is made first now, so one suspended context per
+  // refusal would be a leak somebody pays for in battery.
+  order.length = 0;
+  const refused = await loadTalking({
+    AudioContext: SuspendedContext,
+    navigator: { mediaDevices: { getUserMedia: async () => { throw Object.assign(new Error("no"), { name: "NotAllowedError" }); } } },
+  });
+  await refused.voice.talkDown();
+  await settle(40);
+  assert.ok(order.includes("close"), "the context a refused press made was closed");
+  assert.deepEqual(refused.voice.stats().notes, ["no-microphone"]);
 });
 
 test("VOICE-7 modes: one pair of entry points, so the desktop app's hotkey inherits the setting", async () => {

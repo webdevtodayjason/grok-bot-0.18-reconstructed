@@ -31,6 +31,10 @@
 //                   three growing partials, one final, and one heard-confirmed whose text is
 //                   byte-identical to the tool argument and whose words are the words on the spoken
 //                   row in the transcript. Then the turns that never become a row.
+//   --leg release   VOICE-11: what a release puts on the wire. Two engines, because the defect that
+//                   makes voice do nothing in the iPhone app is WebKit's -- a capture context born
+//                   suspended and never resumed inside the press.
+//
 //   --leg person    VOICE-10: the talk mode follows the PERSON and not the browser. Always listening is
 //                   chosen in one browser, a SECOND browser signed in as the same person opens on it at
 //                   first paint with nothing pressed, and a third with no stored value and the route
@@ -72,7 +76,7 @@ const GATE_AGENT = gateUserAgent(import.meta.url);
 const MACHINE = process.env.GATE_MACHINE ?? `${os.hostname()} (${os.platform()} ${os.arch()})`;
 const GATEWAY = process.env.SAND_GATEWAY_URL ?? "http://127.0.0.1:1340";
 
-const LEGS = ["cp", "relay", "nokey", "caps", "origin", "refused", "browser", "frames", "overlay", "person"];
+const LEGS = ["cp", "relay", "nokey", "caps", "origin", "refused", "browser", "frames", "overlay", "person", "release"];
 const leg = (() => {
   const at = process.argv.indexOf("--leg");
   return at === -1 ? "" : String(process.argv[at + 1] ?? "");
@@ -102,6 +106,10 @@ if (process.argv.includes("--help") || process.argv.includes("-h") || leg.length
     "           own voice socket, and the same bytes landing on the spoken row.",
     "  overlay  the speech panel and the two talk modes, at 1440x900 and at 390x844 with a real hold,",
     "           with the footer's rects measured before, during and after every turn.",
+    "  release  VOICE-11: the release really sends the words. A held 1.2 s and let go, in Chromium at",
+    "           1440x900 and in WebKit at 390x844, with the silence counted at the vendor; a tap; the",
+    "           press after a refusal; a hold whose release never comes; and the three microphone",
+    "           refusals read as three different sentences.",
     "",
     "Env: SAND_PROFILE_DIRS (the live legs), SAND_GATEWAY_URL, GATE_MIC_WAV,",
     "     GROK_BOT_PLAYWRIGHT_DIR, VOICE_GATE_PORT (default 7793), VOICE_GATE_CP_PORT (default 7794).",
@@ -2249,6 +2257,374 @@ async function legPerson() {
   info(`both browsers signed in through the instance password door, so the person key is "" on this relay -- the same key every other per-person read on it uses. Two NAMED accounts sharing one workspace is the control plane's shape and is measured on the R750.`);
 }
 
+// -------------------------------------------------------------------------- VOICE-11: the release
+/**
+ * WHAT THIS LEG IS FOR, in one sentence: a release that sends nothing ends no turn, and shipped, the
+ * release sent nothing.
+ *
+ * MEASURED before the fix on grok-bot-local-vm in Chromium and WebKit at 1440x900 and 390x844: a
+ * 900 ms hold and a release put 0 bytes and 0 JSON on the wire for the next 1.5 s while 15 captured
+ * frames were dropped by the page's own mute. The only thing that ends a turn is the service's own
+ * turn detection, which the relay configures with silence_duration_ms 700 and which fires on audio
+ * that KEEPS ARRIVING. So the claim is measured where it has to be -- as frames of silence arriving
+ * at the stub vendor after the release -- and not as a flag on the page.
+ *
+ * TWO ENGINES, and that is the point of this leg rather than a nicety. The same root cause is why
+ * voice does nothing in the iPhone app, which is a WKWebView over console.titanium.bot: WebKit births
+ * an AudioContext SUSPENDED and only a user gesture resumes one, and the gesture is spent by the first
+ * await in the handler.
+ */
+async function legRelease() {
+  console.log(`verify-voice --leg release on ${MACHINE}`);
+  requireTheOtherItems(true);
+  // Its own port, seven along, for the same reason --leg overlay takes six: other waves run their own
+  // gates on this Mac and a second control plane on an occupied port answers from the FIRST one.
+  const cp = await startControlPlane(7);
+  const { startStubRealtime } = await import(STUB_REALTIME);
+  const stub = await startStubRealtime({ audioFrames: 2 });
+  cleanups.push(() => { try { stub.close(); } catch { /* gone */ } });
+
+  const dir = mkdtempSync(path.join(os.tmpdir(), "voice-gate-release-"));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  const voiceJson = path.join(dir, "voice.json");
+  writeFileSync(voiceJson, `${JSON.stringify({ enabled: true, apiKey: `gate-not-a-real-key-${randomBytes(8).toString("hex")}`, vendor: "xai" })}\n`, { mode: 0o600 });
+  // The second relay is a workspace nobody ever switched voice on for, which is the 4001 refusal the
+  // re-arm check needs: one press reads a sentence, and the presses after it have to reach a line.
+  const emptyJson = path.join(dir, "voice-empty.json");
+  writeFileSync(emptyJson, `${JSON.stringify({ apiKey: "", vendor: "" })}\n`, { mode: 0o600 });
+  const wav = process.env.GATE_MIC_WAV ?? await makeMicWav(dir);
+
+  const relay = await startRelay({
+    port: Number(process.env.VOICE_GATE_PORT ?? 7793) + 7,
+    voiceJson, stubUrl: stub.url, policyUrl: cp.base, relayToken: cp.relayToken,
+  });
+  const refusing = await startRelay({
+    port: Number(process.env.VOICE_GATE_PORT ?? 7793) + 8,
+    voiceJson: emptyJson, stubUrl: stub.url,
+  });
+  const session = await signIn(relay);
+
+  // The same choice --leg overlay makes, through the card's own door: this box is shared, and other
+  // waves' gates leave scratch agents on its roster whose names sort first.
+  const settingsBefore = await ask(`${relay.base}/voice/settings`, { headers: { cookie: session.cookie } });
+  const roster = settingsBefore.body?.agents ?? [];
+  const scratch = /^(code gate|voice gate|gate)\b|^new agent$/i;
+  const chosen = roster.find((one) => !scratch.test(String(one.name ?? ""))) ?? roster[0] ?? null;
+  check(chosen != null, "the settings door lists this workspace's bots, so one can be chosen", `${roster.length} on the roster`);
+  if (chosen == null) {
+    missing("a bot on this workspace to talk to", [
+      "GET /voice/settings answered an empty roster, so the relay has nobody to hand a spoken turn to",
+      `the host gateway this relay reads is ${GATEWAY}; check it is up and that SAND_PROFILE_DIRS names the live profile`,
+    ]);
+    return;
+  }
+  await ask(`${relay.base}/voice/settings`, {
+    method: "POST",
+    headers: { cookie: session.cookie, "content-type": "application/json" },
+    body: JSON.stringify({ agentId: chosen?.id ?? "" }),
+  });
+  info(`this run talks to ${chosen?.name ?? "(nobody)"}`);
+
+  const playwright = await loadPlaywright();
+
+  /**
+   * WebKit's microphone. Playwright ships no fake capture device for it -- the fake-device flags are
+   * Chromium's -- and this gate holds no real one, so the stream is made out of Web Audio: an
+   * oscillator into a MediaStreamDestination, handed back by a getUserMedia of our own. It is a real
+   * MediaStream through a real graph, which is all the thing being measured needs; what it is NOT is
+   * evidence about WebKit's own device permission, and the leg says so rather than implying otherwise.
+   */
+  const fakeWebkitMicrophone = () => {
+    const Ctx = window.AudioContext ?? window.webkitAudioContext;
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: async () => {
+          const ctx = new Ctx();
+          try { await ctx.resume(); } catch { /* a context that will not resume still renders silence */ }
+          const osc = ctx.createOscillator();
+          osc.frequency.value = 440;
+          const gain = ctx.createGain();
+          gain.gain.value = 0.3;
+          const dest = ctx.createMediaStreamDestination();
+          osc.connect(gain);
+          gain.connect(dest);
+          osc.start();
+          window.__gateMicContext = ctx;
+          return dest.stream;
+        },
+        enumerateDevices: async () => [],
+      },
+    });
+  };
+
+  const readLine = (page) => page.evaluate(() => {
+    const line = document.getElementById("voice-line");
+    if (line == null || line.hidden === true) return "";
+    return (line.textContent ?? "").replace(/\s+/g, " ").trim();
+  });
+  const readStats = (page) => page.evaluate(() => window.__voice?.stats?.() ?? null);
+
+  // THE BUTTON EXISTING IS NOT THE BUTTON BEING PRESSABLE: the console draws an opaque boot cover over
+  // everything until app.js has painted. So the centre is taken through elementFromPoint, which is the
+  // only thing that answers the question a person is asking.
+  const buttonAt = async (page) => {
+    for (let i = 0; i < 80; i += 1) {
+      const at = await page.evaluate(() => {
+        const node = document.querySelector("[data-voice-talk]");
+        if (node == null || node.disabled === true) return null;
+        const r = node.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return null;
+        const x = Math.round(r.left + r.width / 2);
+        const y = Math.round(r.top + r.height / 2);
+        const hit = document.elementFromPoint(x, y);
+        return node.contains(hit) || hit === node ? { x, y } : null;
+      });
+      if (at != null) return at;
+      await sleep(500);
+    }
+    return null;
+  };
+
+  const open = async (browser, base, view) => {
+    const context = await browser.newContext({
+      userAgent: GATE_AGENT,
+      viewport: { width: view.width, height: view.height },
+      hasTouch: view.touch,
+      ...(view.permissions ? { permissions: ["microphone"] } : {}),
+    });
+    if (view.fakeMic) await context.addInitScript(fakeWebkitMicrophone);
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", (error) => errors.push(String(error)));
+    return { context, page, errors, base };
+  };
+
+  const signInPage = async (page, base, password) => {
+    await page.goto(`${base}/login`, { waitUntil: "domcontentloaded" });
+    await page.fill('input[type="password"]', password).catch(() => {});
+    await page.press('input[type="password"]', "Enter").catch(() => {});
+    await page.waitForLoadState("domcontentloaded");
+    await page.waitForFunction(() => window.__voice != null, null, { timeout: 40_000 }).catch(() => {});
+    // The marker the re-arm check reads: a page that reloaded loses it, and "it re-armed" would then
+    // be a claim about a fresh page rather than about this one.
+    await page.evaluate(() => { window.__gateNeverReloaded = "kept"; }).catch(() => {});
+  };
+
+  for (const view of [
+    { name: "desktop", engine: "chromium", width: 1440, height: 900, touch: false, permissions: true, fakeMic: false },
+    { name: "phone", engine: "webkit", width: 390, height: 844, touch: true, permissions: false, fakeMic: true },
+  ]) {
+    const engine = playwright[view.engine];
+    if (engine == null) { skip(`${view.engine} at ${view.width}x${view.height}`, "this playwright build has no such engine"); continue; }
+    step(`${view.engine} ${view.width}x${view.height}`);
+    let browser = null;
+    try {
+      browser = await engine.launch(view.engine === "chromium" ? {
+        args: [
+          "--use-fake-ui-for-media-stream",
+          "--use-fake-device-for-media-stream",
+          // LOOPED, deliberately, where the other legs use %noloop. The claim here is that the SILENCE
+          // after a release is the release's own, so the microphone has to be producing sound right up
+          // to it -- and a three second file that has run out feeds silence into the hold, which is
+          // indistinguishable from the thing being measured. MEASURED with %noloop: 4 silent frames had
+          // already reached the vendor before the release, and the tail could not be counted apart.
+          `--use-file-for-fake-audio-capture=${wav}`,
+          "--autoplay-policy=no-user-gesture-required",
+        ],
+      } : {});
+    } catch (error) {
+      skip(`${view.engine} would not launch`, String(error?.message ?? error).split("\n")[0]);
+      continue;
+    }
+    cleanups.push(() => { try { browser.close(); } catch { /* gone */ } });
+
+    const { context, page, errors } = await open(browser, relay.base, view);
+    await signInPage(page, relay.base, relay.password);
+    const at = await buttonAt(page);
+    check(at != null, `${view.engine}: the console is painted and a press really reaches the talk button`, JSON.stringify(at));
+    if (at == null) { await context.close(); await browser.close(); continue; }
+    const mode = await page.evaluate(() => window.__voice.setTalkMode("push"));
+    check(mode === "push", `${view.engine}: press and hold is the mode under test`, String(mode));
+
+    // ---------------------------------------------------------------- 1. the release sends the words
+    const appendsBefore = stub.events.appendFrames;
+    await page.mouse.move(at.x, at.y);
+    await page.mouse.down();
+    await sleep(1200);
+    const spokeFrames = stub.events.appendFrames - appendsBefore;
+    // THE PRECONDITION THE WHOLE MEASUREMENT RESTS ON. The silence counted below can only be the
+    // release's own if the microphone was still producing sound at the moment of the release, so that
+    // is asserted rather than assumed -- it is what %noloop quietly broke on the first run of this leg.
+    const silentAtRelease = stub.events.trailingSilentFrames;
+    const releasedAt = Date.now();
+    await page.mouse.up();
+
+    let silent = silentAtRelease;
+    while (Date.now() - releasedAt < 4000) {
+      silent = stub.events.trailingSilentFrames;
+      if (silent >= 8) break;
+      await sleep(25);
+    }
+    const tookMs = Date.now() - releasedAt;
+    check(spokeFrames > 0, `${view.engine}: the hold itself reached the vendor`, `${spokeFrames} frame(s) of microphone in 1.2 s`);
+    check(silentAtRelease === 0, `${view.engine}: and it was still making sound at the moment of the release`, `${silentAtRelease} silent frame(s) standing at the end`);
+    check(silent >= 8 && tookMs <= 1000,
+      `${view.engine}: eight frames of silence reached the vendor within a second of the release`,
+      `${silent} frame(s) in ${tookMs} ms`);
+    const stats = await readStats(page);
+    check(stats?.tailFrames === 8, `${view.engine}: and the page says it sent eight and no more`, `tailFrames ${stats?.tailFrames}`);
+    await sleep(400);
+    check(stub.events.trailingSilentFrames === 8,
+      `${view.engine}: exactly the release's eight, with the words before them and nothing after`,
+      `${stub.events.trailingSilentFrames} silent frame(s) at the end of ${stub.events.appendFrames}`);
+    info(`${view.engine}: ${stub.events.appendFrames} frames at the vendor, ${stub.events.silentFrames} of them silent`);
+
+    // ------------------------------------------------------------------------------ 2. a tap
+    const tailBefore = (await readStats(page))?.tailFrames ?? 0;
+    const appendsBeforeTap = stub.events.appendFrames;
+    await sleep(1200);
+    await page.mouse.down();
+    await sleep(50);
+    await page.mouse.up();
+    await sleep(1600);
+    const afterTap = await readStats(page);
+    const tapLine = await readLine(page);
+    const tapFrames = stub.events.appendFrames - appendsBeforeTap;
+    const tapSaidSomething = tapLine.length > 0;
+    const tapWentOut = (afterTap?.tailFrames ?? 0) > tailBefore && tapFrames > 0;
+    check(tapWentOut || tapSaidSomething,
+      `${view.engine}: a tap either reaches the vendor with its silence or says something a person can act on`,
+      tapWentOut ? `${tapFrames} frame(s) at the vendor` : JSON.stringify(tapLine));
+    if (tapSaidSomething) check(!/^[A-Z_]+:/.test(tapLine), `${view.engine}: and what it says is plain words`, JSON.stringify(tapLine));
+
+    // ---------------------------------------------------- 3. a hold whose release never arrives
+    const ceiling = await page.evaluate(() => window.__voice._MAX_HOLD_MS);
+    await page.evaluate(() => window.__voice.stop());
+    await sleep(1500);
+    await page.mouse.move(at.x, at.y);
+    await page.mouse.down();
+    await sleep(1500);
+    const holding = await readStats(page);
+    check(holding?.held === true && holding?.talking === true, `${view.engine}: the hold is live and the microphone is open`, JSON.stringify({ held: holding?.held, talking: holding?.talking }));
+    // And the release never comes: a phone that backgrounds the tab mid-hold delivers no pointerup, no
+    // touchend, no pointercancel and no blur, and nothing but a release ever closed this microphone.
+    await sleep(ceiling + 2500 - 1500);
+    const ceiled = await readStats(page);
+    check(ceiled?.held === false && ceiled?.talking === false,
+      `${view.engine}: a hold whose release was lost cannot hold the microphone open past its ceiling`,
+      `${ceiling} ms, then held ${ceiled?.held} talking ${ceiled?.talking}`);
+    check((ceiled?.tailFrames ?? 0) > (holding?.tailFrames ?? 0),
+      `${view.engine}: and the words that were said still became a turn`,
+      `tailFrames ${holding?.tailFrames} to ${ceiled?.tailFrames}`);
+    await page.mouse.up();
+
+    // ------------------------------------------ 4. the three microphone refusals, read as sentences
+    await page.evaluate(() => window.__voice.stop());
+    await sleep(1200);
+    const sentences = [];
+    for (const refusal of [
+      { what: "the permission was refused", name: "NotAllowedError" },
+      { what: "there is no microphone on this device", name: "NotFoundError" },
+      { what: "this browser cannot record at all", name: "" },
+    ]) {
+      await page.evaluate((name) => {
+        Object.defineProperty(navigator, "mediaDevices", {
+          configurable: true,
+          value: name.length === 0 ? undefined : {
+            getUserMedia: async () => { const error = new Error("refused by the gate"); error.name = name; throw error; },
+            enumerateDevices: async () => [],
+          },
+        });
+      }, refusal.name);
+      // The sentence standing from the last refusal is older than the re-arm cooldown by now, so ONE
+      // press clears it and dials, which is the whole of the re-arm rule being used rather than stated.
+      await page.mouse.move(at.x, at.y);
+      await page.mouse.down();
+      await sleep(400);
+      await page.mouse.up();
+      let said = "";
+      for (let i = 0; i < 40 && said.length === 0; i += 1) { await sleep(100); said = await readLine(page); }
+      sentences.push(said);
+      check(said.length > 20, `${view.engine}: ${refusal.what} reads as a sentence`, JSON.stringify(said));
+      await sleep(1700);
+    }
+    check(new Set(sentences.filter((one) => one.length > 0)).size === 3,
+      `${view.engine}: three ways a microphone can refuse, three different sentences`,
+      JSON.stringify(sentences));
+    for (const said of sentences) {
+      for (const leak of ["xai", "openai", "grok", "websocket", "undefined", "null", "error"]) {
+        if (said.toLowerCase().includes(leak)) fail(`${view.engine}: a refusal sentence says ${leak}`, JSON.stringify(said));
+      }
+    }
+    // The app's wording for the one of the three that is a permission, off the shipped bundle itself.
+    const shellSaid = await page.evaluate(() => {
+      window.__titanbotShell = { platform: "ios", build: "gate", canOpenAppSettings: true };
+      const inApp = window.__voice._sentenceFor("no-microphone");
+      delete window.__titanbotShell;
+      return { inApp, inBrowser: window.__voice._sentenceFor("no-microphone") };
+    });
+    check(shellSaid.inApp !== shellSaid.inBrowser && /iPhone Settings/.test(shellSaid.inApp),
+      `${view.engine}: in the app that sentence names iPhone Settings instead of the browser`,
+      JSON.stringify(shellSaid.inApp));
+
+    check(errors.length === 0, `${view.engine}: the page threw nothing`, errors.slice(0, 2).join(" | ") || "clean");
+    await page.evaluate(() => window.__voice.stop()).catch(() => {});
+    await context.close();
+
+    // ------------------------------------------------ 5. the press after a refusal, on a second relay
+    step(`${view.engine}: the press after a refusal, against a relay that refuses 4001`);
+    const refusedView = { ...view, permissions: view.permissions };
+    const refusedContext = await browser.newContext({
+      userAgent: GATE_AGENT,
+      viewport: { width: view.width, height: view.height },
+      hasTouch: view.touch,
+      ...(refusedView.permissions ? { permissions: ["microphone"] } : {}),
+    });
+    if (view.fakeMic) await refusedContext.addInitScript(fakeWebkitMicrophone);
+    const refusedPage = await refusedContext.newPage();
+    await signInPage(refusedPage, refusing.base, refusing.password);
+    const refusedAt = await buttonAt(refusedPage);
+    check(refusedAt != null, `${view.engine}: the talk button is pressable on the refusing workspace`, JSON.stringify(refusedAt));
+    if (refusedAt != null) {
+      await refusedPage.evaluate(() => window.__voice.setTalkMode("push"));
+      const pressOnce = async (ms = 250) => {
+        await refusedPage.mouse.move(refusedAt.x, refusedAt.y);
+        await refusedPage.mouse.down();
+        await sleep(ms);
+        await refusedPage.mouse.up();
+      };
+      await pressOnce();
+      let refusal = "";
+      for (let i = 0; i < 60 && refusal.length === 0; i += 1) { await sleep(100); refusal = await readLine(refusedPage); }
+      check(refusal.length > 20, `${view.engine}: the first press reads one plain sentence`, JSON.stringify(refusal));
+
+      // The press straight after it CLEARS the sentence and does not dial back into the refusal: that
+      // is VOICE-6's loop, and a phone sends two events for one thumb.
+      await pressOnce(120);
+      await sleep(400);
+      const cleared = await readLine(refusedPage);
+      check(cleared.length === 0, `${view.engine}: the next press clears the sentence rather than dialling into it again`, JSON.stringify(cleared));
+
+      // AND THE PRESS AFTER THAT REALLY DIALS, with no reload: shipped, every press while a sentence
+      // had ever stood was eaten, so a person pressed twice for every start and read nothing about why.
+      await sleep(1000);
+      await pressOnce();
+      let again = "";
+      for (let i = 0; i < 60 && again.length === 0; i += 1) { await sleep(100); again = await readLine(refusedPage); }
+      check(again.length > 20, `${view.engine}: the press a second later dials, and the relay refuses it in words again`, JSON.stringify(again));
+      const kept = await refusedPage.evaluate(() => window.__gateNeverReloaded ?? "");
+      check(kept === "kept", `${view.engine}: and it re-armed on the page that was already open, with no reload`, JSON.stringify(kept));
+    }
+    await refusedContext.close();
+    await browser.close();
+    // One call per workspace at a time, and a closed socket has to settle before the next engine
+    // presses the button or it reads the already-in-a-call sentence.
+    await sleep(1500);
+  }
+  return;
+}
+
 // ---- run one leg ---------------------------------------------------------------------------------
 
 try {
@@ -2262,6 +2638,7 @@ try {
   else if (leg === "frames") await legFrames();
   else if (leg === "overlay") await legOverlay();
   else if (leg === "person") await legPerson();
+  else if (leg === "release") await legRelease();
 } catch (error) {
   failures += 1;
   console.log(`\n  FAIL  the leg threw: ${String(error?.stack ?? error).split("\n").slice(0, 4).join(" | ")}`);

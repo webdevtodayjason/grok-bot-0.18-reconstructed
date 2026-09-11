@@ -562,6 +562,7 @@ timeout 300 node scripts/verify-voice.mjs --leg refused    # a vendor that says 
 timeout 300 node scripts/verify-voice.mjs --leg browser   # real Chrome, a WAV as the microphone
 timeout 300 node scripts/verify-voice.mjs --leg frames    # the words, labelled, at both viewports
 timeout 300 node scripts/verify-voice.mjs --leg overlay   # the panel and the two talk modes, two sizes
+timeout 300 node scripts/verify-voice.mjs --leg release   # the release, in two engines, counted at the vendor
 node --test tests/voice-transcription.test.mjs           # the words at the socket, including the
                                                         # turns that never become a line
 ```
@@ -798,7 +799,8 @@ second in section 8. Nothing here weakens that, and the panel cannot open while 
 — if that gate ever slipped, the panel would draw his own words coming back through your speakers as
 though you had said them.
 
-**The release does not itself end the turn; the silence after it does.** The service's own turn
+**The release does not itself end the turn; the silence after it does, and since VOICE-11 the release
+sends that silence.** See the section below, which is the whole of it. The service's own turn
 detection is what decides an utterance is over, about seven tenths of a second after you stop making
 noise, in both modes. The vendors document a tighter way — turn detection switched off and a manual
 commit on release — and it is refused here, because it needs the session frame rewritten per mode and
@@ -807,6 +809,100 @@ it re-bills the whole conversation every turn on one of the two services (sectio
 
 **Changing the mode ends the call you are in.** A live microphone whose control has just changed
 meaning underneath you is a state nobody on screen can account for.
+
+### What the release does, and what it used to do (VOICE-11)
+
+**It used to do nothing.** Letting go shut the microphone and put not one byte on the wire, and the
+only thing that ends a turn is the service's own turn detection — which is configured to call a turn
+over after seven tenths of a second of silence, and which fires on **audio that keeps arriving**,
+never on a wire that went quiet. So the words were said and nobody ever told the service the person
+had stopped saying them.
+
+**Measured on grok-bot-local-vm in Chromium and WebKit at 1440x900 and 390x844, before the fix:** a
+900 ms hold and a release put **0 bytes and 0 JSON on the wire for the next 1.5 seconds**, while 15
+captured frames were dropped by the page's own mute. At the 1.8 second dial `console.titanium.bot`
+really has, a **tap** was worse: zero frames reached anybody and a whole line was opened anyway, and
+it then sat there for its idle minute with nothing said into it.
+
+**What it does now.** The release sends the silence a person really makes when they stop talking:
+**eight 100 ms frames of zeroes, paced one per 100 ms**, which is 800 ms of quiet against the
+service's 700 ms window. They go down the same door the microphone's own frames go down, so at a line
+that is still opening they queue behind the words and arrive after them rather than ending a turn
+that has not started. A new hold, a hang-up or a dropped line cancels whatever is left of one.
+
+**A tap is not a hold.** A release before the first frame has gone keeps the microphone open until one
+has gone or 300 ms have passed, whichever comes first. If nothing ever went, the line reads **"Hold
+the button while you talk."** and no silence is sent, because there is nothing for it to end.
+
+**A hold whose release never arrives closes itself after thirty seconds.** Six things end a hold and a
+phone that backgrounds the tab mid-press delivers none of them; before this, nothing but a release
+ever closed that microphone. Thirty seconds is already far longer than one utterance, so past it the
+likely truth is a release that was lost. It ends the hold the ordinary way, so the words that were
+said still become a turn and the line stays warm for the next press.
+
+**And the press after a refusal now re-arms.** A sentence on screen makes the first press a "clear it"
+press, which is the loop VOICE-6 was filed for; that was unconditional, so every start while a
+sentence was up cost two presses with nothing on screen to say the first had been spent. A sentence
+younger than a second and a half is still only cleared — that is what keeps the second event of one
+thumb, and a reflex re-press, out of a refusal that has not changed. Older than that, one press clears
+it and dials.
+
+#### What the tail costs
+
+| per hold | |
+|---|---|
+| frames | **8** |
+| bytes | **38.4 KB** (8 × 4,800) |
+| audio on the ledger | **0.8 s** |
+
+The caps count wall seconds and the vendor bills audio seconds, so the 0.8 s is what the ledger sees:
+**0.011% of a 7,200 second day per hold**, and about a tenth of a penny at the flat per-minute rate in
+section 7. It is the price of a turn ever ending.
+
+#### What was measured, and where
+
+**MEASURED on MacBook-Pro.local (darwin arm64) 2026-09-11, `verify-voice --leg release`: 45 of 45,**
+in real Chromium at 1440x900 and real WebKit at 390x844 with touch, against a relay on loopback and a
+stub vendor, run once at the merged tip.
+
+| | Chromium 1440x900 | WebKit 390x844 |
+|---|---|---|
+| the hold's own frames at the vendor | 11 in 1.2 s | 11 in 1.2 s |
+| silence standing at the moment of the release | 0 | 0 |
+| the release's frames at the vendor | **8, in 725 ms** | **8, in 727 ms** |
+| what the page says it sent | `tailFrames` 8 | `tailFrames` 8 |
+| silent frames at the end of the stream | 8 of 19 | 8 of 323 |
+| a hold with no release | closed at 30,000 ms | closed at 30,000 ms |
+
+**The eight frames are counted at the stub vendor, not on the page.** The page's own `tailFrames` is
+asserted beside them, but a number a page reports about itself is not evidence that anything left it:
+the stub counts all-zero `input_audio_buffer.append` frames arriving at the end of the stream, and the
+leg asserts first that the microphone was still making sound at the moment of the release, so what
+follows it can only be the release's own. The first run of that leg proved why: with a three second
+microphone file that had run out, four frames of silence had already reached the vendor before the
+release and the tail could not be told from the room.
+
+**Two engines, and that is the point rather than a nicety.** The same root cause is why voice does
+nothing in the iPhone app, which is a web view over `console.titanium.bot`: WebKit births an audio
+context **suspended** and only a person's own press resumes one, and the press is spent by the first
+`await` in the handler. The capture context is made and resumed inside the press now, before the
+microphone is asked for, with nothing awaited above that ask. What the shell still has to do for
+itself — the permission, the audio session, the origin, and the one line it injects — is
+`docs/APPS.md` § 8b.
+
+**The three ways a microphone can refuse now read three different sentences.** One sentence used to
+serve all of them, and it told a device with no microphone at all to allow one:
+
+- refused permission: **"This page has not been given the microphone yet. Allow it in your browser and press Talk again."**
+- no device: **"No microphone was found on this device. Connect one and press Talk again."**
+- a browser that cannot record: **"This browser cannot record sound, so there is no way to talk to your team in it."**
+
+In the app the first of those names the app's own permission instead — **"This app has not been given
+the microphone yet. Allow it in iPhone Settings and press Talk again."** — and it is the shell saying
+which host it is, on `window.__titanbotShell`, never a user agent being sniffed. There is a fourth for
+a microphone that opened and produces nothing at all, which is a live button over a dead device and
+the worst of the four because nothing on screen looks wrong: **"The microphone is open but no sound is
+reaching this page. Pick a different one in Settings and press Talk again."**
 
 ### The space bar, and what it is not allowed to interrupt
 

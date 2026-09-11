@@ -106,6 +106,17 @@ export async function startStubRealtime({
     /** input_audio_buffer.append frames and their decoded byte count. */
     appendFrames: 0,
     appendBytes: 0,
+    /**
+     * NEW FIELDS, ADDED FOR VOICE-11 AND NEVER CHANGED (the frozen-contract rule at the top).
+     *
+     * A real service's turn detection ends a turn on SILENCE THAT KEEPS ARRIVING, so the console
+     * sends eight zero-filled frames after a release. `silentFrames` is every all-zero append this
+     * stub has seen; `trailingSilentFrames` is how many of them are at the END of the stream, reset
+     * by the next append that carries sound. A gate asserting "the release reached the vendor" reads
+     * the second one, because the first cannot tell a tail from a quiet room.
+     */
+    silentFrames: 0,
+    trailingSilentFrames: 0,
     /** conversation.item.create that are NOT a function_call_output. On xAI each of these is a
      *  billed text event, which is why the bridge sends Titan's reply back as a tool output. */
     billableItems: 0,
@@ -184,8 +195,17 @@ export async function startStubRealtime({
         return;
       }
       if (type === "input_audio_buffer.append") {
+        const bytes = Buffer.from(String(event.audio ?? ""), "base64");
         events.appendFrames += 1;
-        events.appendBytes += Buffer.from(String(event.audio ?? ""), "base64").byteLength;
+        events.appendBytes += bytes.byteLength;
+        // Every byte zero is the silence a release sends. A frame of real room tone is not: the
+        // console's own capture writes what the microphone gave it, sample for sample.
+        if (bytes.byteLength > 0 && bytes.every((byte) => byte === 0)) {
+          events.silentFrames += 1;
+          events.trailingSilentFrames += 1;
+        } else {
+          events.trailingSilentFrames = 0;
+        }
         notify();
         return;
       }

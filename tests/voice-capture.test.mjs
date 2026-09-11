@@ -258,7 +258,10 @@ test("VOICE-1 capture: a MediaStream source is accepted whole, so a meeting need
   // APART from heldFrames, which is the echo gate's own number and the proof that the agent never
   // hears himself. One counter for both would make that proof unreadable the moment anybody used the
   // default mode.
-  assert.deepEqual(Object.keys(capture.stats).sort(), ["bytes", "heldFrames", "heldMs", "mutedFrames", "sent"]);
+  // `blocks` is VOICE-11's, and it is asked before any gate: it is the only honest answer to "is this
+  // microphone producing anything at all", which is what a phone that hands over a device and then
+  // never feeds it looks like from here.
+  assert.deepEqual(Object.keys(capture.stats).sort(), ["blocks", "bytes", "heldFrames", "heldMs", "mutedFrames", "sent"]);
   assert.equal(typeof capture.stop, "function");
 });
 

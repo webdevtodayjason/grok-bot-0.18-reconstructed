@@ -887,6 +887,71 @@ honest about what was and was not proved.
 
 ---
 
+## 8b. What the shell must give voice (VOICE-11)
+
+Voice does nothing in the iPhone app today, and one root cause covers most of it: a `WKWebView` is
+WebKit, and WebKit births an `AudioContext` **suspended**. Since VOICE-11 the console makes and
+resumes its capture context synchronously inside the press, before it asks for the microphone
+(`ui/machine-room/voice.js:406-408`, with the ask at `:414`) — there is no `await` above that ask,
+because the user gesture is spent by the first one and iOS will not resume the context afterwards.
+That is the page's half. These five are the shell's, and none of them can be done from inside the
+page.
+
+**1. Keep the remote origin.** Load `https://console.titanium.bot` in the web view. Do not serve the
+console from a local bundle, a `file://` URL or a custom scheme: the voice socket is admitted only
+when the `Origin` host equals the request host (`ui/voice-edge.mjs:377-387`, `originAllowed`), and a
+page served from anywhere else is refused in words — "That came from a page this console does not
+serve, so I did not open the microphone." (`ui/voice-edge.mjs:1480`). The refusal is correct and the
+shell cannot argue with it.
+
+**2. Grant the capture permission in `WKUIDelegate`.** Implement
+`webView(_:requestMediaCapturePermissionFor:initiatedByFrame:type:decisionHandler:)` and answer
+`.grant` for `.microphone`. Without it `getUserMedia` (`ui/machine-room/voice.js:414`) rejects with
+`NotAllowedError` and the person reads the permission sentence forever, because the app has no
+browser address bar to allow it in. Add `NSMicrophoneUsageDescription` to the app's Info.plist in the
+same pass; a missing one is a launch-time crash, not a refusal.
+
+**3. Inject `window.__titanbotShell` before first paint**, with
+`WKUserScript(source:injectionTime: .atDocumentStart, forMainFrameOnly: false)`:
+
+```js
+window.__titanbotShell = { platform: "ios", build: "1.4.2", canOpenAppSettings: true };
+```
+
+`canOpenAppSettings` is true only when the shell really can open
+`UIApplication.openSettingsURLString`. The console reads it at `ui/machine-room/voice.js:262-266` and
+nowhere else, and it changes exactly one sentence: the denied-microphone line names **iPhone
+Settings** instead of the browser. Nothing sniffs a user agent — which host this is, is a thing the
+host says.
+
+**4. Configure the audio session for both directions.** `AVAudioSession` category `.playAndRecord`
+with options `[.defaultToSpeaker, .allowBluetooth]`, mode `.voiceChat`, activated before the first
+press and deactivated when the call ends. Set `allowsInlineMediaPlayback = true` and
+`mediaTypesRequiringUserActionForPlayback = []` on the `WKWebViewConfiguration`, or the reply plays
+nowhere: playback is Web Audio scheduled off the socket (`ui/machine-room/voice.js:525`), not an
+`<audio>` element a tap can start. Without `.defaultToSpeaker` the reply comes out of the earpiece at
+a volume people report as "it didn't work".
+
+**5. End the call when the app leaves the foreground.** The page already closes on
+`visibilitychange`, `pagehide` and `beforeunload`, and the hold has a thirty second ceiling behind
+that (`ui/machine-room/voice.js:226`) — but a shell that suspends the web view without firing those
+should call `window.__voice.stop()` from `sceneWillResignActive`.
+
+### What the simulator pass looks for
+
+Run it on a real device as well; the simulator has no microphone worth the name. In order, and each
+one is a thing a person does:
+
+| | what a pass looks like |
+|---|---|
+| First press | the permission sheet appears **once**, on the first press only, and never again on later presses of the same install |
+| A 1.2 s hold | the words become a chat line in the conversation within the turn window, and the reply is audible **on the speaker** |
+| A tap | one plain sentence, "Hold the button while you talk.", and no line is opened |
+| After a refusal | the press that clears the sentence, then a press a second later that really dials — with no reload and no app restart |
+| Backgrounding mid-hold | the line closes; coming back to the foreground shows a button that is not drawn as held |
+
+---
+
 ## 9. What the shells do NOT get, and why
 
 | | |

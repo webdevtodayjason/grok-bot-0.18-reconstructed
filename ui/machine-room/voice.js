@@ -85,6 +85,23 @@
     "session-cap": "That call reached its length limit. Press Talk to start another one.",
     "box-not-running": "Your agent's computer is not running, so there is nobody to talk to yet. Start it and press Talk again.",
     "line-dropped": "The line dropped. Press Talk to start again.",
+    // VOICE-11. THE MICROPHONE REFUSES IN THREE DIFFERENT WAYS and shipped they all read the one
+    // sentence above -- so a device with no microphone at all was told to allow one, which is advice
+    // that cannot be taken. Denied is the sentence above; these two are the other two, and the browser
+    // tells them apart by the name it puts on the error it throws.
+    "no-microphone-device": "No microphone was found on this device. Connect one and press Talk again.",
+    "no-recording": "This browser cannot record sound, so there is no way to talk to your team in it.",
+    "no-sound": "The microphone is open but no sound is reaching this page. Pick a different one in Settings and press Talk again.",
+    // A tap, on a control whose whole instruction is to hold it.
+    "hold-to-talk": "Hold the button while you talk.",
+  };
+  // THE SAME CONDITION, IN AN APP RATHER THAN A BROWSER. The iPhone shell is a web view over
+  // console.titanium.bot, so "allow it in your browser" is advice nobody can follow there: the
+  // permission belongs to the app and is granted in iPhone Settings. The shell says so about itself --
+  // window.__titanbotShell, injected before first paint, docs/APPS.md -- and NOTHING here reads a user
+  // agent, which would be a guess about a browser rather than a fact about a host.
+  const SHELL_NOTES = {
+    "no-microphone": "This app has not been given the microphone yet. Allow it in iPhone Settings and press Talk again.",
   };
   // The one note that leads somewhere. There is no Voice card any more -- a key is the operator's and
   // lives in the admin console -- so this opens the workspace's own settings at the Talking row.
@@ -172,6 +189,61 @@
   // not audio, so a line left up after somebody walked away spends a workspace's day: thirty minutes
   // of a hundred and twenty minute allowance for one forgotten press. So it closes itself.
   const PUSH_IDLE_CLOSE_MS = 60_000;
+
+  // ------------------------------------------------- VOICE-11: the release has to send something
+  //
+  // THE RELEASE USED TO SEND NOTHING AT ALL. holdEnd shut the microphone and that was the whole of
+  // it, and the only thing that ends a turn is the service's own turn detection -- which the relay
+  // configures with silence_duration_ms 700 (ui/voice-edge.mjs, TURN_DETECTION) and which fires on
+  // AUDIO THAT KEEPS ARRIVING, never on a wire that went quiet. MEASURED on grok-bot-local-vm in
+  // Chromium and WebKit at 1440x900 and 390x844: a 900 ms hold and a release put 0 bytes and 0 JSON
+  // on the wire for the next 1.5 s while 15 captured frames were dropped by muted(). The words were
+  // said and nobody was ever told the person had stopped saying them.
+  //
+  // So the release sends the silence a person really makes when they stop talking: eight 100 ms
+  // frames of zeroes, paced one per 100 ms the way real capture paces them, which is 800 ms of quiet
+  // against the relay's 700 ms window. It is NOT input_audio_buffer.commit -- both vendors document
+  // that and this bridge refuses it for the reason docs/VOICE.md 13 already gives: a manual commit
+  // needs turn detection switched OFF in the session frame, and that frame is written exactly once
+  // and byte-identically for the life of the socket.
+  const RELEASE_TAIL_MS = 800;
+  // 100 ms, which is what FRAME_BYTES is at SAMPLE_RATE. Derived rather than repeated, so a change to
+  // the frame cannot leave the pacing behind.
+  const FRAME_MS = (FRAME_BYTES / 2 / SAMPLE_RATE) * 1000;
+  const TAIL_FRAMES = Math.ceil(RELEASE_TAIL_MS / FRAME_MS);
+  // A TAP IS NOT A HOLD. At the 1800 ms dial console.titanium.bot really has, a tap sent zero frames
+  // and still opened a line, which then sat there for the idle minute with nothing said into it. So a
+  // release before the first frame has gone keeps the microphone open until one has gone or until
+  // this long has passed -- three frames' worth, so a hold that produced sound is never cut short and
+  // one that produced none is never dialled into silence.
+  const MIN_HOLD_MS = 300;
+  // A HOLD WHOSE RELEASE NEVER ARRIVES. pointerup, touchend, pointercancel, blur and the space bar's
+  // keyup all end one, and a phone that backgrounds the tab mid-hold delivers none of them. Nothing
+  // but a release ever closed the microphone, so the ceiling is here. Thirty seconds is already far
+  // longer than one utterance -- the turn ends seven tenths of a second after a person stops making
+  // noise -- so past it the likely truth is a release that was lost, not somebody still talking. It
+  // ends the hold the ordinary way, so the words that were said still go.
+  const MAX_HOLD_MS = 30_000;
+  // HOW LONG A REFUSAL EATS THE NEXT PRESS. A sentence on screen makes the first press a "clear it"
+  // press, which is VOICE-6's loop being prevented; shipped, that was unconditional, so every start
+  // while a sentence was up cost two presses and there was nothing on screen to say why the first did
+  // nothing. Now the press that clears a FRESH refusal only clears, and a press this long after it
+  // clears AND dials -- long enough that the second event of one gesture cannot dial back into the
+  // refusal it just cleared, short enough that somebody who read the sentence and pressed again
+  // gets a line.
+  const REARM_COOLDOWN_MS = 1500;
+  // ONE GESTURE'S EVENTS ARRIVE INSIDE THIS WINDOW: a phone sends pointerdown AND touchstart for one
+  // thumb, microseconds apart. Two things read it -- a press that spent itself clearing a sentence,
+  // and a talkDown that arrives while a hold is already live. Past it, a second press is a NEW press
+  // whose predecessor's release was lost. Neither had any expiry when this shipped: a lost release
+  // left the spent flag true and ate every press after it for the life of the page.
+  const GESTURE_MS = 400;
+  // A MICROPHONE THAT OPENED AND PRODUCES NOTHING. The worklet posts a block every 128 samples once
+  // the graph is running, so a second of no block at all means the graph is not running -- a context
+  // a phone never resumed, or a device that was handed over and then never fed. A live button over
+  // that is the worst of the microphone conditions, because nothing on screen looks wrong.
+  const SOUND_WATCH_MS = 1000;
+
   // Frames captured before the socket finished opening. Push to talk starts capturing on the press and
   // the dial is not instant, so without this the first words of the first hold are lost every time.
   // Bounded at two seconds, because the relay drops audio more than three seconds ahead of its own
@@ -185,8 +257,26 @@
   // route has answered. docs/VOICE.md 13 says which half is which.
   const TALK_MODE_KEY = "titanbot.voice.talkMode";
 
-  const sentenceFor = (condition) => NOTES[condition] ?? NOTES["line-dropped"];
+  // What the page is running inside, as the host itself declares it. Absent in every browser, which is
+  // why every read of it is a `=== true` rather than a truthiness test.
+  const shellHost = () => global.__titanbotShell ?? null;
+  const shellOpensSettings = () => shellHost()?.canOpenAppSettings === true;
+  const sentenceFor = (condition) =>
+    (shellOpensSettings() ? SHELL_NOTES[condition] : null) ?? NOTES[condition] ?? NOTES["line-dropped"];
   const orbStateFor = (value) => (ORB_STATES.includes(String(value)) ? String(value) : null);
+
+  // VOICE-11. WHICH OF THE THREE THE BROWSER ACTUALLY SAID. The names are the ones both engines throw:
+  // a refused permission is NotAllowedError (SecurityError on a page served insecurely), no device at
+  // all is NotFoundError (OverconstrainedError when a remembered device is gone), and a browser with
+  // no mediaDevices and no AudioWorklet cannot record at all and says so before it asks for anything.
+  // Anything else -- most often a device another application is holding -- keeps the shipped sentence,
+  // which is the honest one for a cause this page cannot name.
+  function micConditionFor(error) {
+    if (error?.cannotRecord === true) return "no-recording";
+    const name = String(error?.name ?? "");
+    if (name === "NotFoundError" || name === "OverconstrainedError") return "no-microphone-device";
+    return "no-microphone";
+  }
 
   // ------------------------------------------------------------------ the echo gate
   //
@@ -264,6 +354,14 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   // echoCancellation / noiseSuppression / autoGainControl are all off. Chromium's own switch list
   // warns that the fake-audio file is mangled by audio processing, so the gate's WAV would arrive
   // unusable otherwise -- and on a real microphone the gate above is the defence, not the browser's.
+  // A browser that cannot record at all, marked as such rather than guessed at by its message. The
+  // classifier above reads the mark; nothing reads the string, which is for a developer's console.
+  function cannotRecord(message) {
+    const error = new Error(message);
+    error.cannotRecord = true;
+    return error;
+  }
+
   async function captureAudio(options = {}) {
     const sampleRate = options.sampleRate ?? SAMPLE_RATE;
     const frameBytes = options.frameBytes ?? FRAME_BYTES;
@@ -281,36 +379,65 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     const AudioContextClass = audio.AudioContext ?? global.AudioContext ?? global.webkitAudioContext;
     const AudioWorkletNodeClass = audio.AudioWorkletNode ?? global.AudioWorkletNode;
     const getUserMedia = audio.getUserMedia
-      ?? ((constraints) => global.navigator.mediaDevices.getUserMedia(constraints));
+      ?? ((constraints) => {
+        // A browser with no mediaDevices at all throws a TypeError on the property read, which reads
+        // as a bug in this file rather than as a browser that cannot record. It says so instead.
+        const devices = global.navigator?.mediaDevices;
+        if (devices?.getUserMedia == null) throw cannotRecord("this browser cannot open a microphone");
+        return devices.getUserMedia(constraints);
+      });
     const moduleUrl = audio.workletUrl ?? null;
     const now = audio.now ?? (() => Date.now());
     if (AudioContextClass == null || AudioWorkletNodeClass == null) {
-      throw new Error("this browser has no audio worklet");
+      throw cannotRecord("this browser has no audio worklet");
     }
 
     // deviceId is added ONLY when Settings holds one, so a workspace that never opened the row asks
     // for exactly what it always asked for and `exact` can never refuse a microphone nobody chose.
     const deviceId = String(options.deviceId ?? "").trim();
-    const stream = source === "microphone"
-      ? await getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-        },
-        video: false,
-      })
-      : source;
 
+    // VOICE-11. THE CONTEXT IS BORN AND RESUMED BEFORE THE MICROPHONE IS ASKED FOR, and there is no
+    // `await` of any kind between the press and that ask. WebKit births an AudioContext SUSPENDED and
+    // only a user gesture resumes one; the gesture is spent by the first await in the handler, so a
+    // context created AFTER `await getUserMedia` -- which is what shipped -- stays suspended on a
+    // phone, the worklet never runs, and the page draws a live button over a microphone that produces
+    // nothing. The playback half of this file has resumed its own context since VOICE-1 and the
+    // capture half never did. resume() is deliberately not awaited, for the same reason.
     const context = new AudioContextClass({ sampleRate });
+    if (context.state === "suspended") {
+      try { context.resume?.(); } catch { /* a context that will not resume is the sound watchdog's */ }
+    }
+
+    let stream = null;
+    try {
+      stream = source === "microphone"
+        ? await getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+          },
+          video: false,
+        })
+        : source;
+    } catch (error) {
+      // The context is made first now, so it has to be given back first: one suspended context per
+      // refused press is a leak somebody pays for in battery.
+      try { context.close?.(); } catch { /* already closed */ }
+      throw error;
+    }
+
     const url = moduleUrl ?? blobUrlFor(WORKLET_SOURCE);
     await context.audioWorklet.addModule(url);
     const node = new AudioWorkletNodeClass(context, "voice-capture");
     const input = context.createMediaStreamSource(stream);
     input.connect(node);
 
-    const stats = { sent: 0, heldFrames: 0, heldMs: 0, mutedFrames: 0, bytes: 0 };
+    // `blocks` is every block the worklet posted, counted BEFORE any gate, because the one question it
+    // answers is whether the audio graph is running at all. A block that is muted or held is still a
+    // microphone that works.
+    const stats = { sent: 0, heldFrames: 0, heldMs: 0, mutedFrames: 0, bytes: 0, blocks: 0 };
     let pending = new Float32Array(0);
     let stopped = false;
 
@@ -318,6 +445,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       if (stopped) return;
       const block = event.data;
       if (block == null || block.length === 0) return;
+      stats.blocks += 1;
       const joined = new Float32Array(pending.length + block.length);
       joined.set(pending, 0);
       joined.set(block, pending.length);
@@ -524,6 +652,14 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     held: false,
     /** Whether the microphone may send at all. False in push to talk between holds. */
     talking: false,
+    /**
+     * VOICE-11. The one door audio leaves by, published here so the release can use the SAME one the
+     * capture uses -- the queue it flushes, the socket it checks, the order it keeps. A tail sent down
+     * a socket read straight off `state` would jump the frames still waiting for the line to open.
+     */
+    sendAudio: null,
+    /** Zero-filled frames sent after a release, counted apart from the microphone's own. */
+    tailFrames: 0,
   };
 
   function adapter() { return global.__machineRoomAdapter ?? null; }
@@ -543,8 +679,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     paint();
   }
 
+  // `at` is when this sentence went up, and the press that clears it reads it: a refusal a person has
+  // had time to read is not a reason to eat their next press (VOICE-11, REARM_COOLDOWN_MS).
   function note(condition, text, fromRelay = false) {
-    state.notes = [{ condition, text, fromRelay }];
+    state.notes = [{ condition, text, fromRelay, at: clockNow() }];
     paint();
   }
 
@@ -561,7 +699,8 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // open; this page only knows about its own microphone, and that is the lesser fact once the line
     // was already refused.
     if (state.notes[0].fromRelay && !fromRelay) return true;
-    state.notes = [{ condition, text: state.notes[0].text, fromRelay: state.notes[0].fromRelay }];
+    // The row is the same row, so it keeps the time it went up: a retitle is not a fresh refusal.
+    state.notes = [{ condition, text: state.notes[0].text, fromRelay: state.notes[0].fromRelay, at: state.notes[0].at ?? clockNow() }];
     paint();
     return true;
   }
@@ -900,6 +1039,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     orb("thinking");
     state.gate = echoGate({ sampleRate: SAMPLE_RATE });
     state.sound = player({ gate: state.gate });
+    state.tailFrames = 0;
 
     // The queue is bounded at two seconds. The relay drops audio more than three seconds ahead of its
     // own wall clock and counts it as a held frame, so a queue that grew without a ceiling would arrive
@@ -920,6 +1060,9 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       pending.push(buffer);
       while (pending.length > PENDING_FRAME_CAP) pending.shift();
     };
+    // VOICE-11. The release sends through this same door, so its silence queues behind whatever the
+    // hold captured before the line was up and arrives in the order it was made.
+    state.sendAudio = sendFrame;
     const beginCapture = () => captureAudio({
       source: "microphone",
       deviceId: state.micDeviceId,
@@ -929,12 +1072,17 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       // Push to talk between holds. In always listening nothing is ever muted this way and the echo
       // gate is the only thing that drops a frame.
       muted: () => !state.talking,
-      onChunk: sendFrame,
+      onChunk: (buffer) => {
+        sendFrame(buffer);
+        // The tap window below closes on the FIRST frame rather than on its timer, so a hold that was
+        // only just long enough pays nothing at all for the rule that catches a tap.
+        if (graceOpen()) finishHold();
+      },
     });
 
     if (captureFirst) {
-      try { state.capture = await beginCapture(); }
-      catch { stop("no-microphone"); return; }
+      try { state.capture = await beginCapture(); watchForSound(); }
+      catch (error) { stop(micConditionFor(error)); return; }
     }
     try {
       await openSocket();
@@ -955,8 +1103,8 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       for (const one of queued) { try { state.socket?.send(one); } catch { /* the close handler has it */ } }
     }
     if (!captureFirst) {
-      try { state.capture = await beginCapture(); }
-      catch { stop("no-microphone"); return; }
+      try { state.capture = await beginCapture(); watchForSound(); }
+      catch (error) { stop(micConditionFor(error)); return; }
     }
     reportHeld();
   }
@@ -983,6 +1131,14 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   function stop(condition, text) {
     clearDismiss();
     if (heldTimer != null) { global.clearInterval(heldTimer); heldTimer = null; }
+    // VOICE-11. Everything this wave arms comes down here, and BEFORE the socket goes: a tail still
+    // being paced onto a closing line, a tap window still waiting for a frame that will never come,
+    // and a hold ceiling for a hold that is over.
+    cancelTail();
+    clearGrace();
+    clearMaxHold();
+    clearSoundWatch();
+    state.sendAudio = null;
     send({ t: "stop" });
     try { state.capture?.stop(); } catch { /* already stopped */ }
     state.capture = null;
@@ -1056,21 +1212,55 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   // prevent, reappearing through the second event of the same gesture. The desktop mouse path, which
   // fires only pointerdown, was correct. So the gesture remembers that it has already been spent, and
   // the next release clears it.
-  let pressSpent = false;
-  function pressDone() { pressSpent = false; }
+  //
+  // VOICE-11 GAVE BOTH OF THESE AN EXPIRY. A gesture whose release never arrived left `pressSpent`
+  // true for the life of the page and ate every press after it, and a hold whose release never
+  // arrived made every later press a no-op because `state.held` was still true. Time is what tells
+  // the second event of ONE gesture from a NEW press: the first pair arrive microseconds apart.
+  let pressSpentAt = 0;
+  let heldAtMs = 0;
+  /** What the capture had sent when this hold began, so "did this hold say anything" is a subtraction. */
+  let holdSentBase = 0;
+  const pressIsSpent = () => pressSpentAt > 0 && clockNow() - pressSpentAt < GESTURE_MS;
+  const framesThisHold = () => Math.max(0, (state.capture?.stats.sent ?? 0) - holdSentBase);
+  function pressDone() { pressSpentAt = 0; }
 
   // Push to talk. The first hold opens the line; later holds are instant because it is still up.
   async function holdStart() {
-    if (state.held || pressSpent) return;
+    if (state.held) {
+      // Two events of ONE gesture land in the same few milliseconds, and the second must never end the
+      // first. A press this long after the hold began is a NEW press whose predecessor's release was
+      // lost, so that hold is ended properly -- tail and all -- rather than left open underneath it.
+      if (clockNow() - heldAtMs < GESTURE_MS) return;
+      holdEnd();
+    }
+    if (pressIsSpent()) return;
     // A NOTE ON SCREEN IS THE MODE, which is the same rule the toggle keeps and for the same reason.
     // While a refusal is standing the first press CLEARS it rather than dialling into the refusal
     // again; without this, holding the button on a workspace with talking switched off redials every
     // time and there is no way out of it. That loop is what Jason was stuck in: "you can't exit out of
-    // this talk mode" (VOICE-6). The press after this one opens a line normally.
-    if (!state.on && state.notes.length > 0) { pressSpent = true; clearNotes(); return; }
+    // this talk mode" (VOICE-6).
+    //
+    // VOICE-11: only while the refusal is FRESH. Shipped, that press never dialled however old the
+    // sentence was, so after a refusal -- or a dropped line -- every start cost two presses, with
+    // nothing on screen to say the first had been spent. A sentence the person has had time to read is
+    // cleared AND dialled by one press; a sentence younger than the cooldown is only cleared, which is
+    // what keeps the second event of one gesture, and a reflex re-press, out of the same refusal.
+    if (!state.on && state.notes.length > 0) {
+      const standing = state.notes[0];
+      const fresh = clockNow() - Number(standing?.at ?? 0) < REARM_COOLDOWN_MS;
+      pressSpentAt = clockNow();
+      clearNotes();
+      if (fresh) return;
+    }
     state.held = true;
+    heldAtMs = clockNow();
+    holdSentBase = state.capture?.stats.sent ?? 0;
     state.talking = true;
+    clearGrace();
+    cancelTail();
     clearIdleClose();
+    armMaxHold();
     paint();
     if (state.on) return;
     await start({ captureFirst: true });
@@ -1079,15 +1269,111 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   function holdEnd() {
     if (!state.held) return;
     state.held = false;
-    // The microphone closes on the release. The TURN then ends the way it ends in the other mode: the
-    // provider's own turn detection notices the silence. We do NOT send the provider's manual commit,
-    // because that needs turn detection switched off in the session frame, and this bridge writes that
-    // frame exactly once and byte-identically for the life of the socket -- rewriting it re-bills the
-    // whole conversation on one of the two services. docs/VOICE.md says so rather than claiming
-    // otherwise.
+    clearMaxHold();
+    // A RELEASE BEFORE THE FIRST FRAME HAS GONE IS A TAP, and a tap used to shut the microphone having
+    // sent nothing at all -- at the 1800 ms dial console.titanium.bot has, a tap opened a whole line
+    // and said nothing into it. So the microphone stays open until one frame has gone or MIN_HOLD_MS
+    // has passed, whichever comes first, and `talking` stays true through that window because it is
+    // what lets a frame go at all. The button is repainted at once: the hold really is over.
+    if (state.talking && framesThisHold() === 0) {
+      paint();
+      openGrace();
+      return;
+    }
+    finishHold();
+  }
+
+  // The end of a hold, by whichever of the three roads got here: an ordinary release, the tap window
+  // expiring, or the first frame arriving inside it.
+  function finishHold() {
+    clearGrace();
     state.talking = false;
+    // The TURN ends the way it ends in the other mode: the provider's own turn detection notices the
+    // silence. We do NOT send the provider's manual commit, because that needs turn detection switched
+    // off in the session frame, and this bridge writes that frame exactly once and byte-identically
+    // for the life of the socket -- rewriting it re-bills the whole conversation on one of the two
+    // services. What VOICE-11 changed is that the silence is now SENT: turn detection fires on audio
+    // that keeps arriving, and a wire that simply stopped is not silence to it.
+    if (framesThisHold() > 0) sendReleaseTail();
+    else { note("hold-to-talk"); armDismiss(); }
     paint();
     armIdleClose();
+  }
+
+  // ------------------------------------------------------------- VOICE-11: the tail, and the tap
+  let tailTimer = null;
+  let tailLeft = 0;
+  function cancelTail() {
+    if (tailTimer != null) { global.clearTimeout(tailTimer); tailTimer = null; }
+    tailLeft = 0;
+  }
+
+  /**
+   * Eight 100 ms frames of zeroes after a release, down the same door the capture uses.
+   *
+   * PACED, NEVER BURST. The relay drops audio more than three seconds ahead of its own wall clock and
+   * counts what it dropped as a held frame, and 800 ms of silence arriving in one packet is not a
+   * person falling quiet to a service's turn detection either. One frame goes at once, because the
+   * release is the moment the person stopped, and the other seven follow a frame apart.
+   */
+  function sendReleaseTail() {
+    cancelTail();
+    tailLeft = TAIL_FRAMES;
+    const one = () => {
+      tailTimer = null;
+      if (tailLeft <= 0) return;
+      const send = state.sendAudio;
+      // The line went while the tail was being paced. What is left of it is dropped rather than
+      // queued: there is nothing on the other end to hear it.
+      if (send == null) { tailLeft = 0; return; }
+      tailLeft -= 1;
+      try { send(new ArrayBuffer(FRAME_BYTES)); }
+      catch { tailLeft = 0; return; }
+      state.tailFrames += 1;
+      if (tailLeft > 0) { tailTimer = global.setTimeout(one, FRAME_MS); tailTimer?.unref?.(); }
+    };
+    one();
+  }
+
+  let graceTimer = null;
+  const graceOpen = () => graceTimer != null;
+  function clearGrace() {
+    if (graceTimer != null) { global.clearTimeout(graceTimer); graceTimer = null; }
+  }
+  function openGrace() {
+    clearGrace();
+    graceTimer = global.setTimeout(() => { graceTimer = null; finishHold(); }, MIN_HOLD_MS);
+    graceTimer?.unref?.();
+  }
+
+  // A hold whose release was lost. It ends the hold rather than hanging up, so the words that were
+  // said still become a turn and the line is still warm for the next press.
+  let maxHoldTimer = null;
+  function clearMaxHold() {
+    if (maxHoldTimer != null) { global.clearTimeout(maxHoldTimer); maxHoldTimer = null; }
+  }
+  function armMaxHold() {
+    clearMaxHold();
+    maxHoldTimer = global.setTimeout(() => { maxHoldTimer = null; if (state.held) holdEnd(); }, MAX_HOLD_MS);
+    maxHoldTimer?.unref?.();
+  }
+
+  // The microphone opened and the audio graph is not running. Asked once a second after the capture
+  // starts, and only about `blocks`, which counts what the worklet posted before any gate touches it.
+  let soundTimer = null;
+  function clearSoundWatch() {
+    if (soundTimer != null) { global.clearTimeout(soundTimer); soundTimer = null; }
+  }
+  function watchForSound() {
+    clearSoundWatch();
+    soundTimer = global.setTimeout(() => {
+      soundTimer = null;
+      if (!state.on || state.capture == null) return;
+      if ((state.capture.stats.blocks ?? 0) > 0) return;
+      note("no-sound");
+      armDismiss();
+    }, SOUND_WATCH_MS);
+    soundTimer?.unref?.();
   }
 
   // A line nobody has held for a minute closes itself. The caps count WALL CLOCK, so a forgotten press
@@ -1906,6 +2192,11 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       level: state.sound?.level() ?? 0,
       lastSaid: state.lastSaid,
       mutedFrames: state.capture?.stats.mutedFrames ?? 0,
+      // VOICE-11. The zero-filled frames the release sent, counted apart from the microphone's own so
+      // one number cannot be read as the other, and the blocks the worklet posted, which is the only
+      // honest answer to "is this microphone producing anything at all".
+      tailFrames: state.tailFrames,
+      blocks: state.capture?.stats.blocks ?? 0,
       // VOICE-7. What the panel is showing right now, the words it last confirmed, and the id of the
       // row those words became -- which is what lets a gate prove the panel's last words and the chat
       // line are the same bytes without reading the DOM twice.
@@ -1969,6 +2260,18 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     _TALK_MODE_KEY: TALK_MODE_KEY,
     _PUSH_IDLE_CLOSE_MS: PUSH_IDLE_CLOSE_MS,
     _PENDING_FRAME_CAP: PENDING_FRAME_CAP,
+    // VOICE-11. The release's own numbers, the two windows around a press, and the classifier that
+    // decides which of the three microphone sentences a person reads.
+    _RELEASE_TAIL_MS: RELEASE_TAIL_MS,
+    _FRAME_MS: FRAME_MS,
+    _TAIL_FRAMES: TAIL_FRAMES,
+    _MIN_HOLD_MS: MIN_HOLD_MS,
+    _MAX_HOLD_MS: MAX_HOLD_MS,
+    _REARM_COOLDOWN_MS: REARM_COOLDOWN_MS,
+    _GESTURE_MS: GESTURE_MS,
+    _SOUND_WATCH_MS: SOUND_WATCH_MS,
+    _SHELL_NOTES: SHELL_NOTES,
+    _micConditionFor: micConditionFor,
     _OVERLAY_ID: OVERLAY_ID,
     _DISSOLVE_MS: DISSOLVE_MS,
     _HEARD_STALE_MS: HEARD_STALE_MS,
