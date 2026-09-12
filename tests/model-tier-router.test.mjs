@@ -82,3 +82,17 @@ test("workspace pins win over the conversation pin and automatic upgrades", asyn
     assert.equal(choose(router, "talk", false).tier, "work", "an unavailable talk deployment is never guessed");
   } finally { await loaded.dispose(); }
 });
+
+test("only this turn's tool calls count: a shell call before the last user message does not make the next turn heavy", async () => {
+  const loaded = await loadRouter();
+  try {
+    const shell = { role: "assistant", content: [{ type: "tool-call", toolName: "Shell", args: {} }] };
+    const user = { role: "user", content: "say hello" };
+    const earlier = new loaded.module.ModelTierTurnRouter();
+    earlier.observeMessages([shell, { role: "tool", content: [{ type: "tool-result", result: { value: "ok" } }] }, user]);
+    assert.equal(choose(earlier).tier, "talk");
+    const thisTurn = new loaded.module.ModelTierTurnRouter();
+    thisTurn.observeMessages([user, shell]);
+    assert.equal(choose(thisTurn).tier, "work");
+  } finally { await loaded.dispose(); }
+});

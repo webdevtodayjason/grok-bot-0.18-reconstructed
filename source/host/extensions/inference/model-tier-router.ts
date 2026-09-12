@@ -84,7 +84,16 @@ export class ModelTierTurnRouter {
   }
 
   observeMessages(messages: readonly unknown[]): void {
-    for (const rawMessage of messages) {
+    // Only THIS turn counts: the messages after the last user message. A shell call three turns ago
+    // must not make today's "say hello" a heavy turn. Measured on the demo box 2026-09-12: every turn
+    // of a conversation that had once run a shell command routed to work, because the whole history
+    // was scanned.
+    let start = 0;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const candidate = record(messages[index]);
+      if (candidate != null && String(candidate.role ?? "").toLowerCase() === "user") { start = index + 1; break; }
+    }
+    for (const rawMessage of messages.slice(start)) {
       const message = record(rawMessage);
       if (message == null) continue;
       let sawToolResult = false;
