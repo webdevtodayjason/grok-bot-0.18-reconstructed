@@ -99,7 +99,7 @@ import {
 import { loadRelayHooks } from "./relay-hooks.mjs";
 import { stateDir, stateFile } from "./state-dir.mjs";
 import { createLoginLedger, filterAttempts } from "./login-ledger.mjs";
-import { readBoxHealth } from "./box-health.mjs";
+import { createBoxHealthSweeper } from "./box-health.mjs";
 import { accountSignIn, relayConfig, ssoVerdict } from "./tenant-login.mjs";
 import {
   NOT_AVAILABLE_SENTENCE, OPERATOR_SLUG, createTenantRegistry, dockerNameReader, operatorEntry,
@@ -1587,27 +1587,12 @@ async function handleMe(req, res, t) {
 // An install with no control plane serves neither. There is nothing to ask and nobody to ask it, and
 // answering 404 rather than 401 is the truthful shape: this route does not exist here.
 
-// One box-health sweep, shared.
-//
-// The sweep runs `docker inspect`, `docker stats` and `du -sk` once per customer, which is real
-// work on the host. One refresh of the admin console asks for it twice, because the Box health
-// panel and the System health panel both want it, and two asks used to be two full fleet sweeps
-// running at the same time. `inFlight` makes concurrent asks share one sweep; the short window
-// makes back-to-back asks share one too. Anything older than the window is measured again, because
-// a health panel that shows a cached minute is a panel that quietly shows the past.
-const BOX_HEALTH_CACHE_MS = 5_000;
-let boxHealthShared = { at: 0, report: null, inFlight: null };
+// The health work lives off the request path. Every thirty seconds it refreshes the saved row for
+// each workspace with four probes in flight at most; the first read starts the first sweep rather
+// than making an admin wait for the timer. Reads only decorate and return the saved rows.
+const boxHealthSweeper = createBoxHealthSweeper({ entries: () => registry.all() });
 function sharedBoxHealth() {
-  if (boxHealthShared.report != null && Date.now() - boxHealthShared.at < BOX_HEALTH_CACHE_MS) {
-    return Promise.resolve(boxHealthShared.report);
-  }
-  if (boxHealthShared.inFlight != null) return boxHealthShared.inFlight;
-  const pending = readBoxHealth(registry.all()).then(
-    (report) => { boxHealthShared = { at: Date.now(), report, inFlight: null }; return report; },
-    (error) => { boxHealthShared = { at: 0, report: null, inFlight: null }; throw error; },
-  );
-  boxHealthShared = { ...boxHealthShared, inFlight: pending };
-  return pending;
+  return boxHealthSweeper.read();
 }
 
 // PROXY-1. The migration's two doors, and they are on this relay for the same reason the other two

@@ -316,9 +316,11 @@ test("one refresh of the console is one box-health sweep on the relay, not two",
     // Box health panel and the System health panel both want the same answer. They load together,
     // so asking twice was two full fleet sweeps running at once for one click on Refresh.
     let asks = 0;
+    let clock = Date.parse("2026-09-12T12:01:29.000Z");
     const api = createAdminApi({
       config: { dataDir: root, tenantRoot: root, relayUrl: "http://relay.invalid", relayToken: "r".repeat(32) },
       store,
+      now: () => clock,
       client: { base: "", call: async () => ({}) },
       json: () => {},
       noContent: () => {},
@@ -331,20 +333,41 @@ test("one refresh of the console is one box-health sweep on the relay, not two",
       fetchImpl: async () => {
         asks += 1;
         await new Promise((resolve) => setTimeout(resolve, 20));
-        return { ok: true, status: 200, json: async () => ({ boxes: [{ slug: "acme", containerState: "running" }] }) };
+        return { ok: true, status: 200, json: async () => ({
+          measuredAt: "2026-09-12T12:00:02.000Z",
+          boxes: [{
+            slug: "acme", containerState: "running", measuredAt: "2026-09-12T12:00:00.000Z",
+            ageMs: 2_000, containerStateWhy: "",
+          }],
+        }) };
       },
     });
 
     const [boxes, system] = await Promise.all([api.boxes(), api.system()]);
     assert.equal(asks, 1, "both panels shared the one sweep");
     assert.equal(boxes.boxes[0].containerState, "running", "and the panel that needed the whole answer got it");
+    assert.equal(boxes.boxes[0].measuredAt, "2026-09-12T12:00:00.000Z");
+    assert.equal(boxes.boxes[0].ageMs, 89_000);
+    assert.equal(boxes.measuredAt, "2026-09-12T12:00:02.000Z", "the fleet stamp came from the relay sweep");
     assert.equal(system.relay.reachable, true, "and the one that only needed a reachability line got that");
 
     // A second refresh inside the window is still the same sweep; the window is short so the panel
     // cannot quietly show a stale minute.
-    await api.boxes();
+    clock += 2_000;
+    const stale = await api.boxes();
     assert.equal(asks, 1);
+    assert.equal(stale.boxes[0].ageMs, 91_000, "the age advances even while the relay body is cached");
+    assert.match(stale.boxes[0].containerStateWhy, /last measured 2 minutes ago/);
   });
+});
+
+test("the box health panel renders each row's age and the fleet sweep stamp in plain words", () => {
+  const source = readFileSync(path.join(import.meta.dirname, "../cp/admin/admin.js"), "utf8");
+  const block = /async function loadBoxes\(\)[\s\S]*?\n  }\n\n  \/\/ ---- panel 4/.exec(source)?.[0] ?? "";
+  assert.match(source, /const age = \(ageMs\)/);
+  assert.match(block, /age\(box\.ageMs\)/, "the age is drawn beside every workspace row");
+  assert.match(block, /fleet last swept/, "the header identifies the fleet sweep timestamp");
+  assert.match(block, /fleet sweep has not finished yet/, "the first background sweep is named honestly");
 });
 
 // ---- the spend panel (PROXY-1) ------------------------------------------------------------------

@@ -179,7 +179,16 @@ test("box health answers the same credential and nothing else", async () => {
     assert.equal(response.status, 200);
     const body = await response.json();
     assert.equal(Array.isArray(body.boxes), true, `boxes should be a list, got ${JSON.stringify(body)}`);
-    assert.match(body.measuredAt, /^\d{4}-\d\d-\d\dT/, "every number carries when it was measured");
+    // The read itself never waits for health work. On a fresh relay it starts the first background
+    // sweep and may therefore have no completed fleet stamp yet; the next read sees the empty-fleet
+    // sweep completed.
+    const swept = body.measuredAt == null
+      ? await settleWait(
+        async () => (await fetch(`${relay.base}/admin/boxes`, { headers: { authorization: `Bearer ${RELAY_TOKEN}` } })).json(),
+        (answer) => answer.measuredAt != null,
+      )
+      : body;
+    assert.match(swept.measuredAt, /^\d{4}-\d\d-\d\dT/, "the completed fleet sweep says when it ran");
   } finally { relay.stop(); }
 });
 

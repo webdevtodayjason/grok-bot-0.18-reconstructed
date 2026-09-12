@@ -92,6 +92,7 @@ const str = (value) => (typeof value === "string" ? value.trim() : "");
 function includedOf(value) {
   if (typeof value !== "object" || value == null || Array.isArray(value)) return null;
   const baseUrl = str(value.baseUrl).replace(/\/+$/, "");
+  const upstreamBaseUrl = str(value.upstreamBaseUrl).replace(/\/+$/, "");
   const key = str(value.key);
   // A set with no way to reach it, or no credential, is not a degraded set: it is no set.
   if (baseUrl.length === 0 || key.length === 0) return null;
@@ -111,7 +112,7 @@ function includedOf(value) {
     };
   }).filter((row) => row != null);
   if (models.length === 0) return null;
-  return { baseUrl, key, keyId: str(value.keyId), models, enforced: value.enforced === true };
+  return { baseUrl, upstreamBaseUrl, key, keyId: str(value.keyId), models, enforced: value.enforced === true };
 }
 
 // One entry, from whatever the control plane (or the test override file) sent. Everything is

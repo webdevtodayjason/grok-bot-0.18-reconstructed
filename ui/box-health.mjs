@@ -42,13 +42,16 @@ const DISK_TIMEOUT_MS = 20_000;
 // false alarm about the relay being down. So the sweep bounds itself. A customer the budget did not
 // reach says so, by name, instead of the whole report arriving late or not at all.
 export const SWEEP_BUDGET_MS = 8_000;
+export const SWEEP_INTERVAL_MS = 30_000;
+export const SWEEP_CONCURRENCY = 4;
+export const STALE_AFTER_MS = 90_000;
 // How deep to look for a box's agent stores. deploy/backup/snapshot.sh finds them as
 // volumes/data/<agent>/store.db, so two levels below volumes/data is already generous.
 const ACTIVITY_DEPTH = 3;
 
-const run = async (file, args, timeout = DOCKER_TIMEOUT_MS) => {
+const run = async (file, args, timeout = DOCKER_TIMEOUT_MS, { signal } = {}) => {
   try {
-    const { stdout } = await execFile(file, args, { timeout, maxBuffer: 1024 * 1024 });
+    const { stdout } = await execFile(file, args, { timeout, signal, maxBuffer: 1024 * 1024 });
     return { ok: true, out: String(stdout).trim() };
   } catch (error) {
     return { ok: false, out: "", why: String(error?.shortMessage ?? error?.message ?? error).split("\n")[0] };
@@ -60,9 +63,9 @@ const run = async (file, args, timeout = DOCKER_TIMEOUT_MS) => {
  * "not measured" when there is no docker socket in this container, which is the honest answer for a
  * developer Mac and for any install where the relay was not given one.
  */
-export async function containerState(name, { exec = run } = {}) {
+export async function containerState(name, { exec = run, signal } = {}) {
   if (String(name ?? "").length === 0) return { state: "not measured", why: "this workspace has no container name" };
-  const result = await exec("docker", ["inspect", "-f", "{{.State.Status}}", String(name)]);
+  const result = await exec("docker", ["inspect", "-f", "{{.State.Status}}", String(name)], DOCKER_TIMEOUT_MS, { signal });
   if (!result.ok) return { state: "not measured", why: result.why };
   return { state: result.out || "unknown" };
 }
@@ -73,9 +76,9 @@ export async function containerState(name, { exec = run } = {}) {
  * A container that is not running has no stats and says so rather than reporting zero, which would
  * read as "using no memory" instead of "not running".
  */
-export async function containerMemory(name, { exec = run } = {}) {
+export async function containerMemory(name, { exec = run, signal } = {}) {
   if (String(name ?? "").length === 0) return { bytes: null, why: "this workspace has no container name" };
-  const result = await exec("docker", ["stats", "--no-stream", "--format", "{{.MemUsage}}", String(name)]);
+  const result = await exec("docker", ["stats", "--no-stream", "--format", "{{.MemUsage}}", String(name)], DOCKER_TIMEOUT_MS, { signal });
   if (!result.ok) return { bytes: null, why: result.why };
   const used = result.out.split("/")[0]?.trim() ?? "";
   const match = /^([0-9.]+)\s*([KMGT]?i?B)$/i.exec(used);
@@ -92,9 +95,9 @@ export async function containerMemory(name, { exec = run } = {}) {
  * customer costs, and their workspace files, their chrome profile and their agent databases are all
  * that answer.
  */
-export async function tenantDisk(root, { exec = run, timeoutMs = DISK_TIMEOUT_MS } = {}) {
+export async function tenantDisk(root, { exec = run, timeoutMs = DISK_TIMEOUT_MS, signal } = {}) {
   if (String(root ?? "").length === 0) return { kb: null, why: "this workspace has no directory on this host" };
-  const result = await exec("du", ["-sk", String(root)], Math.max(500, Math.round(Number(timeoutMs) || DISK_TIMEOUT_MS)));
+  const result = await exec("du", ["-sk", String(root)], Math.max(500, Math.round(Number(timeoutMs) || DISK_TIMEOUT_MS)), { signal });
   if (!result.ok) return { kb: null, why: result.why };
   const kb = Number(String(result.out).split(/\s+/)[0]);
   return Number.isFinite(kb) ? { kb } : { kb: null, why: `du said ${result.out.slice(0, 60)}` };
@@ -109,14 +112,16 @@ export async function tenantDisk(root, { exec = run, timeoutMs = DISK_TIMEOUT_MS
  * idle looks the same as a box that is up and stuck, and this number cannot tell them apart. What
  * it does tell an operator is which customers are actually using the thing.
  */
-export async function lastActivity(root, { depth = ACTIVITY_DEPTH } = {}) {
+export async function lastActivity(root, { depth = ACTIVITY_DEPTH, signal } = {}) {
   const data = String(root ?? "").length === 0 ? "" : path.join(String(root), "volumes", "data");
   if (data.length === 0) return { at: null, why: "this workspace has no directory on this host" };
   let newest = 0;
   const walk = async (dir, left) => {
+    if (signal?.aborted) return;
     let entries;
     try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
+      if (signal?.aborted) return;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) { if (left > 0) await walk(full, left - 1); continue; }
       if (!entry.isFile()) continue;
@@ -136,14 +141,16 @@ export async function lastActivity(root, { depth = ACTIVITY_DEPTH } = {}) {
  * The tenant's own bearer, and a four second ceiling. A gateway that needs longer than that to say
  * hello is not answering as far as a person clicking around the console is concerned.
  */
-export async function gatewayAnswering(gateway, token, { fetchImpl = fetch } = {}) {
+export async function gatewayAnswering(gateway, token, { fetchImpl = fetch, signal } = {}) {
   const base = String(gateway ?? "").replace(/\/+$/, "");
   if (base.length === 0) return { answering: false, why: "this workspace has no gateway address" };
   const started = Date.now();
   try {
     const response = await fetchImpl(`${base}/health`, {
       headers: String(token ?? "").length > 0 ? { authorization: `Bearer ${token}` } : {},
-      signal: AbortSignal.timeout(GATEWAY_TIMEOUT_MS),
+      signal: signal == null
+        ? AbortSignal.timeout(GATEWAY_TIMEOUT_MS)
+        : AbortSignal.any([signal, AbortSignal.timeout(GATEWAY_TIMEOUT_MS)]),
     });
     // Any answer at all is the gateway being up. A 401 means it is up and did not like the bearer,
     // which is still a gateway that is answering and is worth reporting differently from silence.
@@ -168,6 +175,7 @@ export async function gatewayAnswering(gateway, token, { fetchImpl = fetch } = {
  */
 export async function readBoxHealth(entries, {
   exec = run, fetchImpl = fetch, now = () => Date.now(), budgetMs = SWEEP_BUDGET_MS,
+  diskProbe = tenantDisk, signal,
 } = {}) {
   const startedAt = now();
   const measuredAt = new Date(startedAt).toISOString();
@@ -189,11 +197,11 @@ export async function readBoxHealth(entries, {
       continue;
     }
     const [state, memory, disk, activity, gateway] = await Promise.all([
-      containerState(entry?.box, { exec }),
-      containerMemory(entry?.box, { exec }),
-      tenantDisk(root, { exec, timeoutMs: Math.min(DISK_TIMEOUT_MS, left) }),
-      lastActivity(root),
-      gatewayAnswering(entry?.gateway, entry?.token, { fetchImpl }),
+      containerState(entry?.box, { exec, signal }),
+      containerMemory(entry?.box, { exec, signal }),
+      diskProbe(root, { exec, timeoutMs: Math.min(DISK_TIMEOUT_MS, left), signal }),
+      lastActivity(root, { signal }),
+      gatewayAnswering(entry?.gateway, entry?.token, { fetchImpl, signal }),
     ]);
     boxes.push({
       slug: String(entry?.slug ?? ""),
@@ -220,6 +228,176 @@ export async function readBoxHealth(entries, {
   // short because the sweep was cut off" rather than showing a fleet that looks broken.
   return { measuredAt, budgetMs: budget === Infinity ? null : budget, sweptEveryWorkspace: !ranOut, boxes };
 }
+
+/**
+ * Keep the relay's last independently measured row for every workspace.
+ *
+ * `readBoxHealth` remains the bounded, one-shot API used by existing callers and tests. This
+ * scheduler deliberately calls it with one workspace at a time: each workspace therefore owns the
+ * whole eight-second budget, while the worker pool lets a slow workspace occupy only one of four
+ * slots instead of holding every workspace registered after it.
+ *
+ * Disk is different from the other probes. A `du` can take twenty seconds on a large tree, so a
+ * sweep starts it but never waits for it. While it is running, the row reuses the last completed
+ * disk result (or says that the first one is still being measured).
+ */
+export function createBoxHealthSweeper({
+  entries,
+  read = readBoxHealth,
+  exec = run,
+  fetchImpl = fetch,
+  now = () => Date.now(),
+  budgetMs = SWEEP_BUDGET_MS,
+  intervalMs = SWEEP_INTERVAL_MS,
+  concurrency = SWEEP_CONCURRENCY,
+  setIntervalImpl = setInterval,
+  clearIntervalImpl = clearInterval,
+} = {}) {
+  const rows = new Map();
+  const disks = new Map();
+  let lastSweepAt = null;
+  let inFlight = null;
+
+  const allEntries = () => {
+    const value = typeof entries === "function" ? entries() : entries;
+    return Array.isArray(value) ? value : [];
+  };
+
+  const cachedDisk = (slug) => async (root, { exec: diskExec = exec } = {}) => {
+    let state = disks.get(slug);
+    if (state == null || state.root !== root) {
+      state = { root, value: null, inFlight: null };
+      disks.set(slug, state);
+    }
+    if (state.inFlight == null) {
+      const pending = tenantDisk(root, { exec: diskExec, timeoutMs: DISK_TIMEOUT_MS })
+        .then((value) => { state.value = value; return value; })
+        .catch((error) => {
+          state.value = { kb: null, why: String(error?.message ?? error) };
+          return state.value;
+        })
+        .finally(() => { if (state.inFlight === pending) state.inFlight = null; });
+      state.inFlight = pending;
+    }
+    return state.value ?? { kb: null, why: "disk use is still being measured" };
+  };
+
+  const measure = async (entry) => {
+    const slug = String(entry?.slug ?? "");
+    const controller = new AbortController();
+    const limit = Number(budgetMs) > 0 ? Number(budgetMs) : Infinity;
+    let timer = null;
+    try {
+      const probe = read([entry], {
+        exec,
+        fetchImpl,
+        now,
+        budgetMs,
+        diskProbe: cachedDisk(slug),
+        signal: controller.signal,
+      });
+      const report = limit === Infinity ? await probe : await Promise.race([
+        probe,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            const error = new Error(`this workspace exceeded its ${Math.round(limit / 1000)} second health budget`);
+            error.code = "BOX_HEALTH_TIMEOUT";
+            reject(error);
+          }, limit);
+        }),
+      ]);
+      const row = report?.boxes?.[0];
+      if (row != null) rows.set(slug, row);
+    } catch (error) {
+      const measuredAt = new Date(now()).toISOString();
+      const stateDir = String(entry?.stateDir ?? "");
+      const root = /\/state\/?$/.test(stateDir) ? path.dirname(stateDir.replace(/\/$/, "")) : "";
+      const why = error?.code === "BOX_HEALTH_TIMEOUT"
+        ? String(error.message)
+        : `this workspace's health probe failed: ${String(error?.message ?? error)}`;
+      rows.set(slug, unmeasuredBox(entry, root, measuredAt, why));
+    } finally {
+      if (timer != null) clearTimeout(timer);
+    }
+  };
+
+  const sweep = () => {
+    if (inFlight != null) return inFlight;
+    const pending = (async () => {
+      const work = allEntries();
+      let next = 0;
+      const worker = async () => {
+        for (;;) {
+          const index = next;
+          next += 1;
+          if (index >= work.length) return;
+          await measure(work[index]);
+        }
+      };
+      const count = Math.min(work.length, Math.max(1, Math.floor(Number(concurrency) || SWEEP_CONCURRENCY)));
+      await Promise.all(Array.from({ length: count }, () => worker()));
+      lastSweepAt = new Date(now()).toISOString();
+    })().finally(() => { if (inFlight === pending) inFlight = null; });
+    inFlight = pending;
+    return pending;
+  };
+
+  const ageWords = (ageMs) => {
+    const seconds = Math.max(0, Math.round(ageMs / 1000));
+    if (seconds < 60) return `${seconds} second${seconds === 1 ? "" : "s"} ago`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+    const hours = Math.round(minutes / 60);
+    return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  };
+
+  const report = () => {
+    if (lastSweepAt == null && inFlight == null) void sweep();
+    const at = now();
+    const boxes = allEntries().map((entry) => {
+      const slug = String(entry?.slug ?? "");
+      const saved = rows.get(slug);
+      if (saved == null) {
+        const stateDir = String(entry?.stateDir ?? "");
+        const root = /\/state\/?$/.test(stateDir) ? path.dirname(stateDir.replace(/\/$/, "")) : "";
+        return { ...unmeasuredBox(entry, root, null, "not measured yet"), ageMs: null };
+      }
+      const disk = disks.get(slug);
+      const current = disk != null && disk.root === saved.root && disk.value != null
+        ? { ...saved, diskKb: disk.value.kb, diskWhy: disk.value.why ?? "" }
+        : saved;
+      const measured = Date.parse(String(current.measuredAt ?? ""));
+      const ageMs = Number.isFinite(measured) ? Math.max(0, at - measured) : null;
+      if (ageMs == null || ageMs <= STALE_AFTER_MS) return { ...current, ageMs };
+      const stale = `last measured ${ageWords(ageMs)}`;
+      return {
+        ...current,
+        ageMs,
+        containerStateWhy: current.containerStateWhy ? `${current.containerStateWhy}; ${stale}` : stale,
+      };
+    });
+    return {
+      measuredAt: lastSweepAt,
+      budgetMs,
+      sweptEveryWorkspace: boxes.every((row) => row.measuredAt != null),
+      boxes,
+    };
+  };
+
+  const timer = Number(intervalMs) > 0
+    ? setIntervalImpl(() => { void sweep(); }, Number(intervalMs))
+    : null;
+  timer?.unref?.();
+
+  return {
+    read: report,
+    sweep,
+    stop() { if (timer != null) clearIntervalImpl(timer); },
+  };
+}
+
+export const createBoxHealthScheduler = createBoxHealthSweeper;
 
 /** A row for a workspace no probe reached, in the same shape as one that was measured. */
 function unmeasuredBox(entry, root, measuredAt, why) {
