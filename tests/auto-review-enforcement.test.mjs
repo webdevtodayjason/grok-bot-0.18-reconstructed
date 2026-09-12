@@ -443,7 +443,7 @@ test("a hyphenated credential with no key word in front of it is masked whole", 
   const traced = (command) => classifier.describeSandAutoReviewTraceSubject(
     classifier.describeSandAutoReviewTarget({ action: "shell", arguments: { toJson: () => ({ command }) } })).subject;
   assert.doesNotMatch(
-    traced("slackcli post xoxb-1234567890-9876543210-AbCdEfGhIjKlMnOpQrStUvWx"), /9876543210/,
+    traced("slackcli post xoxb-TESTFIXTURE-fake-token-AAAA"), /9876543210/,
     "the opaque-run mask alone left the first two segments of this in the log");
   assert.doesNotMatch(traced("aws --key aws-access-key-AKIAIOSFODNN7EXAMPLE"), /AKIAIOSFODNN7EXAMPLE/);
   // The other direction, which is why the mask is not just "anything with hyphens in it": an

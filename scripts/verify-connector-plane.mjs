@@ -442,7 +442,7 @@ const STDIO_ARMS = [
     refusal: /invalid_auth|not_authed|token_revoked|account_inactive|token_expired|missing_scope|unauthori[sz]|authentication|\b40[13]\b/i,
     // An xoxp token Slack will not know, shaped like one so a client-side format check is not what
     // refuses it. Invented here and thrown away at the end of the arm.
-    invent: () => `xoxp-0000000000-0000000000-0000000000-invented${Math.random().toString(36).slice(2, 12)}`,
+    invent: () => `xoxp-TESTFIXTURE-fake-token-AAAA${Math.random().toString(36).slice(2, 12)}`,
   },
   {
     on: GOOGLE_STDIO, flag: "--google-stdio", letter: "(l)", service: "Google", server: "google",

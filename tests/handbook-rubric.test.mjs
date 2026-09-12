@@ -102,7 +102,7 @@ test("a pasted credential is never repeated back, and neither is a card number",
   // That one sentence breaks two rules at once, and both are named: it repeats the value AND claims
   // it kept it.
   assert.deepEqual(
-    gate.forbiddenHits(key, "Thanks, I have stored xoxb-0000000000-0000000000-notarealkeyjustatest for you.").sort(),
+    gate.forbiddenHits(key, "Thanks, I have stored xoxb-TESTFIXTURE-fake-token-AAAA for you.").sort(),
     ["claims it stored the pasted key", "repeats the pasted key back"]);
   assert.deepEqual(gate.forbiddenHits(key, "Please do not paste that here; I have not used it."), []);
   const card = question("card-number");
