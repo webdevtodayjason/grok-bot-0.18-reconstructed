@@ -2867,6 +2867,10 @@ async function legCall() {
           return b.width === 0 ? 0 : Math.round((c.width / b.width) * 100) / 100; })(),
         mascotWidth: (() => { const m = document.querySelector("#voice-call titan-mascot");
           return m == null ? 0 : Math.round(m.getBoundingClientRect().width); })(),
+        mascotCentre: (() => { const m = document.querySelector("#voice-call titan-mascot");
+          if (m == null) return -1;
+          const b = m.getBoundingClientRect();
+          return Math.round(b.left + b.width / 2); })(),
         still: document.querySelector("#voice-call .voice-call-still") != null,
         endRect: r("[data-voice-call-end]"), muteRect: r("[data-voice-call-mute]"), inputRect: r("[data-voice-call-input]"),
         endPad: document.querySelector("[data-voice-call-end]") == null ? "" : getComputedStyle(screen).paddingBottom,
@@ -2955,6 +2959,12 @@ async function legCall() {
   }, box);
   check(covered.inside, "a thumb at the talk button's own centre now lands on the call screen, so it really is over the shelf",
     JSON.stringify(covered));
+  // HE IS IN THE MIDDLE OF THE SCREEN, which is not free: at 632 px he is wider than the phone, and
+  // laid out naively the track grows to fit him and his left edge sits against the padding with
+  // everything past 390 px clipped -- MEASURED on the live server exactly that way, 632x430 at x=16.
+  check(Math.abs((opened.screen?.mascotCentre ?? -1) - 195) <= 2,
+    "and Titan is centred on the phone rather than hanging off one side of it",
+    `his centre is at ${opened.screen?.mascotCentre} px of 390, and he is ${opened.screen?.mascotWidth} px wide`);
   check(opened.screen?.talkButtons === 1 && opened.screen?.onControls === 0,
     "exactly one element still carries data-talk-button, and neither of the call screen's controls is it (docs/APPS.md counts that)",
     `${opened.screen?.talkButtons} element(s), ${opened.screen?.onControls} of them on this screen`);

@@ -1184,6 +1184,14 @@ own three and no others, because a fourth name **throws** a `RangeError`. Under
 `prefers-reduced-motion` the screen draws the still PNG, runs no animation loop at all, and still
 changes the still when the mood changes.
 
+**He is centred by margins and not by a transform.** A 632 px Titan on a 390 px phone is wider than
+the screen, and laid out naively the grid track grows to fit him: MEASURED on the live server on the
+first ship, his rect was 632x430 at x=16 — his left edge against the padding, and everything past
+390 px clipped away, so half of him was off the phone. The two negative margins make his margin box
+exactly the width of the face, so the track cannot grow, the surplus hangs off both sides evenly and
+the screen's own overflow clips it. A transform would have done it too, and is deliberately not used:
+every transform in that file is kept off the mascot and its ancestors on principle.
+
 ### The three things the recording had that the design did not
 
 **A typed field.** A line typed on the call screen fills the console's own message box and submits the
@@ -1229,6 +1237,26 @@ An involuntary ending with no sentence to show raises one self-dismissing line i
 exact case the note exists for. Its dismiss is armed on the next visible `visibilitychange` rather
 than on the ending.
 
+### One live defect this wave met and fixed, because a press that says nothing is the worst of them
+
+Gating the screen on the R750 turned up a workspace where **pressing Talk said nothing at all**. The
+demo tenant's talking door answers `{"status":200,"enabled":false,"available":true}` — a realtime key
+exists and the customer's own switch is off — and the relay refuses that one with `acceptAndSay`, which
+writes the note, the bye and the close **together**: `{t:"note",text:"Talking is switched off in
+Settings."}`, then `{t:"bye",reason:""}` (that frame's `reason` field carries the **condition**, and
+this refusal names none), then a clean 1000 close.
+
+So the page's own `stop()` found no reason, took its "a person pressed the button to leave, so clear
+what is standing" branch, and deleted the sentence the relay had written a few milliseconds earlier.
+Before this wave that was a hold that did nothing; with a call screen it was a screen that appeared and
+vanished with no explanation, which is how it was found.
+
+The fix tells the two apart. A close the **relay** initiated leaves the relay's own sentence where the
+relay put it, with its ordinary six-second dismiss; a person pressing the button to leave still clears
+what is standing, which is what that branch was for. One wording, one home, and the condition the relay
+could not name does not cost the person the sentence. `--leg nokey` stays 51 of 51 and a unit case
+drives the exact four frames off the live wire in order.
+
 ### MEASURED, `--leg call`, WebKit 390x844 dpr 3 with touch, on MacBook-Pro.local (darwin arm64) against grok-bot-local-vm behind this leg's own relay and the stub vendor
 
 62 of 62 checks.
@@ -1241,6 +1269,7 @@ than on the ending.
 | the words observed across one turn | Connecting, Listening, Thinking, Talking, in that order |
 | the halo with a level driven 0 to 1 | `--voice-level` 0.020 to 1.000, scale 1.004 to 1.18, opacity 0.358 to 0.75 |
 | the mascot's own transform, at rest and at peak | `none` and `none`; canvas aspect 1.471 both times, backing store 2x both times |
+| where Titan is | centred, his middle at 195 px of 390, 632 px wide with 137 px hanging off each side and clipped |
 | the playback analyser on the stub's 20-frame reply | RMS 0.259 |
 | six seconds of a live call with a level on it | 347 frames, **57.8 fps**, 4 frames over 20 ms, median 17 ms, worst 233 ms |
 | the same page with no call screen on it | 267 frames, 44.5 fps, 12 over 20 ms, median 17 ms, worst 337 ms |
