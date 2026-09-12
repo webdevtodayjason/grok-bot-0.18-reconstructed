@@ -1184,6 +1184,57 @@ own three and no others, because a fourth name **throws** a `RangeError`. Under
 `prefers-reduced-motion` the screen draws the still PNG, runs no animation loop at all, and still
 changes the still when the mood changes.
 
+### How he morphs, and it is Titan's blob rather than an orb
+
+Jason, on the avatar: *"We don't want ChatGPT's orb. We're going to have Titan's blob, the one already
+on the homepage. That's what I want there, so it can react and act and morph."* So the middle of this
+screen is the vendored kit's own `<titan-mascot>` — the same element the roster faces, the onboarding
+face and the boot cover draw — and the level reaches **his body**, not just a ring around him.
+
+Two mechanisms, both reading the kit rather than editing it. The kit is vendored byte for byte, its own
+`ASSETS.md` forbids editing this copy, a test fails on drift, and the real change would move
+titanium.bot's marketing site with it.
+
+**1. The kit's own outline.** Read off its source: `strength` multiplies the three summed sine waves
+and the swell that deform the 120-point superellipse contour — the silhouette's wobble *is* that
+number — `speed` scales the clock those waves advance on, and `bob` the float. The only input to all
+three is the mood, and its own frame loop eases toward the mood's triple at 0.035 a frame. So the
+**level picks the mood**, with a hysteresis band, and Titan's body deforms more, and faster, the louder
+the room is. calm is 0.8 strength, curious 1.3, excited 1.65. The mood is written only when it
+changes: every write fires the kit's `attributeChangedCallback`, which dispatches a bubbling
+`titan-statechange` on the document, and sixty of those a second would be this screen shouting at the
+whole page.
+
+**2. Squash and stretch, on the canvas inside the kit's own shadow root.** This is the seam that makes
+per-frame deformation safe at all: `resize()` measures the **host**, and a child's transform does not
+change its parent's layout box, so the kit's own measurement cannot see a transform on its canvas. The
+canvas takes a volume-preserving squash from the level (7% across, 5.6% down), a slow breath at rest —
+translateY -4px and 1.02 over 2600 ms, which is `boot.css`'s own `boot-sprite-breathe`, this console's
+breathing vocabulary for Titan — and a degree of tilt on a slow sine so the **edge moves** rather than
+the whole of him just inflating. The breath gets out of the way as soon as there is a voice to follow.
+While he is thinking the breath is slower and deeper and the level is not read at all, which is on
+purpose: a person should be able to hear that nothing is expected of them.
+
+**The eye is the kit's own, and `tracking` stays off.** The kit's tracking follows a real pointer,
+which a phone call does not have. With it off the eye keeps its own drift on two slow sines and its
+5.6 second blink, which is the "tracking a little" that is true on a screen nobody is pointing at.
+
+MEASURED in WebKit at 390x844 device scale 3 on MacBook-Pro.local, level driven 0 to 1:
+
+| | measured |
+|---|---|
+| Titan's own body, across the row through its middle | **494 px of ink at rest, 437 with a voice on him**, in his own 1264x859 backing store |
+| the kit's face | curious at rest, excited with a voice on him |
+| the canvas transform | `translateY(-1.14px) rotate(0.36deg) scale(0.9935, 0.9911)` then `translateY(0px) rotate(1.11deg) scale(1.07, 0.944)` |
+| the host element's own transform | `none` at both |
+| the box the kit measures itself from | 631.8 x 429.61 at both, backing store 1264x859 at both, canvas CSS height 429.62px at both |
+| six seconds of a live call with the morph running | **352 frames, 58.7 fps**, 3 over 20 ms, median 17 ms, against the same page with no call screen at 16 over 20 ms |
+
+The two mechanisms are measured apart on purpose. The pixel count comes from `getImageData` on the
+backing store, which is what the kit **drew** and is untouched by CSS, so it moves only when the kit's
+own outline changes. The transform string is the squash on top of it. A ring pulsing around a still
+Titan would have passed a halo check and failed his instruction.
+
 **He is centred by margins and not by a transform.** A 632 px Titan on a 390 px phone is wider than
 the screen, and laid out naively the grid track grows to fit him: MEASURED on the live server on the
 first ship, his rect was 632x430 at x=16 — his left edge against the padding, and everything past
