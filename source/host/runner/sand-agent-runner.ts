@@ -1221,6 +1221,7 @@ export class SandAgentRunner<T = unknown> {
       readonly selectedVideos?: readonly unknown[];
       readonly replyContext?: unknown;
       readonly requestSource?: string;
+      readonly thinkHarder?: boolean;
     } = {},
   ): Promise<T | SandAgentRunnerResult | undefined> {
     const trimmed = prompt.trim();

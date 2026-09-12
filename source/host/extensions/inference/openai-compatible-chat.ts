@@ -132,6 +132,31 @@ export function openAiCompatibleModelsEndpoint(baseUrl: string): string {
   return `${chat.slice(0, -"/chat/completions".length)}/models`;
 }
 
+/** The exact ids this credential can currently route to. An unreadable catalog is no evidence. */
+export async function fetchOpenAiCompatibleModelIds(
+  fetchImpl: typeof fetch,
+  settings: Pick<OpenAiCompatibleSettings, "baseUrl" | "apiKey">,
+  timeoutMs = 5_000,
+): Promise<readonly string[] | null> {
+  try {
+    const response = await fetchImpl(openAiCompatibleModelsEndpoint(settings.baseUrl), {
+      headers: settings.apiKey == null ? {} : { authorization: `Bearer ${settings.apiKey}` },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) return null;
+    const body = record(await response.json());
+    const entries = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
+    return [...new Set(entries.flatMap((raw: unknown) => {
+      const entry = record(raw);
+      if (entry == null) return [];
+      const ids = [entry.id, entry.name, ...(Array.isArray(entry.aliases) ? entry.aliases : [])];
+      return ids.filter((id): id is string => typeof id === "string" && id.length > 0);
+    }))];
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Every local inference executor used to report a context window of zero, and the compaction
  * trigger's first line is `if (maxTokens <= 0) return` -- so a conversation on this route grew

@@ -106,6 +106,27 @@ test("GW-03: a send carries a nonce and the composer state is the ledger's answe
   adapter.destroy();
 });
 
+test("ROUTER-1: Think harder is pinned per conversation and reaches sendPrompt", async () => {
+  const { createGatewayAdapter, calls } = await loadAdapter({
+    sendPrompt: { accepted: true },
+    promptAcceptanceStatus: { outcome: "found", record: { status: "accepted", rejectionCode: null } },
+    getAgentTranscriptTail: { entries: [] },
+  });
+  const state = seed();
+  state.workers.push({ ...state.workers[0], id: "w2", name: "Second", messages: [] });
+  const adapter = createGatewayAdapter(state);
+  adapter.setThinkHarder({ kind: "worker", id: "w1" }, true);
+  assert.equal(adapter.getThinkHarder({ kind: "worker", id: "w1" }), true);
+  assert.equal(adapter.getThinkHarder({ kind: "worker", id: "w2" }), false);
+  adapter.sendMessage({ kind: "worker", id: "w1" }, "hard");
+  adapter.sendMessage({ kind: "worker", id: "w2" }, "light");
+  await settle(60);
+  const sent = only(calls, "sendPrompt");
+  assert.equal(sent.find((row) => row.args.agentId === "w1").args.thinkHarder, true);
+  assert.equal(Object.hasOwn(sent.find((row) => row.args.agentId === "w2").args, "thinkHarder"), false);
+  adapter.destroy();
+});
+
 test("GW-03: a send the host did not accept says so, with the host's reason, and drops the dots", async () => {
   const { createGatewayAdapter } = await loadAdapter({
     sendPrompt: { accepted: true },

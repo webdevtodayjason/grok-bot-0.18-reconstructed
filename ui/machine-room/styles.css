@@ -5487,21 +5487,29 @@ body[data-composer-drop="1"] .composer {
 /* THE ONE EXISTING SELECTOR THIS WAVE RE-DECLARES, and the reason, because everything else under
    this banner is a selector of its own.
 
-   .composer is a three-column grid (38px / textarea / Send) with a fixed row height. A fourth child
-   therefore opens an IMPLICIT SECOND ROW: MEASURED in Chrome at 390, 768 and 1440 CSS px, Send was
-   pushed onto a row of its own below the talk button and the form grew from 54 to 104 px. The track
-   is restored rather than the rule edited -- appended declarations, so a rebase is still a clean
-   append and nothing above the banner moves. This file's own comment at :1448 records that the
-   fourth track used to be there, for a mic button that could not act and was removed. This is the
-   control that slot was for. */
+   The composer gained a Talk button in this appended section and now gains the router switch too.
+   Both need explicit tracks: an untracked child opens an IMPLICIT SECOND ROW and pushes Send off
+   the line. The rule remains appended so older layout declarations stay untouched. */
 .composer {
-  grid-template-columns: 38px minmax(0, 1fr) auto auto;
+  grid-template-columns: 38px minmax(0, 1fr) auto auto auto;
 }
 
-/* VOICE-2: THE FIFTH TRACK, AND WHY IT IS GATED ON AN ATTRIBUTE. The live line is a fifth child, and
+.think-harder {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 38px;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.think-harder input { accent-color: var(--teal-400); }
+
+/* VOICE-2: THE CONDITIONAL TRACK, AND WHY IT IS GATED ON AN ATTRIBUTE. The live line is another child, and
    the same bug bites again twice over. MEASURED at 1440x900: a fifth child with no new track took the
    composer 600x54 -> 600x96 and put Send at row two column one, the exact failure the note above
-   records; and an UNCONDITIONAL fifth track, with the line hidden, took 4 px off the message box
+   records; and an unconditional extra track, with the line hidden, took 4 px off the message box
    through this grid's own 4 px gap. So the track exists only while voice.js has the line in the form
    with something to say, and at rest the composer is the form it has always been, to the pixel.
 
@@ -5509,21 +5517,24 @@ body[data-composer-drop="1"] .composer {
    `.composer` in tests/machine-room-voice.test.mjs's allow-list for the same reason that one is:
    deliberately, in this commit, rather than discovered in CI. */
 .composer[data-voice-line] {
-  grid-template-columns: 38px minmax(0, 1fr) minmax(0, 0.7fr) auto auto;
+  grid-template-columns: 38px minmax(0, 1fr) minmax(0, 0.7fr) auto auto auto;
 }
 
 @media (max-width: 690px) {
   /* On a phone the textarea is the scarce thing, so the word goes and the orb stays -- the button
      keeps its aria-label, so it still says what it is to anyone not reading the screen. */
   .composer {
-    grid-template-columns: 44px minmax(0, 1fr) auto auto;
+    grid-template-columns: 44px minmax(0, 1fr) auto auto auto;
   }
 
   /* PHONE-CONSOLE-1: and the same first track while the live line is up, or the attach button is
      back over the message box for the length of a refusal. */
   .composer[data-voice-line] {
-    grid-template-columns: 44px minmax(0, 1fr) minmax(0, 0.7fr) auto auto;
+    grid-template-columns: 44px minmax(0, 1fr) minmax(0, 0.7fr) auto auto auto;
   }
+
+  .think-harder { min-width: 44px; justify-content: center; }
+  .think-harder span { display: none; }
 
   /* VOICE-2, A BROKEN WINDOW CLOSED IN THE SAME PASS. This shipped at 38x38 to match the attach
      button beside it, and MEASURED at 390x844 that is under the 44 px floor :4641-4652 enforces for

@@ -600,6 +600,7 @@ export function createHostGatewayApi(
         richText: args.richText,
         replyToId: args.replyToId,
         clientNonce: args.clientNonce,
+        thinkHarder: args.thinkHarder === true,
         isFork: args.isFork,
         traceparent: args.traceparent,
         enterEpochMs: args.enterEpochMs,

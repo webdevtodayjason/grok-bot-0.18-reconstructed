@@ -84,9 +84,9 @@ export function renderAutomationsSystemPrompt(
 export type AutomationRunTrigger = "schedule" | "manual" | "event";
 export type AutomationRunStatus = "running" | "ok" | "error";
 export interface AutomationRun { id: string; trigger: AutomationRunTrigger; startedAt: number; finishedAt: number | null; status: AutomationRunStatus; detail?: string; event?: string; coalescedRunIds?: string[] }
-export interface AutomationConfig extends NoticeAutomation { name: string; prompt: string; trigger: AutomationTrigger; isEnabled: boolean; createdAt: number; lastRunAt: number | null; raisedNotices: string[] }
+export interface AutomationConfig extends NoticeAutomation { name: string; prompt: string; trigger: AutomationTrigger; isEnabled: boolean; heavy: boolean; createdAt: number; lastRunAt: number | null; raisedNotices: string[] }
 export interface AutomationRecord extends AutomationConfig { id: string; schedule: string; triggerDescription: string; nextRunAt: number | null; runs: AutomationRun[]; filePath: string }
-export interface AutomationSpec { name: string; prompt: string; trigger: AutomationTrigger; isEnabled?: boolean }
+export interface AutomationSpec { name: string; prompt: string; trigger: AutomationTrigger; isEnabled?: boolean; heavy?: boolean }
 
 export function clampAutomationName(name: string): string { return clampLine(name, AUTOMATION_MAX_NAME_LENGTH); }
 export function normalizeAutomationPrompt(prompt: string): string { return prompt.trim(); }

@@ -250,6 +250,10 @@
           <!-- QOL-COMPOSER: a textarea, not an input. Enter sends, Shift+Enter opens a line, and
                the box grows with what is in it up to eight lines (autosizeComposer in app.js). -->
           <textarea id="message-input" name="message" rows="1" autocomplete="off" placeholder=""></textarea>
+          <label class="think-harder" title="Keep this conversation on the work model">
+            <input id="think-harder" type="checkbox" />
+            <span>Think harder</span>
+          </label>
           <!-- VOICE-1: press to talk, press again to stop. type="button" is load-bearing -- inside a
                form a default button submits, which would send the composer on every press. The orb
                lives inside it and its four states are driven only by voice.js from the relay's

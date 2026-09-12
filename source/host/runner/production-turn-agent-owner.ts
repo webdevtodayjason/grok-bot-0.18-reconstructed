@@ -83,6 +83,11 @@ export interface ProductionTurnAgentOwnerInput {
   readonly isRunAwaitingUserSelection?: () => boolean;
   readonly endThisRunAwaitingUser?: (reason: string) => void;
   readonly requestSource?: string;
+  readonly thinkHarder?: boolean;
+  readonly isComputerUseSubagent?: boolean;
+  readonly isBrowserUseSubagent?: boolean;
+  readonly isCodingAgent?: boolean;
+  readonly heavyRoutine?: boolean;
   readonly modelId?: string;
   readonly hidden?: boolean;
   readonly lineage?: unknown;
@@ -164,6 +169,11 @@ export async function createProductionTurnAgentOwner(
     ...(input.requestSource === undefined
       ? {}
       : { requestSource: input.requestSource }),
+    ...(input.thinkHarder === true ? { thinkHarder: true } : {}),
+    ...(input.isComputerUseSubagent === true ? { isComputerUseSubagent: true } : {}),
+    ...(input.isBrowserUseSubagent === true ? { isBrowserUseSubagent: true } : {}),
+    ...(input.isCodingAgent === true ? { isCodingAgent: true } : {}),
+    ...(input.heavyRoutine === true ? { heavyRoutine: true } : {}),
     isSubagentRunner: input.isSubagentRunner,
     isSilenceAllowed: input.isSilenceAllowed,
     ...(input.hidden === undefined ? {} : { hidden: input.hidden }),

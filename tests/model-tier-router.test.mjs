@@ -1,0 +1,84 @@
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { build } from "esbuild";
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+async function loadRouter() {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "model-tier-router-"));
+  const outfile = path.join(dir, "router.mjs");
+  await build({
+    entryPoints: [path.join(repoRoot, "source/host/extensions/inference/model-tier-router.ts")],
+    outfile,
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    target: "node22",
+  });
+  return { module: await import(`${pathToFileURL(outfile).href}?${Date.now()}`), dispose: () => rm(dir, { recursive: true, force: true }) };
+}
+
+const choose = (router, workspacePin = "auto", talkAvailable = true) =>
+  router.choose({ workModel: "plan-zai", talkAvailable, workspacePin });
+
+test("ordinary turns and light routines use talk when the deployment exists", async () => {
+  const loaded = await loadRouter();
+  try {
+    assert.deepEqual(choose(new loaded.module.ModelTierTurnRouter()), { tier: "talk", model: "plan-zai-talk", reason: "automatic" });
+    assert.equal(choose(new loaded.module.ModelTierTurnRouter({ requestSource: "automation" })).tier, "talk");
+    assert.deepEqual(choose(new loaded.module.ModelTierTurnRouter(), "auto", false), { tier: "work", model: "plan-zai", reason: "single-tier" });
+    assert.equal(loaded.module.talkModelFor("customer-model"), null, "customer-owned models never grow a guessed alias");
+  } finally { await loaded.dispose(); }
+});
+
+test("coding, computer planning, heavy routines, and the first heavy tool use work", async () => {
+  const loaded = await loadRouter();
+  try {
+    for (const context of [
+      { isCodeSandboxTask: true }, { isCodingAgent: true }, { isComputerUseSubagent: true },
+      { heavyRoutine: true }, { requestSource: "code-sandbox" },
+    ]) assert.equal(choose(new loaded.module.ModelTierTurnRouter(context)).tier, "work");
+
+    for (const name of ["Shell", "Write", "Edit", "Computer", "code_task", "apply_patch"]) {
+      const router = new loaded.module.ModelTierTurnRouter();
+      assert.equal(choose(router).tier, "talk");
+      router.observeToolCall(name);
+      assert.equal(choose(router).tier, "work", name);
+    }
+    const computer = new loaded.module.ModelTierTurnRouter({ isComputerUseSubagent: true });
+    assert.equal(choose(computer).tier, "work", "computer planning starts on work");
+    computer.observeToolCall("Screenshot");
+    assert.deepEqual(choose(computer), { tier: "talk", model: "plan-zai-talk", reason: "screenshot-read" });
+    assert.equal(choose(computer).tier, "work", "the screenshot read is one model call");
+  } finally { await loaded.dispose(); }
+});
+
+test("two consecutive tool errors upgrade while an intervening success resets the streak", async () => {
+  const loaded = await loadRouter();
+  try {
+    const error = { role: "tool", content: [{ type: "tool-result", result: { isError: true, error: "nope" } }] };
+    const success = { role: "tool", content: [{ type: "tool-result", result: { value: "ok" } }] };
+    const router = new loaded.module.ModelTierTurnRouter();
+    router.observeMessages([error]);
+    assert.equal(choose(router).tier, "talk");
+    router.observeMessages([success, error]);
+    assert.equal(choose(router).tier, "talk");
+    router.observeMessages([error]);
+    assert.equal(choose(router).tier, "work");
+  } finally { await loaded.dispose(); }
+});
+
+test("workspace pins win over the conversation pin and automatic upgrades", async () => {
+  const loaded = await loadRouter();
+  try {
+    const router = new loaded.module.ModelTierTurnRouter({ thinkHarder: true, isCodingAgent: true });
+    assert.equal(choose(router, "talk").tier, "talk");
+    assert.equal(choose(new loaded.module.ModelTierTurnRouter(), "work").tier, "work");
+    assert.equal(choose(new loaded.module.ModelTierTurnRouter({ thinkHarder: true }), "auto").tier, "work");
+    assert.equal(choose(router, "talk", false).tier, "work", "an unavailable talk deployment is never guessed");
+  } finally { await loaded.dispose(); }
+});

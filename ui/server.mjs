@@ -1625,6 +1625,7 @@ const TENANT_RUNNING_ROUTE = /^\/admin\/tenants\/([^/]+)\/running$/;
 // now" is the same computation either way. Reporting the number that was SENT would report a
 // success on a box whose container environment pins something else.
 const TENANT_CEILING_ROUTE = /^\/admin\/tenants\/([^/]+)\/ceiling$/;
+const TENANT_ROUTER_PIN_ROUTE = /^\/admin\/tenants\/([^/]+)\/router-pin$/;
 // CLOUD-BROWSER-1. WHAT A TENANT SPENT ON CLOUD BROWSERS, read out of that tenant's own box.
 //
 // The host writes one JSONL row per cloud session to /home/box/sand-data/cloud-browser-ledger.jsonl
@@ -1658,6 +1659,7 @@ async function handleRelayAdmin(req, res, url) {
   const action = TENANT_ADMIN_ROUTE.exec(url.pathname);
   const running = TENANT_RUNNING_ROUTE.exec(url.pathname);
   const ceiling = TENANT_CEILING_ROUTE.exec(url.pathname);
+  const routerPin = TENANT_ROUTER_PIN_ROUTE.exec(url.pathname);
   const cloudBrowser = TENANT_CLOUD_BROWSER_ROUTE.exec(url.pathname);
   const devices = TENANT_DEVICES_ROUTE.exec(url.pathname);
   // The method refusal still comes before the credential, so a wrong method charges nobody's
@@ -1667,7 +1669,7 @@ async function handleRelayAdmin(req, res, url) {
   // expression below still answers exactly "GET" or "POST" for every path they match. The device
   // route lists and revokes, so it takes GET or DELETE.
   const allowed = devices != null ? ["GET", "DELETE"]
-    : ceiling != null ? ["GET", "POST"] : (action == null ? "GET" : "POST");
+    : ceiling != null ? ["GET", "POST"] : routerPin != null ? "POST" : (action == null ? "GET" : "POST");
   if (Array.isArray(allowed) ? !allowed.includes(req.method) : req.method !== allowed) {
     return fail(res, 405, Array.isArray(allowed) ? allowed.join(" or ") : allowed);
   }
@@ -1698,6 +1700,7 @@ async function handleRelayAdmin(req, res, url) {
   if (running != null) return await reportRunning(res, decodeURIComponent(running[1]));
 
   if (ceiling != null) return await handleTenantCeiling(req, res, decodeURIComponent(ceiling[1]));
+  if (routerPin != null) return await handleTenantRouterPin(req, res, decodeURIComponent(routerPin[1]));
   if (cloudBrowser != null) return await reportCloudBrowser(res, decodeURIComponent(cloudBrowser[1]));
   if (devices != null) return handleAdminDevices(req, res, url, decodeURIComponent(devices[1]));
 
@@ -2016,6 +2019,24 @@ async function handleTenantCeiling(req, res, slug) {
   catch (error) { return fail(res, 502, `that box's settings file could not be written (${String(error?.message ?? error).split("\n")[0].slice(0, 120)})`); }
 
   return await report();
+}
+
+async function handleTenantRouterPin(req, res, slug) {
+  const t = contextOf(slug);
+  if (t == null) return fail(res, 404, NOT_AVAILABLE_SENTENCE);
+  if (!await dockerAvailable()) return refuseWithoutDocker(res, "this relay has no docker under it, so it cannot write inside a box");
+  let body;
+  try { body = JSON.parse(await readBody(req, 64 * 1024) || "{}"); } catch { return fail(res, 400, "that was not JSON"); }
+  const pin = String(body?.pin ?? "").trim().toLowerCase();
+  if (!["auto", "work", "talk"].includes(pin)) return fail(res, 400, "a router pin must be auto, work, or talk");
+  const before = await readSecrets(t);
+  const next = { ...before };
+  if (pin === "auto") delete next.SAND_MODEL_ROUTER_PIN;
+  else next.SAND_MODEL_ROUTER_PIN = pin;
+  try { await writeSecrets(t, next); }
+  catch (error) { return fail(res, 502, `that box's router pin could not be written (${String(error?.message ?? error).split("\n")[0].slice(0, 120)})`); }
+  res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+  return res.end(JSON.stringify({ slug, pin, measuredAt: new Date().toISOString(), wrote: pin === "auto" ? [] : [evidenceOf("SAND_MODEL_ROUTER_PIN", pin)] }));
 }
 
 // Both migration doors, sharing one resolution of the workspace and one shape of answer.

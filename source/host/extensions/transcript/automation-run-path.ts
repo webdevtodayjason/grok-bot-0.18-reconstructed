@@ -251,6 +251,7 @@ export class AutomationRunPath {
                   automationWake: {
                     id: args.automation.id,
                     name: args.automation.name,
+                    heavy: currentAutomation.heavy === true,
                     ...(isEventFire
                       ? { containsUntrustedEventText: true }
                       : {}),

@@ -189,6 +189,7 @@ export interface TurnOptions extends Record<string, unknown> {
   readonly queueStartEpochMs?: number;
   readonly queueStartPerfMs?: number;
   readonly clientNonce?: string;
+  readonly thinkHarder?: boolean;
   readonly ackToken?: string;
 }
 

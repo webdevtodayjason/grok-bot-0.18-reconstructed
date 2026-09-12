@@ -22,6 +22,7 @@ import "./mcp-tools-discovery-unsettled.test.mjs";
 import "./mcp-connecting-server-list.test.mjs";
 import "./mcp-stub-sse.test.mjs";
 import "./openai-compatible-provider.test.mjs";
+import "./model-tier-router.test.mjs";
 import "./publication-bootstrap.test.mjs";
 import "./publication-packaging.test.mjs";
 import "./reconstructed-updater-guard.test.mjs";

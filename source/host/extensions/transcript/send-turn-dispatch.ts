@@ -27,6 +27,7 @@ export interface DispatchUserTurnArgs {
   readonly composedAtMs?: number;
   readonly enterEpochMs?: number;
   readonly clientNonce?: string;
+  readonly thinkHarder?: boolean;
   readonly awaitTurn: boolean;
   readonly isFork: boolean;
   readonly userMessageId?: string;
@@ -57,6 +58,7 @@ export async function dispatchUserTurn(
     composedAtMs,
     enterEpochMs,
     clientNonce,
+    thinkHarder,
     awaitTurn,
     isFork,
     userMessageId,
@@ -169,6 +171,7 @@ export async function dispatchUserTurn(
           queueStartEpochMs,
           queueStartPerfMs,
           clientNonce,
+          ...(thinkHarder === true ? { thinkHarder: true } : {}),
           ackToken,
         },
         epoch,

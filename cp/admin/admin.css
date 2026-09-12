@@ -317,9 +317,9 @@ tbody tr.gateRow:hover td { background: #0E151E; }
 .allowanceRow select { min-width: 110px; }
 .allowanceRow input.clientAllowanceOverride { width: 145px; }
 /* PROVIDERS-1. The model this one workspace runs on, under the customer's name. */
-.modelRow, .capRow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
-.modelRow select, .capRow input { padding: 5px 9px; font-size: 13px; }
-.modelRow .clock, .capRow .clock { flex-basis: 100%; margin-top: 0; }
+.modelRow, .routerPinRow, .capRow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.modelRow select, .routerPinRow select, .capRow input { padding: 5px 9px; font-size: 13px; }
+.modelRow .clock, .routerPinRow .clock, .capRow .clock { flex-basis: 100%; margin-top: 0; }
 /* AGENTS-CAP-2. Wide enough for four digits and no wider: this is a ceiling, not a paragraph. */
 .capRow input.clientCeiling { width: 84px; }
 

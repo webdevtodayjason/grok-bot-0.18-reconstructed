@@ -88,10 +88,15 @@ import {
   isoDay,
   monthStartDay,
   proxyKeyAlias,
+  planModelTier,
   servedPlanModels,
 } from "./proxy.mjs";
 
 export const ADMIN_SALT_NAME = "login-attempt-salt";
+export const ROUTER_PIN_SETTING_PREFIX = "router.pin.";
+export const normalizeRouterPin = (value) => ["work", "talk"].includes(String(value ?? "").trim().toLowerCase())
+  ? String(value).trim().toLowerCase()
+  : "auto";
 
 // Six different passwords from one address inside ten minutes, and the row is flagged as an attack.
 //
@@ -1144,6 +1149,7 @@ export function createAdminApi({
           return row.model.toLowerCase() === actual;
         });
         delete group.priceModel;
+        group.tier = planModelTier(group.model);
         if (price != null) group.listPrice = { input: price.input, output: price.output };
         usage.push(group);
         const provider = fleetUsage.get(group.provider) ?? { provider: group.provider, tokensIn: 0, tokensOut: 0, calls: 0, cost: 0 };
@@ -1335,6 +1341,7 @@ export function createAdminApi({
       const current = ran.find((one) => modelChoices.some((row) => row.alias === one)) ?? ran[0] ?? "";
       rows.push({
         ...view,
+        routerPin: normalizeRouterPin(store.getSetting(`${ROUTER_PIN_SETTING_PREFIX}${tenant.slug}`, "auto")),
         allowance: allowanceService == null ? null : await allowanceService.get(tenant.slug),
         users,
         // MAIL-2. How many of this customer's bots hold an address at the product domain. One
@@ -4256,6 +4263,25 @@ export function createAdminApi({
           message: pinned
             ? `${slug} was written, and it will keep running what its container environment pins: ${String(answer.body?.pinnedBy ?? "SAND_OPENAI_COMPATIBLE_* is set on the container")}. Nothing this console does takes effect there until that is gone.`
             : `${slug} runs ${planModel} from its next message, and its Titan says the name that goes with it. Their open page shows the change on its next load.`,
+        });
+        return true;
+      }
+      if (action === "router-pin") {
+        const pin = String(body?.pin ?? "").trim().toLowerCase();
+        if (!["auto", "work", "talk"].includes(pin)) {
+          json(response, 400, { error: "bad_request", message: "Choose Auto, Always work, or Always talk." });
+          return true;
+        }
+        const ledger = beginAction(guard, request, { action: "client.router-pin", target: slug, detail: `${slug} to ${pin}` });
+        const answer = await askRelayPost(`/admin/tenants/${encodeURIComponent(slug)}/router-pin`, { pin });
+        if (!answer.ok) { ledger.failed(answer.why); json(response, 502, { error: "relay", message: answer.why }); return true; }
+        store.setSetting(`${ROUTER_PIN_SETTING_PREFIX}${slug}`, pin, guard.account?.email ?? "the operator token");
+        ledger.done(`${slug} router pinned ${pin}`);
+        json(response, 200, {
+          slug, pin,
+          message: pin === "auto"
+            ? `${slug} now chooses talk or work automatically from its next model call.`
+            : `${slug} now always uses the ${pin} tier from its next model call.`,
         });
         return true;
       }

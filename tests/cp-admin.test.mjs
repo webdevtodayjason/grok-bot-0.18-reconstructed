@@ -17,6 +17,7 @@ import {
   ATTACK_WINDOW_MS,
   createAdminApi,
   mergeAttempts,
+  normalizeRouterPin,
   stuckProvisioning,
   summariseByAccount,
   summariseByAddress,
@@ -35,6 +36,18 @@ async function withStore(run) {
 
 const PASSWORD = "a-good-password";
 const HASH = (n) => String(n).padStart(2, "0").repeat(32);
+
+test("workspace router pins accept only the three public states", () => {
+  assert.equal(normalizeRouterPin("work"), "work");
+  assert.equal(normalizeRouterPin(" TALK "), "talk");
+  assert.equal(normalizeRouterPin("auto"), "auto");
+  assert.equal(normalizeRouterPin("anything-else"), "auto");
+  const source = readFileSync(path.join(import.meta.dirname, "../cp/admin/admin.js"), "utf8");
+  assert.match(source, /"Auto"/);
+  assert.match(source, /"Always work"/);
+  assert.match(source, /"Always talk"/);
+  assert.match(source, /\/router-pin/);
+});
 
 test("a new account is nobody's super admin and nobody's disabled account", async () => {
   await withStore((store) => {
@@ -459,7 +472,7 @@ test("spend reports workspace usage and fleet totals by provider", async () => {
     ]);
     const answer = await makeApi({ store, root, proxy: { url: config.proxyUrl, masterKey: config.proxyMasterKey }, proxyClient, keys }).spend();
     const acme = answer.clients.find((row) => row.slug === "acme");
-    assert.deepEqual(acme.usage, [{ provider: "zai", model: "plan-zai", tokensIn: 2_000, tokensOut: 400, calls: 2, cost: 2 }]);
+    assert.deepEqual(acme.usage, [{ provider: "zai", model: "plan-zai", tokensIn: 2_000, tokensOut: 400, calls: 2, cost: 2, tier: "work" }]);
     assert.deepEqual(acme.totals, { tokensIn: 2_000, tokensOut: 400, calls: 2, cost: 2 });
     assert.deepEqual(answer.totals, { tokensIn: 2_500, tokensOut: 475, calls: 3, cost: 3 });
     assert.deepEqual(answer.byProvider, [
@@ -474,6 +487,7 @@ test("the spend panel renders the provider usage table and Intl-formatted totals
   const block = /function usageTable\(client\)[\s\S]*?\n  }\n/.exec(source)?.[0] ?? "";
   assert.match(block, /\["Provider", "Model", "In", "Out", "Calls", "Cost"\]/);
   assert.match(block, /by provider/);
+  assert.match(block, /line\.tier === "talk"/);
   assert.match(block, /no usage recorded this month/);
   assert.match(source, /new Intl\.NumberFormat/);
   assert.match(source, /who\.appendChild\(usageTable\(client\)\)/);

@@ -40,6 +40,20 @@
     const state = clone(initialState);
     const listeners = new Set();
     const timers = new Set();
+    const thinkHarderByConversation = new Set();
+    const routerContextKey = (context) => context && context.id ? `${context.kind}:${context.id}` : "";
+    const thinkHarderToggle = global.document?.getElementById?.("think-harder") ?? null;
+    const syncThinkHarderToggle = () => {
+      if (thinkHarderToggle) thinkHarderToggle.checked = thinkHarderByConversation.has(routerContextKey(state.activeContext));
+    };
+    const onThinkHarderToggle = () => {
+      const key = routerContextKey(state.activeContext);
+      if (!key) return;
+      if (thinkHarderToggle.checked) thinkHarderByConversation.add(key);
+      else thinkHarderByConversation.delete(key);
+    };
+    thinkHarderToggle?.addEventListener?.("change", onThinkHarderToggle);
+    syncThinkHarderToggle();
 
     // JOBBUS-3: the Job bus card with no relay and no gateway behind it (docs/JOB-BUS.md §7,
     // hardened by §10.7). A bus with no token has never been called, so it carries no jobs;
@@ -218,6 +232,19 @@
         return clone(state);
       },
 
+      setThinkHarder(contextInput, enabled) {
+        const context = normalizeContext(contextInput ?? state.activeContext);
+        const key = routerContextKey(context);
+        if (enabled) thinkHarderByConversation.add(key); else thinkHarderByConversation.delete(key);
+        syncThinkHarderToggle();
+        return enabled === true;
+      },
+
+      getThinkHarder(contextInput) {
+        const context = normalizeContext(contextInput ?? state.activeContext);
+        return thinkHarderByConversation.has(routerContextKey(context));
+      },
+
       subscribe(listener) {
         listeners.add(listener);
         return () => listeners.delete(listener);
@@ -227,12 +254,14 @@
         timers.forEach((timer) => global.clearTimeout(timer));
         timers.clear();
         listeners.clear();
+        thinkHarderToggle?.removeEventListener?.("change", onThinkHarderToggle);
       },
 
       selectContext(contextOrKind, maybeId) {
         const context = normalizeContext(contextOrKind, maybeId);
         if (!contextExists(context)) return clone(state);
         state.activeContext = context;
+        syncThinkHarderToggle();
         ensureOpenContext(context);
         return emit("context:selected", { context });
       },

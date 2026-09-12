@@ -50,6 +50,7 @@ import { dispatchMirrorOrGroupSend } from "./send-group-fanout.js";
 export interface SendPromptOptions {
   readonly agentId?: string;
   readonly clientNonce?: string;
+  readonly thinkHarder?: boolean;
   readonly traceparent?: string;
   readonly richText?: string;
   readonly replyToId?: string;
@@ -438,6 +439,7 @@ export class SendPipeline {
         ...(options.clientNonce == null
           ? {}
           : { clientNonce: options.clientNonce }),
+        ...(options.thinkHarder === true ? { thinkHarder: true } : {}),
         awaitTurn,
         isFork: threading.isFork,
         ...(userMessageId == null ? {} : { userMessageId }),

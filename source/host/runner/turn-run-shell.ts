@@ -99,6 +99,9 @@ export interface TurnAgentRunContextInput<ContextValue> {
   readonly isSilenceAllowed: boolean;
   readonly isComputerUseSubagent?: boolean;
   readonly isBrowserUseSubagent?: boolean;
+  readonly thinkHarder?: boolean;
+  readonly isCodingAgent?: boolean;
+  readonly heavyRoutine?: boolean;
   readonly hidden?: boolean;
   readonly lineage?: unknown;
   readonly canUseSelfSummary: () => boolean;
@@ -179,6 +182,9 @@ export async function createTurnAgentRunContext<ContextValue>(
     ...(input.requestSource === undefined
       ? {}
       : { requestSource: input.requestSource }),
+    ...(input.thinkHarder === true ? { thinkHarder: true } : {}),
+    ...(input.isCodingAgent === true ? { isCodingAgent: true } : {}),
+    ...(input.heavyRoutine === true ? { heavyRoutine: true } : {}),
     skipLabeling: input.isSubagentRunner || input.hidden === true,
     ...(input.lineage === undefined ? {} : { lineage: input.lineage }),
   };
@@ -191,7 +197,7 @@ export async function createTurnAgentRunContext<ContextValue>(
     ? input.inference.createSession(input.onRequestId, sessionOptions)
     // The conversation id rides along so the [sand][wire] trace can be paired with the
     // [sand][toolset] line for the same turn.
-    : createProviderPromptSession(inferenceProvider, input.conversationId) as unknown as TurnAgentPromptSession;
+    : createProviderPromptSession(inferenceProvider, input.conversationId, sessionOptions) as unknown as TurnAgentPromptSession;
   const summarizationSession = inferenceProvider === "cursor" ? input.inference.createSummarizationSession?.(
     input.onRequestId,
     {
@@ -199,7 +205,7 @@ export async function createTurnAgentRunContext<ContextValue>(
       isSummarizationSession: true,
       ...(input.lineage === undefined ? {} : { lineage: input.lineage }),
     },
-  ) : createProviderPromptSession(inferenceProvider, input.conversationId) as unknown as SummarizationPromptSession;
+  ) : createProviderPromptSession(inferenceProvider, input.conversationId, { ...sessionOptions, thinkHarder: true }) as unknown as SummarizationPromptSession;
   const summarization = summarizationSession ?? input.inference.createSession(
     input.onRequestId,
     {
@@ -340,8 +346,9 @@ export const RESUME_TURN_ACTION = new ConversationAction({
 });
 
 export interface TurnRunOptions {
+  readonly thinkHarder?: boolean;
   readonly requestSource?: string;
-  readonly automationWake?: { readonly id: string };
+  readonly automationWake?: { readonly id: string; readonly heavy?: boolean };
   readonly selectedImages?: readonly unknown[];
   readonly attachedFilePaths?: readonly string[];
   readonly selectedVideos?: readonly unknown[];

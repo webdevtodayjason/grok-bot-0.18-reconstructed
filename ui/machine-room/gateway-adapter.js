@@ -2717,6 +2717,25 @@
 
   function createGatewayAdapter(state) {
     const listeners = new Set();
+    const thinkHarderByConversation = new Set();
+    const routerContextKey = (context) => context && context.id ? `${context.kind}:${context.id}` : "";
+    const thinkHarderToggle = global.document?.getElementById?.("think-harder") ?? null;
+    const syncThinkHarderToggle = () => {
+      if (thinkHarderToggle) thinkHarderToggle.checked = thinkHarderByConversation.has(routerContextKey(state.activeContext));
+    };
+    const setThinkHarderValue = (context, enabled) => {
+      const key = routerContextKey(context);
+      if (!key) return false;
+      if (enabled) thinkHarderByConversation.add(key);
+      else thinkHarderByConversation.delete(key);
+      syncThinkHarderToggle();
+      return enabled === true;
+    };
+    const onThinkHarderToggle = () => {
+      setThinkHarderValue(state.activeContext, thinkHarderToggle.checked);
+    };
+    thinkHarderToggle?.addEventListener?.("change", onThinkHarderToggle);
+    syncThinkHarderToggle();
     // Set by reloadRoster when a status, unread count or preview moved; reloadActive emits on it
     // even when the transcript did not change.
     let rosterChanged = false;
@@ -3161,12 +3180,15 @@
       destroy() {
         listeners.clear();
         suspend();
+        thinkHarderToggle?.removeEventListener?.("change", onThinkHarderToggle);
         global.document?.removeEventListener?.("visibilitychange", onVisibility);
         global.removeEventListener?.("pagehide", suspend);
       },
       // The heartbeat's own body, callable: a test with a stub gateway drives a refresh through
       // it, and a view that just wrote something can ask for the read-back without waiting 15s.
       refresh: () => reloadActive(),
+      setThinkHarder: (context, enabled) => setThinkHarderValue(context ?? state.activeContext, enabled === true),
+      getThinkHarder: (context) => thinkHarderByConversation.has(routerContextKey(context ?? state.activeContext)),
 
       // Older entries, one page before the window (GW-03). Resolves with how many came and whether
       // the host has more; emits its own event so the view can keep its scroll offset instead of
@@ -3188,6 +3210,7 @@
         const r = record(context);
         if (!r) return clone(state);
         state.activeContext = context;
+        syncThinkHarderToggle();
         if (!state.openContexts.some((c) => same(c, context))) state.openContexts.push(context);
         const snapshot = emit("context:selected", { context });
         const load = loadContext(context, r.name, r.status).then(async (loaded) => {
@@ -3254,6 +3277,7 @@
           agentId: context.id,
           prompt: clean,
           clientNonce,
+          ...(thinkHarderByConversation.has(routerContextKey(context)) ? { thinkHarder: true } : {}),
           ...(attachments.length
             ? { attachmentPaths: attachments.map((a) => a.path), attachmentNames: attachments.map((a) => a.name) }
             : {}),
@@ -5363,7 +5387,10 @@
       const title = doc.createElement("strong"); title.textContent = "Top models"; models.appendChild(title);
       for (const row of rows) {
         const line = doc.createElement("div");
-        const name = doc.createElement("span"); name.textContent = row.model;
+        const name = doc.createElement("span");
+        const model = String(row.model ?? "");
+        const tier = model.startsWith("plan-") && !model.endsWith("-vision") ? (model.endsWith("-talk") ? "talk" : "work") : "";
+        name.textContent = tier ? `${model} · ${tier}` : model;
         const tokens = doc.createElement("span"); tokens.textContent = `${allowanceCount(row.tokens)} tokens`;
         line.append(name, tokens); models.appendChild(line);
       }

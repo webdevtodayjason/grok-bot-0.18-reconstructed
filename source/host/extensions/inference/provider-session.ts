@@ -16,7 +16,8 @@ import { isSandBoxSettingEnabled, SAND_TOOL_TRACE_SETTING } from "../../sand-box
 import { SandSettingsStore } from "../../../shared/node/settings/sand-settings-store.js";
 import { getBoxSecretsStorePath } from "../secrets/secrets-service.js";
 import { streamCodexDirectResponses, type CodexDirectTool } from "./codex-direct-responses.js";
-import { DEFAULT_OPENAI_COMPATIBLE_CONTEXT_WINDOW, IMAGE_PART_BYTES_MAX, OPENAI_COMPATIBLE_CONTEXT_WINDOW_ENV, endpointRefusesImages, fetchOpenAiCompatibleContextWindow, openAiCompatibleTools, resolveOpenAiCompatibleSettings, streamOpenAiCompatibleChat, type OpenAiCompatibleSettings } from "./openai-compatible-chat.js";
+import { DEFAULT_OPENAI_COMPATIBLE_CONTEXT_WINDOW, IMAGE_PART_BYTES_MAX, OPENAI_COMPATIBLE_CONTEXT_WINDOW_ENV, endpointRefusesImages, fetchOpenAiCompatibleContextWindow, fetchOpenAiCompatibleModelIds, openAiCompatibleTools, resolveOpenAiCompatibleSettings, streamOpenAiCompatibleChat, type OpenAiCompatibleSettings } from "./openai-compatible-chat.js";
+import { ModelTierTurnRouter, talkModelFor, type ModelTierTurnContext } from "./model-tier-router.js";
 import type { LabelMessage, PromptExecutor } from "./sand-labeling.js";
 
 type Loose = Record<string, any>;
@@ -24,6 +25,7 @@ interface ProviderMessage extends LabelMessage { role: string; content: string |
 type RoutedProvider = Exclude<SandInferenceProvider, "cursor">;
 type UsageRecord = { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number };
 type RoutedToolExecutor = (tool: Loose, args: unknown, toolCallId: string) => Promise<unknown>;
+export interface ProviderSessionOptions extends ModelTierTurnContext {}
 
 // The routed providers advertise the agent's tools to the model and then have nowhere
 // to run what it picks: every provider took `undefined` in the executor position, so the
@@ -672,6 +674,18 @@ function openAiCompatibleSettings(): OpenAiCompatibleSettings {
 const DEFAULT_CONTEXT_WINDOW_RECHECK_MS = 10 * 60 * 1000;
 const resolvedContextWindows = new Map<string, { readonly value: number; readonly expiresAt: number }>();
 const announcedContextWindows = new Map<string, number>();
+const TALK_CATALOG_CACHE_MS = 60_000;
+const talkCatalogs = new Map<string, { readonly ids: readonly string[] | null; readonly expiresAt: number }>();
+async function talkModelAvailable(settings: OpenAiCompatibleSettings): Promise<boolean> {
+  const talkModel = talkModelFor(settings.model);
+  if (talkModel == null) return false;
+  const key = `${settings.baseUrl}\n${settings.model}`;
+  const cached = talkCatalogs.get(key);
+  if (cached !== undefined && Date.now() < cached.expiresAt) return cached.ids?.includes(talkModel) === true;
+  const ids = await fetchOpenAiCompatibleModelIds(fetch, settings);
+  talkCatalogs.set(key, { ids, expiresAt: Date.now() + TALK_CATALOG_CACHE_MS });
+  return ids?.includes(talkModel) === true;
+}
 async function resolveOpenAiCompatibleContextWindow(settings: OpenAiCompatibleSettings): Promise<number> {
   if (settings.contextWindow != null) return settings.contextWindow;
   const key = `${settings.baseUrl}\n${settings.model}`;
@@ -707,8 +721,8 @@ function configuredOpenAiCompatibleModel(): string {
   try { return openAiCompatibleSettings().model; } catch { return "openai-compatible"; }
 }
 
-function openAiCompatibleExecutor(messages: readonly ProviderMessage[], invocationId: string, definitions?: readonly Loose[], executeTool?: RoutedToolExecutor, onUsage?: (usage: UsageRecord) => void, conversationId?: string) {
-  const settings = openAiCompatibleSettings();
+function openAiCompatibleExecutor(messages: readonly ProviderMessage[], invocationId: string, definitions?: readonly Loose[], executeTool?: RoutedToolExecutor, onUsage?: (usage: UsageRecord) => void, conversationId?: string, router?: ModelTierTurnRouter) {
+  let settings = openAiCompatibleSettings();
   const usage = deferred<{ promptTokens: number; completionTokens: number; totalTokens: number }>();
   const extendedUsage = deferred<{ inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; maxTokens: number }>();
   const resultResponse = deferred<ReturnType<typeof response>>();
@@ -753,30 +767,36 @@ function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): re
 }
 
   const tools = openAiCompatibleTools(withJsonSchemaParameters(definitions));
-  // Once for the turn, not three times: each call re-encodes every attached picture to base64, and
-  // the request, the instructions and the trace line all want the same one anyway.
-  const imagesAllowed = !endpointRefusesImages(settings.baseUrl, settings.model);
-  const conversation = conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage"), imagesAllowed);
-  // SAND_TOOL_TRACE: what actually leaves for the provider, beside the [sand][toolset] line for
-  // what buildTurnTools offered. openAiCompatibleTools drops any definition without parameters;
-  // the browserUse subagent lost all fifteen browser tools that way and nobody could see it.
-  if (isSandBoxSettingEnabled(SAND_TOOL_TRACE_SETTING)) {
-    // conversationId so a reader can pair this line with the [sand][toolset] line for the same
-    // turn. Matching on the offered count alone let a request from another agent stand in.
-    console.log(`[sand][wire] ${JSON.stringify({
-      conversationId: conversationId ?? null,
-      transport: settings.transport ?? "chat", model: settings.model,
-      offered: (definitions ?? []).length, sent: (tools ?? []).length,
-      historyImageParts: countHistoryImageParts(messages),
-      imageParts: countWireImageParts(conversation.input),
-      // False only after this endpoint and model have refused a picture once in this host process.
-      imagesAllowed,
-      tools: (tools ?? []).map(tool => tool.name),
-    })}`);
-  }
   const fullStream = (async function* () {
     let text = "";
     try {
+      if (router != null) {
+        const workSettings = settings;
+        const choice = router.choose({
+          workModel: workSettings.model,
+          talkAvailable: await talkModelAvailable(workSettings),
+          workspacePin: process.env.SAND_MODEL_ROUTER_PIN ?? persistedSecrets().SAND_MODEL_ROUTER_PIN,
+        });
+        settings = choice.model === workSettings.model ? workSettings : {
+          ...workSettings,
+          model: choice.model,
+          ...((workSettings.modelLabel ?? "").length === 0 ? {} : { modelLabel: `${workSettings.modelLabel} Flash` }),
+        };
+        console.info(`[sand][router] ${JSON.stringify({ conversationId: conversationId ?? null, tier: choice.tier, model: choice.model, reason: choice.reason })}`);
+      }
+      // Once for the model step: request, instructions and trace share one encoded conversation.
+      const imagesAllowed = !endpointRefusesImages(settings.baseUrl, settings.model);
+      const conversation = conversationInput(messages, (tools ?? []).some((tool: Loose) => tool.name === "SendMessage"), imagesAllowed);
+      if (isSandBoxSettingEnabled(SAND_TOOL_TRACE_SETTING)) {
+        console.log(`[sand][wire] ${JSON.stringify({
+          conversationId: conversationId ?? null,
+          transport: settings.transport ?? "chat", model: settings.model,
+          offered: (definitions ?? []).length, sent: (tools ?? []).length,
+          historyImageParts: countHistoryImageParts(messages),
+          imageParts: countWireImageParts(conversation.input), imagesAllowed,
+          tools: (tools ?? []).map(tool => tool.name),
+        })}`);
+      }
       const contextWindow = await resolveOpenAiCompatibleContextWindow(settings);
       for await (const event of streamOpenAiCompatibleChat({
         fetch,
@@ -797,6 +817,7 @@ function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): re
         // can run SendMessage, which is the agent's only voice. Pass the call through in
         // the vocabulary tool-stream-executor already reads.
         if (event.type === "tool-call") {
+          router?.observeToolCall(event.toolName);
           // The runner starts the tool as soon as it sees a call and expects the arguments
           // to arrive as a stream: a lone tool-call chunk only resolves its args when the
           // stream closes, which is after dispatch, so the tool ran with {} every time.
@@ -823,7 +844,15 @@ function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): re
 }
 
 class ProviderPromptExecutor extends BasePromptExecutor<ProviderMessage> {
-  constructor(readonly provider: RoutedProvider, initialMessages?: readonly ProviderMessage[], readonly onUsage?: (usage: UsageRecord) => void, readonly conversationId?: string) { super(new BasePromptBuilder(initialMessages)); }
+  readonly tierRouter: ModelTierTurnRouter;
+  constructor(readonly provider: RoutedProvider, initialMessages?: readonly ProviderMessage[], readonly onUsage?: (usage: UsageRecord) => void, readonly conversationId?: string, readonly sessionOptions: ProviderSessionOptions = {}) {
+    super(new BasePromptBuilder(initialMessages));
+    this.tierRouter = new ModelTierTurnRouter(sessionOptions);
+  }
+  appendMessages(messages: readonly ProviderMessage[]) {
+    this.tierRouter.observeMessages(messages);
+    return super.appendMessages(messages);
+  }
   stream(_ctx: unknown, invocationId = crypto.randomUUID(), definitions?: readonly Loose[]) {
     const execute = hostRoutedToolExecutor;
     if (this.provider === "codex") return codexExecutor(this.getMessages(), invocationId, definitions, execute, this.onUsage);
@@ -831,14 +860,14 @@ class ProviderPromptExecutor extends BasePromptExecutor<ProviderMessage> {
     // Deliberately no inline executor here: on the runner path tool calls belong to the
     // runner. Handing this one the routed-MCP executor made "did not provide an executor"
     // disappear while leaving every SendMessage unrunnable, so the turn finished silent.
-    if (this.provider === "openai-compatible") return openAiCompatibleExecutor(this.getMessages(), invocationId, definitions, undefined, this.onUsage, this.conversationId);
+    if (this.provider === "openai-compatible") return openAiCompatibleExecutor(this.getMessages(), invocationId, definitions, undefined, this.onUsage, this.conversationId, this.tierRouter);
     return openRouterExecutor(this.getMessages(), invocationId, definitions, execute, this.onUsage);
   }
 }
 
-export function createProviderPromptSession(provider: RoutedProvider, conversationId?: string): { getModelId(): string; getExecutor(state?: unknown): PromptExecutor } {
+export function createProviderPromptSession(provider: RoutedProvider, conversationId?: string, sessionOptions: ProviderSessionOptions = {}): { getModelId(): string; getExecutor(state?: unknown): PromptExecutor } {
   const modelId = provider === "codex" ? configuredCodexModel() : provider === "claude-code" ? "claude-code" : provider === "openai-compatible" ? configuredOpenAiCompatibleModel() : process.env.SAND_OPENROUTER_MODEL?.trim() || "openai/gpt-5.2";
-  return { getModelId: () => modelId, getExecutor: state => new ProviderPromptExecutor(provider, Array.isArray(state) ? state as ProviderMessage[] : undefined, usage => recordRoutedUsage(provider, usage), conversationId) };
+  return { getModelId: () => modelId, getExecutor: state => new ProviderPromptExecutor(provider, Array.isArray(state) ? state as ProviderMessage[] : undefined, usage => recordRoutedUsage(provider, usage), conversationId, sessionOptions) };
 }
 
 export async function runRoutedProviderText(provider: RoutedProvider, messages: readonly ProviderMessage[], options?: {
@@ -846,6 +875,7 @@ export async function runRoutedProviderText(provider: RoutedProvider, messages: 
   readonly tools?: readonly Loose[];
   readonly executeTool?: RoutedToolExecutor;
   readonly onTextDelta?: (delta: string, accumulated: string) => void;
+  readonly routerContext?: ProviderSessionOptions;
 }): Promise<string> {
   const invocationId = crypto.randomUUID();
   const onUsage = (usage: UsageRecord) => recordRoutedUsage(provider, usage);
@@ -854,7 +884,7 @@ export async function runRoutedProviderText(provider: RoutedProvider, messages: 
     : provider === "claude-code"
       ? claudeExecutor(messages, invocationId, onUsage, options?.mcpServerUrl)
       : provider === "openai-compatible"
-        ? openAiCompatibleExecutor(messages, invocationId, options?.tools, options?.executeTool, onUsage)
+        ? openAiCompatibleExecutor(messages, invocationId, options?.tools, options?.executeTool, onUsage, undefined, new ModelTierTurnRouter(options?.routerContext))
         : openRouterExecutor(messages, invocationId, options?.tools, options?.executeTool, onUsage);
   let text = "";
   for await (const event of result.fullStream) {

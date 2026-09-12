@@ -3422,7 +3422,15 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
             requestId,
             inference: createTypedInferenceOwner(extensions.api("inference").port),
             onRequestId: requestIdForwarder(hooks, "agent"),
-            isSubagentRunner: false,
+            isSubagentRunner: shellSubagentKind !== undefined,
+            isComputerUseSubagent: normalizeSubagentKind(shellSubagentKind) === "computeruse",
+            isBrowserUseSubagent: normalizeSubagentKind(shellSubagentKind) === "browseruse",
+            isCodingAgent: shellSubagentKind !== undefined
+              && normalizeSubagentKind(shellSubagentKind) !== "computeruse"
+              && normalizeSubagentKind(shellSubagentKind) !== "browseruse",
+            ...(runOptions.thinkHarder === true ? { thinkHarder: true } : {}),
+            ...(runOptions.requestSource === undefined ? {} : { requestSource: runOptions.requestSource }),
+            ...(runOptions.automationWake?.heavy === true ? { heavyRoutine: true } : {}),
             isSilenceAllowed: runOptions.isSilenceAllowed === true,
             ...(runOptions.ackToken === undefined
               ? {}

@@ -30,6 +30,9 @@ import {
   isoDay,
   monthStartDay,
   proxyKeyAlias,
+  planModelTier,
+  talkPlanModelFor,
+  withTalkPlanModels,
   MCP_SERVERS,
 } from "../cp/proxy.mjs";
 import {
@@ -234,8 +237,19 @@ test("what the mint sends is the tenant's own alias and metadata, and never an e
     // Without this grant the key sees an EMPTY MCP tool list and a 200 while doing it, so a
     // customer's TinyFish connector reports healthy and offers nothing.
     assert.deepEqual(sent.object_permission, { mcp_servers: [...MCP_SERVERS] });
-    assert.deepEqual([...sent.models].sort(), ["plan-minimax", "plan-zai"]);
+    assert.deepEqual([...sent.models].sort(), ["plan-minimax", "plan-minimax-talk", "plan-zai", "plan-zai-talk"]);
   });
+});
+
+test("plan work aliases grant their talk siblings without changing vision or customer models", () => {
+  assert.deepEqual(withTalkPlanModels(["plan-zai", "plan-zai-vision", "customer-model"]), [
+    "plan-zai", "plan-zai-talk", "plan-zai-vision", "customer-model",
+  ]);
+  assert.equal(talkPlanModelFor("plan-zai"), "plan-zai-talk");
+  assert.equal(talkPlanModelFor("plan-zai-vision"), null);
+  assert.equal(planModelTier("plan-zai"), "work");
+  assert.equal(planModelTier("plan-zai-talk"), "talk");
+  assert.equal(planModelTier("customer-model"), null);
 });
 
 test("observe mode mints a soft budget and enforce mints a hard one", async () => {
@@ -531,8 +545,8 @@ test("the pool fails over when one subscription's key is the one that is dead", 
   await withProxy(async ({ proxy, config }) => {
     const minted = await ensureProxyKey(SLUG, config);
     assert.deepEqual(minted.record.models.map((row) => row.id), ["plan-zai"]);
-    assert.equal(proxy.callsTo("POST /key/generate")[0].body.models.length, 1,
-      "two subscriptions under one name have to be minted as one model, not two");
+    assert.deepEqual(proxy.callsTo("POST /key/generate")[0].body.models, ["plan-zai", "plan-zai-talk"],
+      "pool depth must not duplicate either tier");
   }, { models: [
     { model_name: "plan-zai", model_info: { max_input_tokens: 200_000 } },
     { model_name: "plan-zai", model_info: { max_input_tokens: 200_000 } },

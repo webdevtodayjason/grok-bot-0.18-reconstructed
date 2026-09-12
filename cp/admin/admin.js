@@ -692,6 +692,33 @@
     return row;
   }
 
+  function clientRouterPinRow(client) {
+    const row = el("div", "row routerPinRow");
+    row.appendChild(el("span", "quiet", "Model router"));
+    const select = document.createElement("select");
+    select.className = "clientRouterPin";
+    fill(select, [
+      { value: "auto", label: "Auto" },
+      { value: "work", label: "Always work" },
+      { value: "talk", label: "Always talk" },
+    ], client.routerPin ?? "auto");
+    row.appendChild(select);
+    const save = el("button", "ghost small", "Save");
+    save.type = "button";
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      try {
+        const result = await api("POST", `/v1/admin/clients/${encodeURIComponent(client.slug)}/router-pin`, { pin: select.value });
+        banner(String(result.message || `${client.slug}'s router pin was saved.`), true);
+        await loadClients();
+      } catch (error) { banner(String(error.message)); }
+      finally { save.disabled = false; }
+    });
+    row.appendChild(save);
+    row.appendChild(el("span", "clock", "This workspace-wide pin wins over automatic upgrades and the conversation switch."));
+    return row;
+  }
+
   /**
    * How many bots this workspace may hold, on its own row under the customer. AGENTS-CAP-2.
    *
@@ -1043,6 +1070,7 @@
       // gets said out loud rather than a select that appears to work: a control that silently does
       // nothing is worse than no control.
       card.appendChild(clientModelRow(client));
+      card.appendChild(clientRouterPinRow(client));
       card.appendChild(clientAllowanceRow(client, answer.allowanceLevels));
       // AGENTS-CAP-2. And how many bots it may hold, read off the box the same way.
       card.appendChild(clientCeilingRow(client));
@@ -2016,8 +2044,9 @@
     for (const line of usage) {
       const tr = document.createElement("tr");
       const listPrice = line.listPrice == null ? "not recorded" : `$${Number(line.listPrice.input).toFixed(2)} / $${Number(line.listPrice.output).toFixed(2)} per 1M in/out`;
+      const model = line.tier === "talk" || line.tier === "work" ? `${line.model} · ${line.tier}` : line.model;
       for (const value of [
-        line.provider, line.model, countWords(line.tokensIn), countWords(line.tokensOut), countWords(line.calls), money.format(Number(line.cost) || 0), listPrice,
+        line.provider, model, countWords(line.tokensIn), countWords(line.tokensOut), countWords(line.calls), money.format(Number(line.cost) || 0), listPrice,
       ]) tr.appendChild(el("td", null, value));
       body.appendChild(tr);
       const sum = totals.get(line.provider) ?? { tokensIn: 0, tokensOut: 0, calls: 0, cost: 0 };
