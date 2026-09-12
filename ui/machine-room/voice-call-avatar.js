@@ -21,6 +21,33 @@
  * does for centring, because a translate does not change rect.width. Rotation and orientation are
  * then safe by construction, which is why the element's width may be a vw expression at all.
  *
+ * HOW HE MORPHS, and it is Jason's own instruction: "We don't want ChatGPT's orb. We're going to have
+ * Titan's blob, the one already on the homepage. That's what I want there, so it can react and act and
+ * morph." So the middle of this screen is the vendored kit's blob -- the same element the roster, the
+ * onboarding face and the boot cover draw -- and the level reaches the BLOB rather than only a ring
+ * around it. Two mechanisms, both reading the kit rather than editing it:
+ *
+ *   1. THE KIT'S OWN OUTLINE. Read off assets/titan-mascot.js: `strength` scales the three summed sine
+ *      waves and the swell that deform the 120-point superellipse contour -- the silhouette's wobble is
+ *      literally that number -- `speed` scales the clock the waves advance on, and `bob` the float.
+ *      MOODS are the only input to all three (calm .8/.7/1, curious 1.3/.95/1.15, excited 1.65/1.55/2.3)
+ *      and `frame()` eases toward them at .035 a frame, about half a second. So the LEVEL picks the
+ *      mood, with a hysteresis band, and Titan's own body deforms more and faster as somebody talks.
+ *      The mood is written ONLY when the word changes: attributeChangedCallback fires refresh(), which
+ *      dispatches a bubbling `titan-statechange` on the document, and sixty of those a second would be
+ *      this module shouting at the whole page.
+ *   2. SQUASH AND STRETCH, on the CANVAS INSIDE THE KIT'S OWN SHADOW ROOT (`mode: 'open'`), never on
+ *      the host. This is the seam that makes per-frame deformation safe: resize() measures the HOST, and
+ *      a transform on a child does not change its parent's layout box, so the kit's own measurement
+ *      cannot see it. The canvas takes a volume-preserving squash from the level, a slow breath at rest
+ *      -- translateY -4px and 1.02, which is boot.css's own boot-sprite-breathe, this console's
+ *      breathing vocabulary for Titan -- and a small rotation so the edge moves rather than just
+ *      inflating. Nothing about the host's box, the backing store or the kit's arithmetic changes.
+ *
+ * THE EYE IS THE KIT'S OWN and tracking stays "off". The kit's tracking follows a real pointer, which a
+ * phone call does not have; with it off the eye keeps its own slow drift (targetX/targetY on two sines)
+ * and its 5.6 s blink, which is the "tracking a little" that is true on a screen nobody is pointing at.
+ *
  * SIZE. The body is 0.422 of the canvas width at every size and STOPS GROWING where the canvas hits
  * the kit's own Math.min(430, width * .68) height clamp -- an element width of 632 px, giving
  * 266.5 x 244 CSS px of Titan, which is 68% of a 390 px phone and the largest the shipped kit can
@@ -44,6 +71,18 @@
   };
   // Above this the Listening face is curious rather than calm: somebody is talking to him.
   const LEVEL_FLOOR = 0.12;
+  // And above this he is excited. A BAND rather than a point on both, because a mood written on every
+  // frame that crosses a threshold would flap between two faces at a whisper and fire a bubbling
+  // `titan-statechange` on the document each time.
+  const LEVEL_PEAK = 0.55;
+  const MOOD_HYSTERESIS = 0.07;
+  /** How much of the level becomes squash. Volume preserving: what he gains across, he loses down. */
+  const SQUASH = 0.07;
+  /** The breath at rest, and the slower one while he is working. boot.css: 2600 ms, -4px, 1.02. */
+  const BREATH_MS = 2600;
+  const THINKING_BREATH_MS = 4200;
+  const BREATH_LIFT = 4;
+  const BREATH_SCALE = 0.02;
   // ONE POLE, ASYMMETRIC, IN JS RATHER THAN IN CSS. motion.css flattens every transition to 1 ms
   // globally under reduced motion, so a CSS-smoothed level would step and read as jitter.
   const ATTACK = 0.25;
@@ -77,6 +116,9 @@
   let frames = 0;
   let raf = null;
   let mood = "calm";
+  let canvas = null;
+  let lastTransform = "";
+  let started = 0;
 
   /** Which number drives the motion in this state. The echo gate legitimately shuts the microphone
    * while Titan talks, so a Talking state reads playback and a Listening state reads the microphone. */
@@ -104,9 +146,50 @@
     if (still != null) still.src = stillFor(next);
   }
 
-  function moodFor(state, value) {
-    if (state === "Listening" && value > LEVEL_FLOOR) return "curious";
-    return MOOD_FOR[state] ?? "calm";
+  /**
+   * WHICH FACE THE KIT WEARS, and this is mechanism 1: the mood is the only door into the kit's own
+   * `strength`, which is the number its contour waves are multiplied by. `was` is the mood he is
+   * already in, so a level hovering on a threshold does not flap between two of them.
+   */
+  function moodFor(state, value, was = "") {
+    if (state === "Thinking") return "curious";
+    if (state === "Muted" || state === "Connecting") return "calm";
+    const up = (floor) => (was === "calm" || was === "" ? value > floor + MOOD_HYSTERESIS : value > floor - MOOD_HYSTERESIS);
+    const peak = (floor) => (was === "excited" ? value > floor - MOOD_HYSTERESIS : value > floor + MOOD_HYSTERESIS);
+    // He is already making the noise when he talks, so it takes less of it to light him up.
+    if (state === "Talking") return peak(LEVEL_PEAK * 0.6) ? "excited" : "curious";
+    if (peak(LEVEL_PEAK)) return "excited";
+    return up(LEVEL_FLOOR) ? "curious" : "calm";
+  }
+
+  /**
+   * MECHANISM 2, and the one rule it obeys: the transform goes on the canvas INSIDE the kit's shadow
+   * root and never on the host. resize() measures the host; a child's transform does not change a
+   * parent's layout box, so the kit cannot see this and Titan can still be squashed sixty times a
+   * second. Written only when the string changes, so a still frame writes nothing at all.
+   */
+  function morph(now) {
+    if (canvas == null) {
+      try { canvas = mascot?.shadowRoot?.querySelector("canvas") ?? null; }
+      catch { canvas = null; }
+      if (canvas == null) return;
+    }
+    const t = (now - started) / 1000;
+    const period = (word === "Thinking" ? THINKING_BREATH_MS : BREATH_MS) / 1000;
+    const breath = Math.sin((t / period) * Math.PI * 2);
+    // The breath is loudest at rest and gets out of the way once there is a voice to follow.
+    const quiet = 1 - Math.min(1, level * 2);
+    const lift = -BREATH_LIFT * ((breath + 1) / 2) * quiet;
+    const swell = BREATH_SCALE * breath * quiet;
+    const x = 1 + SQUASH * level + swell;
+    const y = 1 - SQUASH * 0.8 * level + swell;
+    // A degree of tilt on a slow sine, so the edge MOVES rather than the whole of him just inflating.
+    const tilt = (0.35 + 1.1 * level) * Math.sin(t * 0.9);
+    const next = `translateY(${lift.toFixed(2)}px) rotate(${tilt.toFixed(2)}deg) scale(${x.toFixed(4)}, ${y.toFixed(4)})`;
+    if (next === lastTransform) return;
+    lastTransform = next;
+    canvas.style.transform = next;
+    canvas.style.transformOrigin = "50% 62%";
   }
 
   function paint() {
@@ -130,15 +213,16 @@
     }
   }
 
-  function tick() {
+  function tick(now) {
     raf = null;
     frames += 1;
     let stats = null;
     try { stats = readLevels?.() ?? null; } catch { stats = null; }
     const raw = clamp01(levelFor(word, stats) / LEVEL_FULL_SCALE);
     level = smooth(level, raw);
-    setMood(moodFor(word, level));
+    setMood(moodFor(word, level, mood));
     paint();
+    morph(typeof now === "number" ? now : Date.now());
     schedule();
   }
 
@@ -160,6 +244,9 @@
     level = 0;
     frames = 0;
     mood = "calm";
+    canvas = null;
+    lastTransform = "";
+    started = typeof global.performance?.now === "function" ? global.performance.now() : Date.now();
     const doc = global.document;
     // REDUCED MOTION IS DESIGNED HERE, NOT INHERITED: the still, no rAF, no level read at all, and the
     // mood still changes the still. MEASURED at 2.7% of the main thread against 9.3%.
@@ -192,7 +279,7 @@
     const value = String(next ?? "");
     if (MOOD_FOR[value] == null) return;
     word = value;
-    if (mascot == null) setMood(moodFor(word, 0));
+    if (mascot == null) setMood(moodFor(word, 0, mood));
   }
 
   function setLevels(mic, out) { readLevels = () => ({ mic: Number(mic) || 0, out: Number(out) || 0 }); }
@@ -207,6 +294,9 @@
       try { mascot.remove(); } catch { /* already gone */ }
     }
     if (still != null) { try { still.remove(); } catch { /* already gone */ } }
+    if (canvas != null) { try { canvas.style.transform = ""; } catch { /* the node is going anyway */ } }
+    canvas = null;
+    lastTransform = "";
     mascot = null;
     still = null;
     host = null;
@@ -232,8 +322,15 @@
     _LEVEL_FULL_SCALE: LEVEL_FULL_SCALE,
     _LEVEL_FLOOR: LEVEL_FLOOR,
     _MOOD_FOR: MOOD_FOR,
+    _LEVEL_PEAK: LEVEL_PEAK,
+    _MOOD_HYSTERESIS: MOOD_HYSTERESIS,
+    _SQUASH: SQUASH,
+    _BREATH_MS: BREATH_MS,
     _smooth: smooth,
     _moodFor: moodFor,
+    _morph: morph,
     _stillFor: stillFor,
+    /** What the canvas inside the kit's shadow root is wearing right now, for the gate to read. */
+    get transform() { return lastTransform; },
   };
 })(typeof window === "undefined" ? globalThis : window);

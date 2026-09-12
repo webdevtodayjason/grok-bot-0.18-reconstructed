@@ -2857,10 +2857,37 @@ async function legCall() {
         // THE CANVAS IS INSIDE THE KIT'S SHADOW ROOT, so a plain descendant selector finds nothing and
         // the aspect reads 0 -- which would make the feedback-bug guard below compare 0 with 0 and pass
         // whatever Titan looked like.
-        canvasAspect: (() => { const c = document.querySelector("#voice-call titan-mascot")?.shadowRoot?.querySelector("canvas");
+        // THE HOST'S OWN BOX is what the kit measures itself from (resize() reads
+        // host.getBoundingClientRect().width), so that is the rect this leg holds still. The canvas
+        // inside its shadow root is now deliberately transformed every frame -- that is how the blob
+        // squashes and stretches -- so its rect is NOT the invariant and reading it as one would either
+        // fail on purpose or, worse, pass by measuring nothing.
+        hostBox: (() => { const m = document.querySelector("#voice-call titan-mascot");
+          if (m == null) return null;
+          const b = m.getBoundingClientRect();
+          return { w: Math.round(b.width * 100) / 100, h: Math.round(b.height * 100) / 100 }; })(),
+        canvasBackingPx: (() => { const c = document.querySelector("#voice-call titan-mascot")?.shadowRoot?.querySelector("canvas");
+          return c == null ? "" : (c.width + "x" + c.height); })(),
+        canvasCssHeight: (() => { const c = document.querySelector("#voice-call titan-mascot")?.shadowRoot?.querySelector("canvas");
+          return c == null ? "" : c.style.height; })(),
+        blobTransform: (() => { const c = document.querySelector("#voice-call titan-mascot")?.shadowRoot?.querySelector("canvas");
+          return c == null ? "" : (c.style.transform || "none"); })(),
+        mood: document.querySelector("#voice-call titan-mascot")?.getAttribute("mood") ?? "",
+        // THE BLOB'S OWN PIXELS. snapshot() is the kit's own door and it reads the canvas it really
+        // drew, so two snapshots that differ are two different Titans and not two different rings.
+        blobInk: (() => { const m = document.querySelector("#voice-call titan-mascot");
+          if (m?.shadowRoot == null) return 0;
+          const c = m.shadowRoot.querySelector("canvas");
           if (c == null) return 0;
-          const b = c.getBoundingClientRect();
-          return b.height === 0 ? 0 : Math.round((b.width / b.height) * 1000) / 1000; })(),
+          const ctx = c.getContext("2d");
+          if (ctx == null) return 0;
+          // How wide he is, in his own backing store, across the row through the middle of his body:
+          // the count of pixels with any ink in them. A morph changes it; a still frame does not.
+          const row = Math.round(c.height * 0.46);
+          const data = ctx.getImageData(0, row, c.width, 1).data;
+          let ink = 0;
+          for (let i = 3; i < data.length; i += 4) if (data[i] > 8) ink += 1;
+          return ink; })(),
         canvasBacking: (() => { const c = document.querySelector("#voice-call titan-mascot")?.shadowRoot?.querySelector("canvas");
           if (c == null) return 0;
           const b = c.getBoundingClientRect();
@@ -3040,12 +3067,32 @@ async function legCall() {
     `level ${atRest.screen?.level} -> ${atPeak.screen?.level}, transform ${atRest.screen?.halo} -> ${atPeak.screen?.halo}`);
   check(atRest.screen?.haloOpacity !== atPeak.screen?.haloOpacity, "and so does its opacity",
     `${atRest.screen?.haloOpacity} -> ${atPeak.screen?.haloOpacity}`);
+  // THE BLOB ITSELF MORPHS, which is what Jason asked for in those words: "We don't want ChatGPT's
+  // orb. We're going to have Titan's blob ... so it can react and act and morph." A ring that pulses
+  // around a still Titan would pass a halo check and fail his instruction, so the reading below is of
+  // HIS OWN PIXELS: the kit's canvas, the row through the middle of his body, the count of pixels
+  // carrying ink. Two different counts are two different Titans.
+  check(atRest.screen?.blobInk > 0 && atPeak.screen?.blobInk > 0
+    && atRest.screen?.blobInk !== atPeak.screen?.blobInk,
+    "TITAN'S OWN BODY MORPHS WITH THE LEVEL, measured across his own canvas rather than on a ring around him",
+    `he is ${atRest.screen?.blobInk} pixels across at rest and ${atPeak.screen?.blobInk} with a voice on him, in a ${atPeak.screen?.canvasBackingPx} backing store`);
+  check(atRest.screen?.blobTransform !== atPeak.screen?.blobTransform && String(atPeak.screen?.blobTransform).includes("scale"),
+    "he squashes and stretches, and the transform that does it is on the canvas INSIDE the kit's shadow root",
+    `${atRest.screen?.blobTransform} then ${atPeak.screen?.blobTransform}`);
+  check(atRest.screen?.mood !== atPeak.screen?.mood,
+    "and the kit's own face changes with him, which is what drives the outline waves in its own arithmetic",
+    `${atRest.screen?.mood} at rest, ${atPeak.screen?.mood} with a voice on him`);
+  // AND THE ONE THING THAT MUST NOT MOVE. The kit sizes its canvas from the HOST's rect, so a transform
+  // anywhere in that chain leaves Titan stretched for the rest of the call; the squash above is on the
+  // canvas, which the host's box cannot see.
   check(atRest.screen?.mascotTransform === "none" && atPeak.screen?.mascotTransform === "none",
-    "THE MASCOT ITSELF IS NEVER TRANSFORMED, at rest or at peak: the kit reads a transform-aware rect for its canvas and a scale there leaves Titan stretched for the rest of the call",
+    "THE HOST ELEMENT ITSELF IS NEVER TRANSFORMED, at rest or at peak, which is what keeps the kit's own measurement honest",
     `${atRest.screen?.mascotTransform} then ${atPeak.screen?.mascotTransform}`);
-  check(atRest.screen?.canvasAspect > 0 && atRest.screen?.canvasAspect === atPeak.screen?.canvasAspect,
-    "and his canvas has exactly the same shape at both levels, which is the feedback bug's own guard",
-    `aspect ${atRest.screen?.canvasAspect} then ${atPeak.screen?.canvasAspect}, backing ${atRest.screen?.canvasBacking}x then ${atPeak.screen?.canvasBacking}x`);
+  check(JSON.stringify(atRest.screen?.hostBox) === JSON.stringify(atPeak.screen?.hostBox)
+    && atRest.screen?.canvasBackingPx === atPeak.screen?.canvasBackingPx
+    && atRest.screen?.canvasCssHeight === atPeak.screen?.canvasCssHeight,
+    "so the box the kit measures itself from, the backing store it allocated and the height it set are identical at both levels",
+    `host ${JSON.stringify(atRest.screen?.hostBox)} then ${JSON.stringify(atPeak.screen?.hostBox)}, backing ${atRest.screen?.canvasBackingPx} then ${atPeak.screen?.canvasBackingPx}, css height ${atRest.screen?.canvasCssHeight} then ${atPeak.screen?.canvasCssHeight}`);
   await page.evaluate(() => window.__voice._setCallLevels(null, null));
   const playing = await page.evaluate(RECTS);
   info(`playback level from the stub's own 20-frame reply: ${playing.level} (measured, webkit 390x844 on ${MACHINE})`);

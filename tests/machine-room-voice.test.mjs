@@ -2772,8 +2772,17 @@ test("VOICE-13 avatar: nothing in the mascot's chain is ever scaled, and the lev
   // case is the cheap half of that guard; --leg call reads the computed transform in a real browser.
   const source = await read("ui/machine-room/voice-call-avatar.js");
   const sheet = await read("ui/machine-room/voice-call.css");
-  const painted = source.slice(source.indexOf("function paint()"), source.indexOf("function tick()"));
+  const painted = source.slice(source.indexOf("function paint()"), source.indexOf("function tick"));
   assert.ok(!/mascot\.style\.transform/.test(painted), "a transform on the mascot is the feedback bug");
+  // JASON, ON THE AVATAR: "We don't want ChatGPT's orb. We're going to have Titan's blob ... so it can
+  // react and act and morph." The morph is real and it is on the kit's own canvas, inside the shadow
+  // root the kit opened -- resize() measures the HOST, and a child's transform does not change a
+  // parent's layout box, so per-frame squash is safe exactly there and nowhere above it.
+  const morphed = source.slice(source.indexOf("function morph("), source.indexOf("function tick"));
+  assert.match(morphed, /shadowRoot\?\.querySelector\("canvas"\)/, "the morph has to reach the kit's own canvas");
+  assert.match(morphed, /canvas\.style\.transform = next/, "and it is a transform on that canvas");
+  assert.ok(!/host\.style|mascot\.style\.transform/.test(morphed), "and never on the host the kit measures itself from");
+  assert.match(morphed, /if \(next === lastTransform\) return/, "a still frame writes nothing at all");
   assert.ok(!/mascot\.style\.width/.test(painted), "writing the level into his width measured 16.8% of the main thread with 1419 layouts");
   assert.match(painted, /halo\.style\.transform/, "the halo is the sibling that moves");
   assert.match(painted, /setProperty\("--voice-level"/, "and the level is one custom property, once a frame, on the screen");
@@ -2811,8 +2820,16 @@ test("VOICE-13 avatar: nothing in the mascot's chain is ever scaled, and the lev
     assert.ok(["calm", "curious", "excited"].includes(avatar._moodFor(word, 0)), `${word} asked the kit for a mood it does not have`);
     assert.ok(["calm", "curious", "excited"].includes(avatar._moodFor(word, 1)), `${word} at a high level asked for a mood the kit does not have`);
   }
-  assert.equal(avatar._moodFor("Listening", 0), "calm");
-  assert.equal(avatar._moodFor("Listening", 1), "curious", "somebody talking to him is what he looks up at");
+  assert.equal(avatar._moodFor("Listening", 0, "calm"), "calm");
+  assert.equal(avatar._moodFor("Listening", 1, "calm"), "excited", "a voice right at him lights him up, which is the kit's own strongest outline");
+  assert.equal(avatar._moodFor("Listening", 0.3, "calm"), "curious", "and a voice across the room is the middle one");
+  // A BAND, NOT A POINT. Every mood write fires the kit's attributeChangedCallback, which dispatches a
+  // bubbling titan-statechange on the document, so a level sitting on a threshold must not flap.
+  const floor = avatar._LEVEL_FLOOR;
+  assert.equal(avatar._moodFor("Listening", floor + 0.02, "calm"), "calm", "just over the floor, from below, is still calm");
+  assert.equal(avatar._moodFor("Listening", floor - 0.02, "curious"), "curious", "and just under it, from above, is still curious");
+  assert.equal(avatar._moodFor("Thinking", 1, "excited"), "curious", "while he is working the face is the same whatever the room is doing");
+  assert.equal(avatar._moodFor("Muted", 1, "excited"), "calm");
   // Which number each state reads. The echo gate legitimately shuts the microphone while he speaks.
   assert.equal(avatar.levelFor("Listening", { mic: 0.4, out: 0.9 }), 0.4);
   assert.equal(avatar.levelFor("Talking", { mic: 0.4, out: 0.9 }), 0.9);
