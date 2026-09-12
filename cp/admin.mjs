@@ -1393,6 +1393,16 @@ export function createAdminApi({
     for (const tenant of store.listTenants()) {
       const live = await tenantView(tenant);
       const seen = fromRelay.get(tenant.slug) ?? null;
+      const measuredMs = Date.parse(String(seen?.measuredAt ?? ""));
+      const ageMs = Number.isFinite(measuredMs) ? Math.max(0, now() - measuredMs) : null;
+      let containerStateWhy = seen?.containerStateWhy ?? (relay.ok ? "not measured yet" : relay.why);
+      if (ageMs > 90_000 && !containerStateWhy.includes("last measured ")) {
+        const minutes = Math.round(ageMs / 60_000);
+        const old = minutes < 60
+          ? `${minutes} minute${minutes === 1 ? "" : "s"} ago`
+          : `${Math.round(minutes / 60)} hour${Math.round(minutes / 60) === 1 ? "" : "s"} ago`;
+        containerStateWhy = containerStateWhy ? `${containerStateWhy}; last measured ${old}` : `last measured ${old}`;
+      }
       rows.push({
         slug: tenant.slug,
         name: tenant.name,
@@ -1403,8 +1413,10 @@ export function createAdminApi({
         // Everything below comes from the relay, which has the docker socket this container does
         // not. A relay that did not answer leaves every one of them as "not measured".
         relayReachable: seen != null,
+        measuredAt: seen?.measuredAt ?? null,
+        ageMs,
         containerState: seen?.containerState ?? "not measured",
-        containerStateWhy: seen?.containerStateWhy ?? (relay.ok ? "the relay did not report this workspace" : relay.why),
+        containerStateWhy,
         gatewayAnswering: seen?.gatewayAnswering ?? null,
         gatewayMs: seen?.gatewayMs ?? null,
         gatewayWhy: seen?.gatewayWhy ?? "",
@@ -1420,7 +1432,7 @@ export function createAdminApi({
           : backup.why,
       });
     }
-    return { boxes: rows, backup, measuredAt: new Date(now()).toISOString() };
+    return { boxes: rows, backup, measuredAt: relay.ok ? (relay.body?.measuredAt ?? null) : null };
   }
 
   /** The whole machine, as far as this container can see it, with the holes named. */
@@ -2858,7 +2870,7 @@ export function createAdminApi({
         return true;
       }
       const valid = name === "allowance.levels"
-        ? parsed.every((row) => String(row?.id ?? "").trim() && String(row?.name ?? "").trim() && Number.isFinite(Number(row?.tokens)) && Number(row.tokens) > 0)
+        ? parsed.every((row) => String(row?.id ?? "").trim() && String(row?.name ?? "").trim() && (row?.tokens == null || (Number.isFinite(Number(row?.tokens)) && Number(row.tokens) > 0)))
         : parsed.every((row) => String(row?.model ?? "").trim() && Number.isFinite(Number(row?.input)) && Number(row.input) >= 0 && Number.isFinite(Number(row?.output)) && Number(row.output) >= 0);
       if (!valid) {
         json(response, 400, { error: "bad_value", message: name === "allowance.levels"

@@ -6,6 +6,8 @@ export const DEFAULT_ALLOWANCE_LEVELS = Object.freeze([
   { id: "seed", name: "Seed", tokens: 25_000_000 },
   { id: "sprout", name: "Sprout", tokens: 75_000_000 },
   { id: "grove", name: "Grove", tokens: 200_000_000 },
+  // Measured, never limited: the operator's own workspaces. tokens null means no cap.
+  { id: "operator", name: "Operator", tokens: null },
 ]);
 export const DEFAULT_ALLOWANCE_LEVEL = "sprout";
 export const DEFAULT_SPEND_PRICES = Object.freeze([
@@ -48,8 +50,8 @@ export function parseLevels(raw) {
   const levels = value.map((row) => ({
     id: String(row?.id ?? "").trim(),
     name: String(row?.name ?? "").trim(),
-    tokens: Number(row?.tokens),
-  })).filter((row) => row.id.length > 0 && row.name.length > 0 && Number.isFinite(row.tokens) && row.tokens > 0);
+    tokens: row?.tokens == null || row?.tokens === "" ? null : Number(row?.tokens),
+  })).filter((row) => row.id.length > 0 && row.name.length > 0 && (row.tokens === null || (Number.isFinite(row.tokens) && row.tokens > 0)));
   return levels.length > 0 ? levels : DEFAULT_ALLOWANCE_LEVELS.map((row) => ({ ...row }));
 }
 
@@ -124,8 +126,9 @@ export function createAllowanceService({ store, proxy, now = () => Date.now(), c
     catch (error) {
       return { level: level.name, levelId: level.id, cap, capOverride, used: null, pct: null, state: "not-recorded", cycle, models: [], why: String(error?.message ?? error) };
     }
-    const pct = cap > 0 ? (usage.used / cap) * 100 : 100;
-    const answer = { level: level.name, levelId: level.id, cap, capOverride, used: usage.used, pct, state: allowanceState(pct), cycle, models: usage.models };
+    // A null cap is the Operator level: measured on every screen, limited nowhere.
+    const pct = cap == null ? null : cap > 0 ? (usage.used / cap) * 100 : 100;
+    const answer = { level: level.name, levelId: level.id, cap, capOverride, used: usage.used, pct, state: cap == null ? "unlimited" : allowanceState(pct), cycle, models: usage.models };
     cache.set(key, { at: now(), answer });
     return answer;
   }

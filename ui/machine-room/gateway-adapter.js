@@ -5348,7 +5348,9 @@
     meter.querySelector(".allowance-meter-pct").textContent = pct == null ? "—" : `${Math.round(pct)}%`;
     drawer.querySelector("[data-allowance-usage]").textContent = answer?.used == null
       ? "Usage not recorded"
-      : `${allowanceCount(answer.used)} of ${allowanceCount(answer.cap)} tokens this cycle · ${Math.round(pct)}%`;
+      : answer.cap == null
+        ? `${allowanceCount(answer.used)} tokens this cycle · no limit on this level`
+        : `${allowanceCount(answer.used)} of ${allowanceCount(answer.cap)} tokens this cycle · ${Math.round(pct)}%`;
     drawer.querySelector("[data-allowance-reset]").textContent = answer?.cycle
       ? `Resets in ${answer.cycle.daysLeft} days (${allowanceDate(answer.cycle.endsAt)})`
       : "Reset date not recorded";

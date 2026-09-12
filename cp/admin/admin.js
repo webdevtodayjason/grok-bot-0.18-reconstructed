@@ -88,6 +88,16 @@
     return `${Math.round(seconds / 86400)} days ago`;
   };
 
+  const age = (ageMs) => {
+    if (ageMs === null || ageMs === undefined || !Number.isFinite(Number(ageMs))) return "not measured yet";
+    const seconds = Math.max(0, Math.round(Number(ageMs) / 1000));
+    if (seconds < 60) return seconds < 5 ? "measured just now" : `measured ${seconds} seconds ago`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `measured ${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+    const hours = Math.round(minutes / 60);
+    return `measured ${hours} hour${hours === 1 ? "" : "s"} ago`;
+  };
+
   const bytes = (value) => {
     if (value === null || value === undefined || !Number.isFinite(Number(value))) return null;
     const units = ["B", "KB", "MB", "GB", "TB"];
@@ -1153,7 +1163,9 @@
     row.appendChild(save);
     const detail = current?.used == null
       ? `usage not recorded${current?.why ? `: ${current.why}` : ""}`
-      : `${countWords(current.used)} of ${countWords(current.cap)} tokens; resets in ${current.cycle.daysLeft} days`;
+      : current.cap == null
+        ? `${countWords(current.used)} tokens this cycle, no limit on this level; resets in ${current.cycle.daysLeft} days`
+        : `${countWords(current.used)} of ${countWords(current.cap)} tokens; resets in ${current.cycle.daysLeft} days`;
     row.appendChild(el("span", "why", detail));
     return row;
   }
@@ -1520,6 +1532,7 @@
       const tr = document.createElement("tr");
       const name = el("td", null, box.slug);
       name.title = box.boxContainer || "no container recorded";
+      name.appendChild(el("div", "quiet", age(box.ageMs)));
       tr.appendChild(name);
 
       const state = document.createElement("td");
@@ -1555,7 +1568,9 @@
 
       body.appendChild(tr);
     }
-    $("measuredAt").textContent = `measured ${when(answer.measuredAt)}`;
+    $("measuredAt").textContent = answer.measuredAt
+      ? `fleet last swept ${when(answer.measuredAt)}`
+      : "fleet sweep has not finished yet";
   }
 
   // ---- panel 4: system health ------------------------------------------------------------------
