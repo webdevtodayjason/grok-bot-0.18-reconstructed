@@ -425,6 +425,23 @@ test("spend lands against the tenant that spent it and against nobody else", asy
   });
 });
 
+test("spend rows with missing token fields count as zero and never NaN", async () => {
+  const today = isoDay(Date.now());
+  const row = {
+    api_key: "hash-acme", key_alias: "titanbot-acme", spend: 0.25,
+    model: "plan-zai", custom_llm_provider: "zai", startTime: `${today}T12:00:00.000Z`,
+  };
+  const fetchImpl = async () => ({ ok: true, status: 200, text: async () => JSON.stringify([row]) });
+  const client = createProxyClient({ config: { proxyUrl: "http://proxy.invalid", proxyMasterKey: "master" }, fetchImpl });
+  const report = await client.spendReport({ startDay: monthStartDay(Date.now()), endDay: today });
+  const acme = report.keys.find((one) => one.alias === "titanbot-acme");
+  assert.equal(acme.tokensIn, 0);
+  assert.equal(acme.tokensOut, 0);
+  assert.equal(acme.usage[0].tokensIn, 0);
+  assert.equal(acme.usage[0].tokensOut, 0);
+  assert.equal(JSON.stringify(acme).includes("NaN"), false);
+});
+
 test("a key's own spend counter is what a budget is compared against", async () => {
   await withProxy(async ({ proxy, config }) => {
     const minted = await ensureProxyKey(SLUG, config);

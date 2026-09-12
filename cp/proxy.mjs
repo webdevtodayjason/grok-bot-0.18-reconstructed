@@ -763,7 +763,7 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
         if (keyId.length === 0) continue;
         let entry = byKey.get(keyId);
         if (entry == null) {
-          entry = { keyId, alias: "", dollars: 0, requests: 0, rows: 0, tokens: 0, byModel: new Map(), byDeployment: new Map() };
+          entry = { keyId, alias: "", dollars: 0, requests: 0, rows: 0, tokens: 0, tokensIn: 0, tokensOut: 0, byModel: new Map(), byUsage: new Map(), byDeployment: new Map() };
           byKey.set(keyId, entry);
         }
         const dollars = Number(row?.spend ?? 0) || 0;
@@ -781,10 +781,17 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
         // zero rather than guessing an average.
         const tokens = Math.max(0, Number(row?.total_tokens ?? 0) || 0)
           || (Math.max(0, Number(row?.prompt_tokens ?? 0) || 0) + Math.max(0, Number(row?.completion_tokens ?? 0) || 0));
+        // Direction is kept separately for the Spend panel. Missing and malformed fields are zero:
+        // old LiteLLM rows do not carry them, and allowing NaN into a monthly sum would poison every
+        // workspace and fleet total after it.
+        const tokensIn = Math.max(0, Number(row?.prompt_tokens ?? 0) || 0);
+        const tokensOut = Math.max(0, Number(row?.completion_tokens ?? 0) || 0);
         entry.dollars += dollars;
         entry.requests += requests;
         entry.rows += 1;
         entry.tokens += tokens;
+        entry.tokensIn += tokensIn;
+        entry.tokensOut += tokensOut;
         const alias = String(row?.key_alias ?? row?.metadata?.user_api_key_alias ?? "");
         if (alias.length > 0) entry.alias = alias;
         // The model as the proxy recorded it. A pass-through request records its PATH here, which
@@ -794,10 +801,21 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
         seen.requests += requests;
         seen.dollars += dollars;
         entry.byModel.set(model, seen);
+        // Prefer the provider recorded on the request. Some older rows only identify their
+        // deployment; those retain an empty provider here so the control plane can fill it from
+        // /model/info, and ultimately name the bucket "not recorded" if neither source can.
+        const provider = String(row?.custom_llm_provider ?? row?.provider ?? "").trim();
+        const deploymentId = String(row?.model_id ?? row?.model_info?.id ?? "");
+        const usageKey = `${provider}\u0000${model}\u0000${deploymentId}`;
+        const usage = entry.byUsage.get(usageKey) ?? { provider, model, deploymentId, tokensIn: 0, tokensOut: 0, calls: 0, cost: 0 };
+        usage.tokensIn += tokensIn;
+        usage.tokensOut += tokensOut;
+        usage.calls += requests;
+        usage.cost += dollars;
+        entry.byUsage.set(usageKey, usage);
         // The deployment this request actually ran on. Absent on a pass-through row and on any
         // build that does not record it, and an absent id is left out rather than bucketed under
         // an empty string: a key slot's spend has to be spend that is really that slot's.
-        const deploymentId = String(row?.model_id ?? row?.model_info?.id ?? "");
         if (deploymentId.length === 0) continue;
         let target = byDeployment.get(deploymentId);
         if (target == null) {
@@ -851,6 +869,17 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
         requests: entry.requests,
         rows: entry.rows,
         tokens: entry.tokens,
+        tokensIn: entry.tokensIn,
+        tokensOut: entry.tokensOut,
+        usage: [...entry.byUsage.values()].map((row) => ({
+          provider: row.provider,
+          model: row.model,
+          deploymentId: row.deploymentId,
+          tokensIn: row.tokensIn,
+          tokensOut: row.tokensOut,
+          calls: row.calls,
+          cost: Math.round(row.cost * 1e6) / 1e6,
+        })),
         deployments: [...entry.byDeployment.values()].map((row) => ({
           id: row.id,
           alias: row.alias,

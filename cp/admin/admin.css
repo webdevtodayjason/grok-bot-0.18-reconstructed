@@ -267,6 +267,11 @@ td.num, td.mono { font-family: var(--mono); font-size: 12.5px; }
    so the mono face has to reach a div inside a cell as well as the cell itself. */
 td .mono, td div.mono { font-family: var(--mono); font-size: 12.5px; }
 td.num { text-align: right; }
+.spend-usage { margin-top: 7px; width: auto; font-size: 11px; }
+.spend-usage th, .spend-usage td { padding: 3px 7px; }
+.spend-usage th:nth-child(n+3), .spend-usage td:nth-child(n+3) { text-align: right; font-family: var(--mono); }
+.spend-usage .spend-provider-total td { color: var(--quiet); border-top: 1px solid var(--line); }
+.spend-no-usage { margin-top: 5px; }
 .empty { padding: 14px; color: var(--quiet); font-size: 13px; }
 
 .chip {

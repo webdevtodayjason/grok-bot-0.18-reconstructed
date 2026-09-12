@@ -587,6 +587,15 @@
   // The two numbers on this screen that are money, formatted once. A null is never a zero: it goes
   // through `measured` below and comes out as the reason it could not be read.
   const dollars = (value) => (Number.isFinite(Number(value)) ? `$${Number(value).toFixed(2)}` : null);
+  const integer = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+  const compactInteger = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
+  const money = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6 });
+  const countWords = (value, compact = false) => {
+    if (value === null || value === undefined) return null;
+    if (!Number.isFinite(Number(value))) return null;
+    const number = Number(value);
+    return compact && Math.abs(number) >= 1_000_000 ? compactInteger.format(number) : integer.format(number);
+  };
 
   // WHERE 80 AND 100 ARE DECIDED, and they are decided here rather than by the proxy, because until
   // CP_PROXY_ENFORCE is set the proxy does not fail anything: observe mode mints a soft budget,
@@ -1867,7 +1876,13 @@
   // count of the ones missing from it.
   function spendChips(answer) {
     if (answer.configured === false) {
-      return [{ label: "This month", value: null, why: String(answer.why ?? "the proxy could not be asked") }];
+      const why = String(answer.why ?? "the proxy could not be asked");
+      return [
+        { label: "Tokens in", value: null, why },
+        { label: "Tokens out", value: null, why },
+        { label: "Cost", value: null, why },
+        { label: "This month", value: null, why },
+      ];
     }
     const clients = answer.clients ?? [];
     const total = (pick) => {
@@ -1875,20 +1890,81 @@
       return seen.length === 0 ? null : dollars(seen.reduce((sum, one) => sum + Number(one), 0));
     };
     const missing = clients.filter((one) => !Number.isFinite(Number(one.thisMonth?.dollars))).length;
+    const providers = Array.isArray(answer.byProvider) ? answer.byProvider : [];
+    const top = (field) => providers
+      .filter((row) => Number(row[field]) > 0)
+      .sort((a, b) => Number(b[field]) - Number(a[field]) || String(a.provider).localeCompare(String(b.provider)))[0]?.provider ?? "no usage recorded";
+    const cost = {
+      label: "Cost",
+      value: clients.length === 0 ? dollars(0) : total((one) => one.thisMonth?.dollars),
+      detail: top("cost"),
+    };
+    const monthlyCost = {
+      label: "This month",
+      value: cost.value,
+      detail: missing > 0 ? `${missing} workspace${missing === 1 ? "" : "s"} not measured` : "",
+      why: missing > 0 ? "This total leaves out the workspaces the proxy could not be asked about." : "",
+      tone: missing > 0 ? "warn" : "",
+    };
     return [
       {
-        label: "This month",
-        value: clients.length === 0 ? dollars(0) : total((one) => one.thisMonth?.dollars),
-        detail: missing > 0 ? `${missing} workspace${missing === 1 ? "" : "s"} not measured` : "",
-        why: missing > 0 ? "This total leaves out the workspaces the proxy could not be asked about." : "",
-        tone: missing > 0 ? "warn" : "",
+        label: "Tokens in",
+        value: countWords(answer.totals?.tokensIn, true),
+        detail: top("tokensIn"),
       },
+      {
+        label: "Tokens out",
+        value: countWords(answer.totals?.tokensOut, true),
+        detail: top("tokensOut"),
+      },
+      cost,
+      monthlyCost,
       { label: "Today", value: clients.length === 0 ? dollars(0) : total((one) => one.today?.dollars) },
       { label: "Workspaces", value: clients.length },
     ];
   }
 
-  const spendHeadline = (answer) => ({ ...spendChips(answer)[0], key: "spend", label: "Spend this month" });
+  const spendHeadline = (answer) => {
+    const cost = spendChips(answer).find((chip) => chip.label === "This month") ?? spendChips(answer)[0];
+    return { ...cost, key: "spend", label: "Spend this month" };
+  };
+
+  /** Provider/model usage nested under a workspace without changing the Spend table's six columns. */
+  function usageTable(client) {
+    if (client.usage === null) return el("div", "quiet spend-no-usage", "usage not measured this month");
+    const usage = Array.isArray(client.usage) ? client.usage : [];
+    if (usage.length === 0) return el("div", "quiet spend-no-usage", "no usage recorded this month");
+    const table = el("table", "spend-usage");
+    const head = document.createElement("thead");
+    const heading = document.createElement("tr");
+    for (const label of ["Provider", "Model", "In", "Out", "Calls", "Cost"]) heading.appendChild(el("th", null, label));
+    head.appendChild(heading);
+    table.appendChild(head);
+    const body = document.createElement("tbody");
+    const totals = new Map();
+    for (const line of usage) {
+      const tr = document.createElement("tr");
+      for (const value of [
+        line.provider, line.model, countWords(line.tokensIn), countWords(line.tokensOut), countWords(line.calls), money.format(Number(line.cost) || 0),
+      ]) tr.appendChild(el("td", null, value));
+      body.appendChild(tr);
+      const sum = totals.get(line.provider) ?? { tokensIn: 0, tokensOut: 0, calls: 0, cost: 0 };
+      sum.tokensIn += Number(line.tokensIn) || 0;
+      sum.tokensOut += Number(line.tokensOut) || 0;
+      sum.calls += Number(line.calls) || 0;
+      sum.cost += Number(line.cost) || 0;
+      totals.set(line.provider, sum);
+    }
+    for (const [provider, sum] of totals) {
+      const tr = el("tr", "spend-provider-total");
+      for (const value of [
+        provider, "by provider", countWords(sum.tokensIn), countWords(sum.tokensOut), countWords(sum.calls), money.format(sum.cost),
+      ]) tr.appendChild(el("td", null, value));
+      body.appendChild(tr);
+    }
+    table.appendChild(body);
+    return table;
+  }
 
   // CODE-1. What a workspace's coding tasks cost, as ONE QUIET LINE inside the Client cell of the
   // Spend table and not as a seventh column: a column would mean editing cp/admin/index.html and the
@@ -1963,6 +2039,7 @@
       // empty row of zeroes on every client would be five-sixths noise.
       const coding = codeLine(code, client.slug);
       if (coding != null) who.appendChild(coding);
+      who.appendChild(usageTable(client));
       tr.appendChild(who);
 
       // A ZERO FROM A PROXY NOBODY ASKED IS NOT A ZERO. With no proxy configured this route still

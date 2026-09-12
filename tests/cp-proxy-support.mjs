@@ -581,7 +581,7 @@ export async function startFakeProxy(options = {}) {
      * `status` is the outcome of the request, which is the only evidence this install has that a
      * provider is unwell.
      */
-    chargeAlias(alias, dollars, requests = 1, model = "plan-zai", { recordedModel = "", status = "success", at = "" } = {}) {
+    chargeAlias(alias, dollars, requests = 1, model = "plan-zai", { recordedModel = "", status = "success", at = "", provider = "", tokensIn = 100, tokensOut = 20 } = {}) {
       const record = keys.get(byAlias.get(alias));
       if (record == null) return false;
       record.spend += dollars;
@@ -598,7 +598,9 @@ export async function startFakeProxy(options = {}) {
           // is not ordered and neither is this one, which is the point of the assertions that read
           // it: an appended ring would keep the wrong five.
           model: recordedModel || model, startTime: String(at) || nowIso(), status,
-          model_id: behind?.model_info?.id ?? "", prompt_tokens: 100, completion_tokens: 20, total_tokens: 120,
+          model_id: behind?.model_info?.id ?? "", prompt_tokens: tokensIn, completion_tokens: tokensOut,
+          total_tokens: (Number(tokensIn) || 0) + (Number(tokensOut) || 0),
+          ...(provider ? { custom_llm_provider: provider } : {}),
           ...(status === "failure" ? { metadata: { error_information: { error_message: "the vendor refused this request" } } } : {}),
         });
       }

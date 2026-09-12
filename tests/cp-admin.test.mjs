@@ -3,6 +3,7 @@
 // address is attacking, and which row is the same attempt seen twice.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 // PUSH-1. The two credential tests sign with keys generated per run rather than with a fixture: a
 // fixture private key is a private key in git whatever it happens to open.
@@ -349,7 +350,7 @@ test("one refresh of the console is one box-health sweep on the relay, not two",
 // ---- the spend panel (PROXY-1) ------------------------------------------------------------------
 
 // The same shape the other two api tests here use, plus a proxy and a reader for one tenant's key.
-function makeApi({ store, root, proxy = null, keys = new Map(), allowance = "", enforce = "", fetchImpl }) {
+function makeApi({ store, root, proxy = null, proxyClient = null, keys = new Map(), allowance = "", enforce = "", fetchImpl }) {
   const config = {
     dataDir: root, tenantRoot: root,
     proxyUrl: proxy?.url ?? "", proxyMasterKey: proxy?.masterKey ?? "",
@@ -365,7 +366,7 @@ function makeApi({ store, root, proxy = null, keys = new Map(), allowance = "", 
     tenantPower: async () => {}, tenantProvision: async () => {},
     currentSession: () => ({ ok: false }),
     log: () => {},
-    proxy: proxy ? createProxyClient({ config }) : null,
+    proxy: proxyClient ?? (proxy ? createProxyClient({ config }) : null),
     proxyKeyOf: (slug) => keys.get(slug) ?? null,
     ...(fetchImpl ? { fetchImpl } : {}),
   });
@@ -393,6 +394,8 @@ test("spend lands against the client who spent it and never against the neighbou
       assert.equal(acme.thisMonth.requests, 8);
       assert.equal(acme.spendToDate, 4);
       assert.equal(acme.pct, 20, "four dollars against a twenty dollar allowance is 20 percent");
+      assert.equal(acme.usage[0].provider, "not recorded", "an unnamed provider row disappeared or was invented");
+      assert.deepEqual(acme.totals, { tokensIn: 800, tokensOut: 160, calls: 8, cost: 4 });
       // The neighbour is a real zero, and it is the one place a zero is honest: the report covered
       // the window and this key is not in it.
       assert.equal(beta.thisMonth.dollars, 0);
@@ -403,6 +406,54 @@ test("spend lands against the client who spent it and never against the neighbou
       assert.equal(acme.alias, "titanbot-acme");
     } finally { await proxy.close(); }
   });
+});
+
+test("spend reports workspace usage and fleet totals by provider", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "acme", name: "Acme", status: "running" });
+    store.createTenant({ slug: "beta", name: "Beta", status: "running" });
+    const at = new Date().toISOString();
+    const logs = [
+      { api_key: "hash-acme", key_alias: "titanbot-acme", spend: 1, model: "plan-zai", model_id: "file-zai", custom_llm_provider: "zai", prompt_tokens: 1_000, completion_tokens: 200, startTime: at },
+      { api_key: "hash-acme", key_alias: "titanbot-acme", spend: 1, model: "plan-zai", model_id: "file-zai", custom_llm_provider: "zai", prompt_tokens: 1_000, completion_tokens: 200, startTime: at },
+      // No row provider: this one is resolved from its deployment's tb_provider field.
+      { api_key: "hash-beta", key_alias: "titanbot-beta", spend: 1, model: "plan-minimax", model_id: "file-minimax", prompt_tokens: 500, completion_tokens: 75, startTime: at },
+    ];
+    const fetchImpl = async (url) => {
+      const body = String(url).endsWith("/model/info")
+        ? { data: [
+          { model_name: "plan-zai", litellm_params: { model: "openai/plan-zai" }, model_info: { id: "file-zai" } },
+          { model_name: "plan-minimax", litellm_params: { model: "openai/plan-minimax" }, model_info: { id: "file-minimax", tb_provider: "minimax" } },
+        ] }
+        : logs;
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+    };
+    const config = { proxyUrl: "http://proxy.invalid", proxyMasterKey: "master" };
+    const proxyClient = createProxyClient({ config, fetchImpl });
+    const keys = new Map([
+      ["acme", { key: "secret-acme", keyId: "hash-acme", alias: "titanbot-acme", mintedAt: "", enforced: false, models: [] }],
+      ["beta", { key: "secret-beta", keyId: "hash-beta", alias: "titanbot-beta", mintedAt: "", enforced: false, models: [] }],
+    ]);
+    const answer = await makeApi({ store, root, proxy: { url: config.proxyUrl, masterKey: config.proxyMasterKey }, proxyClient, keys }).spend();
+    const acme = answer.clients.find((row) => row.slug === "acme");
+    assert.deepEqual(acme.usage, [{ provider: "zai", model: "plan-zai", tokensIn: 2_000, tokensOut: 400, calls: 2, cost: 2 }]);
+    assert.deepEqual(acme.totals, { tokensIn: 2_000, tokensOut: 400, calls: 2, cost: 2 });
+    assert.deepEqual(answer.totals, { tokensIn: 2_500, tokensOut: 475, calls: 3, cost: 3 });
+    assert.deepEqual(answer.byProvider, [
+      { provider: "zai", tokensIn: 2_000, tokensOut: 400, calls: 2, cost: 2 },
+      { provider: "minimax", tokensIn: 500, tokensOut: 75, calls: 1, cost: 1 },
+    ]);
+  });
+});
+
+test("the spend panel renders the provider usage table and Intl-formatted totals", () => {
+  const source = readFileSync(path.join(import.meta.dirname, "../cp/admin/admin.js"), "utf8");
+  const block = /function usageTable\(client\)[\s\S]*?\n  }\n/.exec(source)?.[0] ?? "";
+  assert.match(block, /\["Provider", "Model", "In", "Out", "Calls", "Cost"\]/);
+  assert.match(block, /by provider/);
+  assert.match(block, /no usage recorded this month/);
+  assert.match(source, /new Intl\.NumberFormat/);
+  assert.match(source, /who\.appendChild\(usageTable\(client\)\)/);
 });
 
 test("an unreachable proxy renders not measured with the reason, and never a zero", async () => {

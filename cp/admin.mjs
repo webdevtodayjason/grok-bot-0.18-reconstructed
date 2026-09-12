@@ -971,18 +971,19 @@ export function createAdminApi({
 
   /** One report's row for one tenant, matched on the key id first and the alias second. */
   function windowFor(report, { alias, keyId }) {
-    if (!report.ok) return { requests: null, dollars: null, why: report.why };
+    if (!report.ok) return { requests: null, dollars: null, why: report.why, usage: null };
     const row = report.keys.find((one) => (keyId.length > 0 && one.keyId === keyId))
       ?? report.keys.find((one) => (alias.length > 0 && one.alias === alias));
     // Nothing in the report for this key is not a hole. It is a real zero: the report covers the
     // whole window and this key is not in it, so nothing was spent. That is the one place a zero is
     // honest, and it is written out rather than left to a default.
-    if (row == null) return { requests: 0, dollars: 0, why: "" };
+    if (row == null) return { requests: 0, dollars: 0, why: "", usage: [] };
     return {
       requests: row.requests,
       dollars: row.dollars,
       why: row.requests === null && row.dollars === null ? "the proxy reported this key with no numbers on it" : "",
       models: row.models,
+      usage: Array.isArray(row.usage) ? row.usage : [],
     };
   }
 
@@ -1031,10 +1032,14 @@ export function createAdminApi({
           thisMonth: { requests: null, dollars: null, why: off },
           today: { requests: null, dollars: null, why: off },
           tinyfish: { requests: null, why: off },
+          usage: null,
+          totals: { tokensIn: null, tokensOut: null, calls: null, cost: null },
           why: off,
         })),
         allowance: Number(config.proxyAllowanceUsd) > 0 ? Number(config.proxyAllowanceUsd) : null,
         enforced: Boolean(config.proxyEnforce),
+        totals: { tokensIn: null, tokensOut: null, calls: null, cost: null },
+        byProvider: [],
         measuredAt: new Date(at).toISOString(),
       };
     }
@@ -1057,6 +1062,10 @@ export function createAdminApi({
         .filter((row) => row.inputCostPerToken == null && row.outputCostPerToken == null)
         .map((row) => String(row.vendorModel)),
     );
+    const providerByDeployment = new Map(
+      (deploymentPrices.ok ? deploymentPrices.rows : []).map((row) => [String(row.id), String(row.provider ?? "").trim()]),
+    );
+    const fleetUsage = new Map();
     const rows = [];
     for (const tenant of store.listTenants()) {
       const record = proxyKeyOf(tenant.slug);
@@ -1074,6 +1083,8 @@ export function createAdminApi({
           thisMonth: { requests: null, dollars: null, why: "this workspace has no plan key yet" },
           today: { requests: null, dollars: null, why: "this workspace has no plan key yet" },
           tinyfish: { requests: null, why: "this workspace has no plan key yet" },
+          usage: null,
+          totals: { tokensIn: null, tokensOut: null, calls: null, cost: null },
           why: `this workspace has no plan key yet (mint one with cp/cli.mjs proxy mint ${tenant.slug})`,
         });
         continue;
@@ -1102,6 +1113,42 @@ export function createAdminApi({
       // cost per request on our side and an agent run's real credits vary, so a dollar figure here
       // would be a number that looks precise and is not.
       const models = Array.isArray(thisMonth.models) ? thisMonth.models : [];
+      const usageMeasured = Array.isArray(thisMonth.usage);
+      const usage = [];
+      const usageGroups = new Map();
+      for (const raw of Array.isArray(thisMonth.usage) ? thisMonth.usage : []) {
+        const provider = String(raw.provider ?? "").trim()
+          || providerByDeployment.get(String(raw.deploymentId ?? ""))
+          || "not recorded";
+        const model = String(raw.model ?? "").trim() || "not recorded";
+        const key = `${provider}\u0000${model}`;
+        const group = usageGroups.get(key) ?? { provider, model, tokensIn: 0, tokensOut: 0, calls: 0, cost: 0 };
+        group.tokensIn += Number(raw.tokensIn) || 0;
+        group.tokensOut += Number(raw.tokensOut) || 0;
+        group.calls += Number(raw.calls) || 0;
+        group.cost += Number(raw.cost) || 0;
+        usageGroups.set(key, group);
+      }
+      for (const group of usageGroups.values()) {
+        group.cost = Math.round(group.cost * 1e6) / 1e6;
+        usage.push(group);
+        const provider = fleetUsage.get(group.provider) ?? { provider: group.provider, tokensIn: 0, tokensOut: 0, calls: 0, cost: 0 };
+        provider.tokensIn += group.tokensIn;
+        provider.tokensOut += group.tokensOut;
+        provider.calls += group.calls;
+        provider.cost += group.cost;
+        fleetUsage.set(group.provider, provider);
+      }
+      usage.sort((a, b) => (b.cost - a.cost) || a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model));
+      const totals = usageMeasured
+        ? usage.reduce((sum, row) => ({
+          tokensIn: sum.tokensIn + row.tokensIn,
+          tokensOut: sum.tokensOut + row.tokensOut,
+          calls: sum.calls + row.calls,
+          cost: sum.cost + row.cost,
+        }), { tokensIn: 0, tokensOut: 0, calls: 0, cost: 0 })
+        : { tokensIn: null, tokensOut: null, calls: null, cost: null };
+      if (totals.cost != null) totals.cost = Math.round(totals.cost * 1e6) / 1e6;
       const tinyfishRows = models.filter((row) => String(row.model).toLowerCase().includes(TINYFISH_MODEL_MARK));
       rows.push({
         slug: tenant.slug,
@@ -1126,6 +1173,8 @@ export function createAdminApi({
           ? "A dollar figure only means something for a model that has a cost per token set on it in the Providers panel."
           : deploymentPrices.why,
         thisMonth: { requests: thisMonth.requests, dollars: thisMonth.dollars, why: thisMonth.why },
+        usage: usageMeasured ? usage : null,
+        totals,
         today: { requests: today.requests, dollars: today.dollars, why: today.why },
         tinyfish: models.length === 0
           ? { requests: null, why: thisMonth.why || "the proxy's report does not break this key down by model on this build" }
@@ -1133,12 +1182,27 @@ export function createAdminApi({
         why: "",
       });
     }
+    const byProvider = [...fleetUsage.values()].map((row) => ({
+      ...row,
+      cost: Math.round(row.cost * 1e6) / 1e6,
+    })).sort((a, b) => (b.cost - a.cost) || a.provider.localeCompare(b.provider));
+    const totals = sweep.month.ok
+      ? byProvider.reduce((sum, row) => ({
+        tokensIn: sum.tokensIn + row.tokensIn,
+        tokensOut: sum.tokensOut + row.tokensOut,
+        calls: sum.calls + row.calls,
+        cost: sum.cost + row.cost,
+      }), { tokensIn: 0, tokensOut: 0, calls: 0, cost: 0 })
+      : { tokensIn: null, tokensOut: null, calls: null, cost: null };
+    if (totals.cost != null) totals.cost = Math.round(totals.cost * 1e6) / 1e6;
     return {
       configured: true,
       why: "",
       clients: rows,
       allowance,
       enforced: Boolean(config.proxyEnforce),
+      totals,
+      byProvider,
       // Said out loud on the panel as well as here. The spend counter chain is batch written, so a
       // stop at the allowance is a stop and not an exact cap: a burst in flight when the number is
       // read can carry a customer past it before the next write lands.
