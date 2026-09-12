@@ -236,21 +236,10 @@ export const MCP_SERVERS = Object.freeze(["tinyfish"]);
 // The one place that knows a key belongs to a plan model rather than to a customer's own provider.
 export const isPlanModel = (id) => String(id ?? "").startsWith(PLAN_MODEL_PREFIX);
 export const isTalkPlanModel = (id) => isPlanModel(id) && String(id).endsWith("-talk");
-export const talkPlanModelFor = (id) => {
-  const model = String(id ?? "").trim();
-  return isPlanModel(model) && !model.endsWith("-talk") && !model.endsWith("-vision") ? `${model}-talk` : null;
-};
-export function withTalkPlanModels(models = []) {
-  const expanded = [];
-  for (const raw of models) {
-    const model = String(raw ?? "");
-    if (!model || expanded.includes(model)) continue;
-    expanded.push(model);
-    const talk = talkPlanModelFor(model);
-    if (talk != null && !expanded.includes(talk)) expanded.push(talk);
-  }
-  return expanded;
-}
+// ROUTER-1c: every caller hands in the list the proxy SAID it serves, and that list already
+// carries `<plan>-talk` whenever the deployment exists. Inventing the sibling here granted
+// plan-qwen-talk to keys on 2026-09-12, the host trusted /models, and the proxy answered 400 on
+// Jason's voice turns. A key is scoped to what the proxy serves, nothing more.
 export const planModelTier = (id) => isTalkPlanModel(id) ? "talk"
   : isPlanModel(id) && !String(id).endsWith("-vision") ? "work" : null;
 
@@ -651,7 +640,7 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
       const routes = Array.isArray(allowedRoutes) ? allowedRoutes : tenantRoutesFor(await listPassThrough());
       const body = {
         key_alias: alias,
-        models: withTalkPlanModels(models),
+        models: [...new Set(models.map(String).filter(Boolean))],
         metadata: { slug: String(slug), box: String(box ?? "") },
         // PROXY-8's half of the fix, applied at mint. See TENANT_ALLOWED_ROUTES above for the
         // measurement and for why the ordering against the global list is load bearing.
@@ -737,7 +726,7 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
         else body.soft_budget = Number(allowanceUsd);
       }
       if (Number(rpmLimit) > 0) body.rpm_limit = Number(rpmLimit);
-      if (Array.isArray(models)) body.models = withTalkPlanModels(models);
+      if (Array.isArray(models)) body.models = [...new Set(models.map(String).filter(Boolean))];
       if (Array.isArray(allowedRoutes)) body.allowed_routes = [...allowedRoutes];
       return call("POST", "/key/update", { body });
     },

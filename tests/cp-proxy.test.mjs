@@ -31,8 +31,6 @@ import {
   monthStartDay,
   proxyKeyAlias,
   planModelTier,
-  talkPlanModelFor,
-  withTalkPlanModels,
   MCP_SERVERS,
 } from "../cp/proxy.mjs";
 import {
@@ -237,18 +235,16 @@ test("what the mint sends is the tenant's own alias and metadata, and never an e
     // Without this grant the key sees an EMPTY MCP tool list and a 200 while doing it, so a
     // customer's TinyFish connector reports healthy and offers nothing.
     assert.deepEqual(sent.object_permission, { mcp_servers: [...MCP_SERVERS] });
-    assert.deepEqual([...sent.models].sort(), ["plan-minimax", "plan-minimax-talk", "plan-zai", "plan-zai-talk"]);
+    // ROUTER-1c: exactly what the proxy serves. No invented `-talk` sibling: the fake serves none,
+    // so the key gets none, and the host router stays on work for these tenants.
+    assert.deepEqual([...sent.models].sort(), ["plan-minimax", "plan-zai"]);
   });
 });
 
-test("plan work aliases grant their talk siblings without changing vision or customer models", () => {
-  assert.deepEqual(withTalkPlanModels(["plan-zai", "plan-zai-vision", "customer-model"]), [
-    "plan-zai", "plan-zai-talk", "plan-zai-vision", "customer-model",
-  ]);
-  assert.equal(talkPlanModelFor("plan-zai"), "plan-zai-talk");
-  assert.equal(talkPlanModelFor("plan-zai-vision"), null);
+test("the tier of a plan alias is read from its name, and customer models have none", () => {
   assert.equal(planModelTier("plan-zai"), "work");
   assert.equal(planModelTier("plan-zai-talk"), "talk");
+  assert.equal(planModelTier("plan-zai-vision"), null);
   assert.equal(planModelTier("customer-model"), null);
 });
 
@@ -545,11 +541,25 @@ test("the pool fails over when one subscription's key is the one that is dead", 
   await withProxy(async ({ proxy, config }) => {
     const minted = await ensureProxyKey(SLUG, config);
     assert.deepEqual(minted.record.models.map((row) => row.id), ["plan-zai"]);
-    assert.deepEqual(proxy.callsTo("POST /key/generate")[0].body.models, ["plan-zai", "plan-zai-talk"],
-      "pool depth must not duplicate either tier");
+    assert.deepEqual(proxy.callsTo("POST /key/generate")[0].body.models, ["plan-zai"],
+      "pool depth must not duplicate the alias");
   }, { models: [
     { model_name: "plan-zai", model_info: { max_input_tokens: 200_000 } },
     { model_name: "plan-zai", model_info: { max_input_tokens: 200_000 } },
+  ] });
+});
+
+test("a talk alias reaches the key only when the proxy serves it (ROUTER-1c)", async () => {
+  // 2026-09-12: keys were widened with `<plan>-talk` for every plan alias, so a box on plan-qwen
+  // saw plan-qwen-talk in /models, the router chose it, and the proxy answered 400. The key may
+  // carry plan-zai-talk here because the fake serves it, and nothing for plan-qwen.
+  await withProxy(async ({ proxy, config }) => {
+    await ensureProxyKey(SLUG, config);
+    assert.deepEqual([...proxy.callsTo("POST /key/generate")[0].body.models].sort(), ["plan-qwen", "plan-zai", "plan-zai-talk"]);
+  }, { models: [
+    { model_name: "plan-zai", model_info: {} },
+    { model_name: "plan-zai-talk", model_info: {} },
+    { model_name: "plan-qwen", model_info: {} },
   ] });
 });
 
