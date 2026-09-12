@@ -253,6 +253,9 @@ export function loadConfig(env = process.env) {
     // is the compose service name on the shared network, which Coolify keeps as a network alias, and
     // the relay's own port. The credential is CP_RELAY_TOKEN, already above.
     relayUrl: text("CP_RELAY_URL", `http://${text("CP_RELAY_HOST", CONFIG_DEFAULTS.relayHost)}:7777`).replace(/\/+$/, ""),
+    // The address boxes use for model traffic. Kept separate from CP_RELAY_URL because the latter
+    // may be a loopback or public address meaningful only from the control-plane container.
+    relayModelUrl: text("CP_RELAY_MODEL_URL", `http://${text("CP_RELAY_HOST", CONFIG_DEFAULTS.relayHost)}:7777`).replace(/\/+$/, ""),
     // How long to wait on that relay. The box-health sweep on the other end is bounded, so the
     // default is comfortably longer than that budget and this exists for a fleet that outgrows it.
     relayTimeoutMs: Number(text("CP_RELAY_TIMEOUT_MS", "")) || 0,

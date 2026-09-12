@@ -180,8 +180,9 @@ test("the included object is pinned field for field, and its id is its model", a
       // Being read by the relay is not the same as being KEPT by it. modelLabel was pinned here
       // and dropped by ui/tenant-registry.mjs's includedOf on arrival, which no assertion on this
       // side could see. tests/relay-tenant-endpoints.test.mjs holds the other half.
-      assert.deepEqual(Object.keys(row.included).sort(), ["baseUrl", "enforced", "key", "keyId", "models"]);
-      assert.equal(row.included.baseUrl, `${proxy.url}/v1`);
+      assert.deepEqual(Object.keys(row.included).sort(), ["baseUrl", "enforced", "key", "keyId", "models", "upstreamBaseUrl"]);
+      assert.match(row.included.baseUrl, /\/model-proxy\/v1$/);
+      assert.equal(row.included.upstreamBaseUrl, `${proxy.url}/v1`);
       // The key off the disk, not one this answer invented, and the same one the box will present.
       assert.equal(row.included.key, readProxyKey("acme", plane.config).key);
       assert.equal(row.included.enforced, false, "observe mode is the default this wave ships");

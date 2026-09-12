@@ -43,6 +43,7 @@
 //   node cp/cli.mjs marketplace list
 //   node cp/cli.mjs marketplace verify [--row <id>] [--fixtures] [--write]
 //   node cp/cli.mjs session verify <token>
+//   node cp/cli.mjs setting set allowance.levels|spend.prices '<json array>'
 //
 // `signup add` is the whole of adding a customer in one line: it makes the account, works the
 // workspace name out of the company name, and builds the box. `account add` is the older two-step
@@ -1542,6 +1543,7 @@ const USAGE = [
   "node cp/cli.mjs marketplace list",
   "node cp/cli.mjs marketplace verify [--row <id>] [--fixtures] [--write]",
   "node cp/cli.mjs session verify <token>",
+  "node cp/cli.mjs setting set allowance.levels|spend.prices '<json array>'",
   "",
   "signup add is the one line that adds a customer: account, workspace, box, the bots' addresses and the welcome mail. It runs the SAME sequence the console's Add a client runs, and prints the temporary password once, first.",
   "tenant remove closes every door a company has and retires their bots' addresses for ever. It exits non-zero if the container is still running after Coolify said the service was gone.",
@@ -2124,6 +2126,15 @@ async function deviceRevoke(args) {
   out("its next call is refused within two seconds; the app asks the person to sign in again");
 }
 
+async function settingSet(args) {
+  const [name, value] = positional(args);
+  if (!["allowance.levels", "spend.prices"].includes(String(name)) || value == null) {
+    die("node cp/cli.mjs setting set allowance.levels|spend.prices '<json array>'");
+  }
+  const answer = await askAdmin("POST", `/v1/admin/settings/${encodeURIComponent(name)}`, { value });
+  out(`${answer.name} is set`);
+}
+
 async function mailSweep() {
   const answer = await askRelay("POST", "/mail/sweep");
   for (const row of Array.isArray(answer?.swept) ? answer.swept : []) {
@@ -2192,6 +2203,7 @@ const commands = {
   "marketplace list": marketplaceList,
   "marketplace verify": marketplaceVerify,
   "session verify": sessionVerify,
+  "setting set": settingSet,
 };
 const command = commands[`${group} ${action}`];
 if (!command) die(USAGE, 1);

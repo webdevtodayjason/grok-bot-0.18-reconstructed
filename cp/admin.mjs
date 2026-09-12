@@ -758,6 +758,7 @@ export function createAdminApi({
   // cp/server.mjs rather than built here, for the same reason the store and the Coolify client
   // are: one of each in this process.
   proxy = null,
+  allowance: allowanceService = null,
   proxyKeyOf = () => null,
   // PROVIDERS-1. The address a change came from, worked out by cp/server.mjs, which is the only
   // thing in this process that knows which peers are trusted proxies and which are boxes. Without
@@ -1019,9 +1020,10 @@ export function createAdminApi({
       return {
         configured: false,
         why: off,
-        clients: store.listTenants().map((tenant) => ({
+        clients: await Promise.all(store.listTenants().map(async (tenant) => ({
           slug: tenant.slug,
           name: tenant.name,
+          tokenAllowance: allowanceService == null ? null : await allowanceService.get(tenant.slug),
           alias: "",
           keyId: "",
           minted: false,
@@ -1035,7 +1037,7 @@ export function createAdminApi({
           usage: null,
           totals: { tokensIn: null, tokensOut: null, calls: null, cost: null },
           why: off,
-        })),
+        }))),
         allowance: Number(config.proxyAllowanceUsd) > 0 ? Number(config.proxyAllowanceUsd) : null,
         enforced: Boolean(config.proxyEnforce),
         totals: { tokensIn: null, tokensOut: null, calls: null, cost: null },
@@ -1065,6 +1067,9 @@ export function createAdminApi({
     const providerByDeployment = new Map(
       (deploymentPrices.ok ? deploymentPrices.rows : []).map((row) => [String(row.id), String(row.provider ?? "").trim()]),
     );
+    const priceModelByDeployment = new Map(
+      (deploymentPrices.ok ? deploymentPrices.rows : []).map((row) => [String(row.id), String(row.vendorModel ?? "").split("/").pop()]),
+    );
     const fleetUsage = new Map();
     const rows = [];
     for (const tenant of store.listTenants()) {
@@ -1073,6 +1078,7 @@ export function createAdminApi({
         rows.push({
           slug: tenant.slug,
           name: tenant.name,
+          tokenAllowance: allowanceService == null ? null : await allowanceService.get(tenant.slug),
           alias: proxyKeyAlias(tenant.slug),
           keyId: "",
           minted: false,
@@ -1122,7 +1128,9 @@ export function createAdminApi({
           || "not recorded";
         const model = String(raw.model ?? "").trim() || "not recorded";
         const key = `${provider}\u0000${model}`;
-        const group = usageGroups.get(key) ?? { provider, model, tokensIn: 0, tokensOut: 0, calls: 0, cost: 0 };
+        const priceModel = priceModelByDeployment.get(String(raw.deploymentId ?? "")) ?? "";
+        const group = usageGroups.get(key) ?? { provider, model, priceModel, tokensIn: 0, tokensOut: 0, calls: 0, cost: 0 };
+        if (group.priceModel !== priceModel) group.priceModel = "";
         group.tokensIn += Number(raw.tokensIn) || 0;
         group.tokensOut += Number(raw.tokensOut) || 0;
         group.calls += Number(raw.calls) || 0;
@@ -1131,6 +1139,12 @@ export function createAdminApi({
       }
       for (const group of usageGroups.values()) {
         group.cost = Math.round(group.cost * 1e6) / 1e6;
+        const price = allowanceService?.prices?.().find((row) => {
+          const actual = (group.priceModel || group.model).toLowerCase().split("/").pop();
+          return row.model.toLowerCase() === actual;
+        });
+        delete group.priceModel;
+        if (price != null) group.listPrice = { input: price.input, output: price.output };
         usage.push(group);
         const provider = fleetUsage.get(group.provider) ?? { provider: group.provider, tokensIn: 0, tokensOut: 0, calls: 0, cost: 0 };
         provider.tokensIn += group.tokensIn;
@@ -1153,6 +1167,7 @@ export function createAdminApi({
       rows.push({
         slug: tenant.slug,
         name: tenant.name,
+        tokenAllowance: allowanceService == null ? null : await allowanceService.get(tenant.slug),
         alias: record.alias,
         keyId: record.keyId,
         minted: true,
@@ -1320,6 +1335,7 @@ export function createAdminApi({
       const current = ran.find((one) => modelChoices.some((row) => row.alias === one)) ?? ran[0] ?? "";
       rows.push({
         ...view,
+        allowance: allowanceService == null ? null : await allowanceService.get(tenant.slug),
         users,
         // MAIL-2. How many of this customer's bots hold an address at the product domain. One
         // number on the row they are already looking at, so "has this workspace been swept" is a
@@ -1358,7 +1374,11 @@ export function createAdminApi({
         },
       });
     }
-    return { clients: rows, proxy: { configured: spending.configured, why: spending.why }, measuredAt: new Date(now()).toISOString() };
+    return {
+      clients: rows,
+      allowanceLevels: allowanceService == null ? [] : allowanceService.settings(rows[0]?.slug ?? "").levels,
+      proxy: { configured: spending.configured, why: spending.why }, measuredAt: new Date(now()).toISOString(),
+    };
   }
 
   /** Box health: the ledger's view, plus the relay's, joined on the slug. */
@@ -2060,6 +2080,8 @@ export function createAdminApi({
         configured: false, why: off,
         db: { on: null, why: off },
         providers: [], planModels: [], defaults, actions,
+        allowanceLevels: allowanceService?.settings("").levels ?? [],
+        listPrices: allowanceService?.prices?.() ?? [],
         measuredAt: new Date(at).toISOString(),
       };
     }
@@ -2239,6 +2261,8 @@ export function createAdminApi({
       planModels,
       defaults,
       actions,
+      allowanceLevels: allowanceService?.settings("").levels ?? [],
+      listPrices: allowanceService?.prices?.() ?? [],
       pricing: {
         unpriced: planModels.filter((row) => row.priced !== true).map((row) => row.alias),
         why: planModels.some((row) => row.priced !== true)
@@ -2818,6 +2842,33 @@ export function createAdminApi({
 
     if (rest.length === 1 && rest[0] === "clients" && method === "GET") {
       json(response, 200, await clients());
+      return true;
+    }
+
+    if (rest.length === 2 && rest[0] === "settings" && method === "POST") {
+      const name = decodeURIComponent(rest[1]);
+      if (!["allowance.levels", "spend.prices"].includes(name)) {
+        json(response, 400, { error: "bad_setting", message: "That setting is not editable through this route." });
+        return true;
+      }
+      let parsed;
+      try { parsed = JSON.parse(String(body?.value ?? "")); } catch { parsed = null; }
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        json(response, 400, { error: "bad_value", message: "Send a non-empty JSON array." });
+        return true;
+      }
+      const valid = name === "allowance.levels"
+        ? parsed.every((row) => String(row?.id ?? "").trim() && String(row?.name ?? "").trim() && Number.isFinite(Number(row?.tokens)) && Number(row.tokens) > 0)
+        : parsed.every((row) => String(row?.model ?? "").trim() && Number.isFinite(Number(row?.input)) && Number(row.input) >= 0 && Number.isFinite(Number(row?.output)) && Number(row.output) >= 0);
+      if (!valid) {
+        json(response, 400, { error: "bad_value", message: name === "allowance.levels"
+          ? "Each allowance level needs an id, a name and a positive token count."
+          : "Each list price needs a model and non-negative input and output prices." });
+        return true;
+      }
+      store.setSetting(name, JSON.stringify(parsed), guard.account?.email ?? "the operator token");
+      allowanceService?.clear?.();
+      json(response, 200, { name, value: parsed });
       return true;
     }
 
@@ -4242,6 +4293,13 @@ export function createAdminApi({
               ? `${slug} was written and its box did not report a ceiling back, so nothing here can say what it is now. ${String(answer.body?.why ?? "")}`.trim()
               : `${slug} holds ${live} bots from now on. Their own page shows it on its next load.`,
         });
+        return true;
+      }
+      if (action === "allowance") {
+        if (allowanceService == null) { json(response, 503, { error: "not_available", message: "Token allowances are not available on this build." }); return true; }
+        const saved = allowanceService.set(slug, { level: body?.level, capOverride: body?.capOverride }, guard.account?.email ?? "the operator token");
+        if (!saved.ok) { json(response, saved.error === "not_found" ? 404 : 400, saved); return true; }
+        json(response, 200, { slug, allowance: await allowanceService.get(slug, { fresh: true }) });
         return true;
       }
       json(response, 404, { error: "not_found" });

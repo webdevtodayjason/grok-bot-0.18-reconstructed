@@ -1033,6 +1033,7 @@
       // gets said out loud rather than a select that appears to work: a control that silently does
       // nothing is worse than no control.
       card.appendChild(clientModelRow(client));
+      card.appendChild(clientAllowanceRow(client, answer.allowanceLevels));
       // AGENTS-CAP-2. And how many bots it may hold, read off the box the same way.
       card.appendChild(clientCeilingRow(client));
       // ONBOARD-2. Where their invite got to, what went out to them, and the way to take them away.
@@ -1101,6 +1102,60 @@
       card.appendChild(wrap);
       host.appendChild(card);
     }
+  }
+
+  function allowanceBar(answer, className = "") {
+    const wrap = el("span", `tokenAllowance ${className}`.trim());
+    const bar = el("span", "tokenAllowanceTrack");
+    const fill = el("span", `tokenAllowanceFill ${answer?.state ?? "not-recorded"}`);
+    fill.style.width = `${Math.max(0, Math.min(100, Number(answer?.pct) || 0))}%`;
+    bar.appendChild(fill);
+    wrap.appendChild(bar);
+    wrap.appendChild(el("span", "quiet", answer?.pct == null ? "not recorded" : `${Math.round(answer.pct)}%`));
+    return wrap;
+  }
+
+  function clientAllowanceRow(client, levels) {
+    const current = client.allowance;
+    const row = el("div", "capRow allowanceRow");
+    row.appendChild(el("strong", null, "5-day token allowance"));
+    row.appendChild(allowanceBar(current));
+    const select = document.createElement("select");
+    select.className = "clientAllowanceLevel";
+    for (const level of Array.isArray(levels) ? levels : []) {
+      const option = document.createElement("option");
+      option.value = level.id;
+      option.textContent = level.name;
+      option.selected = level.id === current?.levelId;
+      select.appendChild(option);
+    }
+    const override = document.createElement("input");
+    override.className = "clientAllowanceOverride";
+    override.type = "number";
+    override.min = "1";
+    override.step = "1";
+    override.placeholder = "cap override";
+    override.value = current?.capOverride == null ? "" : String(current.capOverride);
+    const save = el("button", "ghost small", "Save allowance");
+    save.type = "button";
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      try {
+        await api("POST", `/v1/admin/clients/${encodeURIComponent(client.slug)}/allowance`, {
+          level: select.value, capOverride: override.value,
+        });
+        await loadClients();
+      } catch (error) { banner(String(error.message)); }
+      finally { save.disabled = false; }
+    });
+    row.appendChild(select);
+    row.appendChild(override);
+    row.appendChild(save);
+    const detail = current?.used == null
+      ? `usage not recorded${current?.why ? `: ${current.why}` : ""}`
+      : `${countWords(current.used)} of ${countWords(current.cap)} tokens; resets in ${current.cycle.daysLeft} days`;
+    row.appendChild(el("span", "why", detail));
+    return row;
   }
 
   // ---- ADMIN-2: adding a client from the screen --------------------------------------------------
@@ -1938,14 +1993,16 @@
     const head = document.createElement("thead");
     const heading = document.createElement("tr");
     for (const label of ["Provider", "Model", "In", "Out", "Calls", "Cost"]) heading.appendChild(el("th", null, label));
+    heading.appendChild(el("th", null, "List price"));
     head.appendChild(heading);
     table.appendChild(head);
     const body = document.createElement("tbody");
     const totals = new Map();
     for (const line of usage) {
       const tr = document.createElement("tr");
+      const listPrice = line.listPrice == null ? "not recorded" : `$${Number(line.listPrice.input).toFixed(2)} / $${Number(line.listPrice.output).toFixed(2)} per 1M in/out`;
       for (const value of [
-        line.provider, line.model, countWords(line.tokensIn), countWords(line.tokensOut), countWords(line.calls), money.format(Number(line.cost) || 0),
+        line.provider, line.model, countWords(line.tokensIn), countWords(line.tokensOut), countWords(line.calls), money.format(Number(line.cost) || 0), listPrice,
       ]) tr.appendChild(el("td", null, value));
       body.appendChild(tr);
       const sum = totals.get(line.provider) ?? { tokensIn: 0, tokensOut: 0, calls: 0, cost: 0 };
@@ -1958,7 +2015,7 @@
     for (const [provider, sum] of totals) {
       const tr = el("tr", "spend-provider-total");
       for (const value of [
-        provider, "by provider", countWords(sum.tokensIn), countWords(sum.tokensOut), countWords(sum.calls), money.format(sum.cost),
+        provider, "by provider", countWords(sum.tokensIn), countWords(sum.tokensOut), countWords(sum.calls), money.format(sum.cost), "—",
       ]) tr.appendChild(el("td", null, value));
       body.appendChild(tr);
     }
@@ -2035,6 +2092,13 @@
       const who = document.createElement("td");
       who.appendChild(el("strong", null, client.name || client.slug));
       who.appendChild(el("div", "quiet", client.slug));
+      if (client.tokenAllowance != null) {
+        who.appendChild(allowanceBar(client.tokenAllowance, "spendCycleAllowance"));
+        const cycle = client.tokenAllowance.cycle;
+        who.appendChild(el("div", "quiet", client.tokenAllowance.used == null
+          ? "this cycle: not recorded"
+          : `this cycle: ${Math.round(client.tokenAllowance.pct)}% of ${countWords(client.tokenAllowance.cap)}, resets in ${cycle.daysLeft} days`));
+      }
       // CODE-1's one additive line. Nothing at all for a workspace that has run no coding task: an
       // empty row of zeroes on every client would be five-sixths noise.
       const coding = codeLine(code, client.slug);
@@ -3081,6 +3145,32 @@
     const note = el("p", "quiet", `This is what a workspace provisioned from now on runs on. It changes nothing about a workspace that already exists: those are set one at a time on their own row under Clients and users. ${CLOCK.customerPage}`);
     if (answer.defaults?.why) note.title = String(answer.defaults.why);
     host.appendChild(note);
+
+    const settings = [
+      { name: "allowance.levels", label: "Allowance levels", value: answer.allowanceLevels ?? [] },
+      { name: "spend.prices", label: "List prices per 1M input/output tokens", value: answer.listPrices ?? [] },
+    ];
+    for (const setting of settings) {
+      const block = el("div", "row allowanceSetting");
+      const label = el("label", null, setting.label);
+      const field = document.createElement("textarea");
+      field.rows = 3;
+      field.value = JSON.stringify(setting.value);
+      label.appendChild(field);
+      block.appendChild(label);
+      const button = el("button", "ghost small", "Save");
+      button.type = "button";
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          await api("POST", `/v1/admin/settings/${encodeURIComponent(setting.name)}`, { value: field.value });
+          await loadProviders();
+        } catch (error) { banner(String(error.message)); }
+        finally { button.disabled = false; }
+      });
+      block.appendChild(button);
+      host.appendChild(block);
+    }
   }
 
   function renderLedger(rows) {

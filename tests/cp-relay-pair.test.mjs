@@ -207,12 +207,13 @@ test("the included object the control plane writes is the one the relay reads, f
     const body = await (await pair.ask("GET", "/v1/relay/tenants", { token: pair.relayToken })).json();
     const row = body.tenants.find((tenant) => tenant.slug === SLUG);
     assert.ok(row?.included, `the customer got no included object: ${JSON.stringify(body.skipped)}`);
-    assert.deepEqual(Object.keys(row.included).sort(), ["baseUrl", "enforced", "key", "keyId", "models"]);
+    assert.deepEqual(Object.keys(row.included).sort(), ["baseUrl", "enforced", "key", "keyId", "models", "upstreamBaseUrl"]);
     assert.equal(typeof row.included.baseUrl, "string");
     // Plain http to a private name on the docker bridge. That is precisely what the relay's tenant
     // endpoint guard refuses, and the guard is NOT relaxed for it: these rows never enter a
     // customer's endpoints.json, the relay computes them from this answer.
-    assert.match(row.included.baseUrl, /^http:\/\/[^/]+\/v1$/);
+    assert.match(row.included.baseUrl, /^http:\/\/[^/]+\/model-proxy\/v1$/);
+    assert.match(row.included.upstreamBaseUrl, /^http:\/\/[^/]+\/v1$/);
     assert.notEqual(row.included.key, "", "the relay was handed no key to use");
     assert.equal(typeof row.included.enforced, "boolean");
     assert.ok(Array.isArray(row.included.models) && row.included.models.length > 0);

@@ -309,6 +309,13 @@ tbody tr.gateRow:hover td { background: #0E151E; }
 .client .head strong, .feedbackCard .head strong { font-size: 15px; }
 .client .actions { margin-left: auto; display: flex; gap: 6px; }
 .client .users { margin-top: 10px; }
+.tokenAllowance { display: inline-flex; align-items: center; gap: 7px; }
+.tokenAllowanceTrack { display: inline-block; width: 110px; height: 7px; overflow: hidden; border-radius: 5px; background: var(--line); }
+.tokenAllowanceFill { display: block; height: 100%; background: var(--good); }
+.tokenAllowanceFill.warning { background: var(--warn); }
+.tokenAllowanceFill.exhausted { background: #c64e72; }
+.allowanceRow select { min-width: 110px; }
+.allowanceRow input.clientAllowanceOverride { width: 145px; }
 /* PROVIDERS-1. The model this one workspace runs on, under the customer's name. */
 .modelRow, .capRow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
 .modelRow select, .capRow input { padding: 5px 9px; font-size: 13px; }
@@ -431,6 +438,9 @@ form.stack .controls { margin: 0; }
 .defaults { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
 .defaults .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .defaults select { padding: 6px 10px; font-size: 13px; }
+.allowanceSetting { margin-top: 8px; }
+.allowanceSetting label { flex: 1 1 520px; }
+.allowanceSetting textarea { display: block; width: 100%; margin-top: 5px; padding: 7px 9px; background: #0C131C; color: var(--ink); border: 1px solid var(--line); border-radius: 6px; font: 11px/1.4 var(--mono); }
 
 /* ---- system ----------------------------------------------------------------------------- */
 

@@ -606,6 +606,14 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
     configured,
     call,
 
+    // The allowance reader needs exact timestamps, so it consumes the request rows rather than a
+    // calendar-day aggregate. The caller owns the 60-second cache shared by every workspace.
+    async spendRows() {
+      const answer = await call("GET", "/spend/logs");
+      if (!answer.ok) return answer;
+      return { ok: true, rows: Array.isArray(answer.body) ? answer.body : [] };
+    },
+
     /**
      * One virtual key for one tenant.
      *

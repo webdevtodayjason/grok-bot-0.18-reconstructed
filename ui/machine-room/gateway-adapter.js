@@ -106,6 +106,7 @@
   const answers = new Map();
   let answerBytes = 0;
   const inFlight = new Map();
+  const allowanceWarnings = new Map();
 
   function rememberAnswer(key, text, digest) {
     const held = answers.get(key);
@@ -130,8 +131,17 @@
     if (held?.digest != null) headers["x-titan-if-digest"] = held.digest;
     const r = await relayFetch(`/api/${method}`, { method: "POST", headers, body: JSON.stringify(args) });
     const text = await r.text();
+    if (method === "sendPrompt" && r.headers?.get?.("x-token-allowance-warning") != null) {
+      const agentId = String(args?.agentId ?? "");
+      if (agentId.length > 0) allowanceWarnings.set(agentId, "Heads up, this cycle's tokens are at 80%.");
+    }
     if (!r.ok) {
       let body; try { body = JSON.parse(text); } catch { body = text; }
+      if (r.status === 429 && body?.error === "allowance") {
+        const days = Number.isFinite(Number(body.daysLeft)) ? Number(body.daysLeft) : "a few";
+        const on = allowanceDate(body.resetsAt);
+        throw new Error(`Your cycle's tokens are used up. They come back in ${days} days, on ${on}. Ask your admin if you need more now.`);
+      }
       throw new Error(body?.error ?? `${method} failed (${r.status})`);
     }
     if (text === UNCHANGED_ANSWER) {
@@ -2842,6 +2852,14 @@
         awaiting.delete(key);
         r.status = "ready";
         r.statusText = expired ? "No reply came back" : "Ready for the next task";
+        const warning = !expired ? allowanceWarnings.get(context.id) : null;
+        if (warning) {
+          allowanceWarnings.delete(context.id);
+          r.messages.push({
+            id: `allowance-warning-${Date.now()}`, authorId: context.id, authorName: r.name,
+            type: "text", text: warning, time: timeOf(Date.now()),
+          });
+        }
         return;
       }
       r.status = "working";
@@ -5309,6 +5327,71 @@
     });
   }
   wireLogout().catch(() => { /* no control drawn; the relay is the source of truth either way */ });
+
+  const allowanceCount = (value) => new Intl.NumberFormat("en", { notation: Number(value) >= 1_000_000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(Number(value));
+  const allowanceDate = (value) => {
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? new Intl.DateTimeFormat("en", { month: "short", day: "numeric", timeZone: "UTC" }).format(date) : "date not recorded";
+  };
+  function paintAllowance(answer, doc = global.document) {
+    const meter = doc?.getElementById?.("allowance-meter");
+    const drawer = doc?.getElementById?.("allowance-drawer");
+    if (meter == null || drawer == null) return false;
+    const pct = answer?.pct == null ? null : Math.max(0, Number(answer.pct) || 0);
+    const state = String(answer?.state ?? "not-recorded");
+    meter.hidden = false;
+    meter.dataset.state = state;
+    drawer.dataset.state = state;
+    const width = `${Math.min(100, pct ?? 0)}%`;
+    meter.querySelector(".allowance-meter-fill").style.width = width;
+    drawer.querySelector(".allowance-drawer-bar span").style.width = width;
+    meter.querySelector(".allowance-meter-pct").textContent = pct == null ? "—" : `${Math.round(pct)}%`;
+    drawer.querySelector("[data-allowance-usage]").textContent = answer?.used == null
+      ? "Usage not recorded"
+      : `${allowanceCount(answer.used)} of ${allowanceCount(answer.cap)} tokens this cycle · ${Math.round(pct)}%`;
+    drawer.querySelector("[data-allowance-reset]").textContent = answer?.cycle
+      ? `Resets in ${answer.cycle.daysLeft} days (${allowanceDate(answer.cycle.endsAt)})`
+      : "Reset date not recorded";
+    drawer.querySelector("[data-allowance-level]").textContent = answer?.level ? `${answer.level} level` : "Level not recorded";
+    const models = drawer.querySelector("[data-allowance-models]");
+    models.replaceChildren();
+    const rows = Array.isArray(answer?.models) ? answer.models.slice(0, 3) : [];
+    if (rows.length === 0) models.textContent = answer?.used == null ? "Model usage not recorded" : "No model usage this cycle";
+    else {
+      const title = doc.createElement("strong"); title.textContent = "Top models"; models.appendChild(title);
+      for (const row of rows) {
+        const line = doc.createElement("div");
+        const name = doc.createElement("span"); name.textContent = row.model;
+        const tokens = doc.createElement("span"); tokens.textContent = `${allowanceCount(row.tokens)} tokens`;
+        line.append(name, tokens); models.appendChild(line);
+      }
+    }
+    return true;
+  }
+  async function wireAllowance() {
+    const meter = global.document?.getElementById?.("allowance-meter");
+    const drawer = global.document?.getElementById?.("allowance-drawer");
+    if (meter == null || drawer == null) return;
+    const [response, auth] = await Promise.all([
+      relayFetch("/allowance", { headers: { accept: "application/json" } }),
+      relayFetch("/auth/state", { headers: { accept: "application/json" } }).then((one) => one.json()).catch(() => null),
+    ]);
+    if (!response.ok) return;
+    paintAllowance(await response.json());
+    const workspace = global.document?.getElementById?.("allowance-workspace");
+    if (workspace != null && auth?.workspace) {
+      workspace.textContent = String(auth.workspace.name || auth.workspace.slug);
+      workspace.hidden = false;
+    }
+    const close = () => { drawer.hidden = true; meter.setAttribute("aria-expanded", "false"); };
+    meter.addEventListener("click", () => {
+      drawer.hidden = !drawer.hidden;
+      meter.setAttribute("aria-expanded", String(!drawer.hidden));
+    });
+    drawer.querySelector(".allowance-close")?.addEventListener("click", close);
+  }
+  global.__allowanceUi = { paint: paintAllowance, count: allowanceCount, date: allowanceDate };
+  wireAllowance().catch(() => { /* absence is rendered as absence, never as a made-up zero */ });
 
   // app.js constructs its adapter synchronously, so the gateway is read before it loads. If the
   // gateway is unreachable the demo adapter runs instead and the page still comes up.

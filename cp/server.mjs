@@ -56,6 +56,7 @@ import { createCodeTasks } from "./code.mjs";
 import { beginKeyAction, keyDefinition, keyEvidence, keysDoor, parseKeyValue, proveKey, relaySecrets } from "./secrets.mjs";
 import { INTAKE_BYTES as FEEDBACK_BODY_BYTES, normalizeReport } from "./feedback.mjs";
 import { createProxyClient, includedModelRows } from "./proxy.mjs";
+import { createAllowanceService } from "./allowance.mjs";
 import {
   VERIFY_INTERVAL_MS,
   docNoiseRules,
@@ -203,6 +204,7 @@ export function createApp(options = {}) {
   // built with no CP_PROXY_URL is not an error and never throws; every call on it answers with the
   // sentence saying the feature is off.
   const proxy = options.proxy ?? createProxyClient({ config, fetchImpl });
+  const allowance = options.allowance ?? createAllowanceService({ store, proxy, now });
 
   // The address the lockout counts against, decided by the relay's own code (ui/auth.mjs) with the
   // relay's own two settings.
@@ -405,7 +407,10 @@ export function createApp(options = {}) {
     return {
       why: live.why,
       row: {
-        baseUrl: `${config.proxyUrl}/v1`,
+        // Boxes call the relay, not LiteLLM directly. That is the only point shared by a person's
+        // turn, a routine and a subagent, so it is the only edge that can stop all three at 100%.
+        baseUrl: `${config.relayModelUrl ?? config.relayUrl}/model-proxy/v1`,
+        upstreamBaseUrl: `${config.proxyUrl}/v1`,
         key: record.key,
         keyId: record.keyId,
         models,
@@ -630,7 +635,7 @@ export function createApp(options = {}) {
   // client and one session verifier in this process rather than two. It mounts below, before the
   // operator-token routes, and every route inside it refuses anything that is not a super admin.
   const admin = createAdminApi({
-    config, store, client, now, fetchImpl, proxy,
+    config, store, client, now, fetchImpl, proxy, allowance,
     // ONBOARD-2. The box probe, which is the same fetch as fetchImpl in production and is not in a
     // test: the console's invite asks a new box for its own /health before it will mail a customer,
     // and a test process has no docker network for that name to resolve on. One word, so the
@@ -1054,6 +1059,18 @@ export function createApp(options = {}) {
       if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
       if (!requireRelay(request, response)) return undefined;
       return json(response, 200, await relayRegistry());
+    }
+
+    // A customer session may read only its own allowance. The relay credential may read any one
+    // workspace so it can cache the decision at the model-call edge without holding an admin key.
+    if (segments[1] === "tenants" && segments[3] === "allowance" && segments.length === 4) {
+      if (method !== "GET") return json(response, 405, { error: "method_not_allowed" });
+      const slug = decodeURIComponent(segments[2]);
+      const session = currentSession(request);
+      const relay = secretsMatch(bearer(request), config.relayToken);
+      if (!relay && (!session.ok || String(session.payload?.tenant ?? "") !== slug)) return json(response, 401, { error: "unauthorized" });
+      const answer = await allowance.get(slug);
+      return answer == null ? json(response, 404, { error: "not_found" }) : json(response, 200, answer);
     }
 
     // ---- the per-bot mail directory (MAIL-2, docs/MAIL.md) --------------------------------------

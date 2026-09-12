@@ -55,6 +55,7 @@ import net from "node:net";
 import { lookup } from "node:dns/promises";
 import { adoptSubscription, forgetSubscription, resolveSubscription, scanSubscriptions } from "./subscriptions.mjs";
 import { rewriteVncAsset } from "./vnc-bridge.mjs";
+import { MODEL_START_COMMANDS, allowanceRefusal, createAllowanceReader } from "./allowance-edge.mjs";
 import {
   BOX_INCOMING_ENTRY, BOX_TARBALL_PATH, LATEST_VERSION_FILE, RUNTIME_ROUTE_PREFIX,
   composeHostBundleScript, formatLatestVersionFile, parseLatestVersionFile, parseRuntimeRequest,
@@ -2298,6 +2299,11 @@ async function readBody(req, maxBytes = Infinity) {
 
 // POST /api/<method> -> that tenant's gateway. The browser never sees the token.
 async function relayCommand(t, req, res, method) {
+  let tokenAllowance = null;
+  if (MODEL_START_COMMANDS.has(method)) {
+    tokenAllowance = await allowanceFor(t);
+    if (tokenAllowance?.state === "exhausted") return answerAllowanceExhausted(res, tokenAllowance);
+  }
   const body = await readBody(req);
   const upstream = await fetch(`${t.gateway}/api/${method}`, {
     method: "POST",
@@ -2331,14 +2337,86 @@ async function relayCommand(t, req, res, method) {
   // Only on a 200: a refusal's body is the gateway's sentence and must reach the console whole.
   if (upstream.status === 200) {
     const shaped = HOOKS.shapeApiAnswer(method, body, req.headers, text);
+    const warn = method === "sendPrompt" && tokenAllowance?.state === "warning"
+      && await takeAllowanceWarning(t, tokenAllowance);
     res.writeHead(200, {
       "content-type": upstream.headers.get("content-type") ?? "application/json",
+      ...(warn ? { "x-token-allowance-warning": String(tokenAllowance.cycle.index) } : {}),
       ...shaped.headers,
     });
     return res.end(shaped.bytes);
   }
   res.writeHead(upstream.status, { "content-type": upstream.headers.get("content-type") ?? "application/json" });
   res.end(text);
+}
+
+// The relay asks once per minute per workspace. A failed read never becomes an invented zero and
+// never blocks a person; only the control plane's measured exhausted state closes model starts.
+const allowanceWarnings = new Set();
+const readAllowance = createAllowanceReader({ cpUrl: RELAY?.cpUrl, relayToken: RELAY?.relayToken });
+const allowanceFor = (t) => readAllowance(t.slug);
+
+async function takeAllowanceWarning(t, allowance) {
+  const index = allowance?.cycle?.index;
+  if (!Number.isInteger(index)) return false;
+  const key = `${t.slug}:${index}`;
+  if (allowanceWarnings.has(key)) return false;
+  allowanceWarnings.add(key);
+  const file = t.file("allowance-warning.json");
+  try {
+    const held = JSON.parse(await readFile(file, "utf8"));
+    if (Number(held?.cycle) === index) return false;
+  } catch { /* no warning has been recorded for this workspace yet */ }
+  try {
+    t.ensureDir();
+    await writeFile(file, `${JSON.stringify({ cycle: index, at: new Date().toISOString() })}\n`, { mode: 0o600 });
+    await ownLikeParent(file);
+  } catch { /* memory still prevents repeats until this relay restarts */ }
+  return true;
+}
+
+function answerAllowanceExhausted(res, allowance) {
+  const body = allowanceRefusal(allowance);
+  res.writeHead(429, { "content-type": "application/json", "cache-control": "no-store" });
+  return res.end(JSON.stringify(body));
+}
+
+// Every included model call, including calls made inside routines and subagents, crosses this edge.
+// The virtual key identifies one registry row and is replaced with that same row's key upstream;
+// a console session, gateway token or neighbouring tenant key opens nothing here.
+async function relayIncludedModel(req, res, url) {
+  const header = String(req.headers.authorization ?? "");
+  const presented = /^bearer\s+/i.test(header) ? header.replace(/^bearer\s+/i, "").trim() : "";
+  const entry = registry.matchBy(presented, (row) => row.included?.key);
+  const t = entry == null ? null : contextOf(entry.slug);
+  if (t == null || !t.entry.included?.upstreamBaseUrl) return fail(res, 401, "unauthorized");
+  const allowance = await allowanceFor(t);
+  if (allowance?.state === "exhausted") return answerAllowanceExhausted(res, allowance);
+  const rest = url.pathname.slice("/model-proxy".length);
+  const body = req.method === "GET" || req.method === "HEAD" ? null : await readBody(req);
+  let upstream;
+  try {
+    upstream = await fetch(`${t.entry.included.upstreamBaseUrl}${rest.replace(/^\/v1/, "")}${url.search}`, {
+      method: req.method,
+      headers: {
+        authorization: `Bearer ${t.entry.included.key}`,
+        accept: String(req.headers.accept ?? "application/json"),
+        ...(body == null ? {} : { "content-type": String(req.headers["content-type"] ?? "application/json") }),
+      },
+      ...(body == null ? {} : { body }),
+    });
+  } catch {
+    return fail(res, 502, "the included models did not answer");
+  }
+  const headers = { "content-type": upstream.headers.get("content-type") ?? "application/json", "cache-control": "no-store" };
+  const retryAfter = upstream.headers.get("retry-after");
+  if (retryAfter) headers["retry-after"] = retryAfter;
+  res.writeHead(upstream.status, headers);
+  if (req.method === "HEAD" || upstream.body == null) return res.end();
+  try {
+    for await (const chunk of upstream.body) res.write(Buffer.from(chunk));
+  } catch { /* the upstream closed; end the downstream without inventing a second response */ }
+  return res.end();
 }
 
 // GET /events -> gateway SSE, piped through unchanged so reconnects behave normally.
@@ -4073,6 +4151,12 @@ const server = createServer(async (req, res) => {
         return await edge.handleList(req, res);
       }
     }
+    // Model traffic comes from a box carrying its own virtual key, before the console login. This
+    // is the enforcement point shared by chats, routines and subagents.
+    if (url.pathname === "/model-proxy/v1" || url.pathname.startsWith("/model-proxy/v1/")) {
+      if (!["GET", "POST", "HEAD"].includes(req.method)) return fail(res, 405, "GET, HEAD or POST");
+      return await relayIncludedModel(req, res, url);
+    }
     // Before the console's login as well, and behind a credential the console session cannot
     // present: this is the CONTROL PLANE asking the relay for the two things only the relay can
     // see. The failed sign-in ledger, because a refusal happens at this door and never reaches the
@@ -4194,6 +4278,13 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/me") {
       if (req.method !== "GET") return fail(res, 405, "GET");
       return await handleMe(req, res, t);
+    }
+    if (url.pathname === "/allowance") {
+      if (req.method !== "GET") return fail(res, 405, "GET");
+      const answer = await allowanceFor(t);
+      if (answer == null) return fail(res, 503, "token usage is not recorded right now");
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify(answer));
     }
     // PUSH-1, through the hook seam, so this file carries the dispatch and ui/push-edge.mjs carries
     // every rule. With no push-edge.mjs this falls through to the 404 at the bottom, which is what a

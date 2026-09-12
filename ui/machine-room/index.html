@@ -76,6 +76,11 @@
                is, the eyebrow says which room of it you are in. -->
           <img class="window-lockup" src="assets/titanium-bot-logo.svg" alt="Titanium Bot" />
           <strong class="window-eyebrow">Machine Room</strong>
+          <span class="allowance-workspace" id="allowance-workspace" hidden></span>
+          <button class="allowance-meter" id="allowance-meter" type="button" aria-controls="allowance-drawer" aria-expanded="false" hidden>
+            <span class="allowance-meter-track" aria-hidden="true"><span class="allowance-meter-fill"></span></span>
+            <span class="allowance-meter-pct">—</span>
+          </button>
         </div>
 
         <!-- PHONE-CONSOLE-1: at phone widths this is not a dock on the bar, it is the menu behind the
@@ -125,6 +130,15 @@
           <button class="icon-button" id="logout-button" type="button" aria-label="Log out" title="Log out" hidden>⏻</button>
         </div>
       </header>
+      <aside class="allowance-drawer" id="allowance-drawer" aria-label="Token allowance" hidden>
+        <button class="icon-button compact allowance-close" type="button" aria-label="Close token allowance">×</button>
+        <small>Token allowance</small>
+        <strong data-allowance-usage>Usage not recorded</strong>
+        <div class="allowance-drawer-bar" aria-hidden="true"><span></span></div>
+        <p data-allowance-reset></p>
+        <p data-allowance-level></p>
+        <div data-allowance-models></div>
+      </aside>
 
       <main class="stage" id="stage">
         <section class="worker-roster" id="worker-roster" aria-label="Workers and rooms">
