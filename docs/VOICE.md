@@ -1280,6 +1280,46 @@ drives the exact four frames off the live wire in order.
 | the footer when the screen came up | shelf 390x133 at 0,711, composer 358x56 at 16,778, talk 44x44 at 245,784 — byte-identical to before the press |
 | an app switch | the line closed, the screen went, one plain line in the conversation, the background released |
 
+### MEASURED ON THE R750 THROUGH console.titanium.bot, 2026-09-11, as a throwaway customer on the demo tenant
+
+`scripts/verify-voice-r750.mjs` **65 of 65**, minted inside the control plane's own container and
+removed afterwards. Two engines, because each can measure a half the other cannot.
+
+**The screen, in WebKit at 390x844 with device scale 3 and the iPhone's insets restated** (`--sat`
+59px, `--sab` 34px, the way the phone-layout gate restates them): one press brought it up in **50 ms**,
+390x844 at 0,0, `position: fixed`, `z-index: 80`; End 56x46, Mute 56x46 and the text field 222x44, all
+at least 44 px and all on screen; the screen's own padding read 16 px top and 24 px bottom. WebKit
+threw nothing.
+
+**A real spoken turn through the real vendor, in Chromium at 390x844** with speech made on this Mac by
+`say` as the capture device, because WebKit has no fake-capture switch. The person's line, as the
+vendor transcribed it: *"Low Titan, in one short sentence, what is the team working on today?"* —
+"Hello" misheard, which is the vendor on a synthetic voice and is quoted rather than tidied. Titan
+answered out loud: *"I don't have any record of active team work today — nothing's been assigned or
+reported to me..."*. The words on the screen went Connecting, Listening, Talking and Thinking across
+it; End put the person back in the chat, the exchange is in the transcript with the **Spoken** chip on
+the person's line, and the chat was scrolled to the newest line, 0 px from the bottom. Screenshots of
+Connecting, Thinking, Talking and the chat afterwards are in the scratchpad.
+
+**ONE turn, not two, and the reason is the gate's microphone rather than the product.** The capture
+file plays **once** — `%noloop`, which matters: the first live attempt looped it, so the vendor heard
+one sentence over and over with no gap and its own 700 ms silence detector never fired. Measured then:
+the microphone level read 0.114, the word reached Listening, and nothing was ever confirmed in 150 s.
+Played once there is exactly one utterance in the file, so there is exactly one turn.
+
+**The workspace's own talking switch was off and the gate put it back.** The demo tenant's door
+answers `{"enabled":false,"available":true}` — a realtime key is stored and the customer's switch is
+off — so the gate turns that switch on as the customer whose account it is, takes the turn, and
+restores the value it found, which it then re-reads and asserts. Five minutes of the day's 120 were
+spent across both attempts. The first version of that restore ran **after** closing the browser, had
+no page to run on, and left the switch on until it was put back by hand; it now runs first and is
+checked.
+
+**A screenshot artifact, named so nobody reads it as a defect:** WebKit's capture at device scale 3
+paints the fixed bottom row a second time at the top of the image. The DOM says otherwise — one
+`#voice-call`, one `.voice-call-controls` at y=774, measured through `elementFromPoint` and rects on
+the live server — and the Chromium screenshot of the same screen shows one row.
+
 **Injected, not measured:** the microphone level. WebKit ships no fake capture device and the leg's
 microphone is built out of Web Audio, so the avatar's reaction to a person's own voice is driven
 through `__voice._setCallLevels` and every line that reads it says "injected". The playback level in

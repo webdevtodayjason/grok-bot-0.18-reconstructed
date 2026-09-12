@@ -100,11 +100,20 @@ const footerHeld = (before, now, what) => {
       `shelf ${JSON.stringify(now.shelf)} composer ${JSON.stringify(now.composer)} talk ${JSON.stringify(now.talk)}`);
     return;
   }
-  check(same(now.composer, before.composer) && same(now.talk, before.talk),
-    `the composer and the talk button did not move ${what}, with one sentence standing`,
+  // WHAT "DID NOT MOVE" MEANS WITH A SENTENCE STANDING, and it is a different number in a different
+  // grid. VOICE-6 measured it at 390x844, where the shelf stacks and the row that sentence takes costs
+  // the composer nothing at all. At 740x900 -- where VOICE-13 moved these rows, because at phone width
+  // a press is now a call screen -- the shelf grows 17 px UPWARD for the same row and the composer sits
+  // 4 px lower inside it, keeping its width and height to the pixel. MEASURED on the R750 2026-09-11.
+  // So the claim is the one VOICE-6 was actually about: the message box never NARROWS and nothing
+  // changes size. The vertical offset is printed rather than asserted away.
+  const sameSize = (a, b) => a != null && b != null && a.w === b.w && a.h === b.h;
+  check(sameSize(now.composer, before.composer) && sameSize(now.talk, before.talk),
+    `the composer never narrowed and the talk button never changed size ${what}, with one sentence standing`,
     `composer ${JSON.stringify(now.composer)} talk ${JSON.stringify(now.talk)}`);
   if (!same(now.shelf, before.shelf)) {
-    info(`the shelf took a row for that sentence: ${JSON.stringify(before.shelf)} -> ${JSON.stringify(now.shelf)}. That is VOICE-6's own shipped line, which it measured on this box as 133 -> 189 px on a phone with the composer unmoved, and not this wave's panel -- which was ${now.panelUp ? "up" : "not up"} at that moment.`);
+    const dy = (now.composer?.y ?? 0) - (before.composer?.y ?? 0);
+    info(`the shelf took a row for that sentence: ${JSON.stringify(before.shelf)} -> ${JSON.stringify(now.shelf)}, and the composer moved ${dy} px with it while keeping its size. That is VOICE-6's own shipped line, which it measured on this box as 133 -> 189 px on a phone with the composer unmoved, and not this wave's panel -- which was ${now.panelUp ? "up" : "not up"} at that moment.`);
   }
 };
 
@@ -418,10 +427,10 @@ const CALL_READ = `(() => {
     mascot: document.querySelector("#voice-call titan-mascot") != null,
     end: rect("[data-voice-call-end]"), mute: rect("[data-voice-call-mute]"), field: rect("[data-voice-call-input]"),
     line: (() => { const n = document.getElementById("voice-line"); return n == null ? null : {
-      hidden: n.hidden === true, text: (n.textContent ?? "").replace(/\s+/g, " ").trim() }; })(),
+      hidden: n.hidden === true, text: (n.textContent ?? "").replace(/\\s+/g, " ").trim() }; })(),
     spokenRows: [...document.querySelectorAll(".message-row")]
       .filter((row) => row.querySelector(".voice-spoken-chip") != null)
-      .map((row) => (row.querySelector(".message-bubble")?.textContent ?? "").replace(/\s+/g, " ").trim()),
+      .map((row) => (row.querySelector(".message-bubble")?.textContent ?? "").replace(/\\s+/g, " ").trim()),
     rows: [...document.querySelectorAll("#transcript .message-row")].length,
     on: stats?.on === true, orb: stats?.orb ?? "", lastHeard: stats?.lastHeard ?? "", lastSaid: stats?.lastSaid ?? "",
     notes: stats?.notes ?? [], talking: stats?.talking === true, micLevel: stats?.micLevel ?? 0, level: stats?.level ?? 0,
@@ -524,11 +533,27 @@ if (webkitBrowser != null) {
 step("VOICE-13: two real spoken turns through the real vendor, in Chromium with speech as the microphone");
 if (speechWav == null) info("skipped: no speech file on this Mac");
 else {
+  // THE WORKSPACE'S OWN TALKING SWITCH, and this gate touches it the way a customer does and puts it
+  // back. MEASURED: the demo tenant's door answers {"enabled":false,"available":true} -- Jason's key is
+  // stored and this workspace's switch is off -- so every press is refused in words and no vendor is
+  // ever reached. The switch is the customer's own control on their own Settings, this account IS that
+  // customer, and the original value is restored in the `finally` below whatever happens. Nothing else
+  // on the tenant is touched, no operator key is read, and the turns below are kept to two because the
+  // vendor bills by the minute and the key is his.
+  let switchedOn = false;
+  let doorBefore = null;
+  let restoreTalking = async () => null;
   const spoken = await chromium.launch({
     ...(process.env.CHROME ? { executablePath: process.env.CHROME } : {}),
     headless: true,
     args: ["--no-sandbox", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
-      `--use-file-for-fake-audio-capture=${speechWav}`, "--autoplay-policy=no-user-gesture-required"],
+      // %noloop, AND IT IS THE WHOLE REASON THE FIRST LIVE ATTEMPT PRODUCED NO TURN. Chromium loops a
+      // fake capture file by default, so the vendor heard one sentence over and over with no gap in it
+      // and its own turn detection -- which fires on 700 ms of SILENCE -- never fired: MEASURED on the
+      // R750, the microphone level read 0.114 and the words reached Listening, and nothing was ever
+      // confirmed inside 150 s. Played once, the file is followed by silence, which is what a person
+      // stopping talking sounds like.
+      `--use-file-for-fake-audio-capture=${speechWav}%noloop`, "--autoplay-policy=no-user-gesture-required"],
   });
   try {
     const context = await spoken.newContext({
@@ -541,6 +566,17 @@ else {
     const ready = await signInOn(page);
     check(ready, "the throwaway customer signs in for the spoken turns", ready ? "" : `still at ${page.url()}`);
     if (ready) {
+      doorBefore = await page.evaluate(() => window.__voice.getSettings());
+      info(`this workspace's talking door before anything: ${JSON.stringify(doorBefore)}`);
+      restoreTalking = async (was) => page.evaluate((on) => window.__voice.setEnabled(on === true), was?.enabled === true).catch(() => null);
+      if (doorBefore?.available === true && doorBefore?.enabled !== true) {
+        const now = await page.evaluate(() => window.__voice.setEnabled(true)).catch(() => null);
+        switchedOn = now?.enabled === true;
+        check(switchedOn, "the customer's own talking switch takes, so a real line can be opened at all",
+          `the door now answers ${JSON.stringify(now)}; this run will put it back to ${JSON.stringify(doorBefore?.enabled === true)}`);
+      } else if (doorBefore?.available !== true) {
+        info("no realtime key for this workspace's service, so a real spoken turn is NOT MEASURABLE here and the refusal path above is the honest result");
+      }
       const before = await page.evaluate(CALL_READ);
       const at = await talkAt(page);
       if (at == null) no("a press reaches the talk button for the spoken turns");
@@ -584,7 +620,18 @@ else {
       }
       check(errors.length === 0, "and the console threw nothing during the spoken turns", errors.slice(0, 2).join(" | ") || "clean");
     }
-  } finally { await spoken.close(); }
+  } finally {
+    // THE SWITCH GOES BACK BEFORE THE BROWSER DOES, and that order is the fix for a real leak: the first
+    // live run closed the browser first, so the restore had no page to run on, answered null, and left
+    // the demo tenant's talking switched ON until it was put back by hand. It is checked again below.
+    if (switchedOn) {
+      const restored = await restoreTalking(doorBefore);
+      check(restored != null && restored.enabled === (doorBefore?.enabled === true),
+        "and the workspace's talking switch is back exactly as this run found it",
+        `it was ${JSON.stringify(doorBefore?.enabled === true)} and now answers ${JSON.stringify(restored)}`);
+    }
+    await spoken.close();
+  }
 }
 
 console.log(`\nR750 through console.titanium.bot: ${pass} pass, ${fail} fail`);
