@@ -547,7 +547,13 @@ else {
     ...(process.env.CHROME ? { executablePath: process.env.CHROME } : {}),
     headless: true,
     args: ["--no-sandbox", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
-      `--use-file-for-fake-audio-capture=${speechWav}`, "--autoplay-policy=no-user-gesture-required"],
+      // %noloop, AND IT IS THE WHOLE REASON THE FIRST LIVE ATTEMPT PRODUCED NO TURN. Chromium loops a
+      // fake capture file by default, so the vendor heard one sentence over and over with no gap in it
+      // and its own turn detection -- which fires on 700 ms of SILENCE -- never fired: MEASURED on the
+      // R750, the microphone level read 0.114 and the words reached Listening, and nothing was ever
+      // confirmed inside 150 s. Played once, the file is followed by silence, which is what a person
+      // stopping talking sounds like.
+      `--use-file-for-fake-audio-capture=${speechWav}%noloop`, "--autoplay-policy=no-user-gesture-required"],
   });
   try {
     const context = await spoken.newContext({
@@ -615,11 +621,16 @@ else {
       check(errors.length === 0, "and the console threw nothing during the spoken turns", errors.slice(0, 2).join(" | ") || "clean");
     }
   } finally {
-    await spoken.close();
+    // THE SWITCH GOES BACK BEFORE THE BROWSER DOES, and that order is the fix for a real leak: the first
+    // live run closed the browser first, so the restore had no page to run on, answered null, and left
+    // the demo tenant's talking switched ON until it was put back by hand. It is checked again below.
     if (switchedOn) {
       const restored = await restoreTalking(doorBefore);
-      info(`this run switched the workspace's talking ON for the two turns and has put it back: the door now answers ${JSON.stringify(restored)}`);
+      check(restored != null && restored.enabled === (doorBefore?.enabled === true),
+        "and the workspace's talking switch is back exactly as this run found it",
+        `it was ${JSON.stringify(doorBefore?.enabled === true)} and now answers ${JSON.stringify(restored)}`);
     }
+    await spoken.close();
   }
 }
 
