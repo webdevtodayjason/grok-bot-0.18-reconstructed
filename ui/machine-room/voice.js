@@ -1634,7 +1634,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     try { state.socket.send(JSON.stringify(message)); } catch { /* the close handler has it */ }
   }
 
-  function stop(condition, text) {
+  function stop(condition, text, options = {}) {
     clearDismiss();
     if (heldTimer != null) { global.clearInterval(heldTimer); heldTimer = null; }
     // VOICE-11. Everything this wave arms comes down here, and BEFORE the socket goes: a tail still
@@ -1682,7 +1682,23 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // mid-call outlives the call it was about: the button was pressed to leave, so leaving is what it
     // does. A stop that DOES carry a reason is the two lines above, and that sentence is the whole
     // point of the press.
-    if (state.notes.length > 0) { clearNotes(); return; }
+    //
+    // EXCEPT WHEN THE WIRE IS WHAT STOPPED US, and this was MEASURED ON THE LIVE SERVER on 2026-09-11
+    // while gating the call screen, on a workspace whose talking switch is off (its door answers
+    // `{"enabled":false,"available":true}` -- a key exists, the customer's switch is off). The relay
+    // refuses that one with `acceptAndSay`, which writes the note, the bye and the close TOGETHER:
+    // `{t:"note",text:"Talking is switched off in Settings."}`, then `{t:"bye",reason:""}` -- reason
+    // carries the CONDITION and that refusal names none -- then a clean 1000 close. So `byeReason` was
+    // empty, this stop carried no reason, and the line below DELETED the sentence the relay had written
+    // a few milliseconds earlier. A person pressed Talk on that workspace and got NOTHING: no line, no
+    // words, and on a phone a call screen that appeared and vanished. The fix is to tell the two apart:
+    // a person pressing the button to leave clears what is standing, and a close the relay initiated
+    // leaves the relay's own sentence where the relay put it, with its ordinary six second dismiss.
+    if (state.notes.length > 0) {
+      if (options.fromWire === true && state.notes[0].fromRelay === true) { armDismiss(); paint(); return; }
+      clearNotes();
+      return;
+    }
     paint();
   }
 
@@ -2137,7 +2153,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // reads; the page does not paper over it with a generic failure.
     const named = CLOSE_CONDITIONS[code];
     if (code >= 4000) { stop(named ?? "line-dropped", reason.length > 0 ? reason : undefined); return; }
-    if (code === 1000) { stop(); return; }
+    // A clean close the RELAY made, which is how every refusal it can name in words arrives. The flag
+    // is what keeps the sentence it just wrote from being cleared as though a person had pressed the
+    // button to leave.
+    if (code === 1000) { stop(undefined, undefined, { fromWire: true }); return; }
     // 1006 and friends: the line went away without saying why, which is its own sentence.
     stop(state.byeReason || "line-dropped");
   }

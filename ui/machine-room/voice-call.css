@@ -62,7 +62,12 @@ body[data-voice-call] { overflow: hidden; }
 .voice-call-face {
   position: relative;
   flex: 1 1 auto;
+  /* An explicit track, because an auto one sizes itself to the 632 px mascot and then there is nothing
+   * left of the viewport to centre him in. MEASURED on the live server before this: the mascot's own
+   * rect was 632x430 at x=16 on a 390 px phone -- his left edge against the padding and everything past
+   * 390 clipped away, so half of Titan was off the screen. */
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
   width: 100%;
   min-height: 0;
@@ -73,10 +78,21 @@ body[data-voice-call] { overflow: hidden; }
   position: relative;
   z-index: 1;
   display: block;
+  justify-self: center;
   width: var(--voice-call-face);
   max-width: none;
   opacity: .9;
   transition: opacity 180ms ease-out, width 260ms ease-out;
+}
+
+/* HE IS CENTRED BY MARGINS AND NOT BY A TRANSFORM. The kit reads a transform-aware rect to size its
+ * canvas, and every transform in this file is kept off the mascot and its ancestors on principle, so
+ * the overflow is taken out of the box model instead: the two negative margins make his margin box
+ * exactly the width of the face, so the track cannot grow, the surplus hangs off both sides evenly,
+ * and the screen's own overflow clips it. At 390 px that is 632 px of Titan with 137 px off each side.
+ * The same rule centres the 190 px orb when a card takes the middle, with positive margins. */
+.voice-call-face titan-mascot {
+  margin-inline: calc((100% - var(--voice-call-face)) / 2);
 }
 
 .voice-call-face .voice-call-still {

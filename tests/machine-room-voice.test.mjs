@@ -2818,3 +2818,35 @@ test("VOICE-13 avatar: nothing in the mascot's chain is ever scaled, and the lev
   assert.equal(avatar.levelFor("Talking", { mic: 0.4, out: 0.9 }), 0.9);
   assert.equal(avatar.levelFor("Muted", { mic: 0.4, out: 0.9 }), 0);
 });
+
+test("VOICE-13 refusal: the relay's own sentence survives the close that follows it", async () => {
+  // MEASURED ON THE LIVE SERVER 2026-09-11, gating the call screen on a workspace whose talking switch
+  // is off: its door answers {"enabled":false,"available":true} -- a key exists, the customer's switch
+  // does not -- and the relay refuses that one with acceptAndSay, which writes the note, the bye and
+  // the close together. The bye's `reason` field carries the CONDITION and that refusal names none, so
+  // the page's own stop() found no reason, took its "an ordinary press to leave clears what is
+  // standing" branch, and DELETED the sentence the relay had written milliseconds earlier. A person
+  // pressed Talk and got nothing at all: no line, no words, and on a phone a call screen that appeared
+  // and vanished. This is the exact sequence, in order, off the live wire.
+  const { voice } = await loadVoice();
+  voice._state.on = true;
+  frame(voice, { t: "state", state: "off" });
+  frame(voice, { t: "note", text: "Talking is switched off in Settings.", reason: "" });
+  assert.equal(voice.stats().notes.length, 1, "the relay's sentence is standing");
+  frame(voice, { t: "bye", reason: "", detail: "voice is switched off" });
+  voice._onClose({ code: 1000, reason: "" });
+  assert.equal(voice._state.on, false, "the line is down");
+  assert.equal(voice.stats().notes.length, 1, "and the sentence the relay wrote is STILL on screen, which is the whole of the fix");
+  assert.equal(voice._state.notes[0].text, "Talking is switched off in Settings.", "in the relay's own wording, which is the only wording for this condition");
+  assert.ok(voice._dismissTimer() != null, "with its ordinary dismiss armed, so it takes itself away rather than sitting there for the life of the tab");
+  voice.stop();
+
+  // AND A PERSON PRESSING THE BUTTON TO LEAVE STILL CLEARS WHAT IS STANDING, which is what that branch
+  // was for: a note the relay sent mid-call must not outlive the call it was about.
+  const second = await loadVoice();
+  second.voice._state.on = true;
+  frame(second.voice, { t: "note", text: "Something the relay said mid-call.", reason: "" });
+  assert.equal(second.voice.stats().notes.length, 1);
+  second.voice.stop();
+  assert.deepEqual(second.voice.stats().notes, [], "the press that leaves takes it with it");
+});
