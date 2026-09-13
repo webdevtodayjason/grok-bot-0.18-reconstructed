@@ -428,19 +428,31 @@ Overview is drawn from a registry the loaders write to and Keys is drawn by the 
 
 ---
 
-## 8. What is not proven
+## 8. What is measured, and what is not (updated 2026-09-13 00:50 CDT)
 
-- **The Email Worker has never run.** It is not deployed by this wave, this repository holds no
-  Cloudflare credential, and no message has ever reached the intake from Cloudflare. Everything in
-  section 6 is a design plus a code block, and the first real delivery is the measurement that is
-  missing. The intake, the store, the panel, the state moves and the notification are measured
-  against a stub box in `tests/cp-support.test.mjs`.
-- **Nothing here has run on the R750.** No control plane was recreated and no box was touched.
-- **The notification has never been seen in a real workspace.** The prompt, the agent id, the nonce
-  and the gateway bearer are all asserted against a fake box in this repository's own process. What
-  a turn actually looks like in Titan's conversation when that line arrives is unmeasured.
-- **The Email Routing rule is still a forward.** Until the operator changes it to Send to a Worker,
-  `support@titanium.bot` behaves exactly as it did on 2026-09-12.
+Measured on the R750 and on Cloudflare the same night the intake shipped:
+
+- **The Email Worker runs.** `support-intake` was deployed from the code block in section 6 on
+  2026-09-13 at 00:22 CDT (versions c391a903, then a178dd71 with logs on), its `SUPPORT_TOKEN`
+  set by a pipe from the control plane's mint route so the value never crossed a terminal, and the
+  Email Routing rule for `support@titanium.bot` switched from a forward to Send to a Worker at
+  00:24 CDT. The forward to the mailbox is kept inside the worker.
+- **The intake is live on the R750.** The control plane was recreated with this code at 00:19 CDT;
+  `POST /v1/relay/support` answers 401 to a bad bearer from the internet and 200 to the worker.
+- **Five test mails arrived** (from `farm@tiinyapp.farm` through Resend, each "delivered" on Resend's
+  side). Rows 1 to 3 landed in the Support panel with "nobody was told": the titanium workspace,
+  the one adopted rather than provisioned, had no `box_container` on its row and no profile token
+  file. Both were written on the R750 (the token copied from the box's own environment, never
+  through a session). Row 4 then logged `Titan in titanium was told`.
+- **Open on the panel:** the five test rows sit in state `new` for the operator to close.
+
+Still not proven:
+
+- What the notification looks like inside Titan's conversation for a person (the turn ran; nobody
+  has read it on the console yet).
+- An adopted tenant's row needs `box_container` and the profile token file by hand today; the
+  product fix (derive the container from the Coolify uuid, mint or copy the token at adopt) is
+  filed as SUPPORT-1d, owner the next wave that opens `cp/onboard.mjs`.
 
 ## 9. Where everything is
 
