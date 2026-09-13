@@ -6,13 +6,15 @@
 // that did not ask for it.
 //
 // ADMIN-3 MADE IT A DASHBOARD. One panel is on screen at a time, a left rail names them and the URL
-// hash says which, so a link opens a panel. All eight loaders still run together on one Refresh:
+// hash says which, so a link opens a panel. All nine loaders still run together on one Refresh:
 // the rail decides what is SHOWN, never what is fetched, because an operator who opens Box health
 // during an outage must not wait on a fetch that could have happened a second earlier. TWO of the
-// ten panels cost no route at all: the Overview, whose every figure was already fetched for one of
-// the eight and comes out of a registry each loader writes to, and Keys (KEYS-2), whose two blocks
+// eleven panels cost no route at all: the Overview, whose every figure was already fetched for one of
+// the nine and comes out of a registry each loader writes to, and Keys (KEYS-2), whose two blocks
 // are drawn by the System health loader that already fetched both their answers. So the numbers on
-// this page are ten panels and eight loaders, and they are different on purpose.
+// this page are eleven panels and nine loaders, and they are different on purpose. SUPPORT-1 added
+// the eleventh panel and the ninth loader together, which is the ordinary case: a panel with a route
+// of its own moves both numbers.
 //
 // PROVIDERS-1 ADDED THE ONE THING THIS PAGE HAD NEVER DONE: it takes a secret IN. Every panel
 // before it was read-only plus seven actions that carried no value, and the only secret that ever
@@ -128,7 +130,8 @@
 
   const PANELS = [
     "panel-overview", "panel-signins", "panel-clients", "panel-boxes", "panel-system",
-    "panel-keys", "panel-spend", "panel-providers", "panel-feedback", "panel-marketplace",
+    "panel-keys", "panel-spend", "panel-providers", "panel-feedback", "panel-support",
+    "panel-marketplace",
   ];
 
   const wantedPanel = (raw) => {
@@ -159,10 +162,10 @@
   // ---- the summary strips and the Overview -------------------------------------------------------
   //
   // ADMIN-3 asked for a strip of figures at the top of each panel and an Overview that links into
-  // them. Neither fetches anything: every number was already in one of the eight answers, so each
+  // them. Neither fetches anything: every number was already in one of the nine answers, so each
   // loader writes its own strip and registers its one headline figure, and the Overview is drawn
-  // from that registry once the eight have settled. It is NOT a ninth loader, and Refresh runs the
-  // same eight requests it always ran.
+  // from that registry once the nine have settled. It is NOT a tenth loader, and Refresh runs the
+  // same nine requests the panels need.
   //
   // A panel that threw registers nothing and its Overview chip says "not measured" with the reason
   // the loader gave. That is the whole reason the Overview reads a registry rather than making its
@@ -173,6 +176,9 @@
     { key: "boxes", label: "Boxes answering", hash: "#panel-boxes" },
     { key: "spend", label: "Spend this month", hash: "#panel-spend" },
     { key: "feedback", label: "Reports waiting", hash: "#panel-feedback" },
+    // SUPPORT-1. The one figure an operator needs off this panel before opening it: how many people
+    // have written to the support address and not been answered.
+    { key: "support", label: "Support unanswered", hash: "#panel-support" },
     { key: "verification", label: "Needs re-verification", hash: "#panel-marketplace" },
     { key: "attacks", label: "Sign-in attacks", hash: "#panel-signins" },
   ];
@@ -200,8 +206,9 @@
    * A panel's own strip, and the one figure it lends the Overview.
    *
    * Called where each loader has its answer and BEFORE that loader's own early return, not at the
-   * end of it: four of the eight return early on an empty answer, and a strip written after that
-   * return is a strip nobody with no customers, no boxes or no reports would ever see.
+   * end of it: five of the nine return early on an empty answer, and a strip written after that
+   * return is a strip nobody with no customers, no boxes, no reports or no support mail would ever
+   * see.
    */
   function summarise(sectionId, chips, headline) {
     const host = document.querySelector(`#${sectionId} .strip`);
@@ -2059,7 +2066,13 @@
     for (const [provider, sum] of totals) {
       const tr = el("tr", "spend-provider-total");
       for (const value of [
-        provider, "by provider", countWords(sum.tokensIn), countWords(sum.tokensOut), countWords(sum.calls), money.format(sum.cost), "—",
+        // The list-price cell is EMPTY on a rollup row rather than a dash. A rollup covers several
+        // models at several prices, so there is no one price to print, and this page's own rule is
+        // that a figure nobody can state says so in words and never "a zero, a dash, or a green
+        // tick" (docs/ADMIN.md). It held an em dash, which was also the one em dash on the console
+        // and a latent failure of verify-admin's own sweep for them. Found and fixed while adding
+        // the Support panel; nothing else on this row moved.
+        provider, "by provider", countWords(sum.tokensIn), countWords(sum.tokensOut), countWords(sum.calls), money.format(sum.cost), "",
       ]) tr.appendChild(el("td", null, value));
       body.appendChild(tr);
     }
@@ -3485,7 +3498,185 @@
     finally { button.disabled = false; }
   });
 
-  // ---- panel 7: the marketplace ------------------------------------------------------------------
+  // ---- panel 8: support (SUPPORT-1) ------------------------------------------------------------
+  //
+  // Mail that arrived at the operator's support address, forwarded here by their own Cloudflare Email
+  // Worker. The panel's one structural rule is the one it prints under its heading: NOTHING IS SENT
+  // FROM HERE. The operator answers from their own mail client and presses Mark replied, which is a
+  // record of what they did rather than an action that did it.
+  //
+  // EVERY FIELD ON A CARD WAS WRITTEN BY A STRANGER -- anybody on the internet can write to a support
+  // address -- so every one of them reaches the page through el()/text(), which is textContent, and
+  // not one of them is ever assigned to innerHTML. The html part of a mail arrives already flattened
+  // to words by cp/support.mjs and is drawn as text like the rest.
+
+  const SUPPORT_STATE_CHIP = { new: "chip", replied: "chip ok", closed: "chip locked" };
+  const SUPPORT_STATE_LABEL = { new: "new", replied: "replied", closed: "closed" };
+
+  function renderSupportCard(message) {
+    // Its own class and not `.client`, for the reason the feedback card has its own: a gate counts
+    // `.client` in strict mode to say how many workspaces the Clients panel drew, and a support
+    // message wearing that name makes a correct page read as an extra customer.
+    const card = el("div", "supportCard");
+    const head = el("div", "head");
+    head.appendChild(el("strong", null, message.subject || "(no subject)"));
+    head.appendChild(el("span", "quiet", message.from || "no address"));
+    head.appendChild(el("span", SUPPORT_STATE_CHIP[message.state] ?? "chip", SUPPORT_STATE_LABEL[message.state] ?? message.state));
+    const seen = el("span", "quiet", ago(message.receivedAt));
+    seen.title = when(message.receivedAt);
+    head.appendChild(seen);
+    card.appendChild(head);
+
+    // Whether the operator's workspace was actually told. A message that is here and was never
+    // announced is a thing to SEE rather than infer, which is why the row carries the receipt: a
+    // notification that silently failed for a fortnight would otherwise look exactly like one that
+    // worked every time.
+    card.appendChild(message.notifiedAt
+      ? el("p", "quiet", `${message.notifyDetail || "your workspace was told"} ${ago(message.notifiedAt)}`)
+      : el("p", "quiet bad", `nobody was told about this one: ${message.notifyDetail || "this control plane did not say why"}`));
+
+    // The body on click. Collapsed, because the panel is a list of who is waiting and the text is
+    // what you open when you decide to answer one.
+    const body = String(message.text || message.htmlText || "").trim();
+    const detail = document.createElement("details");
+    const words = body.length > 0 ? body.split(/\s+/).length : 0;
+    detail.appendChild(el("summary", "quiet", body.length === 0
+      ? "this message had no words in it"
+      : `read it: ${words} word${words === 1 ? "" : "s"}${message.text ? "" : ", from the html part"}`));
+    const pre = el("pre", "mono");
+    pre.appendChild(text(body));
+    detail.appendChild(pre);
+    if (message.to) detail.appendChild(el("p", "quiet", `addressed to ${message.to}`));
+    if (message.messageId) detail.appendChild(el("p", "quiet", `message id ${message.messageId}`));
+    card.appendChild(detail);
+
+    if (message.notes) card.appendChild(el("p", "quiet", `note: ${message.notes}`));
+    if (message.decidedBy) card.appendChild(el("p", "quiet", `last moved by ${message.decidedBy} ${ago(message.decidedAt)}`));
+
+    const actions = el("div", "controls");
+    const note = document.createElement("input");
+    note.type = "text";
+    note.className = "supportNote";
+    note.autocomplete = "off";
+    note.placeholder = "a note for whoever reads this next";
+    note.value = String(message.notes ?? "");
+    actions.appendChild(note);
+
+    const move = async (button, state) => {
+      button.disabled = true;
+      try {
+        const result = await api("POST", `/v1/admin/support/${message.id}/state`, { state, notes: note.value });
+        banner(String(result.message ?? "Done."), true);
+        await loadSupport();
+      } catch (error) { banner(String(error.message)); }
+      finally { button.disabled = false; }
+    };
+    // Two buttons on an open message, and a third only on one that has been moved. Reopen is not a
+    // fourth state: it puts the row back to new, which is what "this is not actually dealt with"
+    // means, and it is absent on a new message because there is nothing to undo.
+    const buttons = message.state === "new"
+      ? [["replied", "Mark replied"], ["closed", "Close"]]
+      : [["replied", "Mark replied"], ["closed", "Close"], ["new", "Reopen"]];
+    for (const [state, label] of buttons) {
+      if (state === message.state) continue;
+      const button = el("button", "ghost small", label);
+      button.type = "button";
+      button.addEventListener("click", () => move(button, state));
+      actions.appendChild(button);
+    }
+    card.appendChild(actions);
+    return card;
+  }
+
+  function supportChips(answer) {
+    const counts = answer.counts ?? {};
+    const waiting = Number(counts.new ?? 0);
+    return [
+      { label: "On record", value: answer.total ?? 0 },
+      { label: "Unanswered", value: waiting, tone: waiting > 0 ? "warn" : "good" },
+      { label: "Replied", value: counts.replied ?? 0 },
+      { label: "Closed", value: counts.closed ?? 0 },
+    ];
+  }
+
+  const supportHeadline = (answer) => {
+    const waiting = Number(answer.counts?.new ?? 0);
+    const door = answer.token ?? {};
+    return {
+      key: "support",
+      label: "Support unanswered",
+      value: waiting,
+      tone: !door.stored ? "bad" : waiting > 0 ? "warn" : "good",
+      // A zero with no token minted is not good news, it is a door nothing can deliver through, and
+      // the chip has to say which of the two it is looking at.
+      detail: door.stored
+        ? (waiting > 0 ? "somebody is waiting on an answer" : "nobody is waiting")
+        : "no inbound token, so nothing can be delivered",
+    };
+  };
+
+  async function loadSupport() {
+    const state = $("supportState").value;
+    const answer = await api("GET", `/v1/admin/support?state=${encodeURIComponent(state)}&limit=200`);
+    summarise("panel-support", supportChips(answer), supportHeadline(answer));
+    $("supportGates").textContent = String(answer.gates ?? "");
+
+    const notify = answer.notify ?? {};
+    const note = [
+      `${answer.total} message${answer.total === 1 ? "" : "s"} on record`,
+      `${answer.counts.new} unanswered`,
+      notify.on === false
+        ? "announcing is switched off, so nothing is told about a new message"
+        : notify.workspace
+          ? `announced in ${notify.workspace} (${notify.how})`
+          : `nothing is announced: ${notify.why || "this control plane did not say why"}`,
+      `measured ${when(answer.measuredAt)}`,
+    ];
+    $("supportNote").textContent = note.join(" - ");
+
+    const door = answer.token ?? {};
+    $("supportTokenNote").textContent = door.stored
+      ? `An inbound token is stored. It is ${door.evidence}, and nothing here can show it again. Mint a new one to replace it.`
+      : String(door.why ?? "no inbound token is stored yet.");
+
+    // A minted token is shown once and is gone on the next load of this panel. It is written here
+    // rather than left on screen for ever because it is a live credential on a shared machine's
+    // display, and the operator's own copy of it belongs in the worker's secret.
+    $("supportTokenValue").textContent = "";
+
+    const host = $("supportRows");
+    clear(host);
+    const rows = answer.rows ?? [];
+    if (rows.length === 0) {
+      host.appendChild(el("p", "empty", door.stored
+        ? "Nothing in this filter. That is a real answer: nobody has written to the support address."
+        : "Nothing here, and nothing could arrive yet: mint an inbound token below and paste it into the email worker."));
+      return;
+    }
+    for (const message of rows) host.appendChild(renderSupportCard(message));
+  }
+
+  $("supportState").addEventListener("change", () => { void loadSupport().catch((error) => banner(String(error.message))); });
+
+  $("supportTokenForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = $("supportTokenMint");
+    button.disabled = true;
+    try {
+      const result = await api("POST", "/v1/admin/support/token", {});
+      banner(String(result.message), true);
+      // The reload FIRST and the value after it, in that order: the load clears this line, so writing
+      // the token before it would show the operator their one copy of a credential for a few hundred
+      // milliseconds and then take it away again.
+      await loadSupport();
+      // Shown once, in one place, and never written into an input: a value in a field is a value a
+      // password manager offers to save and a form re-post can repeat.
+      $("supportTokenValue").textContent = String(result.token ?? "");
+    } catch (error) { banner(String(error.message)); }
+    finally { button.disabled = false; }
+  });
+
+  // ---- panel 9: the marketplace ----------------------------------------------------------------
   //
   // MARKET-26 and CLOUD-BROWSER-1, on one screen because they are the two ways the Marketplace goes
   // wrong without anybody noticing: a row that has drifted from what its vendor documents, and a
@@ -3652,23 +3843,23 @@
   // ---- everything at once ----------------------------------------------------------------------
 
   // Which Overview chip each loader owns, in the order they are started below. The Overview is drawn
-  // from what the eight registered, so a loader that threw has to have its chip written back to
+  // from what the nine registered, so a loader that threw has to have its chip written back to
   // "not measured": otherwise the number it registered on the last successful Refresh would sit
   // there looking current while the panel behind it is dark.
-  const LOADER_HEADLINE = ["attacks", "clients", "boxes", null, "spend", null, "feedback", "verification"];
+  const LOADER_HEADLINE = ["attacks", "clients", "boxes", null, "spend", null, "feedback", "support", "verification"];
 
   async function loadAll() {
     banner("");
     const button = $("refresh");
     button.disabled = true;
     // Each panel loads on its own and reports its own failure into its own space, so one route
-    // being down does not blank the other seven. `allSettled`, deliberately.
+    // being down does not blank the other eight. `allSettled`, deliberately.
     //
-    // ALL EIGHT, WHICHEVER PANEL IS ON SCREEN. The rail decides what is shown and never what is
+    // ALL NINE, WHICHEVER PANEL IS ON SCREEN. The rail decides what is shown and never what is
     // fetched: an operator who opens Box health during an outage must not then wait on a request
     // that could have been made a second earlier, and the Overview's figures all come from these
-    // eight, so loading them lazily would leave it half drawn.
-    const results = await Promise.allSettled([loadSignIns(), loadClients(), loadBoxes(), loadSystem(), loadSpend(), loadProviders(), loadFeedback(), loadMarketplace()]);
+    // nine, so loading them lazily would leave it half drawn.
+    const results = await Promise.allSettled([loadSignIns(), loadClients(), loadBoxes(), loadSystem(), loadSpend(), loadProviders(), loadFeedback(), loadSupport(), loadMarketplace()]);
     button.disabled = false;
     const broken = results.filter((result) => result.status === "rejected" && String(result.reason?.message) !== "unauthorized");
     if (broken.length > 0) banner(`${broken.length} panel${broken.length === 1 ? "" : "s"} could not be loaded: ${broken.map((row) => row.reason.message).join("; ")}`);
@@ -3681,10 +3872,10 @@
     renderOverview();
     // The one flag a browser gate waits on, rather than a fixed sleep. It says the render finished,
     // not that everything in it succeeded, which is exactly what a gate wants to inspect. It counts
-    // the LOADERS the refresh runs, which is eight; the page carries TEN panels, because two of them
-    // fetch nothing: the Overview is drawn from what the eight registered, and Keys (KEYS-2) is drawn
+    // the LOADERS the refresh runs, which is nine; the page carries ELEVEN panels, because two of them
+    // fetch nothing: the Overview is drawn from what the nine registered, and Keys (KEYS-2) is drawn
     // by the System health loader out of the two answers it already had.
-    window.__adminLive = { panels: 8, at: new Date().toISOString() };
+    window.__adminLive = { panels: 9, at: new Date().toISOString() };
     document.body.setAttribute("data-admin-loaded", "true");
   }
 
