@@ -2710,8 +2710,16 @@ const BOX = process.env.GROK_BOT_BOX ?? process.env.SAND_BOX_CONTAINER ?? "grok-
 const BOX_SETTINGS = "/home/box/sand-data/sand-host-settings.json";
 const APPROVAL_BLOCK = "ask me before running any shell command";
 const APPROVAL_PROBE = "echo hello-from-voice-call-card";
+/**
+ * VOICE-20. The SECOND command, and it is a different string on purpose. The card's own sentence is
+ * the host's SUMMARY and not the shell line (MEASURED on the local box: "Echo the test string on Grok
+ * Bot's computer" and "Echo the second test string"), so which card is on the screen is asserted off
+ * the row id, and the two sentences are printed beside it. Two identical commands would make that
+ * printout useless to whoever reads the log after a failure.
+ */
+const APPROVAL_PROBE_2 = "echo second-card-on-the-call-screen";
 /** The whole of section H, so a box whose model will not take the turn costs this leg and no more. */
-const APPROVAL_BUDGET_MS = Number(process.env.VOICE_GATE_APPROVAL_MS ?? 170_000);
+const APPROVAL_BUDGET_MS = Number(process.env.VOICE_GATE_APPROVAL_MS ?? 260_000);
 
 /**
  * One picture of the call screen with a live card on it, into the scratch directory this run already
@@ -3461,6 +3469,8 @@ async function legCall() {
   let beforeInstructions = null;
   let probeId = null;
   let stillPending = null;
+  /** VOICE-20. The first card's entry id, so the second one is told apart from it rather than counted. */
+  let stillPendingFirstId = "";
   let armed = false;
   try {
     // The relay proxies the gateway's answer VERBATIM, so the parsed body IS the value -- exactly
@@ -3515,6 +3525,7 @@ async function legCall() {
           if (pending == null) await sleep(3000);
         }
         stillPending = pending;
+        stillPendingFirstId = pending?.entryId ?? "";
         if (pending == null) {
           skip("a real forced approval on the call screen",
             `no pending approval inside ${Math.round((Date.now() - askedAt) / 1000)}s; the box's model endpoint may not have taken the turn`);
@@ -3666,6 +3677,118 @@ async function legCall() {
                 `screen ${after.screen}, line ${after.up}`);
               await shootCall(page, "voice19-approval-settled");
               if (settled === "approved") stillPending = null;
+              // ---- VOICE-20: and the SECOND card, raised while the call is still up ---------------
+              //
+              // Jason, 2026-09-13 on build 22: "I did get it to pop up once, but the other one didn't
+              // pop up. It popped up underneath, so when I closed the chat I saw it in the normal chat
+              // to approve." VOICE-19 kept a card this call has drawn once it settles, which is right,
+              // and left the question nobody had asked: what happens when a NEWER card is raised over
+              // a settled one. The answer has to be that the new question takes the middle and the
+              // settled one goes back to being a transcript row.
+              //
+              // NO RELOAD AND NO SECOND CALL. The prompt goes in while the screen is up, which is the
+              // situation being measured: the person is on a call, the first card is answered, the
+              // agent carries on working and hits the block again.
+              if (settled === "approved" && approvalLeft() > 45_000) {
+                phase = "VOICE-20 the second card";
+                const firstRowId = copied.rowId;
+                await boxCall("sendPrompt", {
+                  agentId: probeId,
+                  prompt: `Now run exactly this one command in your box shell and tell me what happened: ${APPROVAL_PROBE_2}\n`
+                    + "If Auto-review blocks it, immediately retry the exact same command once with "
+                    + "request_smart_mode_approval set to true so the approval card reaches me, then stop and wait "
+                    + "for my answer. Do not run any other command and do not work around the block.",
+                }, 30_000);
+                const secondAskedAt = Date.now();
+                let second = null;
+                while (second == null && approvalLeft() > 12_000) {
+                  const entries = await boxCall("getAgentTranscript", { id: probeId }, 20_000).catch(() => []);
+                  second = (Array.isArray(entries) ? entries : [])
+                    .filter((one) => one.kind === "send-message" && one.message?.type === "auto-review-approval")
+                    .map((one) => ({ entryId: one.id, ...one.message.approval }))
+                    .find((one) => one.status === "pending" && one.entryId !== stillPendingFirstId) ?? null;
+                  if (second == null) await sleep(3000);
+                }
+                if (second == null) {
+                  skip("a SECOND real approval taking the middle of the call screen",
+                    `no second pending approval inside ${Math.round((Date.now() - secondAskedAt) / 1000)}s`);
+                } else {
+                  stillPending = second;
+                  check(true, "the host raised a SECOND real pending approval while the call was up",
+                    `${Math.round((Date.now() - secondAskedAt) / 1000)}s, command ${JSON.stringify(String(second.command ?? "").slice(0, 50))}`);
+                  // The page has to see it before the screen can draw it, so the row is waited on first
+                  // and the middle of the screen second: a failure then says which of the two it was.
+                  const secondRow = await page.waitForFunction((firstId) => {
+                    const rows = [...document.querySelectorAll('#transcript [data-approval-card][data-approval-state="pending"]')];
+                    const row = rows.map((one) => one.closest(".message-row")).find((one) => one?.getAttribute("data-message-id") !== firstId);
+                    return row == null ? null : row.getAttribute("data-message-id");
+                  }, firstRowId, { timeout: 60_000 }).then((handle) => handle.jsonValue()).catch(() => null);
+                  check(secondRow != null, "and the console drew it in the transcript, pending, under the first one",
+                    `row ${JSON.stringify(secondRow)}, the first was ${JSON.stringify(firstRowId)}`);
+                  const middle = await page.waitForFunction((want) => {
+                    const card = document.querySelector("[data-voice-call-card-slot] [data-approval-card]");
+                    if (card == null) return null;
+                    const at = card.closest(".message-row")?.getAttribute("data-message-id")
+                      ?? card.querySelector("[data-decide]")?.getAttribute("data-message-id") ?? "";
+                    return at === want ? true : null;
+                  }, secondRow, { timeout: 25_000 }).then(() => true).catch(() => false);
+                  const whatIsUp = await page.evaluate(() => {
+                    const card = document.querySelector("[data-voice-call-card-slot] [data-approval-card]");
+                    return {
+                      onScreen: card == null ? "nothing" : card.getAttribute("data-approval-state"),
+                      drawn: window.__voice?.stats?.()?.call ?? null,
+                      rows: [...document.querySelectorAll("#transcript [data-approval-card]")]
+                        .map((one) => `${one.closest(".message-row")?.getAttribute("data-message-id")}:${one.getAttribute("data-approval-state")}`),
+                    };
+                  });
+                  check(middle, "THE NEW QUESTION TAKES THE MIDDLE OF THE CALL SCREEN, replacing the one that is already answered",
+                    middle ? `row ${secondRow}` : JSON.stringify(whatIsUp));
+                  const secondCopy = await page.evaluate(() => {
+                    const slot = document.querySelector("[data-voice-call-card-slot]");
+                    const card = slot?.querySelector("[data-approval-card]") ?? null;
+                    if (card == null) return null;
+                    return {
+                      state: card.getAttribute("data-approval-state"),
+                      request: (card.querySelector(".approval-request")?.textContent ?? "").trim(),
+                      buttons: [...card.querySelectorAll("[data-decide]")].map((one) => {
+                        const rect = one.getBoundingClientRect();
+                        const at = document.elementFromPoint(Math.round(rect.x + rect.width / 2), Math.round(rect.y + rect.height / 2));
+                        return {
+                          decide: one.getAttribute("data-decide"), id: one.getAttribute("data-message-id"),
+                          w: Math.round(rect.width), h: Math.round(rect.height), exact: Math.round(rect.height * 100) / 100,
+                          hit: at != null && (at === one || one.contains(at)),
+                        };
+                      }),
+                      cards: document.querySelectorAll("[data-voice-call-card-slot] [data-approval-card]").length,
+                    };
+                  });
+                  if (secondCopy == null) {
+                    check(false, "the second card could be read off the call screen", "no [data-approval-card] in the slot");
+                  } else {
+                    check(secondCopy.state === "pending", "and the copy in the middle is the PENDING one, not the settled one",
+                      `${JSON.stringify(secondCopy.state)}, request ${JSON.stringify(secondCopy.request.slice(0, 70))}`);
+                    // THE CARD'S OWN SENTENCE IS A SUMMARY AND NOT THE COMMAND. MEASURED on the local
+                    // box: the first card read "Echo the test string on Grok Bot's computer" and the
+                    // second "Echo the second test string", neither of which contains the shell line
+                    // it is about -- the command lives in the disclosure, and the disclosure is one of
+                    // the controls the copy leaves behind. So the words are printed and the identity
+                    // is asserted off the row id below, which is the thing a press actually uses.
+                    info(`the second card's own sentence on the call screen: ${JSON.stringify(secondCopy.request.slice(0, 110))}`);
+                    check(secondCopy.request.length > 0, "and it says in words what it is asking for",
+                      `${secondCopy.request.length} character(s)`);
+                    check(secondCopy.cards === 1, "and there is exactly one card in the middle, never two stacked",
+                      `${secondCopy.cards} card(s) in the slot`);
+                    const big = secondCopy.buttons.filter((one) => one.w >= 44 && one.h >= 44 && one.hit);
+                    check(secondCopy.buttons.length > 0 && big.length === secondCopy.buttons.length,
+                      "with its own Allow and Refuse at 44 px and reachable by a thumb",
+                      `${JSON.stringify(secondCopy.buttons.map((one) => `${one.decide} ${one.w}x${one.exact} hit ${one.hit}`))} on ${MACHINE}`);
+                    check(secondCopy.buttons.every((one) => one.id === secondRow),
+                      "each naming the SECOND row, which is how a press on it settles the right card",
+                      `${JSON.stringify(secondCopy.buttons.map((one) => one.id))} vs row ${JSON.stringify(secondRow)}`);
+                  }
+                  await shootCall(page, "voice20-second-card-on-call");
+                }
+              }
               if (pageErrors.length > errorsAfterReload) {
                 info(`and the call screen with a live card on it produced ${pageErrors.length - errorsAfterReload} more: `
                   + `${JSON.stringify(pageErrors.slice(errorsAfterReload).map((one) => String(one).slice(0, 90)))}`);

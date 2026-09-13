@@ -1422,6 +1422,25 @@ export const FIRST_NUDGE_MS = 20000;
 /** Two announcements never closer than this, and never while a response is in flight. */
 export const ANNOUNCE_GAP_MS = 8000;
 /**
+ * VOICE-20. The longest the tool's answer will wait for the room to go quiet before it speaks anyway.
+ *
+ * Jason, 2026-09-13 on build 22: "when Titan starts to send work to the subagent, it interrupts what
+ * Titan is saying. If Titan is in mid-sentence or at the end of the sentence, it will clip." The
+ * waiting sentence and the tool call are ONE response, and the model hands its audio over far faster
+ * than a speaker plays it, so `response.done` for that sentence arrives seconds before the sentence
+ * has finished leaving the speaker. Asking for the next response in that window is asking the vendor
+ * to talk over a sentence a person is still listening to.
+ *
+ * WHY THERE IS A CEILING AT ALL. `playsUntilMs` is BOOKED audio, not played audio: it is what the
+ * bytes would take to come out of a speaker, and nothing on this side can prove the page ever played
+ * them. A page that went to the background, a shell whose player stalled, or a barge-in whose flush
+ * was lost would leave a booking in the future for ever, and an answer held behind it would never be
+ * spoken at all. So the wait is bounded and the answer goes out late rather than never.
+ */
+export const ANSWER_QUIET_CEILING_MS = 6000;
+/** How often the answer looks again to see whether the room has gone quiet. */
+export const ANSWER_QUIET_TICK_MS = 120;
+/**
  * VOICE-19. How often the relay looks for a card the box raised with NO spoken turn behind it.
  *
  * Until this wave the tail was read only inside `makeTurnRunner.run`, which is to say only while a
@@ -2381,6 +2400,78 @@ export function makeVoiceSession({
    * `soundMs` is the grace, and HEARD_GRACE_MS says why a window needs a tail.
    */
   const heardWindow = { bytes: 0, peak: 0, soundMs: 0, loggedKey: null };
+  /**
+   * VOICE-20. THE LEDGER THE CLIP WAS MEASURED WITH, and it stays in because the numbers in it are
+   * the only ones that can tell the two candidate causes apart afterwards.
+   *
+   * One row per response the vendor opens: when it started, how many audio bytes it delivered, how
+   * many milliseconds of speech those bytes are, and when it finished. The row a `response.create`
+   * of ours is asked against is what says whether we asked over a response that was still generating
+   * (the vendor's own `conversation_already_has_active_response`, which is a QUIET code and so proves
+   * nothing from the log alone) or over one that had finished generating and was still being SPOKEN
+   * (`playsUntilMs` in the future), which are two different faults with two different fixes.
+   *
+   * Bytes are attributed to `response_id` when the vendor stamps one on the delta and to the response
+   * in flight when it does not: xAI stamps it, and a vendor that stops would otherwise silently lose
+   * the count rather than mis-report it.
+   */
+  const responses = new Map();
+  let liveResponseId = "";
+  const responseRow = (id) => {
+    const key = String(id ?? "");
+    if (key.length === 0) return null;
+    let row = responses.get(key);
+    if (row == null) {
+      row = { id: key, startedMs: now(), bytes: 0, doneMs: 0 };
+      responses.set(key, row);
+      // A call is one line and a response id is unique within it, but a very long line must not grow
+      // this without bound: the oldest rows are dropped and only the last few can ever be reported on.
+      if (responses.size > 64) responses.delete(responses.keys().next().value);
+    }
+    return row;
+  };
+  /** Milliseconds of speech a count of PCM bytes is, at the one rate this whole file speaks in. */
+  const audioMsOf = (bytes) => Math.round(((Number(bytes) || 0) / (AUDIO_RATE * 2)) * 1000);
+  /** How much of the audio already handed to the page has still to come out of a speaker. */
+  const soundLeftMs = () => Math.max(0, gate.playsUntilMs - now());
+  /**
+   * VOICE-20. WAIT UNTIL THE ROOM IS QUIET BEFORE ASKING THE VENDOR TO SPEAK INTO IT.
+   *
+   * `playsUntilMs` is booked FROM THE BYTES and not from an empty queue, because the model hands a
+   * reply over far faster than a speaker plays it -- makeEchoGate says exactly that in its own comment
+   * and the microphone side of this file has leaned on it since A4. The speaking side did not: the
+   * tool's answer and the lead sentence of a streamed reply both asked for a response the moment the
+   * LAST one had finished GENERATING, which on a hand-off is one to two seconds before Titan's waiting
+   * sentence has finished being heard.
+   *
+   * MEASURED, this Mac against the stub with a two second sentence booked: 1,578 ms of it still to come
+   * out of the speaker at the instant the answer asked. The ceiling is why a stuck booking cannot hold
+   * an answer for ever; it goes out late rather than never, and the log says which happened.
+   */
+  const waitForQuiet = async (why, ceilingMs = ANSWER_QUIET_CEILING_MS) => {
+    const startedAt = now();
+    const until = startedAt + ceilingMs;
+    while (!stopping && gate.playsUntilMs > now() && now() < until) await sleep(ANSWER_QUIET_TICK_MS);
+    const waited = now() - startedAt;
+    if (waited < ANSWER_QUIET_TICK_MS) return 0;
+    const left = soundLeftMs();
+    log(`voice ${t.slug} held ${why} for ${waited} ms so Titan's own sentence could finish`
+      + `${left > 0 ? `, and let it go with ${left} ms still booked because the ${ceilingMs} ms ceiling ran out` : ""}`);
+    return waited;
+  };
+  /**
+   * Every `response.create` this relay sends goes through here, so the log can say what the room
+   * sounded like at the moment it asked. `why` is the caller in plain words, because "a response was
+   * created" is the one fact a log of this already had and the one fact that never helped anybody.
+   */
+  const askForResponse = (why) => {
+    const live = liveResponseId.length > 0 ? responses.get(liveResponseId) : null;
+    const busy = live != null && live.doneMs === 0;
+    log(`voice ${t.slug} asks for a response (${why}): ${busy ? `${live.id} is still generating` : "nothing generating"}`
+      + `, ${live == null ? 0 : live.bytes} audio byte(s) on ${live == null ? "no response" : live.id} = ${audioMsOf(live?.bytes ?? 0)} ms of speech`
+      + `, ${soundLeftMs()} ms of that still booked to play`);
+    return sendProvider({ type: "response.create" });
+  };
   const announcements = [];
   let browser = null;
   let provider = null;
@@ -2613,7 +2704,7 @@ export function makeVoiceSession({
     if (stopping) return;
     lastAnnounceMs = now();
     sendProvider({ type: "conversation.item.create", item: { type: "message", role: "user", content: [{ type: "input_text", text: `Read this out to the person, word for word, nothing added: ${clean}` }] } });
-    sendProvider({ type: "response.create" });
+    askForResponse("an announcement");
   };
 
   /**
@@ -2641,12 +2732,17 @@ export function makeVoiceSession({
     const clean = String(text ?? "").trim();
     if (clean.length === 0) return;
     for (let i = 0; i < 40 && !stopping && responseInFlight; i += 1) await sleep(400);
+    // VOICE-20. AND FOR THE ROOM TO BE QUIET, which is the half this gate was missing. The lead
+    // sentence of Titan's reply is ready a second or two after the tool call on a box that streams,
+    // and the waiting sentence the model said in the same breath as that call is still being spoken
+    // then. Waiting on the response in flight alone is not waiting on the speaker.
+    await waitForQuiet("the first sentence of the reply");
     if (stopping) return;
     // A nudge must not land between two sentences of the answer, so the announcement clock moves here
     // too. The turn runner already drops the nudge once a sentence has been read; this is the belt.
     lastAnnounceMs = now();
     sendProvider({ type: "conversation.item.create", item: { type: "message", role: "user", content: [{ type: "input_text", text: `Read this out to the person, word for word, nothing added: ${clean}` }] } });
-    sendProvider({ type: "response.create" });
+    askForResponse("a sentence of the draft");
   };
 
   /**
@@ -2658,9 +2754,18 @@ export function makeVoiceSession({
    * there must be no `response.create` behind it, or the model generates a fresh turn over an answer
    * that is already finished and says something of its own.
    */
-  const answerTool = (callId, payload, { respond = true } = {}) => {
+  const answerTool = async (callId, payload, { respond = true } = {}) => {
+    // THE OUTPUT GOES AT ONCE, ALWAYS. The model is waiting on it and a call left open wedges the
+    // conversation, so nothing below this line may hold it back.
     sendProvider({ type: "conversation.item.create", item: { type: "function_call_output", call_id: callId, output: JSON.stringify(payload) } });
-    if (respond) sendProvider({ type: "response.create" });
+    if (!respond) return undefined;
+    // VOICE-20. And only THEN ask for the answer to be spoken: never over a response the vendor is
+    // still generating, and never over a sentence that is still coming out of the speaker.
+    for (let i = 0; i < 40 && !stopping && responseInFlight; i += 1) await sleep(400);
+    await waitForQuiet("the tool's answer");
+    if (stopping) return undefined;
+    askForResponse("the tool's answer");
+    return undefined;
   };
 
   /**
@@ -2863,20 +2968,20 @@ export function makeVoiceSession({
     // this path, and it is per-turn because what the person has already heard cannot be known at
     // session.update. The contract it serves is in voiceInstructions, written once.
     if (spoken.length === 0) {
-      answerTool(toolCall.callId, { reply, sentences: pieces });
+      await answerTool(toolCall.callId, { reply, sentences: pieces });
     } else if (unsaid.length === 0) {
-      answerTool(toolCall.callId, { reply: "", sentences: [], alreadyRead: true }, { respond: false });
+      await answerTool(toolCall.callId, { reply: "", sentences: [], alreadyRead: true }, { respond: false });
     } else {
-      // The last streamed sentence may still be playing. Two overlapping responses is the provider
-      // error nobody can hear, so the rest of the answer waits for it exactly as a sentence would.
-      for (let i = 0; i < 40 && !stopping && responseInFlight; i += 1) await sleep(400);
+      // The last streamed sentence may still be playing, and since VOICE-20 `answerTool` is the one
+      // place that waits for it: for the response in flight to finish AND for the booked audio to
+      // drain. The wait that used to be written out here was only the first half of that.
       const payload = { reply: unsaid.join(" "), sentences: unsaid, alreadyRead: true };
       // A HELD CARD IS THE ONE THING THAT IS STILL ASKED IN FULL. Its question is in `unsaid` and it is
       // a question the person has to answer, so it is read out as a plain question exactly as it was
       // before this wave: gisting "do you want me to send it" down to "there is something waiting" is
       // how a person says yes to the wrong thing. No hint goes on a turn that is holding a card.
       if (result.card == null) payload.spoken = SPOKEN_REMAINDER_HINT;
-      answerTool(toolCall.callId, payload);
+      await answerTool(toolCall.callId, payload);
     }
     if (result.attemptId.length > 0) {
       void runner.follow({
@@ -2892,7 +2997,15 @@ export function makeVoiceSession({
     if (type === "error") {
       // A cancel race and a vanished item are NOTES, never errors: they must not colour the orb,
       // and that is host-notes-read-as-errors.md happening in someone else's codebase.
-      if (providerErrorIsQuiet(event)) return log(`voice note from the provider: ${event?.error?.code}`);
+      // VOICE-20. WITH THE RESPONSE IT IS ABOUT. `conversation_already_has_active_response` is in this
+      // set, so until this line a relay that was asking the vendor to speak over its own live response
+      // said so in a log line that named neither the response nor the moment, and the log proved
+      // nothing either way. It is still a note and still never colours the orb.
+      if (providerErrorIsQuiet(event)) {
+        const live = liveResponseId.length > 0 ? responses.get(liveResponseId) : null;
+        return log(`voice note from the provider: ${event?.error?.code} on ${live == null ? "no response" : live.id}`
+          + `${live != null && live.doneMs === 0 ? " while it was still generating" : ""}, ${soundLeftMs()} ms of audio still booked to play`);
+      }
       log(`voice provider error: ${JSON.stringify(event?.error ?? {}).slice(0, 240)}`);
       // A session refused before a single word was said cannot recover by itself, and silence is
       // the void answer this console has already been burned by.
@@ -2991,11 +3104,22 @@ export function makeVoiceSession({
     // THE TURN THIS RESPONSE IS ABOUT, taken when it starts. The no-answer close below used to mean
     // "close whatever is open", and in always-listening the next utterance has often already opened
     // by the time a response finishes, so it took that one's panel away instead.
-    if (type === "response.created") { responseInFlight = true; responseTurn = hearTurn || session.userTurn; return undefined; }
+    if (type === "response.created") {
+      responseInFlight = true;
+      responseTurn = hearTurn || session.userTurn;
+      // VOICE-20. The row this response's bytes and its finish are written on.
+      liveResponseId = String(event?.response?.id ?? `resp:${now()}`);
+      responseRow(liveResponseId).startedMs = now();
+      return undefined;
+    }
     if (type === "response.output_audio.delta") {
       const audio = Buffer.from(String(event.delta ?? ""), "base64");
       if (audio.byteLength === 0) return undefined;
       meter.audioOutBytes += audio.byteLength;
+      // VOICE-20. Stamped by the vendor where it stamps one, and attributed to the response in flight
+      // where it does not, so the count is never silently lost.
+      const row = responseRow(String(event?.response_id ?? "") || liveResponseId);
+      if (row != null) row.bytes += audio.byteLength;
       if (!gate.holding()) { speakId += 1; browser?.sendJson({ t: "speak-begin", id: speakId }); setState("speaking"); }
       // Booked from BYTES: the model sends audio far faster than it is spoken, so the room is loud
       // long after the queue is empty, and that window is exactly when the mic must stay shut.
@@ -3014,12 +3138,23 @@ export function makeVoiceSession({
     }
     if (type === "response.done") {
       responseInFlight = false;
+      // VOICE-20. THE TWO NUMBERS THE HAND-OFF IS JUDGED ON, printed at the one moment both are true:
+      // how much speech this response delivered, and how much of it a speaker has still to play. A
+      // response that finished generating with seconds of its own audio still booked is the window in
+      // which anything else asking to speak talks over a sentence the person is still hearing.
+      const finished = responseRow(String(event?.response?.id ?? "") || liveResponseId);
+      if (finished != null && finished.doneMs === 0) {
+        finished.doneMs = now();
+        log(`voice ${t.slug} response ${finished.id} finished generating after ${finished.doneMs - finished.startedMs} ms`
+          + `: ${finished.bytes} audio byte(s) = ${audioMsOf(finished.bytes)} ms of speech`
+          + `, ${soundLeftMs()} ms of it still booked to play`);
+      }
       const limited = rateLimitOf(event);
       if (limited != null) {
         rateLimitWaits += 1;
         if (rateLimitWaits <= 2) {
           log(`voice rate limited, waiting ${limited.waitMs} ms: ${limited.message}`);
-          void sleep(limited.waitMs).then(() => { if (!stopping) sendProvider({ type: "response.create" }); });
+          void sleep(limited.waitMs).then(() => { if (!stopping) askForResponse("a rate limited response, tried again"); });
         } else {
           // Dropping it is indistinguishable from not being heard, so it is said out loud.
           void say("The voice service is rate limiting us. Give it a moment and say that again.");

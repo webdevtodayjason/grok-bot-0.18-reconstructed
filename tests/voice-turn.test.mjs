@@ -33,7 +33,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { startStubRealtime } from "./helpers/stub-realtime.mjs";
 import {
-  CARD_WATCH_MS, GREETINGS, MAX_TITAN_ROUNDS, SPOKEN_LEAD_SENTENCES, SPOKEN_REMAINDER_HINT,
+  ANSWER_QUIET_CEILING_MS, CARD_WATCH_MS, GREETINGS, MAX_TITAN_ROUNDS, SPOKEN_LEAD_SENTENCES, SPOKEN_REMAINDER_HINT,
   TURN_WAIT_CAP_S, VOICE_NOTE_MAX_CHARS, VOICE_NOTE_WRITE_MS, cardQuestion, fileCallNote, pickGreeting,
   isUnknownGatewayMethod, makeCallDedupe, makeSentenceCutter, makeSpokenExchange, makeTurnRunner,
   makeVoiceEdge, makeVoicePolicy, matchYesNo, pendingCardsOf, phoneLineInstructions, readVoiceBrief,
@@ -2407,6 +2407,166 @@ test("VOICE-15c: a titan call on a line with no audio sends nothing to the box, 
     const closeLine = session.frames.log.find((one) => one.includes("settled this line"));
     assert.ok(closeLine != null, `no close line was printed: ${session.frames.log.join(" | ").slice(0, 400)}`);
     assert.match(closeLine, /1 provider text\(s\) dropped with nothing heard/);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ================================================ VOICE-20: the hand-off must not talk over Titan
+//
+// Jason, 2026-09-13 on build 22: "when Titan starts to send work to the subagent, it interrupts what
+// Titan is saying. If Titan is in mid-sentence or at the end of the sentence, it will clip." Feedback
+// row 41 says the same thing: "Titan's voice clips/cuts off at the end when you switch over to passing
+// something off."
+//
+// THE SHAPE OF THE FAULT, and it is arithmetic rather than opinion. The model says its waiting sentence
+// ("checking the mail now") and calls the `titan` tool in the SAME response. A realtime vendor hands
+// the audio for that sentence over far faster than a speaker plays it, so `response.done` for it
+// arrives seconds before the sentence has finished leaving the speaker -- and `playsUntilMs`, which is
+// what those bytes will take to be spoken, is the only honest reading of "is there still sound in the
+// room" this relay has (makeEchoGate says so in its own comment, and the echo gate has leaned on it
+// since A4). `answerTool` asked for the next response with no wait on either number.
+//
+// The case below drives exactly that: one spoken sentence, then a tool call answered by a gateway that
+// replies at once, which is the worst case and the commonest one on a box with the answer to hand.
+const bookedLeftAtAsk = (logLines, why) => {
+  const line = logLines.filter((one) => one.includes(`asks for a response (${why})`)).at(-1);
+  if (line == null) return null;
+  return {
+    line,
+    bookedMs: Number(/, (\d+) ms of that still booked to play/.exec(line)?.[1] ?? -1),
+    generating: /is still generating/.test(line),
+  };
+};
+
+test("VOICE-20: the tool's answer waits for Titan's waiting sentence to finish leaving the speaker", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  // Twenty 100 ms frames is two seconds of booked speech, which is about what "checking the mail now,
+  // one moment" really is. The number is the point of the case: the relay must not ask for the next
+  // response while two seconds of the last one are still to be spoken.
+  const stub = await startStubRealtime({ vendor: "xai", audioFrames: 20 });
+  const gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    tail: (n) => (n >= 2 ? [reply("e1", "Two unread, both from Richard.")] : []),
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0020" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    await session.mic();
+    // The waiting sentence: one response carrying two seconds of audio, finished generating at once.
+    await stub.speak("Checking the mail now, one moment.");
+    await session.settle(() => session.frames.binary.length >= 20, "the waiting sentence reaching the page");
+    const booked = session.of("speak-end").at(-1)?.holdUntilMs ?? 0;
+    assert.ok(booked - Date.now() > 1200,
+      `the sentence has to still be playing for this case to mean anything, and only ${booked - Date.now()} ms of it were`);
+    // And the tool call in the same breath, answered by a box with the answer to hand.
+    stub.emitToolCall({ name: "titan", args: { message: "what is in the inbox" }, callId: "c_handoff", triple: false });
+    // THE OUTPUT GOES AT ONCE and the response.create is what waits, so the two are settled on apart:
+    // a fix that held the output back would wedge the conversation and pass a check that watched only
+    // the second of them.
+    await session.settle(() => stub.events.toolOutputs.length > 0, "the tool output going back");
+    const bookedWhenAnswered = Number(session.of("speak-end").at(-1)?.holdUntilMs ?? 0) - Date.now();
+    assert.ok(bookedWhenAnswered > 500,
+      `the sentence has to still be playing when the output goes back, and only ${bookedWhenAnswered} ms of it was`);
+    assert.equal(JSON.parse(stub.events.toolOutputs[0].output).reply, "Two unread, both from Richard.");
+    assert.equal(stub.events.responseCreates, 0, "and nothing has asked the vendor to speak yet");
+    await session.settle(() => bookedLeftAtAsk(session.frames.log, "the tool's answer") != null,
+      "the answer asking for a response once the room was quiet", 300);
+    const asked = bookedLeftAtAsk(session.frames.log, "the tool's answer");
+    // THE CLAIM. The answer may not ask the vendor to speak while the waiting sentence is still being
+    // spoken. Zero is "the room is quiet"; anything above it is the clip Jason heard.
+    assert.equal(asked.bookedMs, 0,
+      `the tool's answer asked for a response with ${asked.bookedMs} ms of Titan's own sentence still to come out of the speaker: ${asked.line}`);
+    assert.equal(asked.generating, false, "and never over a response the vendor was still generating");
+    // And the wait is in the log in words, because an operator reading a slow answer has to be able to
+    // tell "the relay held it" from "the box was slow".
+    const held = session.frames.log.find((one) => one.includes("held the tool's answer for"));
+    assert.ok(held != null, `the wait was never logged: ${session.frames.log.join(" | ").slice(0, 400)}`);
+    assert.match(held, /held the tool's answer for \d+ ms so Titan's own sentence could finish/);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-20: a booking that never drains lets the answer go late rather than never", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  // Two hundred 100 ms frames is twenty seconds of booked speech, which is a page that went to the
+  // background, a shell whose player stalled, or a flush that was lost. `playsUntilMs` is BOOKED and
+  // not PLAYED, so nothing on the relay's side can ever prove that audio came out of a speaker, and an
+  // answer held behind it with no ceiling would never be spoken at all.
+  const stub = await startStubRealtime({ vendor: "xai", audioFrames: 200 });
+  const gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    tail: (n) => (n >= 2 ? [reply("e1", "Nothing new.")] : []),
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0021" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    await session.mic();
+    await stub.speak("This is a very long sentence indeed.");
+    await session.settle(() => session.frames.binary.length >= 200, "twenty seconds of speech reaching the page");
+    const askedAt = Date.now();
+    stub.emitToolCall({ name: "titan", args: { message: "anything new" }, callId: "c_ceiling", triple: false });
+    await session.settle(() => bookedLeftAtAsk(session.frames.log, "the tool's answer") != null,
+      "the answer going out on the ceiling rather than never", 600);
+    const waitedMs = Date.now() - askedAt;
+    const asked = bookedLeftAtAsk(session.frames.log, "the tool's answer");
+    assert.ok(waitedMs < ANSWER_QUIET_CEILING_MS + 2500,
+      `the answer waited ${waitedMs} ms, which is past the ${ANSWER_QUIET_CEILING_MS} ms ceiling`);
+    assert.ok(asked.bookedMs > 0,
+      "this case only means something if the room was still loud when the ceiling ran out");
+    // And it SAYS it gave up, because a slow answer with no line about it is debugged by guessing.
+    const held = session.frames.log.find((one) => one.includes("held the tool's answer for"));
+    assert.match(held, /because the \d+ ms ceiling ran out/);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-20: the lead sentence of a streamed reply waits for the room too", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  // VOICE-3 reads the first sentence of Titan's reply out while he is still writing the rest, and on a
+  // box that streams that sentence is ready a second or two after the tool call -- which is while the
+  // waiting sentence the model said in the same breath as that call is still being spoken. Its gate
+  // waited on `responseInFlight` and on nothing else, which is not waiting on a speaker.
+  const stub = await startStubRealtime({ vendor: "xai", audioFrames: 20 });
+  // The draft carries the nonce the RELAY minted, read back off its own sendPrompt: a draft carrying
+  // somebody else's nonce is never read out (VOICE-3), and a fixture that made one up would prove the
+  // opposite of what it claims. The finished entry never lands, so the lead sentence is the only thing
+  // that speaks on this turn.
+  let gateway = null;
+  gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    tail: () => [],
+    draft: () => draftRow("The mail is in. Two from Richard.", {
+      nonce: String(gateway?.of("sendPrompt")[0]?.args?.clientNonce ?? ""), complete: false,
+    }),
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0022" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    await session.mic();
+    await stub.speak("Checking the mail now, one moment.");
+    await session.settle(() => session.frames.binary.length >= 20, "the waiting sentence reaching the page");
+    stub.emitToolCall({ name: "titan", args: { message: "what is in the inbox" }, callId: "c_draft", triple: false });
+    await session.settle(() => bookedLeftAtAsk(session.frames.log, "a sentence of the draft") != null,
+      "the lead sentence being read out", 400);
+    const asked = bookedLeftAtAsk(session.frames.log, "a sentence of the draft");
+    assert.equal(asked.bookedMs, 0,
+      `the lead sentence asked for a response with ${asked.bookedMs} ms of the waiting sentence still to be heard: ${asked.line}`);
+    assert.equal(asked.generating, false);
   } finally {
     await session?.close();
     await stub.close();

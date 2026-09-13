@@ -2045,3 +2045,100 @@ a time. MEASURED after the re-cut: `["Connecting","Listening","Talking","Listeni
 What is NOT proven: no real phone and no real vendor, so nothing here says an iPhone reads the card
 at a real notch or that a real realtime model reads the question well. The one row still red in that
 leg is filed as VOICE-19a and is not a VOICE-19 behaviour.
+
+## 17. The hand-off does not clip him, and the newest question is the one on the screen (VOICE-20)
+
+Jason, 2026-09-13 on build 22, with VOICE-19 live: *"when Titan starts to send work to the subagent,
+it interrupts what Titan is saying. If Titan is in mid-sentence or at the end of the sentence, it
+will clip."* And on the card: *"I did get it to pop up once, but the other one didn't pop up. It
+popped up underneath, so when I closed the chat I saw it in the normal chat to approve."* Feedback
+row 41 says the first one in its own words: *"Titan's voice clips/cuts off at the end when you switch
+over to passing something off."*
+
+### The room is a thing this relay can hear, and only the microphone side was listening to it
+
+`playsUntilMs` is booked FROM THE BYTES. A realtime model hands a reply over far faster than a
+speaker plays it, so an empty queue means the bytes were delivered, not that the room is quiet, and
+`makeEchoGate` has said exactly that in its own comment since A4. The microphone side of this file
+has leaned on that number for the whole of its life: a frame arriving while sound is still booked is
+dropped, because it is the machine hearing itself.
+
+**The speaking side never read it.** The model says its waiting sentence ("checking the mail now")
+and calls the `titan` tool in the same response. When the box answers, `answerTool` sent the
+`function_call_output` and a `response.create` at once, with no wait on the response in flight and
+none on playback; `sayDraftSentence` waited on the response in flight and on nothing else. Both doors
+could therefore ask the vendor to speak into a room where Titan's own sentence was still being heard.
+
+**Two candidate causes were measured before anything was changed, and both were ruled out.**
+
+- **A `response.create` over a response the vendor is still generating.** Its error code,
+  `conversation_already_has_active_response`, is in `QUIET_PROVIDER_CODES`, so the log could not have
+  said either way. It now names the response it is about. MEASURED: in the live relay's whole retained
+  log on the R750 there are **seven** quiet provider notes and **every one of them** is the barge-in
+  cancel race (`Cancellation failed: no active response found`); that code appears **zero** times. And
+  the ledger says the same thing from our side: at the hand-off the log reads *nothing generating*.
+- **The page throwing queued audio away when a new response's audio starts.** MEASURED on the R750
+  through the real vendor, one real hand-off: **0 flushes, 0 scheduled buffers stopped**, 13 buffers
+  scheduled, 4,050 ms of speech delivered and every byte of it scheduled in order. A browser appends;
+  it does not drop. The only thing in this system that throws booked audio away is a barge-in.
+
+**What is actually true is the overlap.** MEASURED on this Mac against the stub with a two second
+sentence booked: the tool's answer asked the vendor to speak with **1,578 ms of Titan's own sentence
+still to come out of the speaker**. On the live R750 turn the box took 26,423 ms to answer, so the
+room was quiet by then and that turn did not overlap; the window is the fast path, which is a box with
+the answer to hand and VOICE-3's lead sentence, ready a second or two after the tool call.
+
+### The fix
+
+One helper, `waitForQuiet`, and two doors use it. `answerTool` sends the `function_call_output` AT
+ONCE -- the model is waiting on it and a call left open wedges the conversation -- and only then waits
+for the response in flight to finish and for `gate.playsUntilMs` to drain before asking for the answer
+to be spoken. `sayDraftSentence` gained the same second half. No new wire frame, and the instructions
+are untouched.
+
+**There is a ceiling, `ANSWER_QUIET_CEILING_MS` (6 s), and it is load-bearing.** `playsUntilMs` is
+BOOKED audio, not played audio, and nothing on this side can prove the page ever played it: a page in
+the background, a stalled shell player or a lost flush would leave a booking in the future for ever,
+and an answer held behind it would never be spoken at all. So the answer goes out late rather than
+never, and the log line says which of the two happened.
+
+### The newest question is the one on the call screen
+
+The middle of the call screen was "the newest row in the conversation with a card in it". That is the
+right rule for a weather card and the wrong one for a question. VOICE-19 keeps a card this call has
+drawn once it settles, so a person can see that what they pressed was allowed -- and a settled card, a
+tool receipt with an attachment, a widget or a report offer landing after a question would all take
+the middle away from the one card the person has to answer. On a call there is nowhere else to answer
+it: the chat behind the screen is `inert`.
+
+**So a pending approval outranks everything else in the conversation, however new the other thing is,
+and the newest question outranks an older one.** With nothing waiting the rule is exactly what
+VOICE-13 wrote. That is the whole of the change: a question jumps the queue, and nothing else about
+the middle of the screen moves.
+
+### Measured
+
+`node --test` on **MacBook-Pro.local (darwin arm64, node v22.23.1)**: all twelve voice suites
+**382 of 382, 0 skipped**, up from 376 before this wave.
+
+`node scripts/verify-voice.mjs --leg call`, WebKit 390x844 device scale 3 with touch, against
+grok-bot-local-vm behind this leg's own relay and the stub vendor: **97 of 98**, up from 90 checks
+before this wave, and the one red row is the pre-existing VOICE-19a browser notice. The leg now forces
+a **second** real approval while the call is still up, with no reload and no second call: the host
+raised it in **24 to 30 s**, the console drew it in the transcript under the first one, and it took the
+middle of the call screen with its own Allow and Refuse at **84x44 and 89x44**, each naming the second
+row.
+
+`node scripts/verify-voice-r750.mjs` through **console.titanium.bot**, as a throwaway customer on the
+demo tenant minted and removed for the run: one real spoken hand-off through the real vendor, in
+Chromium with speech as the microphone. Heard: *"check what is in the inbox and tell me in one short
+sentence."* Answered out loud off the box's own inbox. Hops: the tool call at **1,126 ms** after the
+vendor's VAD stop, `sendPrompt` accepted **56 ms** later, the first entry at **26,423 ms**.
+
+**The gate's own microphone was the first thing this wave had to fix.** Chromium starts the fake
+capture file the moment the page opens the microphone, and since VOICE-14c the line says hello the
+instant the provider confirms the session, so the echo gate held the microphone shut for the whole
+greeting and the one-shot capture file was gone by the time it opened. MEASURED on the first live run:
+microphone level **0.0005**, the words reached Listening and Talking, and nothing was confirmed in
+150 s. The file now carries **six seconds of silence in front of the sentence**, which is a person
+waiting for the greeting to finish, and the turn landed.
