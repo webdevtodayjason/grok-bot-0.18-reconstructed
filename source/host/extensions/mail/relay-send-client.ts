@@ -34,7 +34,12 @@
  *
  *   POST <relay origin>/mail/send
  *   Authorization: Bearer <the box's gateway token, which the registry maps to a workspace>
- *   {agentId, to, subject, text, html?, inReplyTo?, idempotencyKey}
+ *   {agentId, to, cc?, bcc?, subject, text, html?, inReplyTo?, idempotencyKey}
+ *
+ * MAIL-4 added the copies. `to` is one address as a string -- byte for byte the shape MAIL-3 sent --
+ * or a list of them, and `cc` and `bcc` are lists beside it. Twenty addresses across the three is the
+ * relay's ceiling, every one of them is validated there, and a refusal names the field that was
+ * wrong, so this module still sends what it was given and reports what came back.
  *
  *   200 {sent: true,  id: "<the provider's id>", message: "<one sentence>"}
  *       {sent: false, message: "<why not, in words a bot may repeat to a person>"}
@@ -56,7 +61,15 @@ export interface RelaySendTarget {
 /** What the box asks the relay to send. There is deliberately no `from` and no `replyTo`. */
 export interface RelaySendRequest {
   readonly agentId: string;
-  readonly to: string;
+  /**
+   * MAIL-4: one address, or a list. A STRING IS EXACTLY ONE ADDRESS on the far side -- a comma in one
+   * is refused rather than split -- so a caller with several people to write to sends a list.
+   */
+  readonly to: string | readonly string[];
+  /** MAIL-4. Everybody who gets a copy, and whom the other recipients can see. Omitted when empty. */
+  readonly cc?: readonly string[];
+  /** MAIL-4. Copies the other recipients cannot see. On the operator's record all the same. */
+  readonly bcc?: readonly string[];
   readonly subject: string;
   readonly text: string;
   readonly html?: string;

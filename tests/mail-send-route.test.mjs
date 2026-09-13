@@ -12,7 +12,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  buildFrom, createMailSendRoute, mailSentLedgerRow, sanitizeFromName,
+  MAIL_SEND_RECIPIENTS_MAX, buildFrom, createMailSendRoute, mailSentLedgerRow, recipientSummary,
+  recipientWords, sanitizeFromName, sendRecipientSet, sendRecipients,
 } from "../ui/mail-edge.mjs";
 
 const OWNER_KEY = "re_the_relays_own_key";
@@ -224,8 +225,12 @@ test("attachments are refused by name, and an empty or missing field is refused 
   for (const [body, why] of [
     [{ ...GOOD, agentId: "" }, "no bot"],
     [{ ...GOOD, to: "" }, "no recipient"],
-    [{ ...GOOD, to: ["a@b.example", "c@d.example"] }, "more than one recipient"],
+    [{ ...GOOD, to: [] }, "an empty list of recipients"],
+    [{ ...GOOD, to: [""] }, "a list holding nothing but an empty string"],
+    // MAIL-4 made a LIST legal and left this one refused: one string is one address, so a caller
+    // writing a header line into a field is told rather than guessed at.
     [{ ...GOOD, to: "a@b.example, c@d.example" }, "two in one string"],
+    [{ ...GOOD, to: 42 }, "a recipient that is not text at all"],
     [{ ...GOOD, subject: "" }, "no subject"],
     [{ ...GOOD, text: "", html: "" }, "nothing in it"],
   ]) {
@@ -367,6 +372,12 @@ test("no answer this route gives carries a status code, a JSON blob or a vendor'
     ["an attachment", () => send({ ...GOOD, attachments: [{ name: "a.pdf" }] }, {}, {})],
     ["no bot named", () => send({ ...GOOD, agentId: "" }, {}, {})],
     ["no recipient", () => send({ ...GOOD, to: "" }, {}, {})],
+    ["a bad address in to", () => send({ ...GOOD, to: ["a@b.example", "nope"] }, {}, {})],
+    ["a bad address in cc", () => send({ ...GOOD, cc: "nope" }, {}, {})],
+    ["a bad address in bcc", () => send({ ...GOOD, bcc: ["a@b.example", "@nope"] }, {}, {})],
+    ["more people than one mail may carry", () => send({
+      ...GOOD, to: Array.from({ length: 21 }, (unused, n) => `person${n}@client.example`),
+    }, {}, {})],
     ["no subject", () => send({ ...GOOD, subject: "" }, {}, {})],
     ["nothing in it", () => send({ ...GOOD, text: "", html: "" }, {}, {})],
     ["a bot with no address", () => send({ ...GOOD, agentId: "a_nobody" }, {}, {})],
@@ -416,4 +427,215 @@ test("a sent ledger row holds no body", () => {
   assert.equal(Object.keys(row).includes("text"), false);
   assert.equal(Object.keys(row).includes("html"), false);
   assert.equal(row.resend_id, "re_1");
+});
+
+// ---- MAIL-4: several people, and copies ---------------------------------------------------------
+//
+// Titan's own feedback row, 2026-09-10 02:16Z, tenant titanium: "MAIL-3 outbound works (sends
+// accepted cleanly from agent addresses), but the send path supports exactly one recipient per
+// message: no CC field, no BCC".
+//
+// What these cases exist to hold down:
+//
+//   - THE OLD SHAPE IS UNTOUCHED. A single `to` string is the same request, the same sentence, the
+//     same row and the same payload it was before this wave, byte for byte. Every box in the fleet
+//     sends that shape today and a relay swapped under them must not change what it means.
+//   - ONE ROW IS STILL ONE MAIL. A mail to four people is one claim on the control plane and one
+//     line in the workspace's ledger, because that is what the caps count. Twenty is the ceiling on
+//     how far one claimed row may be amplified.
+//   - EVERY ADDRESS GOES THROUGH ONE RULE. The single recipient's rule, applied to every address in
+//     every field, so `cc` cannot quietly accept something `to` refuses.
+//   - A BAD ADDRESS STOPS THE WHOLE MAIL and names the field. Sending to three of four people and
+//     reporting a success is the worst of the three available outcomes.
+//   - A BCC IS ON THE RECORD. The other recipients cannot see it; the operator can. A send path that
+//     hid a recipient from the only record of the send would be a way to email anybody unnoticed.
+
+const ADDRESSES = (body) => JSON.parse(String(body.init.body));
+
+test("MAIL-4: a list in to reaches Resend as a list, and it is still one claim and one ledger row", async () => {
+  const { seen, res } = await send({
+    ...GOOD, to: ["jane@client.example", "bob@client.example", "carol@client.example"],
+  });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  const body = ADDRESSES(seen.resend[0]);
+  assert.deepEqual(body.to, ["jane@client.example", "bob@client.example", "carol@client.example"]);
+  assert.equal("cc" in body, false, "a field with nobody in it is not sent at all");
+  assert.equal("bcc" in body, false);
+  // One mail is one row, because that is the unit the caps count and the unit the person reads.
+  assert.equal(seen.opened.length, 1);
+  assert.equal(seen.sent.length, 1);
+  assert.equal(seen.closed.length, 1);
+  // And every record of it names everybody.
+  assert.equal(seen.opened[0].to, "jane@client.example, bob@client.example, carol@client.example");
+  assert.equal(seen.sent[0].row.to, "jane@client.example, bob@client.example, carol@client.example");
+  assert.equal(res.body.to, "jane@client.example, bob@client.example, carol@client.example");
+  assert.match(res.body.message, /^Sent to jane@client\.example, bob@client\.example, carol@client\.example from /);
+  // The claim's shape is the one cp/mail.mjs already takes, so the control plane is not touched by
+  // this wave: every recipient travels in the string its one column already holds.
+  assert.deepEqual(Object.keys(seen.opened[0]).sort(), ["agentId", "code", "idem", "slug", "to"]);
+});
+
+test("MAIL-4: cc and bcc reach Resend in their own fields and nowhere else", async () => {
+  const { seen, res } = await send({
+    ...GOOD,
+    to: "jane@client.example",
+    cc: ["book@client.example", "files@client.example"],
+    bcc: "audit@titaniumcomputing.com",
+  });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  const body = ADDRESSES(seen.resend[0]);
+  assert.deepEqual(body.to, ["jane@client.example"]);
+  assert.deepEqual(body.cc, ["book@client.example", "files@client.example"]);
+  assert.deepEqual(body.bcc, ["audit@titaniumcomputing.com"]);
+  // A copy is not a To and must never be folded into one: the people on the mail see who else is on
+  // it, and moving a bcc into `to` would show an address somebody asked to keep out of sight.
+  assert.equal(body.to.includes("book@client.example"), false);
+  assert.equal(body.to.includes("audit@titaniumcomputing.com"), false);
+  // The bot reads the sentence aloud, so the copies are named in words and not in header jargon.
+  assert.equal(res.body.message,
+    "Sent to jane@client.example, copying book@client.example, files@client.example, "
+      + "blind copying audit@titaniumcomputing.com from "
+      + `${ADDRESS}. Message id 49a3999c-0000-4000-8000-000000000000.`);
+  assert.equal(/\bcc\b|\bbcc\b/.test(res.body.message), false, "cc and bcc are not words a person has to know");
+});
+
+test("MAIL-4: a blind copy is on the operator's record and on the workspace's own row", async () => {
+  // The other recipients cannot see it. The record can, and must: the whole justification for this
+  // route is that every send is written down, and a recipient nobody wrote down is a way to email
+  // anybody from a customer's box unnoticed.
+  const { seen } = await send({
+    ...GOOD, to: "jane@client.example", cc: "book@client.example", bcc: "audit@titaniumcomputing.com",
+  });
+  const summary = "jane@client.example, cc: book@client.example, bcc: audit@titaniumcomputing.com";
+  assert.equal(seen.opened[0].to, summary, "the control plane's row names everybody");
+  const row = seen.sent[0].row;
+  assert.equal(row.to, summary, "and so does the line the workspace's own Mail card draws");
+  assert.equal(row.cc, "book@client.example", "and the lists are there on their own, unparsed");
+  assert.equal(row.bcc, "audit@titaniumcomputing.com");
+  assert.equal(row.subject, "September invoice");
+  // Still no body and still no subject on the control plane's side of the split.
+  assert.equal(JSON.stringify(seen.opened[0]).includes("September"), false);
+});
+
+test("MAIL-4: one bad address anywhere refuses the whole send, names the field, and sends nothing", async () => {
+  for (const [body, field] of [
+    [{ ...GOOD, to: ["jane@client.example", "not-an-address"] }, "To"],
+    [{ ...GOOD, to: "not-an-address" }, "To"],
+    [{ ...GOOD, cc: "not-an-address" }, "Cc"],
+    [{ ...GOOD, cc: ["book@client.example", "book@"] }, "Cc"],
+    [{ ...GOOD, bcc: ["@titaniumcomputing.com"] }, "Bcc"],
+    [{ ...GOOD, bcc: "two@a.example, three@b.example" }, "Bcc"],
+    [{ ...GOOD, cc: { address: "book@client.example" } }, "Cc"],
+  ]) {
+    const answer = await send(body);
+    assert.equal(answer.res.status, 400, JSON.stringify(body));
+    assert.match(answer.res.body.message, new RegExp(`\\b${field}\\b`),
+      `the refusal names the field that was wrong: ${answer.res.body.message}`);
+    assert.match(answer.res.body.message, /nothing was sent/);
+    // Part of a mail is not an outcome. Nothing is claimed and nothing reaches the mail service, so
+    // there is no row to explain and nobody got a half-addressed copy.
+    assert.equal(answer.seen.resend.length + answer.seen.opened.length, 0, "nothing was claimed and nothing was sent");
+  }
+});
+
+test("MAIL-4: more than twenty people refuses, naming the number, before anything is claimed", async () => {
+  const many = Array.from({ length: MAIL_SEND_RECIPIENTS_MAX + 1 }, (unused, n) => `person${n}@client.example`);
+  const over = await send({ ...GOOD, to: many });
+  assert.equal(over.res.status, 400);
+  assert.equal(over.res.body.error, "too_many_recipients");
+  assert.match(over.res.body.message, /21 people/);
+  assert.match(over.res.body.message, /at most 20/);
+  assert.equal(over.seen.resend.length + over.seen.opened.length, 0);
+
+  // The cap is across the three fields together, because one claimed row is what it limits.
+  const spread = await send({
+    ...GOOD,
+    to: many.slice(0, 10),
+    cc: many.slice(10, 20),
+    bcc: ["audit@titaniumcomputing.com"],
+  });
+  assert.equal(spread.res.status, 400, "ten and ten and one is twenty-one people on one mail");
+  assert.equal(spread.seen.resend.length + spread.seen.opened.length, 0);
+
+  // And exactly twenty goes.
+  const exactly = await send({ ...GOOD, to: many.slice(0, 19), cc: ["audit@titaniumcomputing.com"] });
+  assert.equal(exactly.res.status, 200, JSON.stringify(exactly.res.body));
+  assert.equal(ADDRESSES(exactly.seen.resend[0]).to.length, 19);
+});
+
+test("MAIL-4: an address in two fields is one copy, and the first field keeps it", async () => {
+  // Somebody who put the same address in To and Cc did not ask for two copies of one mail, and the
+  // deduplication is also what makes the twenty a count of PEOPLE rather than of typed lines.
+  const { seen, res } = await send({
+    ...GOOD,
+    to: ["jane@client.example", "JANE@client.example"],
+    cc: ["jane@client.example", "book@client.example"],
+    bcc: ["book@client.example"],
+  });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  const body = ADDRESSES(seen.resend[0]);
+  assert.deepEqual(body.to, ["jane@client.example"], "case is ignored when two addresses are compared");
+  assert.deepEqual(body.cc, ["book@client.example"]);
+  assert.equal("bcc" in body, false, "a field left with nobody in it is not sent");
+});
+
+test("MAIL-4: one recipient is byte for byte the send MAIL-3 made", async () => {
+  const { seen, res } = await send(GOOD);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.to, "jane@client.example");
+  assert.equal(res.body.message,
+    `Sent to jane@client.example from ${ADDRESS}. Message id 49a3999c-0000-4000-8000-000000000000.`);
+  assert.equal("cc" in res.body, false, "an answer carries a field only when there was one");
+  assert.equal("bcc" in res.body, false);
+  const body = ADDRESSES(seen.resend[0]);
+  assert.deepEqual(body.to, ["jane@client.example"]);
+  assert.equal("cc" in body, false);
+  assert.equal("bcc" in body, false);
+  // The ledger row keeps the shape every row already on disk has.
+  assert.deepEqual(Object.keys(seen.sent[0].row),
+    ["at", "agentId", "agentName", "code", "from", "to", "subject", "outcome", "resend_id", "detail"]);
+  assert.equal(seen.opened[0].to, "jane@client.example");
+});
+
+test("MAIL-4: the recipient rules are one rule, and they read in plain words", () => {
+  // A string is one address and a comma in it is a caller's misunderstanding, answered as one.
+  assert.deepEqual(sendRecipients("jane@client.example", "To"), { ok: true, addresses: ["jane@client.example"] });
+  assert.deepEqual(sendRecipients(undefined, "Cc"), { ok: true, addresses: [] });
+  assert.deepEqual(sendRecipients([], "Cc"), { ok: true, addresses: [] });
+  assert.match(sendRecipients("a@b.example, c@d.example", "To").why, /more than one address in one string/);
+  assert.match(sendRecipients("nope", "Bcc").why, /^The Bcc address is not a plain email address/);
+  assert.match(sendRecipients(["a@b.example", "nope"], "Cc").why, /^One of the Cc addresses/);
+  assert.match(sendRecipients(7, "To").why, /^The To field has to be one email address, or a list/);
+  for (const field of ["To", "Cc", "Bcc"]) {
+    assert.match(sendRecipients("nope", field).why, /nothing was sent\.$/, "every refusal ends the same way");
+  }
+
+  // The summary is what every record carries, and for one recipient it is that recipient.
+  const one = sendRecipientSet({ to: "jane@client.example" });
+  assert.equal(recipientSummary(one), "jane@client.example");
+  assert.equal(recipientWords(one), "jane@client.example");
+  const several = sendRecipientSet({
+    to: ["jane@client.example", "bob@client.example"],
+    cc: "book@client.example",
+    bcc: ["audit@titaniumcomputing.com"],
+  });
+  assert.equal(recipientSummary(several),
+    "jane@client.example, bob@client.example, cc: book@client.example, bcc: audit@titaniumcomputing.com");
+  assert.equal(recipientWords(several),
+    "jane@client.example, bob@client.example, copying book@client.example, blind copying audit@titaniumcomputing.com");
+  assert.equal(several.all.length, 4);
+});
+
+test("MAIL-4: a sent ledger row names the copies and holds no body", () => {
+  const row = mailSentLedgerRow({
+    agentId: "a_titan", agentName: "Titan", code: "247758",
+    from: `"Titan (demo)" <${ADDRESS}>`,
+    to: "jane@client.example, cc: book@client.example",
+    cc: ["book@client.example"], bcc: [],
+    subject: "September invoice", outcome: "sent", resendId: "re_1",
+  });
+  assert.equal(row.cc, "book@client.example");
+  assert.equal("bcc" in row, false, "an empty field is absent, so an old row and a new one read alike");
+  assert.equal(Object.keys(row).includes("text"), false);
+  assert.equal(Object.keys(row).includes("html"), false);
 });

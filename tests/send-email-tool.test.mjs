@@ -283,16 +283,17 @@ test("MAIL-3: the idempotency key is per call and not per attempt, so a retry ca
 
 test("MAIL-3: there is no from parameter, and one supplied anyway never reaches the relay", async () => {
   const schema = tool.sendEmailParameters.shape;
-  for (const forbidden of ["from", "reply_to", "replyTo", "headers", "cc", "bcc"]) {
+  // MAIL-4 added `cc` and `bcc` and changed nothing about the other four. The From is the whole
+  // security story of this route: the process holding the key is the process that decides the sender.
+  for (const forbidden of ["from", "reply_to", "replyTo", "headers"]) {
     assert.equal(forbidden in schema, false, `${forbidden} must not be a parameter of this tool`);
   }
   const d = deps();
   const built = tool.createSendEmailTool(d.dependencies);
-  await runTool(built, args({ from: "titan@titanium.bot", reply_to: "somebody@else.example", cc: "x@y.example" }));
+  await runTool(built, args({ from: "titan@titanium.bot", reply_to: "somebody@else.example" }));
   const body = JSON.stringify(d.posted[0].body);
   assert.doesNotMatch(body, /titan@titanium\.bot/, "a supplied from is dropped on the floor, not forwarded");
   assert.doesNotMatch(body, /somebody@else\.example/);
-  assert.doesNotMatch(body, /x@y\.example/);
 });
 
 test("MAIL-3: the outline args carry the recipient and neither the subject nor the body", async () => {
@@ -379,6 +380,105 @@ test("MAIL-3: a dependency that throws is a refusal, never a send of unknown out
   const { result } = await runTool(built, args());
   assert.equal(result.result.case, "error");
   assert.match(result.result.value.error, /socket hang up/);
+});
+
+// ---- MAIL-4: several people, and copies ------------------------------------------------------
+//
+// The box's half of Titan's own feedback row (2026-09-10 02:16Z): the tool takes several people and
+// two kinds of copy. The relay is the one that validates an address and refuses a mail, so what is
+// measured here is the SPLIT and the two strings a person and a model read.
+
+test("MAIL-4: commas in to become a list on the wire, and the single address stays a string", async () => {
+  const d = deps();
+  const built = tool.createSendEmailTool(d.dependencies);
+  await runTool(built, args());
+  assert.equal(d.posted[0].body.to, "jane@client.example",
+    "one address goes as the string MAIL-3 sent, so a swapped relay reads the same request");
+  assert.equal("cc" in d.posted[0].body, false);
+  assert.equal("bcc" in d.posted[0].body, false);
+
+  await runTool(built, args({ to: "jane@client.example, bob@client.example ,  carol@client.example" }), "call-2");
+  assert.deepEqual(d.posted[1].body.to, ["jane@client.example", "bob@client.example", "carol@client.example"],
+    "the commas are split here because one string is exactly one address at the relay");
+});
+
+test("MAIL-4: cc and bcc travel as their own lists and only when they hold somebody", async () => {
+  const d = deps();
+  const built = tool.createSendEmailTool(d.dependencies);
+  await runTool(built, args({ cc: "book@client.example, files@client.example", bcc: "audit@titaniumcomputing.com" }));
+  assert.deepEqual(d.posted[0].body.cc, ["book@client.example", "files@client.example"]);
+  assert.deepEqual(d.posted[0].body.bcc, ["audit@titaniumcomputing.com"]);
+  assert.equal(d.posted[0].body.to, "jane@client.example", "a copy is never folded into the recipient");
+
+  await runTool(built, args({ cc: "   ", bcc: "" }), "call-2");
+  assert.equal("cc" in d.posted[1].body, false, "an empty field is not a field");
+  assert.equal("bcc" in d.posted[1].body, false);
+});
+
+test("MAIL-4: the row on the person's screen names two people and counts the rest", async () => {
+  assert.equal(tool.sendEmailRecipientChip(["jane@client.example"]), "jane@client.example");
+  assert.equal(tool.sendEmailRecipientChip(["a@x.example", "b@x.example"]), "a@x.example, b@x.example");
+  assert.equal(tool.sendEmailRecipientChip(["a@x.example", "b@x.example", "c@x.example"]),
+    "a@x.example, b@x.example and 1 more");
+  assert.equal(tool.sendEmailRecipientChip(["a@x.example", "b@x.example", "c@x.example", "d@x.example"]),
+    "a@x.example, b@x.example and 2 more");
+
+  const d = deps();
+  const built = tool.createSendEmailTool(d.dependencies);
+  const { seen } = await runTool(built, args({
+    to: "jane@client.example, bob@client.example",
+    cc: "book@client.example",
+    subject: "SECRET-SUBJECT-nobody-may-see",
+    text: "SECRET-BODY-nobody-may-see",
+  }));
+  // A copy is a recipient, so it is counted: the person watching has to see how far their bot's mail
+  // went. What may never be here is the subject or the body, however many people it went to.
+  assert.equal(seen.completed.tool.value.args.message, "jane@client.example, bob@client.example and 1 more");
+  for (const call of [seen.initial, seen.completed]) {
+    const json = JSON.stringify(call.tool.value.args.toJson());
+    assert.doesNotMatch(json, /SECRET-SUBJECT/);
+    assert.doesNotMatch(json, /SECRET-BODY/);
+    assert.deepEqual(Object.keys(call.tool.value.args.toJson()), ["message"]);
+  }
+});
+
+test("MAIL-4: the model reads every recipient back, with the copies named in words", async () => {
+  assert.equal(
+    tool.sendEmailRecipientWords(["jane@client.example"], [], []),
+    "jane@client.example",
+  );
+  assert.equal(
+    tool.sendEmailRecipientWords(["jane@client.example"], ["book@client.example"], ["audit@tc.example"]),
+    "jane@client.example, copying book@client.example, blind copying audit@tc.example",
+  );
+
+  const d = deps();
+  const built = tool.createSendEmailTool(d.dependencies);
+  const { result } = await runTool(built, args({
+    to: "jane@client.example, bob@client.example", cc: "book@client.example", bcc: "audit@tc.example",
+  }));
+  assert.equal(result.result.case, "success");
+  const rendered = await built.render(ctx(), result);
+  const sentence = typeof rendered === "string" ? rendered : JSON.stringify(rendered);
+  for (const who of ["jane@client.example", "bob@client.example", "book@client.example", "audit@tc.example"]) {
+    assert.match(sentence, new RegExp(who.replace(".", "\\.")), `${who} is named to the model`);
+  }
+  assert.match(sentence, /copying book@client\.example/);
+  assert.match(sentence, /blind copying audit@tc\.example/);
+});
+
+test("MAIL-4: a refused send to several people still draws as a mail that did not go", async () => {
+  const refused = "The Cc address is not a plain email address, so nothing was sent.";
+  const d = deps({ post: async () => ({ sent: false, status: 400, message: refused }) });
+  const built = tool.createSendEmailTool(d.dependencies);
+  const { result, seen } = await runTool(built, args({ to: "jane@client.example, bob@client.example", cc: "nope" }));
+  assert.equal(result.result.case, "error");
+  assert.equal(result.result.value.error, refused, "the relay names the field and the bot repeats it");
+  assert.equal(seen.completed.tool.value.args.message,
+    `${tool.MAIL_SEND_FAILED_PREFIX}jane@client.example, bob@client.example and 1 more`);
+  const rendered = await built.render(ctx(), result);
+  const sentence = typeof rendered === "string" ? rendered : JSON.stringify(rendered);
+  assert.doesNotMatch(sentence, /\bSent to\b/);
 });
 
 // ---- the withhold --------------------------------------------------------------------------

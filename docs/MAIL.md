@@ -1,4 +1,4 @@
-# Agent email (MAIL-1, MAIL-2, MAIL-3)
+# Agent email (MAIL-1, MAIL-2, MAIL-3, MAIL-4)
 
 > **MAIL-2 changed the addresses.** Every bot now has an address of its own at the product domain,
 > `agent<code>@myagents.email`, where the code is six digits the control plane mints once per bot
@@ -9,6 +9,13 @@
 > decides which address the mail comes from; the bot cannot choose it, and every send is one row on
 > the control plane. Section 6 is the whole of it, and it replaces the shell recipe that used to be
 > there. Sections 3, 4 and 5 are the receive side and are unchanged by it.
+>
+> **MAIL-4 let one mail reach several people.** Titan's own feedback row, 2026-09-10 02:16Z: *"MAIL-3
+> outbound works, but the send path supports exactly one recipient per message: no CC field, no
+> BCC."* `to` now takes a list, `cc` and `bcc` sit beside it, and twenty addresses across the three is
+> the ceiling. **The single-string `to` MAIL-3 shipped is byte for byte the same request, the same
+> sentence and the same row it always was**, because every box in the fleet sends that shape. Section
+> 6 carries it.
 
 
 Every agent gets an email address at your own domain. Mail sent to one of those addresses lands in
@@ -450,7 +457,7 @@ the card save the rest of the form without ever holding a secret.
 | `ui/mail-inbox.jsonl` | One line per event: `{at, email_id, message_id, from, to, subject, agentId, agentName, outcome}`, plus `slug` on the rows described below. Mode 0600, gitignored. |
 | `ui/mail-owner.txt` | Optional. One workspace slug: the workspace whose Resend account holds the per-bot address domain, and the only one whose edge may resolve a code. Absent means the operator's. `CP_MAIL_OWNER_SLUG` is the same value as an environment variable and wins. Read per message. |
 | `ui/mail-no-push.txt` | Optional, and empty in the product. One workspace slug per line (`#` starts a comment): workspaces this relay must not write inside. Their codes are still minted and their mail still routes; only the `setAgentMail` push is skipped. `SAND_UI_MAIL_NO_PUSH_SLUGS` is the same list as a comma-separated environment variable. Read once per sweep, so a change takes effect within five minutes with nothing restarted. |
-| `ui/mail-sent.jsonl` | MAIL-3. One line per send by this workspace's bots: `{at, agentId, agentName, code, to, subject, outcome, resendId}`. Mode 0600, gitignored. **This is the only place a sent subject is kept**, and only this workspace's own Mail card reads it. |
+| `ui/mail-sent.jsonl` | MAIL-3. One line per send by this workspace's bots: `{at, agentId, agentName, code, from, to, subject, outcome, resend_id, detail}`. Mode 0600, gitignored. **This is the only place a sent subject is kept**, and only this workspace's own Mail card reads it. MAIL-4: `to` is EVERY recipient as one readable line, copies included, and `cc` and `bcc` repeat them as their own fields **only when there is something in them** — so a row written before that wave and a single-recipient row written after it are the same shape. The duplication is deliberate: the workspace's own Mail card draws this one column and nothing else from the row, and a `to` naming one of four people would be the console under-reporting mail that left in the customer's name. |
 | `ui/mail-no-send.txt` | MAIL-3. Optional, and empty in the product. One workspace slug per line (`#` starts a comment): workspaces whose bots may not send. The same shape and the same reader as `mail-no-push.txt`, and `SAND_UI_MAIL_NO_SEND_SLUGS` is the same list as an environment variable — but read **per request** rather than per sweep, because it is a refusal and a refusal that takes five minutes to start is not one. It is separate from the no-push list on purpose: not being pushed `canSend` stops a bot offering to send, and a box that is never pushed still holds a valid gateway token and could call the route anyway. An absent push is not a rule. |
 
 The ledger is the "what arrived and where it went" record the console shows, and the duplicate
@@ -505,12 +512,71 @@ maps to a workspace for every other call a box makes. No new secret is minted an
   "inReplyTo": "<abc123@client.example>" }
 ```
 
+```json
+{ "agentId": "…", "to": ["jane@client.example", "bob@client.example"],
+  "cc": ["book@client.example"], "bcc": ["audit@titaniumcomputing.com"],
+  "subject": "September invoice", "text": "Thanks both." }
+```
+
 `inReplyTo` carrying the Message-ID of the mail being answered is what puts the reply in the same
 thread, and it is the only header a caller may set.
 
-**One recipient.** No `cc`, no `bcc`, no arrays. One row is one mail, so the cap arithmetic, the log
-row and the line the person reads on screen each mean exactly one thing. Several recipients is filed
-as MAIL-3i, not built.
+### Several people, and copies (MAIL-4)
+
+**`to` is one address or a list, and `cc` and `bcc` are lists beside it.** Both of the bodies above
+are this route. A field that is absent or empty is nobody, and only an empty `to` is a refusal.
+
+**A string is exactly one address, and a comma inside one is refused rather than split.** That is the
+one shape that was already safe and it keeps its meaning: every box in the fleet has been sending
+`"to": "jane@client.example"` since MAIL-3, and a relay swapped under them must not read it as
+anything else. A caller writing `"a@b.c, d@e.f"` into one field thinks that field is a header line,
+and it is told so in one sentence instead of having the guess honoured.
+
+**Every address in every field goes through the one rule the single recipient always went through.**
+So `cc` cannot quietly accept something `to` refuses. One address that is not an address **refuses
+the whole mail and names the field** — *"One of the Cc addresses is not a plain email address, so
+nothing was sent."* Three of four people getting it while the answer reads like a success is the
+worst of the three available outcomes, and the field is named because the bot reading the sentence
+out is the thing that has to fix it.
+
+**Twenty addresses across the three fields, counted after the duplicates come out.** One row is still
+one mail: the claim, the cap arithmetic and the chip on the person's screen are per mail, not per
+recipient, so the ceiling is what bounds how far one claimed row may be amplified. Thirty mails an
+hour times twenty names is the most a bot can reach in an hour, and that is a number worth being
+able to say. Over it: 400, naming the count it saw and the 20.
+
+**An address in two fields is one copy, and the first field keeps it.** Somebody who typed the same
+address into `to` and `cc` did not ask for two copies of one mail. Case is ignored when two addresses
+are compared and never when one is sent, because a localpart is the receiving server's business.
+
+**A blind copy is hidden from the other recipients and from nobody else.** It is on the control
+plane's row, on the workspace's own sent ledger and on the relay's log line, all three. A send path
+that kept a recipient off the only record of the send would be a way to mail anybody from a box
+unnoticed, and "every send is on the record" is the entire justification for this route existing.
+
+### What the bot's own tool takes, which is not quite this shape
+
+`send_email` in the box takes **three strings**, `to`, `cc` and `bcc`, each holding one address or
+several separated by commas, and it splits them on those commas before it posts. So the model writes
+`to: "jane@client.example, bob@client.example"` the way a person writes an address line, and the relay
+still receives a list. The split is in the box on purpose: one string is exactly one address at the
+route, and a tool parameter whose type changes shape with its contents is a parameter a weaker model
+gets wrong. Nothing about an address is judged in the box — one rule, at the relay, naming the field.
+
+Two strings a person and a model read, and they are deliberately different:
+
+- **The row in the conversation** names two addresses and counts the rest: *Sent an email to
+  jane@client.example, bob@client.example and 2 more.* It is one muted line with nothing to expand,
+  read on a phone as often as a desktop, and twenty addresses in it would push everything else off the
+  line. Who the rest were is on the Sent table of that workspace's own Email card, which holds every
+  recipient of every send. A refused send still reads *Tried to email … it did not send*.
+- **The sentence the model reads back** names every single one, copies included, in words rather than
+  header jargon: *Sent to jane@client.example, bob@client.example, copying book@client.example, blind
+  copying audit@titaniumcomputing.com from agent247758@myagents.email.* It has to say every address
+  because it is the thing that tells the person in one line who the mail went to.
+
+The `email` seed skill carries the same rules in the words the bot reads, including the one that
+matters most: a cc is a recipient, and a recipient is somebody the person asked it to write to.
 
 **`from`, `replyTo` and `headers.From` are not fields this route accepts.** A supplied one is
 IGNORED rather than refused, and a test asserts it never appears in the body that reached Resend.
@@ -526,9 +592,10 @@ IGNORED rather than refused, and a test asserts it never appears in the body tha
    route.** A workspace on the no-push list never learns `canSend`, so its bots never offer to send
    — but its box still holds a valid gateway token and could call this route anyway. An absent push
    is not a rule.
-4. The body cannot be read, is over 64 KB, names no `agentId`, names no single recipient, or carries
-   an `attachments` field → 400 and a plain sentence. Attachments are refused by name: not this
-   wave.
+4. The body cannot be read, is over 64 KB, names no `agentId`, names no recipient at all, names an
+   address that is not one in any of `to`, `cc` and `bcc`, names more than twenty people, or carries
+   an `attachments` field → 400 and a plain sentence. A bad address names its field. Attachments are
+   refused by name: not this wave.
 5. The directory row for **this workspace** and that `agentId`. No row, a retired row, or a row that
    belongs to somebody else → 403, and **all three answer the same sentence**, because a caller must
    learn nothing at all about a workspace that is not theirs. One lookup closes all three, which is
@@ -606,6 +673,11 @@ Both are `admin_settings` rows on the control plane, each with a documented per-
 so the super admin can move them without a deploy. A refusal names the number it hit and when the
 next one can go.
 
+**A mail to twenty people is one row and costs one of these**, which is the MAIL-4 decision written
+as arithmetic: the unit everything in this path counts is the MAIL. That is also why twenty is a
+ceiling rather than a convenience — without one, a single claimed row could be pointed at any number
+of strangers.
+
 They are counted from **every `mail_send_log` row claimed in the window, whatever became of it** —
 `sent`, still `sending`, and `failed`. **Not** from the relay's in-process limiter, which a relay
 restart forgives, and **not** in the box, because a limit a box counts is a limit a box can reset by
@@ -642,6 +714,15 @@ row is a second attempt, and the shared id says only one message left.
 `mail_send_log` on the control plane holds: the workspace, the bot, its code, the recipient, the
 time, the outcome, Resend's id, and a short detail on a failure. **It holds no subject and no body.**
 
+**MAIL-4 put every recipient in that one recipient column and added no column to the table.** The
+value is the line a person reads: `jane@client.example`, or
+`jane@client.example, bob@client.example, cc: book@client.example, bcc: audit@titaniumcomputing.com`.
+One recipient makes exactly the string it always made, so every row already in that table reads the
+same way it did, and there is no migration in this wave at all — `cp/mail.mjs` and `cp/store.mjs` are
+not touched by it. The split this table draws is about subjects and bodies, not about how many people
+a mail went to, and a column per field would have been three nullable columns and an ALTER for a
+question the one column answers: *who did that bot write to.*
+
 That is the same split the receive side already uses. The control plane holds who wrote to whom and
 whether it went; the WORKSPACE'S OWN relay ledger (`mail-sent.jsonl`, beside `mail-inbox.jsonl` on
 that tenant's volume) holds the readable row with the subject, and only that workspace's own Mail
@@ -651,7 +732,7 @@ a line of anybody's mail — and the customer sees their own subjects on their o
 
 ### Recipients
 
-Any address, on day one, for every workspace.
+Any address, on day one, for every workspace, and since MAIL-4 up to twenty of them on one mail.
 
 `mail.approvedSenders.<slug>` is an INBOUND whitelist and it is not touched by this route. Reusing it
 would mean a customer who later turns it on to stop spam silently stops their bots emailing anyone
@@ -1006,7 +1087,24 @@ export (`createMailSends`) rather than failing eighteen times unreadably.
 - **No DMARC record on the product domain.** SPF and DKIM are there; `p=none` with a report address
   is not, so nobody is watching who else sends as it.
 - **No vanity aliases.** A bot's address is its code and only its code.
-- **One recipient per send.** No cc, no bcc, no lists (MAIL-3i).
+- **Twenty recipients per send, and no attachment.** A list, a cc and a bcc all work since MAIL-4;
+  twenty across the three is the ceiling and a twenty-first refuses the mail rather than trimming it.
+- **An incoming mail does not say who else was on it.** The prompt a bot reads names the address the
+  mail arrived at, the sender, the subject, the date and the Message-ID, and never the other To or Cc
+  addresses — the receive path reads `received_for`, `data.to` and `message.to` and no `cc` at all. So
+  a bot that was one of four people cc'd on a thread answers as though it were the only one, and a
+  reply-to-all is not something it can even attempt. Filed as **MAIL-4b**, owner: whoever takes the
+  next mail wave. Next action: carry the full recipient list onto `mailPrompt` as one folded `To:` and
+  `Cc:` line each, through the same one-line fold the other headers go through, so a subject with a
+  newline in it still cannot write a header that was never sent. Proof: a signed webhook naming four
+  recipients delivers a prompt listing all four, and a `cc` holding a CR does not break the fence.
+- **The send gate does not measure the copies yet.** `scripts/verify-mail.mjs --send` walks nineteen
+  legs, all of them single-recipient, so cc and bcc reaching Resend's own fields is proved by
+  `tests/mail-send-route.test.mjs` against the shipped route and not yet against a stub Resend over a
+  real socket. Filed as **MAIL-4c**, owner: the next person to run that gate. Next action: one leg
+  sending to two addresses with a cc and a bcc, asserting the stub received three fields and the
+  control plane holds one row naming all four people. Proof: the leg count goes from nineteen to
+  twenty and the run stays green.
 - **No send-side recipient allow list.** A bot may write to any address (MAIL-3c).
 - **One domain per workspace's own settings.** Those carry one, which is that operator's own. The
   product domain the per-bot codes live at is separate and is the control plane's.
@@ -1020,6 +1118,37 @@ export (`createMailSends`) rather than failing eighteen times unreadably.
 - **Attachments are links, not files.** The relay never downloads one, and the links Resend hands
   over expire.
 
+
+---
+
+## 9c. Several people, and copies (MAIL-4), 2026-09-13
+
+**Measured on this Mac, node v22.23.1, on the branch `night-mail4` off `e4e8455`.** Nothing in this
+wave was measured against `api.resend.com`, a box or the R750; the numbers below are the shipped route
+and the shipped tool run by their own suites, and section 8 names the one leg that is not covered yet.
+
+| measured | this Mac, 2026-09-13 |
+| --- | --- |
+| `node --test tests/mail-send-route.test.mjs` | **32 PASS, 0 FAIL** (23 before this wave, 9 of them new) |
+| `node --test tests/send-email-tool.test.mjs` | **28 PASS, 0 FAIL** (23 before, 5 new) |
+| the mail, onboarding and chip suites together | **296 PASS, 0 FAIL** |
+| `node --test tests/*.test.mjs` | **3365 of 3366**; the one failure is `tests/publication-packaging.test.mjs`, "Router settings use the trusted backend", which reads `source/host/extensions/inference/inference-service.ts` for `createProviderPromptSession(provider)` and fails identically with none of this wave's files in the tree |
+| `tsc --project source/tsconfig.json` | clean |
+| `node --check` on `ui/mail-edge.mjs` and both changed suites | clean |
+
+**What the tests hold down, in the words of what would otherwise have shipped.** A list in `to`
+reaches Resend as a list and is still ONE claim, one sent-ledger line and one close, because the caps
+count mails. `cc` and `bcc` arrive in Resend's own `cc` and `bcc` fields and are never folded into
+`to`, so an address somebody asked to keep out of sight stays out of sight. One bad address in any of
+the three refuses the whole mail, names the field, claims nothing and calls nothing. Twenty-one people
+refuses whether they are all in `to` or spread across the three. The same address in two fields is one
+copy. And the single-recipient send is asserted byte for byte: the same answer sentence, the same
+`res.body.to`, the same payload, and a ledger row whose keys are exactly the ten MAIL-3 wrote.
+
+**What is NOT proved.** No real mail was sent. No box ran the tool, so the split of a comma-separated
+`to` is proved in the tool's own suite and not in a model's turn; `--send-box` is the flag for that and
+it is a model turn, so it is slow and not deterministic. `scripts/verify-mail.mjs --send` was not run
+at all in this wave, which is MAIL-4c in section 8.
 
 ---
 

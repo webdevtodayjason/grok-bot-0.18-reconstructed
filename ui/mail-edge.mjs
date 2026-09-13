@@ -1123,14 +1123,27 @@ export async function resendSend(fetchImpl, apiKey, payload, idempotencyKey = ""
  * to the workspace, on the workspace's own disk, read by that workspace's own console. Never a
  * body, in either place.
  */
-export function mailSentLedgerRow({ at, agentId, agentName, code, from, to, subject, outcome, resendId, detail }) {
+export function mailSentLedgerRow({ at, agentId, agentName, code, from, to, cc = [], bcc = [], subject, outcome, resendId, detail }) {
+  const asList = (value) => (Array.isArray(value) ? value : String(value ?? "").split(","))
+    .map((entry) => asString(entry)).filter((entry) => entry.length > 0).join(", ");
+  const copied = asList(cc);
+  const blind = asList(bcc);
   return {
     at: at ?? new Date().toISOString(),
     agentId: asString(agentId),
     agentName: asString(agentName),
     code: asString(code),
     from: asString(from),
+    // MAIL-4. `to` IS EVERY RECIPIENT as one readable line -- the copies included -- and `cc` and
+    // `bcc` repeat them on their own. That is deliberate duplication and this is the reason: the
+    // workspace's own Mail card draws this column and nothing else from the row, so a `to` holding
+    // only the To addresses would draw a mail to four people as a mail to one, which is the console
+    // lying by omission about mail that left under the customer's name. The two extra fields are
+    // there so nothing has to read that line back out of prose, and they are present ONLY when there
+    // is something in them, so every row written before this wave keeps the shape it had.
     to: asString(to),
+    ...(copied.length > 0 ? { cc: copied } : {}),
+    ...(blind.length > 0 ? { bcc: blind } : {}),
     subject: asString(subject),
     outcome: asString(outcome) || "unknown",
     resend_id: asString(resendId),
@@ -1138,14 +1151,116 @@ export function mailSentLedgerRow({ at, agentId, agentName, code, from, to, subj
   };
 }
 
-// ONE RECIPIENT PER CALL. One row is one mail, so the cap arithmetic, the log row and the chip in
-// the transcript each mean exactly one thing. No cc, no bcc, no arrays. Several recipients in one
-// call is filed rather than built.
+// MAIL-4. SEVERAL PEOPLE, AND COPIES. Titan's own feedback row, 2026-09-10 02:16Z: "MAIL-3 outbound
+// works, but the send path supports exactly one recipient per message: no CC field, no BCC". So a
+// mail may now name a list in `to` and carry `cc` and `bcc` lists beside it.
+//
+// ONE ROW IS STILL ONE MAIL. The claim on the control plane, the cap arithmetic and the chip in the
+// transcript are per MAIL and not per recipient, which is why there is a ceiling on how many people
+// one claimed row may reach: twenty across all three fields together. Thirty mails an hour is the
+// cap a bot has, and twenty names on each of them is the most one of those rows can be amplified to.
+//
+// A STRING IS STILL EXACTLY ONE ADDRESS, byte for byte what it was before this wave. A comma inside
+// a string is refused rather than split: a caller writing "a@b.c, d@e.f" in one field thinks that
+// field is a header line, and honouring the guess would make the one shape that used to be safe
+// ambiguous. A list is a list.
 const SEND_ADDRESS_RE = /^[^\s@,<>"]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
 const oneAddress = (value) => {
   const at = typeof value === "string" ? value.trim() : "";
   return SEND_ADDRESS_RE.test(at) ? at : "";
 };
+
+/** Across `to`, `cc` and `bcc` together, counted after the duplicates are taken out. */
+export const MAIL_SEND_RECIPIENTS_MAX = 20;
+
+/**
+ * One field's addresses, or the sentence that refuses the whole send and NAMES THE FIELD.
+ *
+ * The field is named because a bot reads this sentence out to a person and then has to fix the
+ * thing it got wrong: "one of these addresses is wrong" sends it round the loop guessing which.
+ * Every address in every field is validated by `oneAddress`, the one the single recipient has always
+ * gone through, so `to`, `cc` and `bcc` cannot drift into three different ideas of an address.
+ *
+ * `{ok: true, addresses}` or `{ok: false, why}`. An absent field and an empty list are both `[]`,
+ * which is an answer and not a refusal -- only an empty `to` is refused, by the caller.
+ */
+export function sendRecipients(value, field = "To") {
+  if (value == null) return { ok: true, addresses: [] };
+  const bad = (what) => ({ ok: false, why: `${what}, so nothing was sent.` });
+  if (typeof value === "string") {
+    const at = value.trim();
+    if (at.length === 0) return { ok: true, addresses: [] };
+    const one = oneAddress(at);
+    if (one.length === 0) {
+      return bad(at.includes(",")
+        // The one guess worth answering in its own words, because it is the shape a model reaches for
+        // first and the fix is one sentence long.
+        ? `The ${field} field holds more than one address in one string. Put each address on its own in a list`
+        : `The ${field} address is not a plain email address`);
+    }
+    return { ok: true, addresses: [one] };
+  }
+  if (!Array.isArray(value)) {
+    return bad(`The ${field} field has to be one email address, or a list of them`);
+  }
+  const addresses = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry.trim().length === 0) continue;
+    const one = oneAddress(entry);
+    if (one.length === 0) return bad(`One of the ${field} addresses is not a plain email address`);
+    addresses.push(one);
+  }
+  return { ok: true, addresses };
+}
+
+/**
+ * The three lists as they will be sent, with the duplicates gone.
+ *
+ * An address in both `to` and `cc` would otherwise be two copies of one mail in one inbox, and the
+ * person who put it in both fields did not ask for that. The FIRST field it appears in keeps it, in
+ * the order a reader expects: to, then cc, then bcc. Case is ignored when they are compared and
+ * never when one is sent, because a localpart is the receiving server's business.
+ */
+export function sendRecipientSet(body = {}) {
+  const fields = [["to", "To"], ["cc", "Cc"], ["bcc", "Bcc"]];
+  const out = { to: [], cc: [], bcc: [] };
+  const seen = new Set();
+  for (const [key, field] of fields) {
+    const answer = sendRecipients(body[key], field);
+    if (answer.ok !== true) return answer;
+    for (const address of answer.addresses) {
+      const fold = address.toLowerCase();
+      if (seen.has(fold)) continue;
+      seen.add(fold);
+      out[key].push(address);
+    }
+  }
+  return { ok: true, ...out, all: [...out.to, ...out.cc, ...out.bcc] };
+}
+
+/**
+ * Every recipient as one line a person reads, and the string every RECORD of this send carries.
+ *
+ * One recipient and no copies makes exactly the string the single `to` made before MAIL-4, byte for
+ * byte, so every row already on disk and every row written after this wave read the same way.
+ */
+export function recipientSummary({ to = [], cc = [], bcc = [] } = {}) {
+  return [
+    to.join(", "),
+    ...(cc.length > 0 ? [`cc: ${cc.join(", ")}`] : []),
+    ...(bcc.length > 0 ? [`bcc: ${bcc.join(", ")}`] : []),
+  ].filter((part) => part.length > 0).join(", ");
+}
+
+/**
+ * The same people in the sentence the BOT reads aloud. "copying" and "blind copying" rather than cc
+ * and bcc, for the same reason every other sentence this route answers with is in plain words.
+ */
+export function recipientWords({ to = [], cc = [], bcc = [] } = {}) {
+  return to.join(", ")
+    + (cc.length > 0 ? `, copying ${cc.join(", ")}` : "")
+    + (bcc.length > 0 ? `, blind copying ${bcc.join(", ")}` : "");
+}
 
 /**
  * POST /mail/send.
@@ -1245,10 +1360,24 @@ export function createMailSendRoute({
     if (agentId.length === 0) {
       return refuse(res, 400, "That send request did not say which bot it is from, so nothing was sent.", "bad_request");
     }
-    const to = oneAddress(body.to);
-    if (to.length === 0) {
-      return refuse(res, 400, "That send request needs exactly one recipient, written as a plain email address, so nothing was sent.", "bad_request");
+    // MAIL-4. All three fields, validated by the rule the single recipient has always gone through,
+    // and the whole send refused with the field named when any one address is not an address. Before
+    // the directory is read and long before Resend: an over-long or malformed recipient list costs
+    // this process a parse and nothing else.
+    const recipients = sendRecipientSet(body);
+    if (recipients.ok !== true) return refuse(res, 400, recipients.why, "bad_request");
+    if (recipients.all.length === 0) {
+      return refuse(res, 400, "That send request needs at least one recipient, written as a plain email address, so nothing was sent.", "bad_request");
     }
+    if (recipients.all.length > MAIL_SEND_RECIPIENTS_MAX) {
+      return refuse(res, 400,
+        `That email names ${recipients.all.length} people, and one email may go to at most ${MAIL_SEND_RECIPIENTS_MAX}, `
+          + "so nothing was sent. Send it to fewer people, or send more than one email.",
+        "too_many_recipients");
+    }
+    // What every record of this send says, and the one string the answer, the ledger, the control
+    // plane's row and this relay's log all carry, so the four of them cannot disagree.
+    const to = recipientSummary(recipients);
     const subject = oneLine(body.subject);
     if (subject.length === 0) return refuse(res, 400, "That email has no subject, so nothing was sent.", "bad_request");
     const text = typeof body.text === "string" ? body.text : "";
@@ -1293,7 +1422,7 @@ export function createMailSendRoute({
       : Promise.resolve()
         .then(() => appendSent(slug, mailSentLedgerRow({
           agentId, agentName: asString(row.agentName), code: asString(row.code),
-          from, to, subject, outcome, resendId, detail,
+          from, to, cc: recipients.cc, bcc: recipients.bcc, subject, outcome, resendId, detail,
         })))
         .catch((error) => log(`mail  could not write ${slug}'s sent ledger: ${error?.message ?? error}`)));
 
@@ -1330,7 +1459,10 @@ export function createMailSendRoute({
     // own address. A test asserts none of them ever reaches Resend.
     const payload = {
       from,
-      to: [to],
+      // MAIL-4: the three lists as they were validated, and a field that is empty is not sent at all.
+      to: recipients.to,
+      ...(recipients.cc.length > 0 ? { cc: recipients.cc } : {}),
+      ...(recipients.bcc.length > 0 ? { bcc: recipients.bcc } : {}),
       subject,
       ...(text.length > 0 ? { text } : {}),
       ...(html.length > 0 ? { html } : {}),
@@ -1363,11 +1495,15 @@ export function createMailSendRoute({
     await writeSent("sent", sent.id, "", from);
     log(`mail  ${address} -> ${to} sent (${sent.id})`);
     return sendJson(res, 200, {
-      message: `Sent to ${to} from ${address}. Message id ${sent.id}.`,
+      // MAIL-4: one recipient and no copies makes exactly the sentence MAIL-3 answered with, because
+      // `recipientWords` of one address is that address.
+      message: `Sent to ${recipientWords(recipients)} from ${address}. Message id ${sent.id}.`,
       sent: true,
       id: sent.id,
       from,
       to,
+      ...(recipients.cc.length > 0 ? { cc: recipients.cc.join(", ") } : {}),
+      ...(recipients.bcc.length > 0 ? { bcc: recipients.bcc.join(", ") } : {}),
     });
   }
 
