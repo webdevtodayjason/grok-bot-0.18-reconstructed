@@ -2932,15 +2932,19 @@
     facts.push((model.plans ?? []).length > 0 ? `part of ${(model.plans ?? []).join(", ")}` : "no plan named");
     card.appendChild(el("p", "quiet", facts.join(" . ")));
 
-    const visionName = (answer.planModels ?? []).find((one) => one.alias === model.visionFallback);
+    // A model that names ITSELF has no route, the same rule visionFallbackTarget applies on the
+    // service side: plan-minimax shipped that way and the honest line for it is the middle one
+    // below, not "a screenshot falls back to plan-minimax".
+    const visionTarget = String(model.visionFallback ?? "") === model.alias ? "" : String(model.visionFallback ?? "");
+    const visionName = (answer.planModels ?? []).find((one) => one.alias === visionTarget);
     const vision = el("p", "quiet");
     // Three states, and the middle one is the reason this is not a two-branch check. The model every
     // other one falls back TO has no fallback of its own and never will, so a bare "is there a
     // fallback" test shouts an outage warning at the one model that is working exactly as designed,
     // on every load, forever. The save handler already knows the difference; the screen has to as
     // well, or the operator learns to read the warning as furniture and misses the real one.
-    if (String(model.visionFallback ?? "").length > 0) {
-      vision.appendChild(text(`a screenshot falls back to ${visionName?.customerName || model.visionFallback}`));
+    if (visionTarget.length > 0) {
+      vision.appendChild(text(`a screenshot falls back to ${visionName?.customerName || visionTarget}`));
     } else if (model.supportsVision === true) {
       vision.appendChild(text("this one takes screenshots itself, so nothing falls back"));
       if (model.vision?.ok === false) {

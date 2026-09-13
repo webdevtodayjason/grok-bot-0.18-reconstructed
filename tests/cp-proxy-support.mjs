@@ -372,6 +372,14 @@ export async function startFakeProxy(options = {}) {
     if (route === "POST /fallback") {
       const alias = String(body?.model ?? "");
       const wanted = Array.isArray(body?.fallback_models) ? body.fallback_models.map(String) : [];
+      // A FOURTH SHARP EDGE, and it is the one the control plane kept walking into on every boot: a
+      // model may not be its own fallback. The real build answers 400 with this sentence, which is
+      // what scripts/lib/proxy-legs/stub-proxy.mjs has modelled since the proxy legs were measured;
+      // this fake answered 200 and stored it, so a self-naming deployment looked harmless in here
+      // and printed an error on the R750's every restart.
+      if (wanted.includes(alias)) {
+        return send(400, { detail: { error: `Model '${alias}' cannot be its own fallback` } });
+      }
       const missing = wanted.filter((one) => !deployments.some((row) => row.model_name === one));
       if (missing.length > 0) {
         return send(400, { error: { message: `Invalid fallback models: ${JSON.stringify(missing)}. Available: ${JSON.stringify([...new Set(deployments.map((row) => row.model_name))])}` } });

@@ -55,7 +55,7 @@ import { createCodeTasks } from "./code.mjs";
 // this file answers with. The routes are at the bottom of the dispatcher and the reasoning is there.
 import { beginKeyAction, keyDefinition, keyEvidence, keysDoor, parseKeyValue, proveKey, relaySecrets } from "./secrets.mjs";
 import { INTAKE_BYTES as FEEDBACK_BODY_BYTES, normalizeReport } from "./feedback.mjs";
-import { createProxyClient, includedModelRows } from "./proxy.mjs";
+import { createProxyClient, includedModelRows, visionFallbackTarget } from "./proxy.mjs";
 import { createAllowanceService } from "./allowance.mjs";
 import {
   VERIFY_INTERVAL_MS,
@@ -498,7 +498,12 @@ export function createApp(options = {}) {
     const wanted = new Map();
     for (const row of rows) {
       const alias = String(row?.alias ?? "");
-      const target = String(row?.visionFallback ?? "");
+      // visionFallbackTarget, never the stored field: a deployment that names ITSELF has no route,
+      // and reading the raw value here is what made every boot print
+      // `plan-minimax still has no route to plan-minimax, the proxy answered 400: Model
+      // 'plan-minimax' cannot be its own fallback`. There was nothing to restore and nothing to
+      // report, so such an alias never enters this map and the boot says nothing about it.
+      const target = visionFallbackTarget(row);
       if (alias.length === 0 || target.length === 0 || wanted.has(alias)) continue;
       wanted.set(alias, target);
     }

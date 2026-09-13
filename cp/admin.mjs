@@ -90,6 +90,7 @@ import {
   proxyKeyAlias,
   planModelTier,
   servedPlanModels,
+  visionFallbackTarget,
 } from "./proxy.mjs";
 
 export const ADMIN_SALT_NAME = "login-attempt-salt";
@@ -2240,7 +2241,10 @@ export function createAdminApi({
           ? ""
           : "Every dollar figure for this model is zero until a cost per token is set on it, and a zero reads as 'they have not spent anything'.",
         supportsVision: rows.some((row) => row.supportsVision),
-        visionFallback: fallback.ok ? (fallback.fallbacks[0] ?? "") : first.visionFallback,
+        // The stored name read through visionFallbackTarget, so a deployment that names ITSELF is
+        // reported as having no route rather than as routing to itself. It reaches this branch only
+        // when the proxy could not be asked for the live row.
+        visionFallback: fallback.ok ? (fallback.fallbacks[0] ?? "") : visionFallbackTarget(first),
         vision: { ok: first.visionOk, at: first.visionAt, why: first.visionAt ? "" : "this model has never been asked whether it takes an image" },
         plans: first.plans,
         customerVisible: first.customerVisible,
