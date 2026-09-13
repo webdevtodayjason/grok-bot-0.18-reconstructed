@@ -1459,8 +1459,9 @@ full-screen app has no chat one swipe behind it, Jason asked for the box to go, 
 `nativeAudioWanted`. `paintCall` hides the whole ROW rather than the field inside it, because a bare
 input left in a flex row is still a 44 px gap in the middle of the controls. The screen carries
 `data-voice-call-host="app"` or `"browser"`, so a gate can say which of the two it measured. Where the
-field is drawn, **its answer is not spoken**, and that is a limit rather than a bug being hidden: the relay speaks a reply
-because it is the side that handed the turn to the box, and a typed turn goes straight from this
+field is drawn, **its answer is not spoken**, and that is a limit rather than a bug being hidden: the
+relay speaks a reply because it is the side that handed the turn to the box, and a typed turn goes
+straight from this
 console to the box with the relay not in it. The browser sends exactly three JSON shapes down the
 voice socket and none of them carries text, so speaking a typed line would be a new wire frame. The
 line and its answer are in the chat behind the screen, which is where a person looks when the call
@@ -1824,18 +1825,18 @@ the input list and the restart count rather than only a word.
 On a native call the bottom row carries a speaker/earpiece toggle, speaker by default because a
 hands-free call wants the loudspeaker. Pressing it tells the shell, which applies the choice and
 remembers it for the next call. Under it one quiet line says where the audio really is, as a plain
-word, one of Speaker, Earpiece, Headphones or Bluetooth, with the shell's error after it if there is one. Headphones
-and Bluetooth win the route on their own; the line says so, and the person's speaker/earpiece choice is
-left as it was. In a browser neither the toggle nor the line is there, because WebKit owns the route and
-the choice would do nothing.
+word, one of Speaker, Earpiece, Headphones or Bluetooth, with the shell's error after it if there is
+one. Headphones and Bluetooth win the route on their own, the line says so, and the person's
+speaker and earpiece choice is left as it was. In a browser neither the toggle nor the line is there,
+because WebKit owns the route and the choice would do nothing.
 
 ### When the relay does not answer (VOICE-15c)
 
 VOICE-13 sends every refusal to the shelf and takes the call screen away, which is right for a refusal
-that has a home and a way forward, such as no key, a cap, or a box that is off. A relay that never answered, or a
-line that dropped, has neither, and taking the screen away would leave a phone on a full-screen surface
-with a dead microphone and nothing said. So in the app those two keep the screen: the orb goes off, the
-Mute control becomes Try again, and the screen reads, in plain words,
+that has a home and a way forward, such as no key, a cap, or a box that is off. A relay that never
+answered, or a line that dropped, has neither, and taking the screen away would leave a phone on a
+full-screen surface with a dead microphone and nothing said. So in the app those two keep the screen:
+the orb goes off, the Mute control becomes Try again, and the screen reads, in plain words,
 **"Voice is unavailable: the relay did not answer"** or **"Voice is unavailable: the line dropped"**. A
 phone in a plain browser keeps VOICE-13's behaviour, the sentence on the shelf and the screen gone, so
 nothing without the shell's flag changes.
