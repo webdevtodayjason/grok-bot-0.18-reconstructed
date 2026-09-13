@@ -1,6 +1,6 @@
 # BOOT-1: the console no longer draws after the connectors, it draws before them
 
-Row: `docs/GAP-ANALYSIS.md`, grep `BOOT-1`. Brief: `docs/BOOT-1.md`. Branch: `day-boot1`.
+Row: `docs/GAP-ANALYSIS.md`, grep `BOOT-1`. Brief: `docs/BOOT-1.md`. Branch: `day-boot1`. Commit: `1b5f31e`.
 Files touched: `ui/machine-room/gateway-adapter.js`, `tests/machine-room-gateway.test.mjs`,
 this report, and the BOOT-1 and BOOT-1b gap rows. One more, outside the brief's list and flagged
 in section 4: `tests/browser-driver-protocol.test.mjs`, a pre-existing race in a test the full
