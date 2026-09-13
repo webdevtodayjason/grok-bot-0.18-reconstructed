@@ -2024,7 +2024,7 @@ written once per call, and the transcript row is still the only thing that talks
 `tests/voice-turn.test.mjs` 90 of 90; all twelve voice suites together 376 of 376.
 
 `node scripts/verify-voice.mjs --leg call`, WebKit 390x844 device scale 3 with touch, against
-grok-bot-local-vm and the stub vendor: **87 of 89**, up from 64 of 66 before this wave. The new
+grok-bot-local-vm and the stub vendor: **89 of 90**, up from 64 of 66 before this wave. The new
 section forces one **real** approval on the local box (Auto-review to enforce, one block instruction,
 a scratch agent prompted to run one echo) and puts everything back afterwards, the scratch agent
 included. The host raised it in 24 to 30 s; the copy on the call screen measured **84x44 and 89x44**
@@ -2033,6 +2033,15 @@ with nobody having started a turn, in the read-this-out shape and naming the act
 **copy** settled the transcript row to `approved` with the pill reading "Allowed once"; the copy
 followed it to the settled state with zero buttons left, and the call stayed up through all of it.
 
+One gate row was re-cut with it, and not to get past a red line. "Listening, Thinking and Talking in
+that order" was written before VOICE-14c and asserted that the first occurrence of those three words
+arrived in that order; the line now greets the instant the provider confirms the session, so a
+Talking nobody asked for lands between Connecting and the person's first word and that ordering can
+never hold again. It failed identically on the pristine tree. The greeting is the product, so the row
+now asks that all three words are shown during the call and that the turn's own order holds inside
+whatever the greeting did, read off a continuous in-page recorder rather than a poll for one word at
+a time. MEASURED after the re-cut: `["Connecting","Listening","Talking","Listening","Thinking","Listening","Talking"]`.
+
 What is NOT proven: no real phone and no real vendor, so nothing here says an iPhone reads the card
-at a real notch or that a real realtime model reads the question well. The two rows that are still
-red in that leg are named in `docs/VOICE-19-REPORT.md` and neither is a VOICE-19 behaviour.
+at a real notch or that a real realtime model reads the question well. The one row still red in that
+leg is filed as VOICE-19a and is not a VOICE-19 behaviour.

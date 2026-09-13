@@ -2838,9 +2838,20 @@ async function legCall() {
   await context.addInitScript(() => {
     window.__gateCallUpAt = 0;
     window.__gatePressAt = 0;
+    // VOICE-19. EVERY WORD THE LINE EVER SHOWS, in order, recorded off the same observer rather than
+    // polled for one at a time. VOICE-14c greets the moment the provider confirms the session, so the
+    // Listening between Connecting and that greeting can last milliseconds and a leg that waits for
+    // one word at a time walks straight past it. This is what a person watching the screen sees.
+    window.__gateWords = [];
+    const word = () => {
+      const text = (document.querySelector("[data-voice-call-state]")?.textContent ?? "").trim();
+      if (text.length === 0) return;
+      if (window.__gateWords[window.__gateWords.length - 1] !== text) window.__gateWords.push(text);
+    };
     const watch = () => {
       const node = document.getElementById("voice-call");
       if (node != null && node.hidden === false && window.__gateCallUpAt === 0) window.__gateCallUpAt = performance.now();
+      word();
     };
     // document.documentElement does not exist yet at addInitScript time in WebKit, and observe() throws
     // on a null target -- which this leg then counted as the page throwing.
@@ -3079,8 +3090,21 @@ async function legCall() {
     if (words.at(-1) !== now) words.push(now);
     return now;
   };
+  /** Every word the screen has shown so far, off the page's own recorder rather than off a poll. */
+  const wordsSeen = () => page.evaluate(() => [...(window.__gateWords ?? [])]);
   words.push(opened.screen?.word ?? "");
-  await watchWord("Listening");
+  // TWO PRECONDITIONS BEFORE A TURN IS DRIVEN, and VOICE-14c is the reason for both. The line greets
+  // the moment the provider confirms the session, so the FIRST Listening can be gone in milliseconds
+  // and the word is Talking; and a tool call driven into that window reaches the relay before the
+  // microphone has been heard, which VOICE-15c correctly drops with "I am not hearing your
+  // microphone" and no prompt at all. MEASURED: waiting only for the line left `lastHeard` empty and
+  // no spoken row in the chat. The row this replaced got both preconditions BY ACCIDENT, out of a 15
+  // second timeout spent waiting for a word the greeting had already taken away.
+  await page.waitForFunction(() => {
+    const word = (document.querySelector("[data-voice-call-state]")?.textContent ?? "").trim();
+    const stats = window.__voice?.stats?.();
+    return word === "Listening" && (stats?.micFrames ?? 0) >= 20 ? true : null;
+  }, null, { timeout: 25_000 }).catch(() => {});
   stub.emitSpeechStart();
   const said = `what is the team working on, call ${runId}`;
   for (const part of ["what is", "what is the team", said]) {
@@ -3101,10 +3125,31 @@ async function legCall() {
   await sleep(200);
   void stub.speak("The team is on the settings surface this afternoon.");
   await watchWord("Talking");
-  check(words.includes("Connecting") || words[0] === "Connecting", "the first word is Connecting, because the screen is up before the line is", JSON.stringify(words));
-  const order = ["Listening", "Thinking", "Talking"].map((one) => words.indexOf(one));
-  check(order.every((n, i) => n >= 0 && (i === 0 || n > order[i - 1])),
-    "and then Listening, Thinking and Talking in that order", `the whole observed sequence was ${JSON.stringify(words)}`);
+  const seen = await wordsSeen();
+  check(seen[0] === "Connecting", "the first word is Connecting, because the screen is up before the line is", JSON.stringify(seen));
+  // RE-CUT 2026-09-13 (VOICE-19), and not to get past a red line. This row was written before VOICE-14c
+  // and asserted that the FIRST occurrence of Listening, Thinking and Talking arrived in that order.
+  // The line now says hello the instant the provider confirms the session, so a Talking nobody asked
+  // for lands between Connecting and the person's first word, and that ordering can never hold again.
+  // The greeting is the product, so the row moves to what the product now promises: all three words
+  // are shown during a call, and the TURN'S OWN order still holds inside whatever the greeting did --
+  // the person is heard, then he is working, then he is answering. A regression this still catches: a
+  // turn with no Thinking, a reply that never reaches Talking, or a line that never returns to
+  // Listening after the greeting.
+  const firstTalking = seen.indexOf("Talking");
+  check(["Listening", "Thinking", "Talking"].every((one) => seen.includes(one)),
+    "all three of Listening, Thinking and Talking are shown during the call", `the whole observed sequence was ${JSON.stringify(seen)}`);
+  const heardAt = seen.indexOf("Listening");
+  const workingAt = seen.indexOf("Thinking", heardAt + 1);
+  const answeringAt = workingAt < 0 ? -1 : seen.indexOf("Talking", workingAt + 1);
+  check(heardAt >= 0 && workingAt > heardAt && answeringAt > workingAt,
+    "and the turn's own order holds inside them: heard, then working, then answering",
+    `Listening at ${heardAt}, Thinking at ${workingAt}, Talking at ${answeringAt} of ${JSON.stringify(seen)}`);
+  const greetingLanded = firstTalking >= 0 && firstTalking < workingAt
+    ? (firstTalking < heardAt ? "ahead of the first Listening" : "between the first Listening and the person's words")
+    : "nowhere ahead of the turn";
+  info(`VOICE-14c's greeting is why this row no longer asks for Listening first; on this run it landed ${greetingLanded}, `
+    + `and the whole sequence the screen showed was ${JSON.stringify(seen)}`);
 
   // ---- C: the avatar moves, and nothing in its chain is scaled -----------------------------------
   step("the avatar reacts to a level, and the mascot itself is never transformed");

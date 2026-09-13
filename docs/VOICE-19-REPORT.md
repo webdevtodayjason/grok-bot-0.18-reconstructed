@@ -47,8 +47,8 @@ leg's own relay and the stub vendor.
 
 | | Before this wave | After |
 | --- | --- | --- |
-| checks | 64 of 66 | **87 of 89** |
-| wall clock | 36 s | 90 to 99 s |
+| checks | 64 of 66 | **89 of 90** |
+| wall clock | 36 s | 90 to 103 s |
 
 The new section, on the run of record (`call-final.txt`, 99 s):
 
@@ -90,22 +90,35 @@ The new section, on the run of record (`call-final.txt`, 99 s):
   never appeared on the live card. It is covered in unit tests only.
 - **One box.** grok-bot-local-vm, one host bundle, one roster of 21.
 
-## Still red in `--leg call`, and both are owned
+## One gate row re-cut, on the lead's decision
 
-**1. `and then Listening, Thinking and Talking in that order`.** PRE-EXISTING: it fails identically on
-the pristine tree (baseline run before any VOICE-19 edit, 64 of 66). The observed sequence is
-`["Connecting","Talking","Thinking","Talking"]`. The cause is VOICE-14c: the line now says hello the
-moment the provider confirms the session, so the word after Connecting is Talking, and the gate row
-predates the greeting. **This is a stale gate expectation, not a product fault, and re-cutting it is a
-deliberate decision about what the product should do rather than a repair.** It was left alone on
-purpose: the VOICE-19 brief permits touching `scripts/verify-voice.mjs` only to extend the call leg,
-and loosening an existing assertion to green is the one thing a worker must not do quietly.
-**Owner: the next voice wave that holds this gate.** Next action: decide whether the greeting should
-be preceded by a Listening frame, or whether the row should read
-`Connecting, Talking, Listening, Thinking, Talking`, and re-cut it with the reason written beside it.
-Proof: the leg green with the greeting in place.
+`and then Listening, Thinking and Talking in that order` failed identically on the pristine tree (a
+clean baseline run before any VOICE-19 edit: 64 of 66, same row red), observing
+`["Connecting","Talking","Thinking","Talking"]`. The cause is VOICE-14c: the line says hello the
+moment the provider confirms the session, so a Talking nobody asked for lands between Connecting and
+the person's first word and the old ordering can never hold again.
 
-**2. `and the page threw nothing through any of it`.** Two WebKit notices, both
+**The greeting is the product, so the row was re-cut to match it**, on the team lead's decision of
+2026-09-13. It now asks two things instead of one: that all three of Listening, Thinking and Talking
+are shown during the call, and that the **turn's own order** still holds inside whatever the greeting
+did, which is heard, then working, then answering. It reads them off a **continuous in-page recorder**
+hung on the observer the leg already had, rather than polling for one word at a time, because the
+first Listening can last milliseconds and a poll walks straight past it. It still catches a turn with
+no Thinking, a reply that never reaches Talking, and a line that never returns to Listening.
+
+MEASURED after the re-cut: `["Connecting","Listening","Talking","Listening","Thinking","Listening","Talking"]`,
+with the greeting's Talking at index 2 and the real turn at 4 and 6.
+
+**The re-cut found a second thing on its way, and it is worth writing down.** The old row's fifteen
+second timeout, spent waiting for a word the greeting had already taken away, was also what gave the
+fake microphone time to be heard. A leg that simply stopped waiting drove its tool call into a line
+with no audio on it, and VOICE-15c correctly dropped it: `lastHeard` empty, no prompt to the box, no
+spoken row in the chat. Both preconditions are now named out loud rather than bought by accident from
+a timeout: the line is listening again, and the page has sent at least twenty microphone frames.
+
+## Still red in `--leg call`, and it is filed
+
+**`and the page threw nothing through any of it`.** Two WebKit notices, both
 `ResizeObserver loop completed with undelivered notifications.`, one labelled `[VOICE-19 setup]` and
 one `[VOICE-19 the call with a card on it]`. The phase labels are new in this wave and are what pinned
 them down. Neither is a thrown error: it is the notification WebKit emits when an observer callback
@@ -118,7 +131,11 @@ branch. **Owner: whoever next holds `ui/machine-room/voice-call-avatar.js` or th
 kit.** Next action: instrument which observer's callback is dirtying layout (the kit sizes its canvas
 from its host's rect inside its own `ResizeObserver`, and the face carries a 260 ms width transition),
 then either defer the kit's resize to a frame or drop the transition with the motion cost stated.
-Proof: the leg green with a real card on the call screen, twice in a row.
+Proof: the leg green with a real card on the call screen, twice in a row. **Filed as VOICE-19a in
+docs/GAP-ANALYSIS.md**, under the VOICE rows, with both phases and the reverted attempt recorded so
+nobody spends the afternoon on it twice. The row is left RED rather than filtered: the check means
+what it says, and a gate that greps a known string out of its own evidence is how a real fault gets
+shipped next to a benign one.
 
 ## How to run it
 
