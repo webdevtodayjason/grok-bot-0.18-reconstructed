@@ -91,11 +91,41 @@ file, so the ceiling on disk is 10 MB. A row is
 directory and not a customer's, because a refused sign-in has no customer yet: somebody typing a
 wrong email at the login page belongs to nobody, and a per-tenant ledger would simply lose them.
 
+**There are three doors, not two.** `instance` is the operator's own console password. `account` is a
+customer's email and password, which the control plane decides. `link` is a sign-in link: the control
+plane mints it, the relay verifies it against that workspace's own key, and **nothing is typed**, so
+the control plane is never called and has no row of its own for it. That third door used to write one
+console log line and nothing else, which is why the Clients panel could say a customer had never
+logged in while they were using their workspace. Measured on the R750 2026-09-12 for beta-36: the
+tester came in by link at 13:52 and read as never logged in for the 38 minutes his box spent 9.7M
+input tokens. All three answers of the link door are now written down, and none of them carries a
+hash, because there is no password on any of them.
+
 The **control plane** keeps a `login_attempts` table in its own sqlite. That is not the same table
 as `login_failures`, and the difference matters: `login_failures` is the lockout's counter, cleared
 on a successful sign-in and pruned to a ten minute window, so by design it cannot answer "who has
 been knocking today". `login_attempts` is the record, kept for thirty days, and nothing clears it
 early.
+
+**Its rows carry the reason in words, and the relay's do not.** `refused` is the same word for a
+stranger guessing, for a customer holding a password somebody changed under him, for a door that was
+turned off on purpose and for a workspace that no longer exists. The relay cannot tell those apart --
+every one of them is decided on this side -- so the sentence is written here, next to the outcome, by
+the route that decided it. Five of them exist today:
+
+| what happened | what the row says |
+|---|---|
+| the password did not match | the password did not match the one on file, which was changed 2 hours ago (or has not been changed since the account was made) |
+| no account for that address | there is no account for that address on this control plane |
+| locked out | too many failed tries on this account and this address in the last ten minutes, so the door is shut for 420 more seconds |
+| the sign-in is turned off | the password was right and this sign-in has been turned off, so nobody is guessing: somebody closed this door |
+| the workspace is gone | the password was right and the workspace acme is not registered on this control plane, so there is nothing to sign in to |
+
+**None of those ever reaches the caller.** A wrong email and a wrong password still answer with the
+identical 401 body, because telling them apart tells a guesser who has an account here. The reason is
+what you read; it is not what the visitor is told. A reason is capped at 200 characters with its
+newlines taken out, and nothing derived from a password is ever in one: the keyed hash is still the
+only thing that is.
 
 The panel shows them as one list. A sign-in that came through the console is written down on both
 sides, because the relay forwards it, so a control plane row that matches a relay row within two
@@ -465,6 +495,9 @@ hash nobody can ask back and changing it would lock out a customer who has alrea
 person's own row offers; the new one is shown once in the banner and the row records which of the two
 shapes went out. A double press inside the hour cannot mail a real human twice.
 
+Both of those go through the **link door**, so a customer who uses one now shows up as a sign-in on
+their own row and in the Sign-in attempts panel, named as a link.
+
 **Copy a sign-in link** is the recovery when a welcome bounced. Understand what it is: a stateless
 bearer credential in a URL. The relay verifies it with that workspace's own key and **never checks it
 for revocation**, so it works as many times as it is clicked until it expires and cannot be cancelled
@@ -521,13 +554,59 @@ node cp/cli.mjs tenant remove <slug> [--delete-data] [--yes]
 door for a workspace that is already stopped: it takes the row out and does none of the nine things
 above. **Remove** is the one to use for a customer.
 
+#### Removing one person, and their phones (DEVICE-1)
+
+`DELETE /v1/accounts/<email>` (`cp/cli.mjs account remove`) closes one person's sign-in without
+touching the workspace. **It also revokes every device bearer that account minted**, which it did not
+until this wave: a bearer is an HMAC payload plus a row in the tenant's own state directory, and the
+account row this service deletes is neither of those. Measured on the R750 2026-09-10, two bearers
+belonging to a removed account were still opening `/api` and `/push` on the demo workspace with the
+rest of their thirty days to run, and the fix was `cp device revoke demo <id>` twice by hand.
+
+**By the account, never by the workspace.** Two people can share a workspace, so the revoke matches on
+the device row's `sub`, which is the account id off the verified token that minted it. A colleague's
+phone on the same workspace is not touched and is never even named in a delete.
+
+A revoked bearer meets the front door's own refusal, `401 {"error": "not signed in"}` with
+`x-relay-auth: required`, within one device cache window.
+
+**A relay that cannot be asked does not stop the removal.** Leaving the account in place because a
+device list could not be read is the worse of the two failures, so the account goes and the answer
+says what is still live:
+
+```
+Its device bearers could not be revoked: the relay could not be asked for acme's device list
+(the relay did not answer), so a bearer this account holds is still live until it expires.
+Finish it with: node cp/cli.mjs device list acme
+```
+
+A tenant **teardown** needs none of this: `Remove` deletes that workspace's accounts at its last step,
+by which point the container is gone and the workspace is out of the relay's registry, so a bearer for
+it has nothing left to open.
+
 #### The cards
 
 One card per customer: the workspace, its status in our own ledger, what Coolify says about it right
 now, and `plan: none`, which is said out loud rather than left blank because "we do not bill yet" is
 a fact about the product. Under it, the people who can sign in: when they were added, when they last
-actually got in (from the sign-in record, and "never" is a real answer), and whether they hold the
-super admin flag or have their sign-in turned off.
+actually got in, **how** they got in, the last attempt that failed with the reason it failed, and
+whether they hold the super admin flag or have their sign-in turned off.
+
+**The sign-in column reads both ledgers, and that is the fix rather than a nicety.** A login by
+sign-in link exists ONLY in the relay's file, so a count taken from this service's own table alone
+reported a customer who had been using their workspace all afternoon as somebody who had never
+arrived. The count now merges the two through the same reader the Sign-in attempts panel uses, so an
+attempt the console forwards is one sign-in and not two, and the cell names the door the last one came
+in by: *by sign-in link*, *with an email and password*, *with the instance password*. "Never" is still
+a real answer and still reads as one.
+
+**A count that is short says so.** A relay that could not be asked can hide a link login, so the
+panel prints one line at the top saying the counts are this service's ledger alone until it answers.
+Every "never" under that line is a maybe, and the line is there so nobody reads it as a fact.
+
+**The newest failure is drawn under the time, with its sentence.** That is the one thing beta-36 had
+no way to show: a tester whose password had been changed, meeting the same refusal over and over, on a
+panel whose only word for it was "refused".
 
 The four workspace buttons go through the same code path as `cp/cli.mjs tenant`, including the guard
 that refuses to rebuild an adopted instance. That guard matters here more than anywhere: `titanium`
@@ -732,15 +811,15 @@ printed on the forms themselves:
 - **One reader, and it is not a box.** `GET /v1/relay/keys`, behind `CP_RELAY_TOKEN`, method
   refusal first so a wrong method charges nobody. The relay holds them in memory, refreshes every five
   minutes, keeps its last good copy through an outage, and never writes one beside a state file or
-  pushes one into a container — every exec daemon in a customer's box runs as uid 0, so a key inside
+  pushes one into a container -- every exec daemon in a customer's box runs as uid 0, so a key inside
   one is readable by that customer's own agents.
 
 **Vendor names are allowed on this block and nowhere a customer can read.** This is the operator's
 screen and he has to know which account a key came from.
 
 **The inbound mail signing secret is deliberately NOT here.** It is a routing discriminator rather
-than a vendor credential — when two workspaces claim one mail domain, the one whose secret verifies
-*this body* gets the message — so one global value would let the first claimant read another
+than a vendor credential -- when two workspaces claim one mail domain, the one whose secret verifies
+*this body* gets the message -- so one global value would let the first claimant read another
 customer's mail. docs/MAIL.md §1a is the argument in full.
 
 #### What KEYS-2 measured, and on which machine
@@ -782,7 +861,7 @@ leaving three accounts):
 - **A made-up key is refused in the vendor's own words and nothing is stored.** A synthetic value pasted
   into that field came back **"xAI answered 400 when asked about that key, so it was not checked. Nothing
   was stored."** The field was left empty, and after a full reload of the console the row still read
-  *Not set.* — which is the half that proves the refusal did not quietly keep it.
+  *Not set.* -- which is the half that proves the refusal did not quietly keep it.
 - **System health carries the pointer and no longer carries the forms.** The last line on that panel is a
   link reading *Keys*, `href="#panel-keys"`, painted `rgb(0, 200, 240)` rather than the browser's default
   blue, on that panel's first screen; `#productKeys` and `#pushDoors` are both absent from it.
@@ -877,6 +956,19 @@ Four things it holds, and where each number comes from:
 5. **Pushing a label always asks which workspaces.** The relay door it drives writes seven names
    including the model, so a push moves a workspace onto that plan model. The page sends an empty
    request, renders the candidates the route answers with, and posts only what the operator ticked.
+
+**A model is never its own screenshot fallback, however the field was filled in.** Every Titan turn can
+carry a screenshot, so a customer-visible plan model has to either take images itself or name one a
+request carrying one falls back to. Naming YOURSELF satisfies that guard and registers no route at all,
+and `plan-minimax` shipped on the R750 in exactly that state: customer visible, `tb_vision_fallback`
+set to `plan-minimax`, and `GET /fallback/plan-minimax` answering 404. Two things close it. The panel
+refuses self-naming unless that model's own vision check has passed, which is how a model says "images
+stop here". And every reader that resolves a route reads the stored name through one function, so a
+deployment naming itself has **no** fallback rather than a route to itself: the boot reconcile does not
+try to write it, the card does not claim a screenshot falls back to it, and the proxy is never sent a
+write it refuses with `Model 'plan-minimax' cannot be its own fallback`. That refusal used to be on
+stdout at every single control plane start, which is the fastest way to teach somebody to ignore a
+boot log.
 
 **The ledger is never pruned, and that is said here so nobody trims it later.** `admin_actions`
 records who changed what, when, and from which address, for every change made on this panel. Sign-in
@@ -1225,7 +1317,7 @@ by `cp/server.mjs`'s `requireAdmin`.**
 The two are not interchangeable. `requireAdmin` is a constant-time compare against `CP_ADMIN_TOKEN`
 and nothing else. That value lives in this service's environment; a browser has no way to learn it
 and never will. What a signed-in person's tab holds is a session token from `POST /v1/sessions`.
-`requireSuperAdmin` accepts **either** — the operator's bearer, so the CLI is unaffected, or a
+`requireSuperAdmin` accepts **either** -- the operator's bearer, so the CLI is unaffected, or a
 session whose account carries the flag, looked up in the store on every request.
 
 Anything under `/v1/admin/*` gets this for free: `cp/admin.mjs` runs `requireSuperAdmin` once at the
@@ -1237,7 +1329,7 @@ itself, so a wave that cannot edit that file puts its route elsewhere. Today tha
 Getting it wrong does not show up as an empty panel. `api()` in `cp/admin/admin.js` treats **any**
 401 as a dead session and signs the person out with "That session is no longer valid. Sign in
 again." The Overview loads several panels at once, so one route behind the wrong guard throws the
-operator back to the door a couple of seconds after they sign in — which is exactly what
+operator back to the door a couple of seconds after they sign in -- which is exactly what
 `GET /v1/voice/usage` did on 2026-09-10 (ADMIN-4).
 
 `tests/cp-admin-page-routes.test.mjs` holds the rule: it reads `cp/admin/admin.js`, pulls out every
