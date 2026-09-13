@@ -87,6 +87,7 @@
     <a href="#panel-spend">Spend</a>
     <a href="#panel-providers">Providers</a>
     <a href="#panel-feedback">Feedback</a>
+    <a href="#panel-support">Support</a>
     <a href="#panel-marketplace">Marketplace</a>
   </nav>
 
@@ -441,7 +442,53 @@
     </form>
   </section>
 
-  <!-- 9. Marketplace ------------------------------------------------------------------------- -->
+  <!-- 9. Support ----------------------------------------------------------------------------- -->
+  <!--
+    SUPPORT-1. Mail that arrived at the operator's support address, forwarded here by their own
+    Cloudflare Email Worker. docs/SUPPORT.md is the contract.
+
+    Jason, 2026-09-12: "Support@titaniumbot. If something comes in on that... maybe that goes to a
+    new support page and sends me a notification to my Titanium." Before this it was a Cloudflare
+    forward into his personal mailbox and nothing anybody else could see.
+
+    THE ONE THING THIS PANEL DOES NOT DO IS REPLY, and it says so on its own line rather than in a
+    document. There is no support mailbox to send from and no thread to send into, so the operator
+    answers from their own mail client and marks the message replied. A Reply button wired to
+    nothing would be worse than no button.
+
+    Nothing the sender wrote is editable here. The sender, the subject and the body are a record of
+    what arrived; the state and the note are the operator's.
+  -->
+  <section class="panel" id="panel-support" data-panel="support" hidden>
+    <h2>Support</h2>
+    <div class="strip"></div>
+    <p class="quiet" id="supportGates">Mail to your support address, forwarded here by your own
+      email worker. Nothing is ever sent from here.</p>
+    <div class="controls">
+      <label for="supportState">State</label>
+      <select id="supportState">
+        <option value="">every state</option>
+        <option value="new">new</option>
+        <option value="replied">replied</option>
+        <option value="closed">closed</option>
+      </select>
+      <span id="supportNote" class="quiet"></span>
+    </div>
+    <div id="supportRows" class="clients"></div>
+
+    <h3>What the email worker presents</h3>
+    <p class="quiet" id="supportTokenNote"></p>
+    <form id="supportTokenForm" class="keyForm">
+      <button id="supportTokenMint" type="submit" class="ghost small">Mint a new inbound token</button>
+      <span class="why">The token is shown once, here, and written nowhere else. Paste it into the
+        email worker's SUPPORT_TOKEN secret. Minting a new one stops the old one working, so a
+        worker still holding it cannot deliver until you paste the new one. This token opens the
+        support intake and nothing else on this service.</span>
+    </form>
+    <p class="quiet" id="supportTokenValue"></p>
+  </section>
+
+  <!-- 10. Marketplace ------------------------------------------------------------------------ -->
   <!--
     MARKET-26 and CLOUD-BROWSER-1. The panel for the two things about the Marketplace that go wrong
     quietly: a row that still tells a customer something the vendor stopped documenting, and a cloud

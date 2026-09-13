@@ -46,7 +46,7 @@
 //   ceiling     AGENTS-CAP-2: the clients panel reads the number off the box, 0, 5000, "forty",
 //               2.5 and null are each refused in a sentence and never reach the box, a write
 //               answers with what the box read back, and a pin reports a pin and not a success
-//   page        headless Chrome signs in at /admin and the ten panels are walked one at a time
+//   page        headless Chrome signs in at /admin and the eleven panels are walked one at a time
 //               through the rail: each opens from its own hash, is the only one on screen, does not
 //               push the document past 900 px at 1440x900, and still carries every control it had
 //               (ADMIN-3). The rail is reachable by Tab and by the pointer, and a cold load at a
@@ -2013,15 +2013,15 @@ if (!WANT_BROWSER) {
   const live = await page.evaluate(() => window.__adminLive ?? null);
   check(live != null, "the super admin gets in and the page finishes loading", live ? `${live.panels} panels at ${live.at}` : "no readiness flag");
 
-  // ---- ADMIN-3: ten panels, one on screen, and a page that never scrolls ------------------------
+  // ---- ADMIN-3: eleven panels, one on screen, and a page that never scrolls ----------------------
   //
-  // Ten since KEYS-2, and still eight loaders, which are deliberately different numbers: two panels
-  // fetch nothing. The Overview is drawn from what the eight registered, and Keys is drawn by the
+  // Eleven since SUPPORT-1, and nine loaders, which are deliberately different numbers: two panels
+  // fetch nothing. The Overview is drawn from what the nine registered, and Keys is drawn by the
   // System health loader out of the two answers it already had. The readiness flag counts LOADERS,
   // because that is the thing a gate has to wait for.
   //
   // The old form of this leg asserted isVisible on all eight ids at once, which was right when they
-  // were stacked and is nine guaranteed failures now. Each panel is opened by its own hash instead,
+  // were stacked and is ten guaranteed failures now. Each panel is opened by its own hash instead,
   // which is also the check that a pasted link opens a panel.
   //
   // THE LIST IS THE LEG. Adding an id here extends the hash walk, the only-one-on-screen check, the
@@ -2030,7 +2030,8 @@ if (!WANT_BROWSER) {
   // were edited by hand in the same pass.
   const panels = [
     "panel-overview", "panel-signins", "panel-clients", "panel-boxes", "panel-system",
-    "panel-keys", "panel-spend", "panel-providers", "panel-feedback", "panel-marketplace",
+    "panel-keys", "panel-spend", "panel-providers", "panel-feedback", "panel-support",
+    "panel-marketplace",
   ];
 
   // What each panel had before this wave and must still have. Presence, not visibility: several of
@@ -2053,6 +2054,10 @@ if (!WANT_BROWSER) {
       "#addPlanModelShow", "#planModelForm", "#providerDefaults", "#adminLedger",
     ],
     "panel-feedback": ["#feedbackGates", "#feedbackTier", "#feedbackState", "#feedbackNote", "#feedbackRows", "#feedbackTokenNote", "#githubTokenForm", "#githubRepo", "#githubToken"],
+    // SUPPORT-1. The state filter, the rows, and the mint form. There is no token FIELD on this panel
+    // and there never will be: the inbound token is minted by this service and shown once, so a text
+    // input for it would be a place to paste a credential that nothing reads.
+    "panel-support": ["#supportGates", "#supportState", "#supportNote", "#supportRows", "#supportTokenNote", "#supportTokenForm", "#supportTokenMint"],
     "panel-marketplace": ["#marketplaceNote", "#marketplaceRows", "#marketplaceChanges", "#marketplaceLedger", "#marketplaceLedgerNote", "#marketplaceDelivery"],
   };
 
@@ -2206,7 +2211,11 @@ if (!WANT_BROWSER) {
     const reachWhy = reach == null ? "there is no such element" : await hittable("#keys-voice-xai-value");
     check(reachWhy === "", "and it is what is really under the pointer at its own centre", reachWhy);
   }
-  check(live?.panels === 8, "and the readiness flag says eight loaders ran, which is a different number on purpose", String(live?.panels));
+  // SUPPORT-1 moved this from 8 to 9. The flag counts LOADERS and the rail counts PANELS, and they
+  // are deliberately different numbers: the Overview is drawn from what the loaders registered and
+  // Keys is drawn by the System health loader, so the rail is eleven and this is nine. A panel with a
+  // route of its own moves both, which is what the support inbox is.
+  check(live?.panels === 9, "and the readiness flag says nine loaders ran, which is a different number from the eleven panels on purpose", String(live?.panels));
 
   // KEYS-2, THE POINTER. System health lost both blocks, so it says where they went. Static markup in
   // cp/admin/index.html, named here so a delete of it fails this gate rather than stranding an
@@ -2957,7 +2966,7 @@ if (!WANT_BROWSER) {
     String((wholePage.match(/LiteLLM/g) ?? []).length));
 
   // No em dashes anywhere on the screen. Jason's rule, and the panel is copy a business owner reads.
-  check(!wholePage.includes("—"), "no em dash on any of the ten panels");
+  check(!wholePage.includes("—"), "no em dash on any of the eleven panels");
 
   check(pageErrors.length === 0, "and the page threw nothing", pageErrors.slice(0, 2).join(" | "));
 
@@ -3117,7 +3126,7 @@ step("nothing leaked");
 // ---- out ------------------------------------------------------------------------------------------
 console.log("");
 if (failures === 0) {
-  console.log("PASS  the super admin console holds: the flag, the door, the ledger, the attack rule, ten panels behind a rail on a page that never scrolls, the five paste forms on a Keys entry of their own with the first field on the first screen, a client added and a duplicate refused, provider health that can go back to green, a duplicate provider removed, a provider key and a repository token that go in through the screen and come back out nowhere, the two gates on every report, and a ceiling read off the box.");
+  console.log("PASS  the super admin console holds: the flag, the door, the ledger, the attack rule, eleven panels behind a rail on a page that never scrolls, the five paste forms on a Keys entry of their own with the first field on the first screen, a client added and a duplicate refused, provider health that can go back to green, a duplicate provider removed, a provider key and a repository token that go in through the screen and come back out nowhere, the two gates on every report, and a ceiling read off the box.");
 } else {
   console.log(`FAIL  ${failures} check${failures === 1 ? "" : "s"} did not hold.`);
   if (childLog.length > 0) {

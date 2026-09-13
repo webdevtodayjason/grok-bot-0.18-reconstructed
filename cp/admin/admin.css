@@ -544,3 +544,46 @@ form.stack .controls { margin: 0; }
   background: #0C131C; color: var(--ink); border: 1px solid var(--line); border-radius: 6px;
   resize: vertical; min-height: 68px;
 }
+
+/* ---- SUPPORT-1: the support inbox ------------------------------------------------------------
+   Appended at the end, like the marketplace and push blocks above it, so parallel worktrees can each
+   add a block to this file without meeting in a diff.
+
+   It borrows the card frame from `.client` the way `.feedbackCard` does, and for the same reason that
+   it does NOT borrow the class name: a gate counts `.client` in strict mode to say how many
+   workspaces the Clients panel drew, and a support message wearing that name makes a correct page
+   read as an extra customer.
+
+   The only thing that is new is the body. A support message is somebody else's plain text, often with
+   a quoted thread under it, so it needs to WRAP rather than scroll sideways -- a mail whose lines run
+   off the right of the panel is a mail an operator reads half of -- and it needs a ceiling, because
+   one customer pasting a log file must not push every other card off the screen. */
+.supportCard {
+  border: 1px solid var(--line); border-radius: 8px; padding: 13px 15px; background: #0C131C;
+}
+/* The one red line on this panel: a message that arrived and that NOBODY WAS TOLD ABOUT. This page
+   has no generic red text class -- the only two reds on it are a stat's border and a card's -- and a
+   "nobody was told" line drawn in the same grey as the rest is a failure an operator reads straight
+   past for a fortnight. */
+.supportCard p.quiet.bad { color: var(--bad); }
+.supportCard .head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.supportCard .head strong { font-size: 15px; }
+.supportCard details { margin-top: 8px; }
+.supportCard summary { cursor: pointer; }
+.supportCard p { margin: 6px 0 0; white-space: normal; }
+#panel-support pre {
+  white-space: pre-wrap; word-break: break-word; max-height: 22em; overflow-y: auto;
+  margin: 8px 0 0; padding: 8px 10px; background: #0C131C; border: 1px solid var(--line);
+  border-radius: 6px; font-size: 12.5px;
+}
+/* The note travels with whichever state button is pressed, so it sits in the same row as them and
+   takes the space they do not. */
+.supportCard .controls { margin-top: 10px; }
+.supportCard input.supportNote {
+  flex: 1 1 14em; min-width: 10em; padding: 6px 9px; font-size: 12.5px;
+  background: #0C131C; color: var(--ink); border: 1px solid var(--line); border-radius: 6px;
+}
+/* The minted token, shown once. Monospace because it is going to be selected and pasted, and
+   breakable because it is 68 characters with no spaces in it. */
+#supportTokenValue { font-family: var(--mono); word-break: break-all; user-select: all; }
+#supportTokenValue:empty { display: none; }
