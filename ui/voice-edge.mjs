@@ -538,7 +538,11 @@ export function rateLimitOf(event) {
  * host-notes-read-as-errors.md happening in someone else's codebase.
  */
 const QUIET_PROVIDER_CODES = new Set(["response_cancel_not_active", "item_not_found", "conversation_already_has_active_response"]);
-export const providerErrorIsQuiet = (event) => QUIET_PROVIDER_CODES.has(String(event?.error?.code ?? ""));
+export const providerErrorIsQuiet = (event) => QUIET_PROVIDER_CODES.has(String(event?.error?.code ?? ""))
+  // xAI answers a response.cancel that lands after the response finished with a generic
+  // invalid_request_error whose message says what happened. MEASURED on the R750 2026-09-12 twice
+  // in one barge-in call: a race nobody can hear, not a fault.
+  || /^Cancellation failed/.test(String(event?.error?.message ?? ""));
 
 // ---- the echo gate, server side (A4) ------------------------------------------------------------
 //
@@ -881,6 +885,14 @@ export const MAX_NUDGES = 2;
 export const FIRST_NUDGE_MS = 20000;
 /** Two announcements never closer than this, and never while a response is in flight. */
 export const ANNOUNCE_GAP_MS = 8000;
+/**
+ * VOICE-14c. The line says hello the moment it is up, before the person has said a word. Jason,
+ * 2026-09-12: "as soon as you start the call, it should say something first, like Hey there ...
+ * or just Hi. It could be random." A silent open line reads as a dead one; this is the dial tone.
+ * Short on purpose: each greeting is one billed text item on xAI.
+ */
+export const GREETINGS = ["Hey there.", "Hi.", "Hey, I'm here.", "Hello.", "Hey. Go ahead."];
+export const pickGreeting = (random = Math.random) => GREETINGS[Math.min(GREETINGS.length - 1, Math.floor(random() * GREETINGS.length))];
 /** How often the relay checks its own clock against the caps. */
 export const CAP_TICK_MS = 10000;
 /**
@@ -1694,6 +1706,8 @@ export function makeVoiceSession({
   /** Called once, after the row is settled, so the edge can forget this session. */
   onClosed = () => {},
   log = () => {},
+  // VOICE-14c. A real line always greets; tests that count every frame turn it off.
+  greet = true,
 }) {
   const vendor = vendorOf(settings.vendor);
   const model = settings.model.length > 0 ? settings.model : vendor.model;
@@ -1709,6 +1723,7 @@ export function makeVoiceSession({
   let provider = null;
   let responseInFlight = false;
   let lastAnnounceMs = 0;
+  let greeted = false;
   let speakId = 0;
   let stopping = false;
   /**
@@ -2063,7 +2078,12 @@ export function makeVoiceSession({
       if (meter.toolCalls === 0 && meter.audioOutBytes === 0) return void close("the voice service refused this session", SENTENCE.providerRefused, "no-key");
       return undefined;
     }
-    if (type === "session.updated") { setState("listening"); return undefined; }
+    if (type === "session.updated") {
+      setState("listening");
+      // VOICE-14c: once per line, the first time the provider confirms the session.
+      if (greet && !greeted) { greeted = true; void say(pickGreeting()); }
+      return undefined;
+    }
     if (type === "input_audio_buffer.speech_started") {
       // VOICE-14. THE PERSON TALKED OVER THE AGENT, which in the phone app is allowed and everywhere
       // else cannot happen, because everywhere else the microphone was shut. BOOKED AUDIO IS THE TEST
@@ -2390,6 +2410,8 @@ export function makeVoiceEdge({
   t,
   call,
   policy,
+  // VOICE-14c. Off only in tests that count every frame on the wire; a real line always greets.
+  greet = true,
   ownLikeParent = null,
   log = () => {},
   now = () => Date.now(),
@@ -2624,6 +2646,7 @@ export function makeVoiceEdge({
       const sessionId = newSessionId();
       const ledger = ledgerFor(sessionId);
       const session = makeVoiceSession({
+        greet,
         t, settings, policy, agent, call, ledger, sessionId, now, WebSocketImpl, providerUrl, capTickMs, log,
         dialWatchdogMs,
         onClosed: (one) => { sessions.delete(one); },

@@ -286,6 +286,14 @@ model-supplied agent id would be a cross-tenant read through an open microphone.
 
 ---
 
+### The line says hello first (VOICE-14c)
+
+The moment the provider confirms the session, the relay has the voice say one short greeting from a
+fixed list, picked at random: "Hey there.", "Hi.", "Hey, I'm here.", "Hello.", "Hey. Go ahead." It
+is sent once per line as a read-this-out text item plus one response.create, so on xAI it is one
+billed text item. A line that opens in silence reads as a dead line; this is the dial tone. Jason,
+2026-09-12, on the phone: "as soon as you start the call, it should say something first."
+
 ## 5. The honest latency, and the silence in the middle
 
 Measured on `grok-bot-local-vm`, September 2026, against the real host:

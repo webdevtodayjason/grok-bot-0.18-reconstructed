@@ -26,7 +26,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { startStubRealtime } from "./helpers/stub-realtime.mjs";
 import {
-  MAX_TITAN_ROUNDS, TURN_WAIT_CAP_S,
+  GREETINGS, MAX_TITAN_ROUNDS, TURN_WAIT_CAP_S, pickGreeting,
   isUnknownGatewayMethod, makeCallDedupe, makeSentenceCutter, makeTurnRunner, makeVoiceEdge,
   makeVoicePolicy, matchYesNo, pendingCardsOf, remainderOf, resolveHeldCard, resolveVoiceAgent,
   splitSentences, toolCallsOf, writeVoiceSettings,
@@ -628,7 +628,7 @@ test("two pending cards are not guessed between, and the turn names them", async
 // this wave owns exactly one test helper (tests/helpers/stub-realtime.mjs, which item C imports) and
 // adding a second would put a file in two waves' hands.
 
-async function openSession({ stub, settings, gateway, dir }) {
+async function openSession({ stub, settings, gateway, dir, greet = false }) {
   await writeVoiceSettings(settings, { file: path.join(dir, "voice.json") });
   const t = {
     slug: "acme", name: "Acme", operator: false,
@@ -642,7 +642,7 @@ async function openSession({ stub, settings, gateway, dir }) {
   // the relay thought was happening, or the next person debugs it by guessing.
   const logLines = [];
   const edge = makeVoiceEdge({
-    t, call: gateway.call, policy: makeVoicePolicy({}), providerUrl: stub.url,
+    t, call: gateway.call, policy: makeVoicePolicy({}), providerUrl: stub.url, greet,
     log: (line) => logLines.push(String(line)),
   });
   const server = net.createServer();
@@ -878,6 +878,33 @@ test("VOICE-3 end to end: each sentence is read out as it lands and the tool out
     assert.equal(session.of("said").at(-1).text, whole);
     const hops = session.of("hops").at(-1);
     assert.ok(hops.td > 0 && hops.td < hops.t3, `td ${hops.td} t3 ${hops.t3}`);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-14c: the line says hello first, once, before the person has said a word", async () => {
+  // Jason, 2026-09-12: "as soon as you start the call, it should say something first". The greeting
+  // is the first text item and the first response.create on the wire, sent when the provider
+  // confirms the session and never again for the life of the line.
+  assert.equal(pickGreeting(() => 0), GREETINGS[0]);
+  assert.equal(pickGreeting(() => 0.999), GREETINGS.at(-1));
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai", audioFrames: 1 });
+  const gateway = fakeGateway({ agents: [{ id: "a1", name: "Titan", isRunning: true }], tail: () => [], draft: "unknown" });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0001" }, gateway, dir, greet: true });
+    await session.settle(() => stub.events.responseCreates > 0, "the greeting's response.create");
+    const items = stub.events.inbound
+      .filter((event) => event.type === "conversation.item.create" && event.item?.type === "message")
+      .map((event) => String(event.item.content?.[0]?.text ?? ""));
+    assert.equal(items.length, 1, JSON.stringify(items));
+    assert.ok(GREETINGS.some((greeting) => items[0].endsWith(greeting)), items[0]);
+    assert.equal(stub.events.responseCreates, 1);
+    assert.equal(stub.events.toolOutputs.length, 0, "nothing went to Titan: the greeting is the line's own");
   } finally {
     await session?.close();
     await stub.close();

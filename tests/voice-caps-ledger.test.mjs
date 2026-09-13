@@ -379,7 +379,7 @@ function settingsEdge({ dir, operator }) {
     voiceSettingsFile: path.join(dir, "voice.json"),
     voiceLedgerFile: path.join(dir, "voice-minutes.jsonl"),
   };
-  return makeVoiceEdge({
+  return makeVoiceEdge({ greet: false,
     t,
     call: async (command) => (command === "listAgents" ? { agents: [{ id: "a1", name: "Titan", isRunning: true }] } : {}),
     policy: makeVoicePolicy({}),
@@ -486,7 +486,7 @@ async function openSocket({ dir, settings, stub = null, gateway = null, WebSocke
     voiceLedgerFile: path.join(dir, "voice-minutes.jsonl"),
   };
   const call = gateway ?? (async (command) => (command === "listAgents" ? { agents: [{ id: "a1", name: "Titan", isRunning: true }] } : {}));
-  const edge = makeVoiceEdge({
+  const edge = makeVoiceEdge({ greet: false,
     t, call, policy: makeVoicePolicy(relay), providerUrl: stub?.url ?? "ws://127.0.0.1:9/never",
     WebSocketImpl, log: (line) => logLines.push(String(line)),
     // KEYS-1. The operator's own keys, when a test is measuring which one dials. Null -- the default

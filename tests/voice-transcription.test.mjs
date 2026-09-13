@@ -117,7 +117,7 @@ async function openSession({ stub, settings, gateway, dir }) {
     voiceLedgerFile: path.join(dir, "voice-minutes.jsonl"),
   };
   const logLines = [];
-  const edge = makeVoiceEdge({
+  const edge = makeVoiceEdge({ greet: false,
     t, call: gateway.call, policy: makeVoicePolicy({}), providerUrl: stub.url,
     log: (line) => logLines.push(String(line)),
   });
