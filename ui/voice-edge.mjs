@@ -51,8 +51,10 @@
  *      host dropped the SendMessage tool call from every gateway surface. As of 2026-09-12 the host
  *      projects the message it is part way through writing behind one new command, `getTurnDraft`
  *      (source/host/extensions/transcript/turn-draft.ts), and the turn runner below reads it on the
- *      same 400 ms tick it already polls the tail on, handing each sentence over as it becomes
- *      whole. BOTH PATHS ARE LIVE AND BOTH ARE TESTED: a box whose host predates that command
+ *      same 400 ms tick it already polls the tail on, handing the FIRST sentence over as it becomes
+ *      whole -- VOICE-16b capped it at that one, and the rest of the answer goes back on the tool
+ *      output for the model to say short. BOTH PATHS ARE LIVE AND BOTH ARE TESTED: a box whose host
+ *      predates that command
  *      answers 404, the reader stops asking, and the turn is the original WAIT-THEN-SPLIT seam with
  *      the acknowledgement carrying the silence. What this file still does not do is claim the
  *      vendor streams: the sentences are cut here, from the host's draft, and the finished entry
@@ -292,6 +294,11 @@ export const TURN_DETECTION = { type: "server_vad", threshold: 0.55, silence_dur
  * the seam for a JOB and not for a sentence -- do it, look it up, or check it. The result path is
  * untouched: VOICE-3 sentence streaming, held cards and the spoken yes all still come back through
  * the same output.
+ *
+ * VOICE-16b CHANGED FIVE WORDS OF IT, and only because leaving them contradicts the instructions. The
+ * description used to finish "then read out what comes back", which is the exact behaviour the spoken
+ * contract in voiceInstructions now forbids; a tool description and a system prompt that disagree is a
+ * prompt that argues with itself, and the model resolves that however it likes. Nothing else here moved.
  */
 export function titanTool() {
   return {
@@ -304,8 +311,8 @@ export function titanTool() {
       + "log, a number you do not already have, anything that has happened since you last spoke, and "
       + "anything at all you are not sure of. Do NOT call it for ordinary conversation you can already "
       + "answer out of who you are and what you remember. Say one short thing first, like \"checking "
-      + "the mail now\", so the line is not silent, then read out what comes back. It takes five to "
-      + "twenty-five seconds.",
+      + "the mail now\", so the line is not silent, and then say the gist of what comes back in one "
+      + "short sentence. It takes five to twenty-five seconds.",
     parameters: {
       type: "object",
       properties: { message: { type: "string", description: "The job, in the person's own words." } },
@@ -357,8 +364,17 @@ export function phoneLineInstructions(agentName = "Titan") {
  * arrive as a titan call. A voice that answered "yes, go ahead" out of its own head would leave the
  * card open and nothing approved, which is the worst outcome on this path.
  *
+ * WHAT VOICE-16b ADDED. Two sections at the end, the spoken contract: a phone voice is one or two
+ * short conversational sentences, and a result that comes back from the box is given as a gist rather
+ * than read out. It lives HERE, in the once-per-call instructions, and not in a per-turn hint, for the
+ * same cached-prefix reason everything else in this function lives here. The tool output on a streamed
+ * turn carries the one per-turn thing that cannot be known in advance -- which sentence the person has
+ * already heard -- and nothing else.
+ *
  * NO BRIEF, NO CHANGE. `brief: null` -- an older host, a box that does not hold that agent any more,
- * a read that timed out -- answers phoneLineInstructions above, byte for byte.
+ * a read that timed out -- answers phoneLineInstructions above, byte for byte. The spoken contract is
+ * NOT back-ported into it: that string is pinned literally by a test as the thing it always was, and a
+ * box old enough to miss `getVoiceBrief` is a box nobody is tuning the voice of.
  *
  * @param {string|{agentName?: string, brief?: object|null}} [options] the agent's name, or the name
  *        and the brief. The string form is what buildSession's own default uses and is unchanged.
@@ -398,8 +414,8 @@ export function voiceInstructions(options = {}) {
     + "that needs DOING, LOOKING UP or CHECKING: send it, run it, open it, read it, fix it, book it, "
     + "a file, a machine, a log, a number you do not already have, anything that has happened since "
     + "the conversation above, and anything at all you are not sure of. Say one short thing first, "
-    + "like \"checking the mail now\", so the line is not silent, then read out what comes back. It "
-    + "takes five to twenty-five seconds.",
+    + "like \"checking the mail now\", so the line is not silent, and then say the gist of what comes "
+    + "back in a sentence. It takes five to twenty-five seconds.",
     "ANSWERS TO A QUESTION THAT CAME BACK ALWAYS GO THROUGH IT. If you read out something that asks "
     + "the person to confirm, approve or choose, their answer goes straight back through the titan "
     + "function, every time, even when it is only yes or no. Never treat a yes as done yourself: "
@@ -410,8 +426,20 @@ export function voiceInstructions(options = {}) {
     "NEVER MAKE ANYTHING UP. Not a number, not a name, not a file, not a result, and never a thing "
     + "you did. If you do not have it, the rest of you does: call titan and ask. If what comes back "
     + "says something went wrong, say so plainly.",
-    "HOW YOU SOUND. Short sentences, a normal speaking voice. Never read out punctuation or headings, "
-    + "never spell a file path character by character, and never sound like a screen being read.",
+    // VOICE-16b. THE SPOKEN CONTRACT, and it is the rule this voice breaks most. Jason, 2026-09-12,
+    // after the first working call: "it needs to be shorter and more conversational. Instead of
+    // repeating everything it did, it can say, 'Yep, I did it.' ... less like a syllabus coming back
+    // every time." The text on screen is unchanged and still carries everything; this is about the
+    // mouth. It is written ONCE, here, like every other line of these instructions.
+    "HOW YOU SOUND, AND THIS IS THE ONE YOU WILL GET WRONG. You are on a phone. Everything you say is "
+    + "one or two short sentences in plain conversational words, the way a person answers a phone. No "
+    + "lists, no headings, no numbered steps, no file paths, no code, no punctuation read out, and "
+    + "never the sound of a screen being read.",
+    "WHAT YOU SAY WHEN SOMETHING COMES BACK FROM THE titan FUNCTION. Do not repeat it and do not read "
+    + "it out. Give the gist in one breath, the way you would over your shoulder: \"Yep, did that.\" "
+    + "\"Done. The backup ran clean.\" \"That one failed, I am on it.\" Only if there is more to it "
+    + "than you just said, add in a few words that the rest is on the screen. Never walk back through "
+    + "what you did, never say it twice, and never turn one result into a summary with parts.",
   );
   return out.join("\n\n");
 }
@@ -745,7 +773,38 @@ export function splitSentences(text, { max = 320 } = {}) {
 // remainderOf is what stops the person hearing the first half of it twice.
 
 /**
- * Whole sentences off the front of a draft, once each.
+ * VOICE-16b. How many sentences of the draft are ever read out word for word.
+ *
+ * ONE. The first sentence is the latency win VOICE-3 was built for -- the person hears something
+ * twenty seconds before the entry is persisted -- and every sentence after it is the thing Jason
+ * asked to stop: "less like a syllabus coming back every time". So sentence one is read as it lands,
+ * and the REST of the answer goes back through the tool output for the model to say in its own short
+ * words, under the spoken contract in voiceInstructions.
+ *
+ * It is a cap on what is SPOKEN and not on what is known. The page, the conversation and the tool
+ * output all still carry the whole reply.
+ */
+export const SPOKEN_LEAD_SENTENCES = 1;
+
+/**
+ * VOICE-16b. What the tool output says about the part of the answer nobody has heard.
+ *
+ * It rides on the `function_call_output` and NOT in the session instructions, because it is the one
+ * thing on this path that cannot be known once per call: which sentence the person has already heard
+ * is a per-turn fact. The standing contract -- short, conversational, no lists, give the gist -- is in
+ * voiceInstructions, written once at session.update, where the cached prefix lives.
+ *
+ * It is deliberately permissive about saying NOTHING. A one-sentence answer that was already read out
+ * in full takes a different branch and never sees this, but a two-sentence answer whose second
+ * sentence adds nothing is common, and "or nothing at all" is what stops the voice padding.
+ */
+export const SPOKEN_REMAINDER_HINT = "The person has ALREADY heard the first sentence of this out loud. "
+  + "Say the rest in ONE short spoken sentence, in your own plain words, or say nothing at all if the "
+  + "first sentence already covered it. Do not read this out word for word, do not repeat what they have "
+  + "heard, and do not turn it into a list. The whole answer is on their screen either way.";
+
+/**
+ * Whole sentences off the front of a draft, once each, up to `limit` of them.
  *
  * The LAST piece of an unfinished draft is never handed out: splitSentences cannot know whether a
  * trailing fragment is a short sentence or the first four words of a long one, so it waits for text
@@ -754,18 +813,27 @@ export function splitSentences(text, { max = 320 } = {}) {
  * A draft that was REWRITTEN rather than extended -- the model revising what it already wrote -- is
  * not repaired here. Words already spoken cannot be unsaid, so only genuinely new tail pieces are
  * handed out, and the divergence is settled once, against the finished reply, by remainderOf.
+ *
+ * WHY THE LIMIT IS IN HERE rather than in the loop that calls it. `spoken` is what remainderOf
+ * subtracts to work out what the person has NOT heard, so it has to mean "handed out", exactly. A
+ * caller that cut three sentences and then spoke only the first would leave two sentences recorded as
+ * said and nobody would ever hear them. Refusing to cut them is the only shape where the record and
+ * the room agree. `done` is how the caller knows it can stop reading the draft at all.
  */
-export function makeSentenceCutter({ max = 320 } = {}) {
+export function makeSentenceCutter({ max = 320, limit = Infinity } = {}) {
   const spoken = [];
   return {
     /** Everything handed out so far, in the order it was said. */
     get spoken() { return spoken.slice(); },
     get count() { return spoken.length; },
+    /** Whether the limit is reached, so there is nothing left for this cutter to ever hand out. */
+    get done() { return spoken.length >= limit; },
     cut(draftText, { complete = false } = {}) {
+      if (spoken.length >= limit) return [];
       const pieces = splitSentences(draftText, { max });
       const ready = complete ? pieces : pieces.slice(0, -1);
       if (ready.length <= spoken.length) return [];
-      const fresh = ready.slice(spoken.length);
+      const fresh = ready.slice(spoken.length, limit);
       for (const piece of fresh) spoken.push(piece);
       return fresh;
     },
@@ -1671,8 +1739,13 @@ export function makeTurnRunner({
      * `onDraftSentence` is VOICE-3: one whole sentence of Titan's reply, handed over while he is still
      * writing the rest. It is awaited, so the caller can pace itself against the voice model's own
      * playback and the runner never runs ahead of what has actually been said. `spoken` on the result
-     * is every sentence that went through it and `remaining` is what is left to read out, which is
-     * what the tool output must carry so nothing is read twice.
+     * is every sentence that went through it and `remaining` is what is left, which is what the tool
+     * output must carry so nothing is said twice.
+     *
+     * VOICE-16b CAPPED IT AT ONE. It fires for the FIRST sentence only (SPOKEN_LEAD_SENTENCES), which
+     * keeps the latency win and stops the rest of the answer being read out like a report. So `spoken`
+     * holds at most one sentence and `remaining` holds the whole tail of the reply, for the model to
+     * say in its own short words rather than word for word.
      *
      * @returns {Promise<{ok:boolean, accepted:boolean, text:string, pieces:string[], spoken:string[],
      *          remaining:string[], diverged:boolean, attemptId:string, afterId:string, afterMs:number,
@@ -1682,7 +1755,10 @@ export function makeTurnRunner({
       // `td` is VOICE-3's hop: when the FIRST sentence of the answer was handed to the voice model,
       // which on a streaming turn lands well before t3 (the finished entry) and is the whole of the win.
       const hops = { t1: now(), t2: 0, t3: 0, t4: 0, td: 0 };
-      const cutter = makeSentenceCutter();
+      // VOICE-16b. ONE sentence is read out word for word, and the rest of the answer is the model's to
+      // say short. The cap lives in the cutter so that `spoken` stays exactly what the person heard,
+      // which is what `remaining` below is subtracted from.
+      const cutter = makeSentenceCutter({ limit: SPOKEN_LEAD_SENTENCES });
       /** Whichever is true first stops the draft reader: the caller does not want it, or the box has no command. */
       let streaming = typeof onDraftSentence === "function";
       if (rounds >= maxRounds) {
@@ -1760,6 +1836,10 @@ export function makeTurnRunner({
               if (hops.td === 0) hops.td = now();
               try { await onDraftSentence(sentence); } catch (error) { log(`voice draft sentence failed: ${error?.message ?? error}`); }
             }
+            // VOICE-16b. The lead sentence is out, so there is nothing more this draft can be read for
+            // and the box stops being asked for it. Everything still being written lands in the finished
+            // entry below, and `remaining` is what the model gets to say in its own short words.
+            if (cutter.done) streaming = false;
           }
         }
         // A nudge is driven off the roster's own working flag, never a bare timer, and each one is
@@ -2271,6 +2351,11 @@ export function makeVoiceSession({
   /**
    * VOICE-3. One whole sentence of Titan's answer, read out while he is still writing the rest.
    *
+   * SINCE VOICE-16b IT FIRES ONCE PER TURN, for the lead sentence, because the turn runner's cutter
+   * stops at SPOKEN_LEAD_SENTENCES. Nothing in here changed: it is still the one shape that makes a
+   * realtime model say an exact string, and the queueing and pacing below still matter because the
+   * greeting, a nudge or an announcement can be in flight when the sentence is ready.
+   *
    * IT IS `say`'S WIRE SHAPE AND NOT AN ASSISTANT ITEM. An assistant `conversation.item.create` puts
    * the words into the history as though the model had already said them, which produces no audio at
    * all -- the person hears nothing and the model then carries on from text it never spoke. The one
@@ -2299,10 +2384,11 @@ export function makeVoiceSession({
   /**
    * The tool's answer.
    *
-   * `respond` is VOICE-3's one subtraction: when every sentence of the reply has ALREADY been read out
-   * while Titan was writing it, the output still has to be sent -- the model is waiting on it and a
-   * call left open wedges the conversation -- but there must be no `response.create` behind it, or the
-   * model generates a fresh turn over an answer that is already finished and says something of its own.
+   * `respond` is VOICE-3's one subtraction: when the whole of the reply has ALREADY been read out
+   * while Titan was writing it -- since VOICE-16b that is a one-sentence answer -- the output still has
+   * to be sent, because the model is waiting on it and a call left open wedges the conversation, but
+   * there must be no `response.create` behind it, or the model generates a fresh turn over an answer
+   * that is already finished and says something of its own.
    */
   const answerTool = (callId, payload, { respond = true } = {}) => {
     sendProvider({ type: "conversation.item.create", item: { type: "function_call_output", call_id: callId, output: JSON.stringify(payload) } });
@@ -2415,6 +2501,12 @@ export function makeVoiceSession({
     // A turn that streamed nothing takes the path VOICE-1 always took, unchanged: the whole reply and
     // its sentences, one response behind it. That is every desktop call and every call to a box whose
     // host does not carry getTurnDraft.
+    //
+    // VOICE-16b. ONE sentence was read out word for word and the rest of the answer is the model's to
+    // say short, so the remainder goes back with the `spoken` hint: the person heard sentence one, say
+    // the rest in one short sentence or nothing. The hint is the only per-turn instruction anywhere on
+    // this path, and it is per-turn because what the person has already heard cannot be known at
+    // session.update. The contract it serves is in voiceInstructions, written once.
     if (spoken.length === 0) {
       answerTool(toolCall.callId, { reply, sentences: pieces });
     } else if (unsaid.length === 0) {
@@ -2423,7 +2515,13 @@ export function makeVoiceSession({
       // The last streamed sentence may still be playing. Two overlapping responses is the provider
       // error nobody can hear, so the rest of the answer waits for it exactly as a sentence would.
       for (let i = 0; i < 40 && !stopping && responseInFlight; i += 1) await sleep(400);
-      answerTool(toolCall.callId, { reply: unsaid.join(" "), sentences: unsaid, alreadyRead: true });
+      const payload = { reply: unsaid.join(" "), sentences: unsaid, alreadyRead: true };
+      // A HELD CARD IS THE ONE THING THAT IS STILL ASKED IN FULL. Its question is in `unsaid` and it is
+      // a question the person has to answer, so it is read out as a plain question exactly as it was
+      // before this wave: gisting "do you want me to send it" down to "there is something waiting" is
+      // how a person says yes to the wrong thing. No hint goes on a turn that is holding a card.
+      if (result.card == null) payload.spoken = SPOKEN_REMAINDER_HINT;
+      answerTool(toolCall.callId, payload);
     }
     if (result.attemptId.length > 0) {
       void runner.follow({

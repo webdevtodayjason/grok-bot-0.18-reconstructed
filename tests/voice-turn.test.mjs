@@ -11,8 +11,15 @@
  *
  * So BOTH shapes are pinned here now. The wait-then-split path is unchanged and still proved, because
  * it is what every box without that host bundle does and what every desktop call with no draft does;
- * and the streaming path is proved beside it -- sentences handed out in order as the draft grows, and
- * a tool output that carries only what is LEFT so the front of the answer is never read twice.
+ * and the streaming path is proved beside it -- the lead sentence handed out the moment it is whole, and
+ * a tool output that carries only what is LEFT so the front of the answer is never said twice.
+ *
+ * VOICE-16b CAPPED THE READING AT THAT ONE SENTENCE. Jason, after the first working call: "it needs to be
+ * shorter and more conversational ... less like a syllabus coming back every time." So the assertions
+ * about how many sentences are read out, how many text items that costs and how many response.create go
+ * with them all moved in this wave, each one with the reason in its own message; and the tool output now
+ * carries the remainder plus one line asking for it short. The text on screen did not move at all, which
+ * is why every `said` frame in here still carries the whole reply.
  *
  * Everything runs on a FAKE CLOCK. A real 400 ms poll loop against a real 120 s cap would make this
  * file the slowest in the suite for no extra confidence.
@@ -26,7 +33,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { startStubRealtime } from "./helpers/stub-realtime.mjs";
 import {
-  GREETINGS, MAX_TITAN_ROUNDS, TURN_WAIT_CAP_S, VOICE_NOTE_MAX_CHARS, pickGreeting,
+  GREETINGS, MAX_TITAN_ROUNDS, SPOKEN_LEAD_SENTENCES, SPOKEN_REMAINDER_HINT, TURN_WAIT_CAP_S,
+  VOICE_NOTE_MAX_CHARS, pickGreeting,
   isUnknownGatewayMethod, makeCallDedupe, makeSentenceCutter, makeSpokenExchange, makeTurnRunner,
   makeVoiceEdge, makeVoicePolicy, matchYesNo, pendingCardsOf, phoneLineInstructions, readVoiceBrief,
   remainderOf, resolveHeldCard, resolveVoiceAgent, splitSentences, titanTool, toolCallsOf,
@@ -370,6 +378,23 @@ test("the cutter hands out whole sentences only, once each, and holds the traili
   assert.deepEqual(cutter.cut("The gate is green. Two legs failed. I re-ran them.", { complete: true }), []);
 });
 
+test("VOICE-16b: a cutter with a limit hands out that many sentences and then nothing, ever", () => {
+  // THE LIMIT IS WHY `spoken` CAN BE TRUSTED. remainderOf subtracts `spoken` from the finished reply to
+  // work out what the person has not heard, so a cutter that cut three sentences while the caller spoke
+  // one would record two sentences as said that nobody ever heard, and the tool output would skip them.
+  // So the cap refuses to cut them rather than cutting and discarding.
+  const cutter = makeSentenceCutter({ limit: 1 });
+  assert.deepEqual(cutter.cut("The gate is green. Two legs"), ["The gate is green."]);
+  assert.equal(cutter.done, true, "one sentence is the whole of what this cutter will ever hand out");
+  // A draft that grew by two whole sentences in one tick still hands out nothing: the person heard one.
+  assert.deepEqual(cutter.cut("The gate is green. Two legs failed. I re-ran them.", { complete: true }), [],
+    "the limit holds even when the draft arrives whole in one tick");
+  assert.deepEqual(cutter.spoken, ["The gate is green."], "and `spoken` is exactly what was said out loud");
+  assert.equal(cutter.count, 1);
+  // The default is unchanged, which is what keeps the helper honest for any other caller.
+  assert.equal(makeSentenceCutter().done, false);
+});
+
 test("the remainder is what is LEFT of the finished reply, and a revised draft is repaired from the change", () => {
   const all = ["One.", "Two.", "Three."];
   assert.deepEqual(remainderOf(all, []), { pieces: all, diverged: false });
@@ -392,10 +417,16 @@ test("only a 404 turns the draft reader off; a timeout does not", () => {
   assert.equal(isUnknownGatewayMethod(null), false);
 });
 
-test("a growing draft is spoken sentence by sentence, and the tool result carries only what is left", async () => {
+test("VOICE-16b: the FIRST sentence is read out as it lands and the rest of the answer is not", async () => {
+  // WHAT THIS USED TO ASSERT, AND WHY IT MOVED. Until VOICE-16b every whole sentence of the draft was
+  // handed over as "read this out, word for word", so a three-sentence answer was read like a report.
+  // Jason, 2026-09-12, after the first working call: "it needs to be shorter and more conversational
+  // ... less like a syllabus coming back every time." So the lead sentence still goes out the instant
+  // it is whole -- that is the twenty-second latency win and it is untouched -- and sentences two and
+  // three are left to the model to say short, through the tool output.
   const clock = fakeClock();
   const whole = "The gate is green. Two legs failed earlier. I re-ran both of them.";
-  // The draft grows over three reads and the finished entry lands on the fourth tail poll, which is
+  // The draft grows over three reads and the finished entry lands on the fifth tail poll, which is
   // the real ordering: the host writes the partial tool call long before the entry is persisted.
   const steps = ["The gate is green. Two", "The gate is green. Two legs failed earlier. I", whole];
   let nonceSeen = "";
@@ -417,14 +448,18 @@ test("a growing draft is spoken sentence by sentence, and the tool result carrie
     onDraftSentence: (sentence) => { spoken.push(sentence); },
   });
   assert.equal(nonceSeen, "a1", "the draft is asked for by agent id");
-  assert.deepEqual(spoken, ["The gate is green.", "Two legs failed earlier.", "I re-ran both of them."],
-    `spoken was ${JSON.stringify(spoken)}; the relay said nothing else`);
+  assert.deepEqual(spoken, ["The gate is green."],
+    `spoken was ${JSON.stringify(spoken)}; only the lead sentence is ever read out word for word now`);
   assert.deepEqual(result.spoken, spoken);
-  assert.deepEqual(result.remaining, [], "every sentence was already read out, so nothing is owed");
+  assert.deepEqual(result.remaining, ["Two legs failed earlier.", "I re-ran both of them."],
+    "sentences two and three are what the tool output carries, for the model to say short");
   assert.equal(result.diverged, false);
   // The whole reply is still the result, because the panel and the conversation hold the whole reply.
   assert.equal(result.text, whole);
   assert.deepEqual(result.pieces, splitSentences(whole));
+  // And the box stops being asked for a draft once the lead sentence is out: there is nothing left it
+  // could be read for. One read is the one that produced the sentence.
+  assert.equal(gw.draftReads, 1, `getTurnDraft was read ${gw.draftReads} times after the lead sentence`);
   // THE WIN, and the only number in this file that is about latency: the first sentence was handed
   // over BEFORE the finished entry was ever seen.
   assert.ok(result.hops.td > 0, "td was never stamped");
@@ -594,6 +629,36 @@ test("the instructions still say that an answer to a question goes back through 
   assert.match(said, /confirm, approve or choose/);
   assert.match(said, /even when it is only yes or no/);
   assert.match(said, /Never treat a yes as done yourself/);
+});
+
+test("VOICE-16b: the instructions carry the spoken contract ONCE, and the phone line is still untouched", () => {
+  // Jason, 2026-09-12, after the first working call on build 20: "when we're in voice, Titan needs to be
+  // less verbose. It can be verbose in the text that's being printed out, but it needs to be shorter and
+  // more conversational ... less like a syllabus coming back every time." The contract is prompt text, so
+  // what can be pinned here is that it IS in the instructions, that it says the four things it has to
+  // say, and that it is written exactly once. Whether a real model obeys it is a live call, not a test.
+  const said = voiceInstructions({ agentName: "Titan", brief: briefRow() });
+  const times = (haystack, needle) => haystack.split(needle).length - 1;
+  assert.equal(times(said, "HOW YOU SOUND"), 1, "the spoken contract is written once, not once per section");
+  assert.equal(times(said, "WHAT YOU SAY WHEN SOMETHING COMES BACK"), 1, "and so is the result rule");
+  assert.match(said, /one or two short sentences in plain conversational words/);
+  assert.match(said, /No lists, no headings, no numbered steps, no file paths, no code/);
+  assert.match(said, /Give the gist in one breath/);
+  assert.match(said, /the rest is on the screen/);
+  assert.match(said, /never say it twice/);
+  // THE LINE THAT HAD TO GO. "Read out what comes back" is the behaviour being removed, and it was in
+  // both the instructions and the tool description; a prompt that says both things argues with itself.
+  assert.ok(!/read out what comes back/.test(said), "the old read-it-out instruction is gone");
+  assert.ok(!/read out what comes back/.test(titanTool().description), "and gone from the tool description too");
+  // AND THE WAIT LINE STAYS, because a silent line is the other failure: the voice says what it is
+  // doing before the five to twenty-five seconds, and that is unchanged.
+  assert.match(said, /checking the mail now/);
+  assert.equal(times(said, "so the line is not silent"), 1);
+  // The fallback for an old host is byte for byte what it always was, contract and all: it is pinned
+  // literally above, and the contract is deliberately NOT back-ported into it.
+  assert.equal(phoneLineInstructions("Titan"), PHONE_LINE_TITAN);
+  assert.ok(!phoneLineInstructions("Titan").includes("one or two short sentences"));
+  assert.equal(SPOKEN_LEAD_SENTENCES, 1, "one sentence is read out word for word; the rest is the model's to say short");
 });
 
 test("an empty brief is still the agent and never the phone line", () => {
@@ -1074,7 +1139,7 @@ test("\"don't confirm\" spoken at a pending card closes nothing as approved", as
 // the same way; a panel that has to open, follow the words and then DISSOLVE cannot. These run end to
 // end against the real bridge so the labels are measured on the wire rather than read off a diff.
 
-test("VOICE-3 end to end: each sentence is read out as it lands and the tool output adds nothing", async () => {
+test("VOICE-16b end to end: the lead sentence is read out, and the rest comes back for the model to say short", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
   const stub = await startStubRealtime({ vendor: "xai", audioFrames: 1 });
   const whole = "The gate is green. Two legs failed earlier. I re-ran both of them.";
@@ -1100,32 +1165,113 @@ test("VOICE-3 end to end: each sentence is read out as it lands and the tool out
     stub.emitToolCall({ name: "titan", args: { message: "how did the gate go" }, triple: true });
     await session.settle(() => stub.events.toolOutputs.length > 0, "the tool output going back", 900);
 
-    // THREE sentences went out as text items, in order, each one a "read this out" the model speaks.
-    // On xAI each of these is a billed flat fee, which is the price of the first sentence arriving
-    // twenty seconds early and is why docs/VOICE.md says so out loud.
+    // ONE sentence went out as a text item, and it is the lead sentence. Until VOICE-16b this was
+    // three, one per sentence of the answer, which is the "syllabus coming back" Jason asked to stop.
+    // On xAI each text item is a billed flat fee, so the two that are gone are two fees that are gone
+    // with them: the Spend line counts 1 where it used to count 3.
     const spokenItems = stub.events.inbound
       .filter((event) => event.type === "conversation.item.create" && event.item?.type === "message")
       .map((event) => String(event.item.content?.[0]?.text ?? ""));
-    assert.equal(spokenItems.length, 3, `the relay sent ${spokenItems.length} text items: ${JSON.stringify(spokenItems)}`);
+    assert.equal(spokenItems.length, 1,
+      `the relay sent ${spokenItems.length} text items: ${JSON.stringify(spokenItems)}; only the lead sentence is read out`);
     assert.ok(spokenItems[0].endsWith("The gate is green."), spokenItems[0]);
-    assert.ok(spokenItems[1].endsWith("Two legs failed earlier."), spokenItems[1]);
-    assert.ok(spokenItems[2].endsWith("I re-ran both of them."), spokenItems[2]);
-    assert.equal(stub.events.billableItems, 3, "one billed item per sentence, counted on the Spend line");
+    assert.equal(stub.events.billableItems, 1, "one billed item for the lead sentence, where VOICE-3 billed one per sentence");
 
-    // And the tool output adds NOTHING, because there is nothing left the person has not heard. The
-    // call is still closed -- a function_call_output the model never gets wedges the conversation --
-    // and there is no response.create behind it, so the model is not asked to talk over a finished
-    // answer. Three response.create, one per sentence, and not a fourth.
+    // And the REST of the answer comes back on the tool output with the spoken hint, so the model says
+    // it in its own short words instead of reading it. `alreadyRead` still says the front of it was
+    // heard, `sentences` is exactly what is left, and `reply` is those sentences and nothing else.
     assert.equal(stub.events.toolOutputs.length, 1);
     const output = JSON.parse(stub.events.toolOutputs[0].output);
-    assert.deepEqual(output, { reply: "", sentences: [], alreadyRead: true });
-    assert.equal(stub.events.responseCreates, 3, `there were ${stub.events.responseCreates} response.create`);
+    assert.deepEqual(output, {
+      reply: "Two legs failed earlier. I re-ran both of them.",
+      sentences: ["Two legs failed earlier.", "I re-ran both of them."],
+      alreadyRead: true,
+      spoken: SPOKEN_REMAINDER_HINT,
+    });
+    // TWO response.create: one behind the lead sentence, one behind the tool output so the model
+    // actually says the gist. It was three before -- one per sentence -- with none behind the output.
+    assert.equal(stub.events.responseCreates, 2, `there were ${stub.events.responseCreates} response.create`);
 
     // The page still gets the WHOLE answer: the panel and the conversation hold all of it, and only
     // the provider's copy is trimmed.
     assert.equal(session.of("said").at(-1).text, whole);
     const hops = session.of("hops").at(-1);
     assert.ok(hops.td > 0 && hops.td < hops.t3, `td ${hops.td} t3 ${hops.t3}`);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-16b end to end: a one-sentence answer is said once and the tool output says there is nothing more", async () => {
+  // THE SHAPE JASON ASKED FOR, ALL THE WAY THROUGH. "Yep, I did it." is the whole answer: it is read out
+  // as it lands, and the tool output closes the call while telling the model there is nothing left to
+  // say. No second response.create, so nothing is generated over a finished answer. This branch is
+  // unchanged from VOICE-3 and is here because the common case now ENDS here rather than passing through.
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai", audioFrames: 1 });
+  const whole = "Yep, did that.";
+  const gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    tail: (n) => (n >= 5 ? [reply("e1", whole)] : []),
+    // The host marks the draft complete when the message is delivered, which is what lets a single
+    // sentence be read out at all: an unfinished draft always holds its last fragment back.
+    draft: () => draftRow(whole, { nonce: String(gateway.of("sendPrompt")[0]?.args?.clientNonce ?? ""), complete: true }),
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0001" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    stub.emitToolCall({ name: "titan", args: { message: "did the backup run" }, triple: true });
+    await session.settle(() => stub.events.toolOutputs.length > 0, "the tool output going back", 900);
+    const spokenItems = stub.events.inbound
+      .filter((event) => event.type === "conversation.item.create" && event.item?.type === "message")
+      .map((event) => String(event.item.content?.[0]?.text ?? ""));
+    assert.equal(spokenItems.length, 1, `the relay sent ${spokenItems.length} text items: ${JSON.stringify(spokenItems)}`);
+    assert.ok(spokenItems[0].endsWith(whole), spokenItems[0]);
+    const output = JSON.parse(stub.events.toolOutputs[0].output);
+    assert.deepEqual(output, { reply: "", sentences: [], alreadyRead: true },
+      "nothing is owed, so no remainder and no spoken hint: the hint exists only to shorten a remainder");
+    assert.equal(stub.events.responseCreates, 1,
+      `there were ${stub.events.responseCreates} response.create; the one behind the sentence, and none behind the output`);
+    assert.equal(session.of("said").at(-1).text, whole, "the page still gets the whole reply");
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-16b end to end: a held card's question is still asked in full, with no shorten-it hint on it", async () => {
+  // THE ONE THING THE CONTRACT MUST NOT TOUCH. A card's question is what the person answers yes or no
+  // to, and the relay resolves that answer through the approval path. A question gisted down to "there
+  // is something waiting on you" is how somebody says yes to the wrong thing, so a turn that is holding
+  // a card gets the old payload exactly: the question in `sentences`, and no `spoken` hint.
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai", audioFrames: 1 });
+  const gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    // The card lands with no reply entry beside it, which is the runner's card branch: he is waiting
+    // on the person. The draft streamed one sentence before it, which is what makes this the branch
+    // where a hint would otherwise be attached.
+    tail: (n) => (n >= 5 ? [approvalEntry("e1", "req-77")] : []),
+    draft: () => draftRow("I have the mail ready to go.", { nonce: String(gateway.of("sendPrompt")[0]?.args?.clientNonce ?? ""), complete: true }),
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0001" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    stub.emitToolCall({ name: "titan", args: { message: "send richard the invoice" }, triple: true });
+    await session.settle(() => stub.events.toolOutputs.length > 0, "the tool output going back", 900);
+    const output = JSON.parse(stub.events.toolOutputs[0].output);
+    assert.equal(output.spoken, undefined, "a turn holding a card carries no shorten-it hint");
+    assert.equal(output.alreadyRead, true, "the lead sentence was read out, and the output still says so");
+    assert.ok(output.sentences.some((piece) => piece.includes("Send the email to Richard")),
+      `the card's own question is what is left to ask: ${JSON.stringify(output.sentences)}`);
+    assert.equal(stub.events.responseCreates, 2, "one behind the lead sentence, one behind the question");
   } finally {
     await session?.close();
     await stub.close();

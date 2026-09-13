@@ -58,6 +58,9 @@ What you get:
   once to start and press again to stop. Holding is the default. Section 13.
 - **A panel over the conversation while you talk**, with your words appearing in it as you say them.
   When you stop, it dissolves and those words are the next line of the conversation. Section 13.
+- **He answers short out loud and writes it all down.** On the phone you get a sentence or two in plain
+  words, "Yep, did that", not the whole result read back at you. The full reply is in the conversation
+  on screen, every word of it, same as ever. Section 5.
 - There is no wake word and nothing is ever listening on its own.
 - Everything spoken lands in the **same conversation you type in**, marked as spoken, and it is there
   on your phone afterwards. **When the call ends, the whole spoken exchange is written into that
@@ -336,7 +339,7 @@ Measured on `grok-bot-local-vm`, September 2026, against the real host:
 | T2→T3 | **your team lead thinks** | **5.5–9.0 s** for a short question, **15–25 s** when it touches a shell, **50.6 s** on the first turn of a cold box |
 | T3 | the reply is noticed | ours, ≤450 ms at a 400 ms poll |
 | T3→T4 | the first sentence goes back to the vendor | **ours, ≤20 ms** |
-| TD | a sentence of the reply is read out while he is still writing (VOICE-3) | ours, ≤450 ms behind the sentence becoming whole. **Not yet measured on a real box** |
+| TD | the FIRST sentence of the reply is read out while he is still writing (VOICE-3, capped at one sentence by VOICE-16b) | ours, ≤450 ms behind that sentence becoming whole. **Not yet measured on a real box** |
 | T5→T6 | the first sample is audible | **not measured** — see below |
 
 **T5→T6 is not on this ledger and cannot be**, and it carried a number (≤120 ms) until 2026-09-10
@@ -376,9 +379,14 @@ this product could do, and the release said so rather than claiming otherwise.
 That surface now exists. The host projects the message your team lead is part way through writing as a
 small object behind one new gateway command, `getTurnDraft`
 (`source/host/extensions/transcript/turn-draft.ts`), and the relay reads it on the same 400 ms tick it
-already polls the conversation on. As each sentence of the reply becomes whole, it is read out. So on a
-box carrying this host bundle you hear sentence one while he is still writing sentence four, and the
-`TD` hop, the first sentence actually spoken, lands before `T3`, the finished message being noticed.
+already polls the conversation on. The moment the FIRST sentence of the reply is whole, it is read out.
+So on a box carrying this host bundle you hear sentence one while he is still writing sentence four, and
+the `TD` hop, that sentence actually spoken, lands before `T3`, the finished message being noticed.
+
+**It is one sentence and not all of them, since VOICE-16b.** Until 2026-09-12 every whole sentence of
+the draft was read out word for word, which made a long answer sound like a report being read. The lead
+sentence is the part that buys the silence back; the rest of the answer goes to the voice at the end of
+the turn as something to say short, not to read. The last subsection of this section is that rule.
 
 Two things about that draft are worth knowing, because they are design and not accident:
 
@@ -391,10 +399,12 @@ Two things about that draft are worth knowing, because they are design and not a
   still the truth. What the relay hands back to the voice at the end is only the part of the answer you
   have not heard, which is what stops the front of it being read twice.
 
-**It costs one billed text item per sentence on xAI**, because that is how a realtime model is made to
-say an exact string, and section 7 prices it. That is the trade: the first sentence arrives seconds
-rather than tens of seconds after you stop talking, and a four-sentence answer bills four flat item
-fees instead of none. Nothing about it is a price claim, and nothing about it is free.
+**It costs one billed text item on xAI**, because sending the voice an exact string to say is how a
+realtime model is made to say it, and section 7 prices it. That is the trade: the first sentence arrives
+seconds rather than tens of seconds after you stop talking, and it bills one flat item fee where the old
+wait-then-read path billed none. It was one fee per sentence until VOICE-16b capped the reading at one,
+so a four-sentence answer now bills one where it billed four. Nothing about it is a price claim, and
+nothing about it is free.
 
 **A box whose host predates this loses the first sentence and nothing else.** The command answers
 "unknown gateway method", the relay stops asking for the rest of the call, and the turn behaves exactly
@@ -411,6 +421,45 @@ One more measured oddity, because it shapes the design: one prompt produced **tw
 seconds apart under a single attempt id. So later messages of the same attempt go on an announcement
 queue and are spoken between turns, never on top of one. The draft follows the first message only, for
 the same reason.
+
+### He is short on the phone, and the screen still has all of it (VOICE-16b)
+
+Jason, 2026-09-12, after the first working call: *"When we're in voice, Titan needs to be less verbose.
+It can be verbose in the text that's being printed out, but it needs to be shorter and more
+conversational. Instead of repeating everything it did, it can say, 'Yep, I did it. Okay, right?' ...
+less like a syllabus coming back every time."*
+
+So a call is now one voice with two different jobs, and only the mouth changed:
+
+- **What you hear is one or two short sentences.** No lists, no headings, no numbered steps, no file
+  paths, no code, nothing that sounds like a screen being read. When something comes back from the box
+  he gives you the gist in one breath, "Done, the backup ran clean", and if there is more to it than
+  that he says the rest is on your screen. He does not walk you back through what he did.
+- **What is written in the conversation is the whole thing, unchanged.** Every word of his reply is in
+  the conversation you type in and on the panel on screen, exactly as it was before this change. Nothing
+  about the text got shorter, and nothing was summarised on the way to it.
+
+Two mechanisms carry that, and they are deliberately in different places:
+
+- **The standing rule is in the instructions, written once** when the socket opens, for the same
+  cached-prefix reason everything else in them is written once (section 7). It is the contract: short,
+  conversational, give the gist.
+- **What he has already said out loud is per-turn, so it rides on the tool result.** The relay reads the
+  lead sentence out word for word while he is still writing, then hands back the rest of the answer with
+  one line saying the person already heard the first sentence, so say the rest in one short sentence or
+  nothing at all. That is the only per-turn instruction anywhere on this path, and it exists because what
+  you have already heard cannot be known when the call is dialled.
+
+**A held action is the one thing that is still asked in full.** Its question is what you answer yes or no
+to, and the relay closes it through the approval path, so it is read out as a plain question and is never
+shortened. "Do you want me to send it" gisted down to "there is something waiting on you" is how a person
+says yes to the wrong thing. A refusal and a spoken yes were already one sentence each and are untouched.
+
+**What this is NOT proven to do.** The contract and the hint are prompt text. A test can prove they are in
+the session exactly once, that one sentence and not four is read out word for word, and that the remainder
+and the hint are what the tool result carries. Whether a real realtime model actually answers in two
+sentences instead of five is a live call, on a real box, with a person listening. Nothing here measures
+that.
 
 ---
 
@@ -497,13 +546,15 @@ code:
 
 - Your team lead's reply goes back as tool-result messages, which are **free** on xAI. Nudges are
   bounded because each one is a billed message rather than just a word.
-- **VOICE-3's sentences are the one deliberate exception, and they are not free.** Reading a sentence
-  out while he is still writing the rest means sending it to the voice model as a message, so a
-  four-sentence answer costs four flat item fees on xAI where the old wait-then-read path cost none.
-  That is the price of hearing the first sentence seconds rather than tens of seconds after you stop
-  talking, it is counted on the session's Spend line like every other billed item, and the tool output
-  at the end of such a turn carries only what you have not heard so nothing is paid for twice. On a box
-  whose host has no draft to read, nothing changes and nothing extra is billed.
+- **VOICE-3's lead sentence is the one deliberate exception, and it is not free.** Reading a sentence
+  out while he is still writing the rest means sending it to the voice model as a message, which is one
+  flat item fee on xAI where the old wait-then-read path cost none. That is the price of hearing the
+  first sentence seconds rather than tens of seconds after you stop talking, and it is counted on the
+  session's Spend line like every other billed item. **VOICE-16b made it one fee instead of one per
+  sentence**, because only the first sentence is read out now: a four-sentence answer bills one item
+  where it billed four, and the rest of the answer goes back on the tool result, which is free. The
+  result still carries only what you have not heard, so nothing is paid for twice. On a box whose host
+  has no draft to read, nothing changes and nothing extra is billed.
 - On OpenAI the base instructions are written **once** when the socket opens and are byte-identical
   for its whole life. Rewriting them invalidates the cached prefix and re-bills the entire
   conversation every turn. That was the single most expensive thing the reference implementation did.
