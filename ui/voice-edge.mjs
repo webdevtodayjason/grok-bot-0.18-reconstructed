@@ -1703,7 +1703,7 @@ export function makeVoiceSession({
   const caption = makeCaption(vendor.transcription.mode);
   const runner = makeTurnRunner({ call, now, sleep, log });
   const startedMs = now();
-  const meter = { audioInBytes: 0, audioOutBytes: 0, billedItemEvents: 0, toolCalls: 0, browserHeld: 0, bargeIns: 0 };
+  const meter = { audioInBytes: 0, audioOutBytes: 0, billedItemEvents: 0, toolCalls: 0, browserHeld: 0, audioInPeak: 0, audioInSumSq: 0, audioInSamples: 0, bargeIns: 0 };
   const announcements = [];
   let browser = null;
   let provider = null;
@@ -1761,6 +1761,8 @@ export function makeVoiceSession({
 
   const secondsNow = () => Math.max(0, Math.round((now() - startedMs) / 1000));
   const bytesToSeconds = (bytes) => Math.round(bytes / (AUDIO_RATE * 2));
+  /** Full-scale decibels for a PCM16 magnitude: 0 dBFS is 32767, silence prints as -inf dBFS. */
+  const dbfs = (magnitude) => magnitude > 0 ? `${(20 * Math.log10(magnitude / 32767)).toFixed(1)} dBFS` : "-inf dBFS";
 
   const rowNow = (state, closeReason = "") => voiceLedgerRow({
     sessionId, slug: t.slug, agentId: agent.agentId, agentName: agent.agentName,
@@ -2187,7 +2189,8 @@ export function makeVoiceSession({
     // app never managed it once look identical everywhere else.
     log(`voice ${t.slug} settled this line: ${settled.wallSeconds} s, ${settled.audioInSeconds} s of audio in, `
       + `${settled.audioOutSeconds} s out, ${settled.toolCalls} turn(s) to the agent, ${settled.heldFrames} held frame(s), `
-      + `${meter.bargeIns} barge-in(s), and it ended because ${reason}`);
+      + `${meter.bargeIns} barge-in(s), mic peak ${dbfs(meter.audioInPeak)} rms ${dbfs(meter.audioInSamples > 0 ? Math.sqrt(meter.audioInSumSq / meter.audioInSamples) : 0)}, `
+      + `and it ended because ${reason}`);
     // The edge forgets this session here, so "what is live right now" is a truthful answer and the
     // one-call-at-a-time check reads it. Every finished session used to be retained for the life of
     // the relay process, with its socket wrappers, its gate and its meter.
@@ -2251,6 +2254,17 @@ export function makeVoiceSession({
           if (seconds > capSeconds) { meter.browserHeld += 1; return; }
           if (seconds > secondsNow() + AUDIO_LEAD_SECONDS) { meter.browserHeld += 1; return; }
           meter.audioInBytes += payload.byteLength;
+          // VOICE-14b: WHAT THE MICROPHONE ACTUALLY CARRIED. Five calls from the phone app on
+          // 2026-09-12 sent 18 to 35 s of audio each and the provider heard no speech in any of
+          // them; nothing on this side could say whether that audio was a voice or 24 kHz of
+          // zeros. PCM16 little-endian, so the peak and the running sum of squares cost one loop.
+          for (let at = 0; at + 1 < payload.byteLength; at += 2) {
+            const sample = payload.readInt16LE(at);
+            const magnitude = sample < 0 ? -sample : sample;
+            if (magnitude > meter.audioInPeak) meter.audioInPeak = magnitude;
+            meter.audioInSumSq += sample * sample;
+            meter.audioInSamples += 1;
+          }
           sendProvider({ type: "input_audio_buffer.append", audio: payload.toString("base64") });
         },
         onJson: (message) => {
