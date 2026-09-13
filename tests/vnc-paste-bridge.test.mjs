@@ -118,3 +118,12 @@ test("the console half is wired to the same message names", () => {
   assert.ok(/while this pane has the keyboard/.test(html), "and scopes the paste claim to when the browser still delivers one");
   assert.ok(/id="desktop-vnc-bar"/.test(html), "the pane carries the button that shows that bar");
 });
+
+test("the bridge never reads UI at module top level, because WebKit hands it over uninitialised (beta-36-2, 2026-09-12)", () => {
+  const out = String(rewriteVncAsset("vnc.html", "<html><head></head><body></body></html>"));
+  const bridge = out.slice(out.indexOf("<script type=\"module\">"), out.indexOf("</script>"));
+  assert.ok(!/\narmClipboard\(\);/.test(bridge), "the first arm is on the load event, not a synchronous top-level call");
+  assert.ok(bridge.includes("window.addEventListener(\"load\", armClipboard)"));
+  assert.ok(bridge.includes("const uiNow = () => { try { return UI; }"), "every read of UI goes through the guard");
+  assert.ok(!/[^.\w]UI\.rfb/.test(bridge), "no bare UI.rfb read is left in the bridge");
+});

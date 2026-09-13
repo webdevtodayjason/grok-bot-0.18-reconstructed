@@ -51,11 +51,20 @@ const ORIGIN = window.location.origin;
 const framed = window.parent !== window;
 const toParent = (message) => { if (framed) window.parent.postMessage(message, ORIGIN); };
 
-// UI.rfb is null until the handshake finishes, and is replaced outright on every reconnect, so the
+// The rfb on UI is null until the handshake finishes, and is replaced outright on every reconnect, so the
 // clipboard listener is attached to whichever object is there now -- once per object.
 let watched = null;
+// WEBKIT, 2026-09-12, beta-36-2 on Safari: "Cannot access 'UI' before initialization" from this
+// module's first line, painted by noVNC's own error handler as a red box over the whole pane.
+// vnc.html's boot module has top-level awaits (defaults.json, mandatory.json), so its graph, which
+// owns app/ui.js, is still evaluating asynchronously when this second root module imports the
+// same file, and WebKit hands the binding over before it is initialised. Chrome does not. So UI is
+// never read at the top level here, every read goes through this guard, and the first arm waits
+// for the page's load event; the one-second retry below was always going to catch up anyway.
+const uiNow = () => { try { return UI; } catch (error) { return null; } };
 const armClipboard = () => {
-  const rfb = UI.rfb;
+  const ui = uiNow();
+  const rfb = ui == null ? null : ui.rfb;
   if (rfb == null || rfb === watched) return;
   watched = rfb;
   rfb.addEventListener("clipboard", (event) => {
@@ -63,7 +72,7 @@ const armClipboard = () => {
     if (typeof text === "string" && text.length > 0) toParent({ type: "titanbot-vnc-clipboard", text });
   });
 };
-armClipboard();
+window.addEventListener("load", armClipboard);
 window.setInterval(armClipboard, 1000);
 
 const toggleBar = () => document.documentElement.classList.toggle("titanbot-vnc-bar");
@@ -79,9 +88,10 @@ window.addEventListener("message", (event) => {
   armClipboard();
   // Said, not swallowed. A toast that reads "pasted" on a screen that never got the text is the
   // failure this whole pane exists to stop.
-  if (UI.rfb == null) { toParent({ type: "titanbot-vnc-paste-failed", reason: "the screen is not connected yet" }); return; }
+  const ui = uiNow();
+  if (ui == null || ui.rfb == null) { toParent({ type: "titanbot-vnc-paste-failed", reason: "the screen is not connected yet" }); return; }
   try {
-    UI.rfb.clipboardPasteFrom(text);
+    ui.rfb.clipboardPasteFrom(text);
     toParent({ type: "titanbot-vnc-pasted", chars: text.length });
   } catch (error) {
     toParent({ type: "titanbot-vnc-paste-failed", reason: String(error && error.message ? error.message : error) });
