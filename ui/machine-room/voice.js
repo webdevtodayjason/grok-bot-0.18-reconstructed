@@ -176,6 +176,18 @@
   const CALL_WORDS = ["Connecting", "Listening", "Thinking", "Talking", "Muted"];
   // One event, one sentence, in plain words, with no condition name and nothing to press.
   const CALL_ENDED_SENTENCE = "The call ended.";
+  // VOICE-15b. What the ended card says about the call behind it, and the rule that makes it honest.
+  //
+  // Jason, on build 17: "when it was done, it said that the call ended and only one word was said:
+  // them. Nobody said that." That call had 0 s of audio in, so the one word came from the provider's
+  // own transcription -- of its greeting, or of the silence it was handed -- and the card read it back
+  // to him as though he had said it. A call this page heard nothing in SAYS SO, in plain words, and
+  // the words on the card are only ever the person's own.
+  const CALL_ENDED_NOTHING = "Nothing was heard.";
+  const CALL_ENDED_SAID = "You said:";
+  // The longest quote the card carries. Longer than this and the card is a transcript, which is the
+  // chat's job: the durable record of a spoken turn is the two rows the relay writes.
+  const CALL_ENDED_WORDS = 120;
   // How long the ended note stays once somebody is actually looking at it. Longer than a refusal's
   // six seconds because this note is read AFTER an interruption, not during one.
   const CALL_ENDED_MS = 10_000;
@@ -327,6 +339,17 @@
   // browser, an old app build) opens its own microphone and plays through Web Audio, byte for byte what
   // it did before this wave.
   const nativeAudioWanted = () => shellHost()?.nativeAudio === true;
+  // VOICE-15b. Whether the call screen offers somewhere to type. Jason, on build 17: "there's no reason
+  // to have a text box there for chatting in this view." In the phone app the call screen IS the whole
+  // surface -- there is no console behind it to glance at, the box cost the three controls beside it
+  // the room they needed (MEASURED at 390x844: an 86 px field and a Try again whose word ran over its
+  // own pill), and a typed line is the one thing on that screen whose answer is never spoken.
+  //
+  // A PHONE IN A PLAIN BROWSER KEEPS IT. That is VOICE-13's shape, taken from Jason's own recording
+  // ("a row at the bottom with somewhere to type"), and the chat behind a browser's call screen is one
+  // swipe away rather than a different application. The reader is the platform the shell names, which
+  // is the same fact bargeInWanted reads and never a user agent.
+  const typedLineWanted = () => shellHost()?.platform !== "ios";
   // VOICE-15. Page to shell, through the one bridge TitaniumVoice.swift installs on every console page.
   // Absent in every browser, which is why the send is a try: a shell that is not there is not an error,
   // it is just not an app. docs/APPS.md names the five actions and their fields.
@@ -585,7 +608,12 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     //
     // IT DOES NOT TOUCH sent, heldFrames, heldMs OR mutedFrames, and it must not: the comment above
     // this function says MEETING-1 shares it rather than forking it, and --leg frames reads those four.
-    const stats = { sent: 0, heldFrames: 0, heldMs: 0, mutedFrames: 0, bytes: 0, blocks: 0, micLevel: 0, micFrames: 0 };
+    //
+    // VOICE-15b adds micPeak, the loudest frame of the whole call, beside the last frame's own level.
+    // micLevel answers "is there a voice right now" for the avatar; micPeak answers "did this call
+    // ever hear anything at all", which is the question the ended card has to settle and which no
+    // single frame can. It is additive: the four numbers above are untouched.
+    const stats = { sent: 0, heldFrames: 0, heldMs: 0, mutedFrames: 0, bytes: 0, blocks: 0, micLevel: 0, micFrames: 0, micPeak: 0 };
     let pending = new Float32Array(0);
     let stopped = false;
 
@@ -618,6 +646,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
         let sum = 0;
         for (let i = 0; i < frame.length; i += 1) sum += frame[i] * frame[i];
         stats.micLevel = Math.sqrt(sum / frame.length);
+        if (stats.micLevel > stats.micPeak) stats.micPeak = stats.micLevel;
         stats.micFrames += 1;
         const pcm = pcm16FromFloat32(frame);
         stats.sent += 1;
@@ -759,7 +788,8 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     const muted = typeof options.muted === "function" ? options.muted : () => false;
     const onChunk = typeof options.onChunk === "function" ? options.onChunk : () => {};
     const sampleRate = options.sampleRate ?? SAMPLE_RATE;
-    const stats = { sent: 0, heldFrames: 0, heldMs: 0, mutedFrames: 0, bytes: 0, blocks: 0, micLevel: 0, micFrames: 0 };
+    // VOICE-15b's micPeak is here too, so the ended card asks the same question of both capture paths.
+    const stats = { sent: 0, heldFrames: 0, heldMs: 0, mutedFrames: 0, bytes: 0, blocks: 0, micLevel: 0, micFrames: 0, micPeak: 0 };
     let stopped = false;
     postToShell({ action: "audioStart", sampleRate });
     const capture = {
@@ -783,6 +813,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
         let sum = 0;
         for (let i = 0; i < view.length; i += 1) { const v = view[i] / 0x8000; sum += v * v; }
         stats.micLevel = view.length > 0 ? Math.sqrt(sum / view.length) : 0;
+        if (stats.micLevel > stats.micPeak) stats.micPeak = stats.micLevel;
         stats.micFrames += 1;
         stats.sent += 1;
         stats.bytes += length;
@@ -1375,6 +1406,20 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     output: "speaker",
     /** VOICE-15. The last route the shell reported for this call, drawn as one quiet line. */
     route: null,
+    /**
+     * VOICE-15b. THE PERSON'S OWN WORDS ON THIS CALL, and nothing else: what the ended card is allowed
+     * to read back. Filled from `heard-confirmed`, which is the relay's own "these are the bytes that
+     * went into the agent's conversation", and only when this page's microphone really produced the
+     * sound they were made of. Emptied when a call opens, never when one closes -- the card is painted
+     * after closeCall() has run.
+     */
+    heard: [],
+    /**
+     * VOICE-15b. What Titan said on this call, flattened for comparison. A provider that transcribes
+     * its OWN output onto the person's channel is the defect behind "only one word was said: them",
+     * and this is what lets the card tell the two apart without reading the wire's intent.
+     */
+    spoken: [],
   };
   let callEndedTimer = null;
 
@@ -1671,6 +1716,18 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     if (node == null) return;
     hide(node, !call.up);
     if (!call.up) return;
+    // VOICE-15b. In the phone app the call screen is the WHOLE surface: no message box on it, and
+    // nothing of the console's own composer reachable behind it (the sheet's opaque ground and the
+    // `inert` app shell already do the second half). A phone in a browser keeps VOICE-13's row.
+    const typedForm = node.querySelector("[data-voice-call-form]");
+    const wantsTyped = typedLineWanted();
+    if (typedForm != null) {
+      hide(typedForm, !wantsTyped);
+      const field = typedForm.querySelector?.("[data-voice-call-input]") ?? node.querySelector("[data-voice-call-input]");
+      if (!wantsTyped && field != null && field.value !== "") field.value = "";
+    }
+    const host = wantsTyped ? "browser" : "app";
+    if (node.getAttribute("data-voice-call-host") !== host) node.setAttribute("data-voice-call-host", host);
     const retry = node.querySelector("[data-voice-call-retry]");
     const mute = node.querySelector("[data-voice-call-mute]");
     const outputBtn = node.querySelector("[data-voice-call-output]");
@@ -1874,6 +1931,60 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   // a toast fired as the screen locks is gone before anybody looks, which is the exact case this note
   // exists for. It is mounted in .conversation-space beside the VOICE-7 panel, so renderTranscript's
   // wholesale innerHTML rewrite cannot take it with it.
+  // ------------------------------------------------------------ VOICE-15b: whose words those were
+  //
+  // Two strings that look alike on a wire and must never be confused on a screen: what the PERSON
+  // said, and what the PROVIDER transcribed of its own output. The relay labels them apart --
+  // `heard-confirmed` is the person's, `said` is Titan's -- and on build 17 a call with 0 s of audio
+  // in still produced one confirmed word, "them.", which was the provider transcribing its own
+  // greeting or the silence it was handed. The card read it back as Jason's own sentence.
+  //
+  // So the card takes a string only when this page's own microphone made the sound it was made of.
+  // That is a fact no wire frame can fake: `sent` is the frames this page put on the socket and
+  // `micPeak` is the loudest of them. Zero frames, or frames that were all digital silence, and there
+  // is nothing of the person's on this call whatever the provider transcribed.
+  const flatWords = (text) => String(text ?? "").toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+  /** Did Titan say this on this call. A provider reading its own greeting back is the case. */
+  function agentSaidIt(flat) {
+    if (flat.length === 0) return true;
+    for (const one of call.spoken) {
+      if (one === flat) return true;
+      // A short transcript INSIDE something Titan said ("them." out of a whole greeting) is the shape
+      // the defect really took, so containment counts -- one way only, because a person quoting Titan
+      // at length is not a thing the provider does to itself.
+      if (flat.length <= 24 && one.includes(flat)) return true;
+    }
+    return false;
+  }
+  function rememberSpoken(text) {
+    const flat = flatWords(text);
+    if (flat.length === 0) return;
+    call.spoken.push(flat);
+    if (call.spoken.length > 40) call.spoken.shift();
+  }
+  function rememberHeard(text) {
+    const words = String(text ?? "").replace(/\s+/g, " ").trim();
+    if (words.length === 0) return false;
+    const stats = state.capture?.stats;
+    // NOTHING WENT UP THE WIRE, SO NOTHING CAME BACK AS THE PERSON'S. Build 17's call was exactly
+    // this: no frames sent, one word confirmed.
+    if ((stats?.sent ?? 0) <= 0) return false;
+    // FRAMES THAT WERE ALL SILENCE ARE THE SAME CLAIM ONE LAYER DOWN, which is the shape build 20's
+    // microphone took (peak 0.0 dBFS). A real room never reads exactly zero.
+    if ((stats?.micPeak ?? 0) <= 0) return false;
+    if (agentSaidIt(flatWords(words))) return false;
+    call.heard.push(words);
+    if (call.heard.length > 20) call.heard.shift();
+    return true;
+  }
+  /** What the ended card reads: the call ended, and either the person's last words or that there were none. */
+  function endedCardText() {
+    const last = call.heard[call.heard.length - 1] ?? "";
+    if (last.length === 0) return `${CALL_ENDED_SENTENCE} ${CALL_ENDED_NOTHING}`;
+    const words = last.length > CALL_ENDED_WORDS ? `${last.slice(0, CALL_ENDED_WORDS - 1).trimEnd()}…` : last;
+    return `${CALL_ENDED_SENTENCE} ${CALL_ENDED_SAID} “${words}”`;
+  }
+
   function showEndedNote() {
     const document_ = global.document;
     const space = document_?.querySelector(".conversation-space");
@@ -1884,7 +1995,8 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       note = document_.getElementById(CALL_ENDED_ID);
       if (note == null) return;
     }
-    if (note.textContent !== CALL_ENDED_SENTENCE) note.textContent = CALL_ENDED_SENTENCE;
+    const words = endedCardText();
+    if (note.textContent !== words) note.textContent = words;
     hide(note, false);
     // ITS DISMISS IS ARMED ON VISIBILITY, NOT ON THE ENDING. The commonest way a call ends by itself is
     // the phone going to sleep, and a timer started then runs out in somebody's pocket.
@@ -1949,6 +2061,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     state.sound = nativeAudioWanted() ? nativePlayer({ gate: state.gate }) : player({ gate: state.gate });
     state.tailFrames = 0;
     state.flushes = 0;
+    // VOICE-15b. Whose words this LINE heard, and what Titan said on it. Emptied here rather than at
+    // the close, because the ended card is painted one frame after closeCall() has already run.
+    call.heard = [];
+    call.spoken = [];
     // VOICE-14. Asked ONCE, here, for the life of this line. The relay is told the same thing on the
     // opening frame below, so one answer drives both halves of the gate.
     state.bargeIn = bargeInWanted();
@@ -2658,6 +2774,9 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       case "heard-confirmed":
         state.labelled = true;
         overlayConfirmed(String(frame.text ?? ""), frame);
+        // VOICE-15b. And the ended card's own copy, taken only when this page's microphone really
+        // made the sound these words were transcribed from.
+        rememberHeard(String(frame.text ?? ""));
         break;
       case "hear-end":
         state.labelled = true;
@@ -2681,6 +2800,9 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       // start or a stop ever cleared it. The text is kept for the gate to read and for nothing else.
       case "said":
         state.lastSaid = String(frame.text ?? "");
+        // VOICE-15b. Kept flattened for one comparison and one only: a provider that transcribes its
+        // OWN output onto the person's channel must not reach the ended card as the person's words.
+        rememberSpoken(state.lastSaid);
         break;
       case "speak-begin":
         state.gate?.begin();
@@ -3023,6 +3145,41 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     gear?.click?.();
   }
 
+  // ------------------------------------------------------------ ROUTER-1d: Think harder on a phone
+  //
+  // ROUTER-1 put the switch in the composer, and styles.css hides it at 690 px because a 358 px row
+  // with a message box, an attach button, Talk and Send in it has nowhere to put a fifth control. So on
+  // a phone the one way to pin a conversation to the work model did not exist at all. It comes back as
+  // a ROW OF THE + MENU, which is PHONE-CONSOLE-1's own pattern for a control that exists only there
+  // (index.html's "Attach a file" row is the precedent, and the dock keeps its bar markup at both
+  // widths so nothing is wired twice).
+  //
+  // THERE IS ONE PIECE OF STATE AND THIS IS NOT IT. The switch the adapter reads is the checkbox
+  // #think-harder: gateway-adapter.js listens for its `change` and keys the pin by conversation. The
+  // row presses THAT, and the checkbox's own event is what carries the change, so the phone and the
+  // laptop cannot hold two different answers. The desktop switch is untouched in markup, in CSS and
+  // in behaviour.
+  const thinkHarderBox = () => global.document?.getElementById?.("think-harder") ?? null;
+  /** The row shows what the checkbox holds. Read again on every open, because the adapter writes that
+   *  checkbox directly when the conversation changes and there is no event on that path to follow. */
+  function paintThinkRow() {
+    const row = global.document?.querySelector?.("[data-voice-think]");
+    if (row == null) return;
+    const on = thinkHarderBox()?.checked === true ? "true" : "false";
+    // Guarded on a change, like every other write in this file: the body-wide observer is watching.
+    if (row.getAttribute("aria-pressed") !== on) row.setAttribute("aria-pressed", on);
+  }
+  /** A press on the row is a press on the switch. Returns false where there is no switch to press. */
+  function pressThinkRow() {
+    const box = thinkHarderBox();
+    if (box == null) return false;
+    box.checked = box.checked !== true;
+    try { box.dispatchEvent(new global.Event("change", { bubbles: true })); }
+    catch { /* a window with no Event constructor is a test, and the checkbox still holds the truth */ }
+    paintThinkRow();
+    return true;
+  }
+
   function wire() {
     const document_ = global.document;
     if (document_ == null) return;
@@ -3035,8 +3192,20 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       // microphone by THIS road -- always listening, where pointerdown deliberately does nothing --
       // opens a call screen on a phone like every other road does. talkDown's own branch decides.
       if (talk != null) { event.preventDefault(); if (talkMode() !== "push") void talkDown(); return; }
-      if (event.target?.closest?.("[data-voice-open-settings]") != null) { event.preventDefault(); openSettings(); }
+      if (event.target?.closest?.("[data-voice-open-settings]") != null) { event.preventDefault(); openSettings(); return; }
+      // ROUTER-1d. The + menu's Think harder row, and the press that opens the menu it lives in. The
+      // row carries no data-capability on purpose: app.js closes the sheet on any press that has one,
+      // and a switch somebody has just flipped should show its new state rather than take the menu
+      // away. The open is repainted on the next frame, after app.js has set the body attribute.
+      if (event.target?.closest?.("[data-voice-think]") != null) { event.preventDefault(); pressThinkRow(); return; }
+      if (event.target?.closest?.("#composer-plus") != null) {
+        (global.requestAnimationFrame ?? ((fn) => global.setTimeout(fn, 16)))(paintThinkRow);
+      }
     });
+    // The other half of "one piece of state": the desktop switch moving, by a press on it or by the
+    // settings surface, repaints the row so the two can never read differently.
+    document_.getElementById("think-harder")?.addEventListener?.("change", paintThinkRow);
+    paintThinkRow();
     // ---------------------------------------------------------- VOICE-7: press and hold
     //
     // The RELEASE listens on the document rather than on the button, because a thumb that slides off a
@@ -3281,10 +3450,16 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       // is muted, the status line under him, and whether a card has taken the middle.
       // VOICE-15 adds three: whether the line is down and what it says, the speaker/earpiece choice,
       // and the route the shell last reported, so a test reads all of it without the DOM.
+      // VOICE-15b adds three more: whether this host offers somewhere to type on the call screen, the
+      // person's own words as the ended card would read them back, and the card's whole sentence.
       call: {
         up: call.up, word: call.word, muted: call.muted, status: call.status, card: call.card,
         down: call.down, output: call.output, route: call.route,
+        typed: typedLineWanted(), heard: [...call.heard], ended: endedCardText(),
       },
+      // VOICE-15b. The loudest frame of this call, beside the last frame's own level: "did this call
+      // ever hear anything" is what the ended card turns on and no single frame can answer it.
+      micPeak: state.capture?.stats.micPeak ?? 0,
     }),
     // Exposed so a test can pin the words and the arithmetic without a browser, which is the
     // contract marketplace-bots.js and cloud-browser.js already keep.
@@ -3389,6 +3564,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       typed: sendThroughComposer,
       endedNoteUp: endedNoteUp,
       dismissEndedNote,
+      // VOICE-15b. The ended card's own words, and the two readers behind them.
+      endedText: endedCardText,
+      remember: rememberHeard,
+      spoken: rememberSpoken,
       levels: callLevels,
       _state: call,
       _endedTimer: () => callEndedTimer,
@@ -3400,6 +3579,14 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     _CALL_WORDS: CALL_WORDS,
     _CALL_ENDED_SENTENCE: CALL_ENDED_SENTENCE,
     _CALL_ENDED_MS: CALL_ENDED_MS,
+    // VOICE-15b. The ended card's other two sentences, the host reader behind the typed row, and the
+    // + menu's Think harder switch (ROUTER-1d).
+    _CALL_ENDED_NOTHING: CALL_ENDED_NOTHING,
+    _CALL_ENDED_SAID: CALL_ENDED_SAID,
+    _CALL_ENDED_WORDS: CALL_ENDED_WORDS,
+    _typedLineWanted: typedLineWanted,
+    _paintThinkRow: paintThinkRow,
+    _pressThinkRow: pressThinkRow,
     _callMarkup: callMarkup,
     _mountCall: mountCall,
     _paintCall: paintCall,

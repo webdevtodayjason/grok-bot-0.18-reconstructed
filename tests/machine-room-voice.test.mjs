@@ -17,7 +17,7 @@
 // host-notes-read-as-errors.md: a host line that looks like a stack trace gets read as one.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -2537,6 +2537,10 @@ function callDom(options = {}) {
       setAttribute: (k, v) => { self._attrs[k] = String(v); },
       removeAttribute: (k) => { delete self._attrs[k]; },
       addEventListener: (name, fn) => { (self._on[name] ??= []).push(fn); },
+      // ROUTER-1d. The + menu's row presses the checkbox the adapter reads, and the adapter hears
+      // about it through that checkbox's own `change`. A node that cannot dispatch one would let this
+      // file pass while the two halves of the switch silently disagreed on a real page.
+      dispatchEvent: (event) => { for (const fn of self._on[event?.type] ?? []) fn(event); return true; },
       appendChild: (node) => { self._kids.push(node); return node; },
       // Every node takes one and most do nothing with it: voice.js's own line mounts into #composer,
       // which this document really does answer, and a node that cannot take HTML throws there.
@@ -2558,6 +2562,11 @@ function callDom(options = {}) {
   // VOICE-15. The toggle's label lives inside the toggle; the module reads it by its own attribute.
   screen._find["[data-voice-call-output]"]._find["[data-voice-call-output-label]"] = made();
   screen._find["[data-voice-call-card-slot]"] = made();
+  // VOICE-15b. The typed row is a form with the field inside it, because the app hides the ROW and not
+  // just the box: a bare input left in a flex row is still a 44 px gap in the middle of the controls.
+  const typedForm = made();
+  typedForm._find["[data-voice-call-input]"] = screen._find["[data-voice-call-input]"];
+  screen._find["[data-voice-call-form]"] = typedForm;
   const shell = made();
   const space = made();
   const transcript = made();
@@ -2568,6 +2577,12 @@ function callDom(options = {}) {
   const note = made({ id: "voice-call-ended" });
   note.hidden = true;
   space.insertAdjacentHTML = () => { byId.set("voice-call-ended", note); };
+  // ROUTER-1d. The + menu's row and the ONE checkbox the adapter reads, which is the thing the row
+  // presses. Both live outside the call screen, which is the point: the row is the composer's, not the
+  // call's, and this file is where the two are proved to hold one answer between them.
+  const thinkRow = made({ "aria-pressed": "false" });
+  const thinkBox = made({ id: "think-harder" });
+  thinkBox.checked = false;
   const body = made();
   body.insertAdjacentHTML = () => { byId.set("voice-call", screen); };
   const document_ = {
@@ -2580,6 +2595,7 @@ function callDom(options = {}) {
     getElementById: (id) => byId.get(id) ?? null,
     querySelector: (sel) => ({
       ".app-shell": shell, ".conversation-space": space, "#composer": composer,
+      "[data-voice-think]": thinkRow,
     }[sel] ?? null),
     querySelectorAll: (sel) => document_._rows[sel] ?? [],
     addEventListener: () => {},
@@ -2588,7 +2604,9 @@ function callDom(options = {}) {
   byId.set("transcript", transcript);
   byId.set("composer", composer);
   byId.set("message-input", box);
-  return { document: document_, screen, shell, space, transcript, box, note, made, submitted: () => submitted };
+  byId.set("think-harder", thinkBox);
+  return { document: document_, screen, shell, space, transcript, box, note, made, thinkRow, thinkBox,
+    typedForm, submitted: () => submitted };
 }
 
 const systemRow = (make, id, words) => {
@@ -2721,7 +2739,10 @@ test("VOICE-13 call: every path out puts the page back, and the newest line is w
     }
     if (exit === "hidden") {
       assert.equal(voice._call.endedNoteUp(), true, "a phone that was locked mid-call says so, once, in plain words");
-      assert.equal(dom.note.textContent, voice._CALL_ENDED_SENTENCE);
+      // VOICE-15b: and it says what was heard on the call behind it. Nothing was said on this one, so
+      // it says that rather than leaving the person to guess -- which is the half of build 17's defect
+      // that no wording could hide.
+      assert.equal(dom.note.textContent, `${voice._CALL_ENDED_SENTENCE} ${voice._CALL_ENDED_NOTHING}`);
       voice._call.dismissEndedNote();
     }
   }
@@ -3280,4 +3301,449 @@ test("VOICE-15 a browser line sends no shell audio messages and opens its own mi
   assert.equal(getUserMediaCalls, 1, "the browser path opened its own microphone");
   assert.deepEqual(shellMessages, [], "and posted nothing to the shell's audio bridge");
   voice.stop();
+});
+
+// ================================================================== VOICE-15b
+//
+// Jason, on TestFlight build 17, three faults on one call screen and one control that a phone never
+// had at all:
+//
+//   "there's no reason to have a text box there for chatting in this view"
+//   "The buttons do not look so great ... the shapes are wrong and they kind of overlap on the text"
+//   "when it was done, it said that the call ended and only one word was said: them. Nobody said that"
+//
+// The geometry is measured in a real browser at 390x844 (the leg at the bottom of this file); these
+// cases pin the words, the host rules and the one thing a picture cannot show -- WHOSE words those
+// were. WebKit is the phone's engine and is not available to a worker on this Mac, so every number in
+// this wave's report is Chrome's at that size, which is said out loud there.
+
+test("VOICE-15b call: the phone app's call screen has no message box, and a phone in a browser keeps one", async () => {
+  const app = callDom();
+  const inApp = await loadNativeCall({ document: app.document });
+  await inApp.voice._call.open();
+  await settle(10);
+  assert.equal(inApp.voice._typedLineWanted(), false, "the app names its own platform, and no user agent decides this");
+  assert.equal(app.typedForm.hidden, true, "the typed ROW is hidden, not just the box inside it: a bare input is still a gap in the row");
+  assert.equal(app.screen.getAttribute("data-voice-call-host"), "app");
+  assert.equal(inApp.voice.stats().call.typed, false);
+  inApp.voice.stop();
+
+  // A phone-sized browser keeps VOICE-13's shape, taken from Jason's own recording of the thing he
+  // asked for: "a row at the bottom with somewhere to type". The chat behind a browser's call screen
+  // is one swipe away rather than another application.
+  const web = callDom();
+  const { voice } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: web.document });
+  await voice._call.open();
+  await settle(10);
+  assert.equal(voice._typedLineWanted(), true);
+  assert.equal(web.typedForm.hidden, false, "a browser keeps somewhere to type");
+  assert.equal(web.screen.getAttribute("data-voice-call-host"), "browser");
+  assert.equal(voice.stats().call.typed, true);
+  // And the line it carries still leaves by the composer a person already uses, unchanged.
+  assert.equal(voice._call.typed("what is the team working on"), true);
+  assert.equal(web.box.value, "what is the team working on");
+  voice.stop();
+});
+
+test("VOICE-15b ended: a call nothing was heard on says so, and never reads the provider's own words back", async () => {
+  const dom = callDom();
+  const call = await loadNativeCall({ document: dom.document });
+  await call.voice._call.open();
+  await settle(10);
+  // BUILD 17'S CALL, on the wire: 0 s of audio in, Titan's own greeting, and then one "confirmed"
+  // word that the provider had transcribed off its own output or off the silence it was handed.
+  frame(call.voice, { t: "said", text: "Hi, it is Titan. What can I do for them?" });
+  frame(call.voice, { t: "heard-confirmed", text: "them.", turn: 1, itemId: "i1" });
+  assert.deepEqual(call.voice.stats().call.heard, [],
+    "a call this page put no audio on the wire for has none of the person's words, whatever came back");
+  assert.equal(call.voice._call.endedText(), `${call.voice._CALL_ENDED_SENTENCE} ${call.voice._CALL_ENDED_NOTHING}`);
+  // The card itself, through the one path that raises it: a phone that locked mid-call.
+  dom.document.hidden = true;
+  call.voice.stop();
+  await settle(20);
+  assert.equal(call.voice._call.endedNoteUp(), true);
+  assert.equal(dom.note.textContent, "The call ended. Nothing was heard.",
+    "in plain words, with no condition name and nothing to press");
+  call.voice._call.dismissEndedNote();
+});
+
+test("VOICE-15b ended: the card reads back the person's own words, and drops what Titan said", async () => {
+  const dom = callDom();
+  const { voice } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });
+  await voice.talkDown();
+  await settle(20);
+  // A real frame of sound through the real capture path: 2400 samples at 0.5 is an RMS of 0.5, so
+  // `sent` and `micPeak` are both the microphone's own doing and not a number a test wrote.
+  capturePort.onmessage({ data: loudBlock() });
+  assert.ok(voice.stats().sent > 0 && voice.stats().micPeak > 0, "the microphone really produced a frame");
+  frame(voice, { t: "said", text: "Everything is backed up and the last run was clean." });
+  frame(voice, { t: "heard-confirmed", text: "did the backup run last night", turn: 1, itemId: "i1" });
+  assert.deepEqual(voice.stats().call.heard, ["did the backup run last night"]);
+  assert.equal(voice._call.endedText(), "The call ended. You said: “did the backup run last night”");
+  // AND THE AGENT'S OWN SENTENCE COMING BACK ON THE PERSON'S CHANNEL IS STILL DROPPED, even on a call
+  // where the microphone was working: a provider reading its greeting back is the defect, not a turn.
+  frame(voice, { t: "heard-confirmed", text: "Everything is backed up and the last run was clean.", turn: 2, itemId: "i2" });
+  assert.deepEqual(voice.stats().call.heard, ["did the backup run last night"], "Titan's own sentence is not the person's");
+  // A short fragment of something Titan said is the shape build 17 actually took.
+  frame(voice, { t: "heard-confirmed", text: "backed up", turn: 3, itemId: "i3" });
+  assert.deepEqual(voice.stats().call.heard, ["did the backup run last night"]);
+  // A long quote is cut rather than turned into a transcript: the durable record is the chat's rows.
+  const long = "a".repeat(voice._CALL_ENDED_WORDS + 40);
+  frame(voice, { t: "heard-confirmed", text: long, turn: 4, itemId: "i4" });
+  const ended = voice._call.endedText();
+  assert.ok(ended.length < long.length, "the card is a card and not a transcript");
+  assert.ok(ended.endsWith("…”"), ended);
+  // The next line starts again: these words belong to the call they were said on.
+  voice.stop();
+  await voice.start({ handsFree: true });
+  await settle(10);
+  assert.deepEqual(voice.stats().call.heard, [], "a new line has heard nothing yet");
+  voice.stop();
+});
+
+test("ROUTER-1d: on a phone the Think harder switch is a row of the + menu, pressing the one switch the adapter reads", async () => {
+  const dom = callDom();
+  const { voice, fake } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });
+  // The adapter's own wiring, in one line: it listens for `change` on #think-harder and keys the pin
+  // by conversation (gateway-adapter.js). So a row that does not move THAT checkbox and does not fire
+  // THAT event pins nothing, however it looks.
+  const heard = [];
+  dom.thinkBox.addEventListener("change", () => heard.push(dom.thinkBox.checked));
+  fake.Event = class { constructor(type, init = {}) { this.type = type; Object.assign(this, init); } };
+  assert.equal(voice._pressThinkRow(), true);
+  assert.equal(dom.thinkBox.checked, true, "the press moved the checkbox the adapter reads");
+  assert.deepEqual(heard, [true], "and the adapter heard about it through that checkbox's own change");
+  assert.equal(dom.thinkRow.getAttribute("aria-pressed"), "true", "and the row shows the new state");
+  assert.equal(voice._pressThinkRow(), true);
+  assert.equal(dom.thinkBox.checked, false, "a second press turns it off again");
+  assert.deepEqual(heard, [true, false]);
+  assert.equal(dom.thinkRow.getAttribute("aria-pressed"), "false");
+  // THE CHECKBOX IS THE TRUTH AND THE ROW FOLLOWS IT. The adapter writes it directly when the
+  // conversation changes, with no event on that path, so the row is read again rather than remembered.
+  dom.thinkBox.checked = true;
+  voice._paintThinkRow();
+  assert.equal(dom.thinkRow.getAttribute("aria-pressed"), "true",
+    "a conversation switch moved the switch, and the row is not holding the last conversation's answer");
+  // And a page with no switch at all is not an error: the row simply presses nothing.
+  const bare = await loadTalking({ innerWidth: 390, innerHeight: 844 });
+  assert.equal(bare.voice._pressThinkRow(), false);
+  voice.stop();
+});
+
+test("ROUTER-1d source: the row is in the + menu's own markup, with no capability and no second switch", async () => {
+  const html = await read("ui/machine-room/index.html");
+  const dock = html.slice(html.indexOf('<nav class="capability-dock"'), html.indexOf("</nav>", html.indexOf('<nav class="capability-dock"')));
+  const row = dock.split("\n").find((line) => line.includes("data-voice-think"));
+  assert.ok(row != null, "the Think harder row is not in the capability dock, which is the + menu at phone width");
+  assert.ok(!row.includes("data-capability"),
+    "a row with data-capability closes the sheet on press (app.js), and a switch a person just flipped has to show its new state");
+  assert.match(row, /aria-pressed="false"/, "it is a switch, and it says so");
+  // ONE SWITCH, NOT TWO. The composer's own checkbox is the state; a second <input type="checkbox">
+  // in the menu would be a second answer to the same question.
+  assert.equal(html.split('id="think-harder"').length - 1, 1, "there is exactly one Think harder input on the page");
+  assert.match(html, /<label class="think-harder"/, "and the desktop switch in the composer is untouched");
+  // The row is drawn only at phone width, where the composer's switch is hidden. Both halves in CSS.
+  const css = await read("ui/machine-room/styles.css");
+  assert.match(css, /\.voice-think \{ display: none; \}/, "the row is not drawn on the bar, where the composer's own switch is right there");
+  const phoneBlock = css.slice(css.lastIndexOf("@media (max-width: 690px)"));
+  assert.match(phoneBlock, /\.voice-think \{\s*display: grid;/, "and it is drawn at phone width, where the composer's switch is not");
+  assert.match(css, /\.think-harder \{ display: none; \}|\.think-harder \{\n?\s*display: none;/,
+    "ROUTER-1's own phone rule still hides the composer's switch, which is what makes the menu row the only one");
+});
+
+test("VOICE-15b source: the call screen's controls are ONE shape, and the hidden attribute really hides", async () => {
+  const sheet = await read("ui/machine-room/voice-call.css");
+  // THE DEFECT THIS CASE EXISTS FOR: `display: grid` on a control beats [hidden], so a button the
+  // module thought it had hidden was on the screen in front of a person. MEASURED in Chrome at
+  // 390x844: the speaker toggle drawn in a plain browser, and Try again drawn on a live line.
+  // Read off the RULES rather than pattern-matched over the file: every rule that turns a control ON
+  // has to say :not([hidden]) in the selector that does it, or the attribute the module sets is inert.
+  const rules = [...sheet.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^}]*)\}/g)]
+    .map((one) => ({ selector: one[1].trim(), body: one[2] }));
+  const controls = ["mute", "end", "output", "retry", "typed"];
+  for (const rule of rules) {
+    const display = /display:\s*([a-z-]+)/.exec(rule.body)?.[1];
+    if (display == null || display === "none") continue;
+    for (const part of rule.selector.split(",").map((one) => one.trim())) {
+      const named = controls.find((one) => part.startsWith(`.voice-call-${one}`));
+      if (named == null) continue;
+      assert.ok(part.includes(":not([hidden])"),
+        `${part} takes display: ${display} without :not([hidden]), so the hidden attribute cannot hide it`);
+    }
+  }
+  const shared = sheet.slice(sheet.indexOf(".voice-call-mute:not([hidden])"));
+  for (const control of ["mute", "end", "output", "retry"]) {
+    assert.ok(shared.startsWith(".voice-call-mute:not([hidden])") && shared.includes(`.voice-call-${control}:not([hidden])`),
+      `.voice-call-${control} is not in the one rule that gives all four controls their shape`);
+  }
+  const rule = shared.slice(0, shared.indexOf("}"));
+  assert.match(rule, /min-height: 44px/, "the 44 px floor this console enforces for every other control");
+  assert.match(rule, /min-width: 44px/);
+  assert.match(rule, /white-space: nowrap/, "a label that wraps grows the row under the screen's own bottom padding");
+  // And the sheet still carries no breakpoint: the module decides who gets a screen, and now also who
+  // gets somewhere to type on it.
+  assert.ok(!/@media[^{]*width/.test(sheet), "voice-call.css grew a width breakpoint");
+  // The copy that used to live in styles.css is gone, so there is one place the shape is written.
+  // Read off the rules and not the file: the banner there NAMES the three selectors it gave back, in
+  // order to explain where they went and why.
+  const css = (await read("ui/machine-room/styles.css")).replace(/\/\*[\s\S]*?\*\//g, "");
+  for (const gone of [".voice-call-output", ".voice-call-retry", ".voice-call-route", ".voice-call-mute", ".voice-call-end"]) {
+    assert.ok(!css.includes(gone), `styles.css still styles ${gone}, which is the drift this wave removed`);
+  }
+});
+
+// ------------------------------------------------------------------ VOICE-15b's own browser leg
+//
+// WHAT ONLY A BROWSER CAN ANSWER, and what this leg exists for: every fault Jason reported on build 17
+// was a fault of the SHEET, and three of the four were invisible to the fifty cases above because they
+// all read `node.hidden` -- the module's own state -- rather than the box a person's thumb lands on.
+// `display: grid` on a control beats [hidden], so the speaker toggle painted in a plain browser and
+// Try again painted on a live line, and four 56 px pills plus a message box left the field 86 px wide
+// with "Try again" running over its own border. verify-ui-in-a-real-browser.md, paid for again.
+//
+// CHROME AT 390x844 AND NOT WEBKIT. The phone's engine is WebKit and it is not available here; what is
+// measured below is Chrome at the phone's own size, which settles geometry, the cascade and the
+// attribute, and cannot settle how iOS lays out an emoji glyph or the safe-area insets. Said out loud
+// in docs/VOICE-15B-REPORT-page.md as well.
+//
+// Pictures land in reports/voice-15b (gitignored) or VOICE_GATE_SHOT_DIR, and the path is printed.
+const SHOT_DIR = process.env.VOICE_GATE_SHOT_DIR ?? path.join(repoRoot, "reports/voice-15b");
+
+test("VOICE-15b in a real browser at 390x844: one shape, no message box in the app, and a card that says what was heard", async (t) => {
+  const playwright = PLAYWRIGHT_CANDIDATES.find((one) => existsSync(one));
+  if (!existsSync(CHROME) || playwright == null) {
+    t.skip(`tried Chrome at ${CHROME} and playwright-core at ${PLAYWRIGHT_CANDIDATES.join(", ")}; `
+      + "set GROK_BOT_CHROME / GROK_BOT_PLAYWRIGHT to run the browser leg");
+    return;
+  }
+  const { chromium } = await import(playwright);
+  await mkdir(SHOT_DIR, { recursive: true });
+  const { server } = serveConsole();
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const browser = await chromium.launch({ executablePath: CHROME, headless: true, args: ["--no-sandbox"] });
+
+  // One read of the bottom row: every control's own box, its label's box, and what a thumb would hit
+  // where the console's message box is. A control that is not painted answers width 0, which is the
+  // difference between "hidden" and "hidden" that this whole leg turns on.
+  const readRow = () => {
+    const of = (selector) => {
+      const node = document.querySelector(selector);
+      if (node == null) return null;
+      const r = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      const span = [...node.querySelectorAll("span")].find((one) => !one.classList.contains("voice-call-glyph"));
+      const l = span?.getBoundingClientRect();
+      return {
+        w: Math.round(r.width * 100) / 100, h: Math.round(r.height * 100) / 100,
+        left: Math.round(r.left * 100) / 100, right: Math.round(r.right * 100) / 100,
+        top: Math.round(r.top * 100) / 100, bottom: Math.round(r.bottom * 100) / 100,
+        radius: style.borderRadius, attr: node.hidden === true, display: style.display,
+        label: span == null || l == null ? null : {
+          text: span.textContent.trim(),
+          w: Math.round(l.width * 100) / 100,
+          left: Math.round(l.left * 100) / 100, right: Math.round(l.right * 100) / 100,
+          top: Math.round(l.top * 100) / 100, bottom: Math.round(l.bottom * 100) / 100,
+          cut: span.scrollWidth - span.clientWidth,
+        },
+      };
+    };
+    const box = document.getElementById("message-input");
+    const r = box?.getBoundingClientRect();
+    const hit = r == null ? null : document.elementFromPoint(Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2));
+    return {
+      typed: of(".voice-call-typed"), output: of("[data-voice-call-output]"), mute: of("[data-voice-call-mute]"),
+      retry: of("[data-voice-call-retry]"), end: of("[data-voice-call-end]"),
+      word: document.querySelector("[data-voice-call-state]")?.textContent ?? "",
+      host: document.getElementById("voice-call")?.getAttribute("data-voice-call-host") ?? "",
+      composerReachable: hit != null && hit.closest("#voice-call") == null,
+      sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    };
+  };
+
+  try {
+    // ---- the phone app: a shell that names itself, and owns the audio.
+    const app = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true,
+      userAgent: GATE_AGENT });
+    await app.addInitScript(() => {
+      window.__titanbotShell = { platform: "ios", build: "17", canOpenAppSettings: true, nativeAudio: true };
+      window.webkit = { messageHandlers: { titaniumVoice: { postMessage: () => {} } } };
+    });
+    const page = await app.newPage();
+    const failures = [];
+    page.on("pageerror", (error) => failures.push(String(error)));
+    await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => window.__voice != null, null, { timeout: 20_000 });
+    await page.waitForTimeout(2500);
+    await page.evaluate(() => window.__voice._call.open());
+    await page.waitForTimeout(900);
+    // The dial is refused here (this server has no voice door), so the screen lands in VOICE-15c's
+    // down state. Both shapes matter, so the down one is measured first and then cleared through the
+    // module's own state -- the same door every case above drives it by.
+    const down = await page.evaluate(readRow);
+    await page.screenshot({ path: path.join(SHOT_DIR, "after-390-down.png") });
+    await page.evaluate(() => { window.__voice._call._state.down = ""; window.__voice._paintCall(); });
+    await page.waitForTimeout(200);
+    const live = await page.evaluate(readRow);
+    await page.screenshot({ path: path.join(SHOT_DIR, "after-390-live.png") });
+    // The longest word any of these controls carries, which is the one the pill used to run over.
+    await page.evaluate(() => window.__voice._toggleOutput());
+    await page.waitForTimeout(200);
+    const earpiece = await page.evaluate(readRow);
+    await page.screenshot({ path: path.join(SHOT_DIR, "after-390-earpiece.png") });
+
+    // 1. NO MESSAGE BOX AND NO COMPOSER. Jason: "there's no reason to have a text box there for
+    //    chatting in this view."
+    for (const [name, seen] of [["down", down], ["live", live], ["earpiece", earpiece]]) {
+      assert.equal(seen.host, "app", `${name}: the screen does not know it is in the app`);
+      assert.equal(seen.typed.w, 0, `${name}: the call screen still has a message box on it: ${JSON.stringify(seen.typed)}`);
+      assert.equal(seen.composerReachable, false,
+        `${name}: the console's own composer is reachable behind the call screen, so the screen is not the whole surface`);
+      assert.equal(seen.sideways, false, `${name}: the call screen scrolls sideways at 390 px`);
+    }
+
+    // 2. ONE SHAPE, 44 px, AND NO LABEL OVER ITS OWN BORDER. Jason: "the shapes are wrong and they
+    //    kind of overlap on the text."
+    const shapeOf = (seen) => [seen.output, seen.mute, seen.retry, seen.end].filter((one) => one != null && one.w > 0);
+    for (const [name, seen] of [["down", down], ["live", live], ["earpiece", earpiece]]) {
+      const drawn = shapeOf(seen);
+      assert.ok(drawn.length >= 2, `${name}: fewer controls are drawn than this screen has`);
+      for (const one of drawn) {
+        assert.ok(one.w >= 44 && one.h >= 44, `${name}: a control is ${one.w}x${one.h}, under the 44 px floor: ${JSON.stringify(one)}`);
+        assert.ok(one.label != null, `${name}: a control with no word under it is an icon alone: ${JSON.stringify(one)}`);
+        assert.equal(one.label.cut, 0, `${name}: the label is cut off inside its own control: ${JSON.stringify(one.label)}`);
+        // THE OVERLAP, MEASURED: the label's box inside the control's, clear of the corner curve.
+        assert.ok(one.label.left >= one.left + 3 && one.label.right <= one.right - 3,
+          `${name}: the word runs over its own control: ${JSON.stringify(one)}`);
+        assert.ok(one.label.bottom <= one.bottom - 3, `${name}: the word sits on the control's bottom edge: ${JSON.stringify(one)}`);
+      }
+      const first = drawn[0];
+      for (const one of drawn) {
+        assert.equal(one.w, first.w, `${name}: the controls are different widths: ${JSON.stringify(drawn.map((x) => x.w))}`);
+        assert.equal(one.h, first.h, `${name}: the controls are different heights: ${JSON.stringify(drawn.map((x) => x.h))}`);
+        assert.equal(one.radius, first.radius, `${name}: the controls are different shapes: ${JSON.stringify(drawn.map((x) => x.radius))}`);
+      }
+      const order = [...drawn].sort((a, b) => a.left - b.left);
+      for (let i = 1; i < order.length; i += 1) {
+        assert.ok(order[i].left >= order[i - 1].right,
+          `${name}: two controls overlap: ${JSON.stringify(order[i - 1])} and ${JSON.stringify(order[i])}`);
+      }
+    }
+    // The two states really are different controls, which is what [hidden] could not do before.
+    assert.ok(down.retry.w > 0 && down.mute.w === 0 && down.output.w === 0,
+      `a dead line offers Try again and nothing to mute: ${JSON.stringify(down)}`);
+    assert.ok(live.retry.w === 0 && live.mute.w > 0 && live.output.w > 0,
+      `a live line offers Mute and the speaker choice and no Try again: ${JSON.stringify(live)}`);
+    assert.equal(earpiece.output.label.text, "Earpiece", "the toggle says which output it is on");
+    console.log(`    VOICE-15b at 390x844 in Chrome: controls ${live.mute.w}x${live.mute.h} radius ${live.mute.radius}, `
+      + `the widest word is "${earpiece.output.label.text}" at ${earpiece.output.label.w} px inside it, `
+      + `the message box is ${live.typed.w} px in the app, and the three controls sit at `
+      + `${[earpiece.output.left, earpiece.mute.left, earpiece.end.left].join(", ")}`);
+
+    // 3. THE CARD SAYS WHAT WAS HEARD. This call heard nothing at all -- no microphone was opened by
+    //    the refused line -- which is exactly build 17's call, and the sentence says so.
+    const card = await page.evaluate(() => {
+      window.__voice.stop();
+      const call = window.__voice._call;
+      call._state.up = true;
+      call._state.endedByPerson = false;
+      call.close();
+      return new Promise((resolve) => setTimeout(() => {
+        const note = document.getElementById("voice-call-ended");
+        const r = note?.getBoundingClientRect();
+        resolve({ text: note?.textContent ?? "", hidden: note?.hidden ?? true,
+          w: r == null ? 0 : Math.round(r.width * 100) / 100, h: r == null ? 0 : Math.round(r.height * 100) / 100 });
+      }, 200));
+    });
+    await page.screenshot({ path: path.join(SHOT_DIR, "after-390-ended.png") });
+    assert.equal(card.hidden, false, "a call that ended by itself says so where the person is looking");
+    assert.equal(card.text, "The call ended. Nothing was heard.",
+      `the card read something other than the plain truth about this call: ${JSON.stringify(card)}`);
+    console.log(`    VOICE-15b card at 390x844: "${card.text}" in ${card.w}x${card.h} px`);
+
+    // 4. ROUTER-1d, with a real thumb at real coordinates.
+    const menu = await page.evaluate(() => {
+      window.__voice._call.dismissEndedNote();
+      document.getElementById("composer-plus").click();
+      return new Promise((resolve) => setTimeout(() => {
+        const row = document.querySelector("[data-voice-think]");
+        const r = row?.getBoundingClientRect();
+        const hit = r == null ? null : document.elementFromPoint(Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2));
+        const composerSwitch = document.querySelector(".think-harder");
+        resolve({
+          open: document.body.dataset.capabilityMenu ?? "",
+          w: r == null ? 0 : Math.round(r.width * 100) / 100, h: r == null ? 0 : Math.round(r.height * 100) / 100,
+          x: r == null ? 0 : Math.round(r.left + r.width / 2), y: r == null ? 0 : Math.round(r.top + r.height / 2),
+          reachable: hit != null && (row.contains(hit) || hit === row),
+          pressed: row?.getAttribute("aria-pressed") ?? "",
+          checked: document.getElementById("think-harder")?.checked ?? null,
+          composerSwitch: composerSwitch == null ? "gone" : getComputedStyle(composerSwitch).display,
+        });
+      }, 400));
+    });
+    await page.screenshot({ path: path.join(SHOT_DIR, "after-390-menu.png") });
+    assert.equal(menu.open, "open", "the + button did not open the menu the row lives in");
+    assert.ok(menu.w >= 44 && menu.h >= 44, `the Think harder row is ${menu.w}x${menu.h}, under the 44 px floor`);
+    assert.equal(menu.reachable, true, "a thumb cannot reach the row; elementFromPoint landed elsewhere");
+    assert.equal(menu.composerSwitch, "none", "the composer's own switch is still hidden at phone width, which is why this row exists");
+    assert.equal(menu.checked, false);
+    await page.touchscreen.tap(menu.x, menu.y);
+    await page.waitForTimeout(300);
+    const pressed = await page.evaluate(() => ({
+      pressed: document.querySelector("[data-voice-think]")?.getAttribute("aria-pressed") ?? "",
+      checked: document.getElementById("think-harder")?.checked ?? null,
+      open: document.body.dataset.capabilityMenu ?? "",
+    }));
+    await page.screenshot({ path: path.join(SHOT_DIR, "after-390-menu-on.png") });
+    assert.equal(pressed.checked, true, "a real tap did not move the one switch the adapter reads");
+    assert.equal(pressed.pressed, "true", "and the row did not show the new state");
+    assert.equal(pressed.open, "open", "the menu closed on a switch, so nobody saw what they had just done");
+    console.log(`    ROUTER-1d at 390x844: the + menu's row is ${menu.w}x${menu.h} at ${menu.x},${menu.y}, `
+      + `a tap sets #think-harder to ${pressed.checked} and the sheet stays open`);
+
+    // ---- the same width with no shell: VOICE-13's shape, and NO speaker toggle.
+    const web = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true,
+      userAgent: GATE_AGENT });
+    try {
+      const plain = await web.newPage();
+      await plain.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+      await plain.waitForFunction(() => window.__voice != null, null, { timeout: 20_000 });
+      await plain.waitForTimeout(2000);
+      await plain.evaluate(() => { window.__voice._call.open(); });
+      await plain.waitForTimeout(700);
+      // A REFUSED LINE TAKES A BROWSER'S SCREEN AWAY, which is VOICE-13's own rule and VOICE-15c
+      // deliberately did not change (the sentence lands on the shelf behind it instead). So the screen
+      // is put back up through the module's state to measure the SHEET, which is what this half is
+      // about: the first cut of this leg measured a screen that was not there and read 0 px for
+      // everything on it, including the message box it was asserting the presence of.
+      await plain.evaluate(() => {
+        window.__voice.stop();
+        window.__voice._call._state.up = true;
+        window.__voice._call._state.down = "";
+        window.__voice._paintCall();
+      });
+      await plain.waitForTimeout(200);
+      const browserRow = await plain.evaluate(readRow);
+      await plain.screenshot({ path: path.join(SHOT_DIR, "after-390-browser.png") });
+      assert.equal(browserRow.host, "browser");
+      assert.ok(browserRow.typed.w > 150, `a phone in a browser keeps somewhere to type: ${JSON.stringify(browserRow.typed)}`);
+      // THE HALF NO UNIT CASE COULD SEE. VOICE-15's own case asserts `node.hidden === true` here and
+      // passed while the toggle was painted on the screen, because the sheet gave it a display.
+      assert.equal(browserRow.output.w, 0,
+        `the speaker toggle is drawn in a browser, where WebKit owns the route and it decides nothing: ${JSON.stringify(browserRow.output)}`);
+      assert.equal(browserRow.retry.w, 0, "and Try again is drawn on a live line");
+      assert.ok(browserRow.mute.w >= 44 && browserRow.end.w >= 44);
+      console.log(`    VOICE-15b at 390x844 in a plain browser: the message box is ${browserRow.typed.w} px, `
+        + `Mute and End are ${browserRow.mute.w}x${browserRow.mute.h}, and the speaker toggle is not drawn`);
+    } finally {
+      await web.close();
+    }
+
+    const ours = failures.filter((one) => /voice/i.test(one));
+    assert.deepEqual(ours, [], `voice.js threw in a real page: ${ours.join(" | ")}`);
+    console.log(`    VOICE-15b pictures: ${SHOT_DIR}`);
+  } finally {
+    await browser.close().catch(() => {});
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
