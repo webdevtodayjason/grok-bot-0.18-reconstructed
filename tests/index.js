@@ -317,5 +317,8 @@ import "./machine-room-settings.test.mjs";
 
 // ALLOWANCE-1: five-day token accounting, relay enforcement, and the console meter/drawer.
 import "./cp-allowance.test.mjs";
+// CP-2, 2026-09-13: the adopt path and the kept-data sweep.
+import "./cp-adopt.test.mjs";
+import "./cp-kept.test.mjs";
 import "./relay-allowance-edge.test.mjs";
 import "./machine-room-allowance.test.mjs";
