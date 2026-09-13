@@ -1,14 +1,19 @@
 // KB-1. The handbook is five managed skills the host seeds into every box, and two sentences in the
 // standing persona section that make them reachable.
 //
-// WHY THE TWO SENTENCES ARE THE LOAD-BEARING HALF. A seeded managed skill costs zero standing
-// prompt bytes and is ALSO named nowhere the model can see: getSystemPrompt adds no section listing
-// managed skills, the <available_skills> catalog only renders when resolveAgentSkills supplies
-// something and nothing in this tree supplies it (agentSkillsFromWorkflows is exported and called
-// from nowhere), and no tool runs a skill. So seeding guarantees the packs EXIST and guarantees
-// nothing about Titan knowing they do. The path in the persona is what makes a pack reach an answer,
-// which is why its size is pinned here rather than left to drift: it is paid on every turn of every
-// agent on every box, forever.
+// WHY THE TWO SENTENCES ARE THE LOAD-BEARING HALF. When this wave landed, a seeded managed skill
+// cost zero standing prompt bytes and was ALSO named nowhere the model could see: getSystemPrompt
+// adds no section listing managed skills, the <available_skills> catalog renders only when
+// resolveAgentSkills supplies something and nothing in the tree supplied it, and no tool runs a
+// skill. So seeding guaranteed the packs EXIST and guaranteed nothing about Titan knowing they do.
+//
+// KB-1f has since supplied that producer (source/host/runner/agent-skills-resolver.ts), so every
+// pack's name and description now do reach the prompt and a pack costs about 84 estimated tokens of
+// standing spend; tests/agent-skill-catalog.test.mjs is where that cost is pinned. These sentences
+// stay and stay load-bearing: one is an INSTRUCTION to read the index before answering, which a
+// catalog row is not, and it is the half that still works on a box whose seeds failed to write
+// their files. Its size is pinned here rather than left to drift, because it is paid on every turn
+// of every agent on every box, forever.
 //
 // The roster case SKIPS while none of the five packs are in the tree (KB-1b, KB-1c and KB-1d write
 // them) and FAILS on a half-written roster, because a half roster ships a persona pointing at a file
