@@ -161,7 +161,8 @@ test("DISCOVER-1 in a real browser at 1440x900 and 390x844", async (t) => {
         assert.ok(state.gets >= beforePoll + 2, "the 60 second production poll repeats while the page is open");
         await page.locator("[data-discover-hide]").click();
         await page.waitForFunction(() => document.getElementById("discover-pill").hidden === true);
-        assert.equal(state.hides, 1, "Hide must POST once");
+        // DISCOVER-1d: Hide is for this tab only, so nothing is posted; the bar returns on reload.
+        assert.equal(state.hides, 0, "Hide posts nothing");
 
         await page.waitForFunction(() => window.__mrUi?.openPanel && window.__mrSettings?.open, null, { timeout: 30_000 });
         await page.evaluate(() => window.__mrSettings.open("general"));

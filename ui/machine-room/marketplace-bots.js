@@ -1162,7 +1162,7 @@
       : `<span class="status-pill">offline — no gateway to import through</span>`;
     return `<div data-bot-page="${escapeHtml(text(bot.id))}" data-team-page="${escapeHtml(text(bot.id))}">`
       + `<button class="quiet-button" type="button" data-bots-back style="margin-bottom:12px">← All bots</button>`
-      + `<div class="plugin-hero">${tileMarkup(bot, "large")}<div class="plugin-hero-copy"><h3>${escapeHtml(text(bot.name))}</h3><p>By ${escapeHtml(text(bot.creator) || "Titanbot team")} · ${escapeHtml(text(bot.category) || "Bots")} · ${members.length} bots</p><p>${escapeHtml(text(bot.description))}</p></div><div style="display:grid;gap:6px;align-content:start">${importButton}</div></div>`
+      + `<div class="plugin-hero">${tileMarkup(bot, "large")}<div class="plugin-hero-copy"><h3>${escapeHtml(text(bot.name))}</h3><p>${creditLine(bot) ? `${escapeHtml(creditLine(bot))} · ` : ""}${escapeHtml(text(bot.category) || "Bots")} · ${members.length} bots</p><p>${escapeHtml(text(bot.description))}</p></div><div style="display:grid;gap:6px;align-content:start">${importButton}</div></div>`
       + `<div class="plugin-browser" style="min-height:300px;margin-top:16px"><aside class="plugin-sidebar">${nav}</aside><section class="plugin-detail"><div class="plugin-sections">${body}${teamControlsMarkup(bot)}</div></section></div>`
       + `</div>`;
   }

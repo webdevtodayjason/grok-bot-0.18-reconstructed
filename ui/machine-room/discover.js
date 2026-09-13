@@ -48,7 +48,7 @@
     const sheet = menu();
     if (button == null || sheet == null) return answer;
 
-    const shouldHide = answer.hidden || answer.pct >= 100;
+    const shouldHide = answer.hidden || answer.pct >= 100 || sessionHidden();
     doc()?.body?.toggleAttribute("data-discover-visible", !shouldHide);
     button.hidden = shouldHide;
     button.querySelector("[data-discover-pct]").textContent = `${answer.pct}%`;
@@ -88,16 +88,23 @@
     return answer;
   }
 
+  // DISCOVER-1d, Jason 2026-09-13: "Maybe it's only hidden until you refresh or log back in, and then
+  // it truly hides once you've done all the steps." Hide is for this tab only; the bar comes back
+  // on the next load until every step is done, and 100% retires it on its own. The persistent flag
+  // stays for Settings ("Show the welcome bar") and for an older console that still posts it.
+  const SESSION_KEY = "titanbot:discover-hidden";
+  const sessionHidden = () => { try { return global.sessionStorage?.getItem(SESSION_KEY) === "1"; } catch { return false; } };
   async function hide() {
     close();
     if (pill() != null) pill().hidden = true;
     doc()?.body?.removeAttribute("data-discover-visible");
     answer = { ...answer, hidden: true };
-    try { await request("POST", "/discover/hide"); } catch { /* the local choice still avoids a stuck control */ }
+    try { global.sessionStorage?.setItem(SESSION_KEY, "1"); } catch { /* no storage, the pill returns on reload */ }
     return answer;
   }
 
   async function show() {
+    try { global.sessionStorage?.removeItem(SESSION_KEY); } catch { /* nothing to clear */ }
     try {
       const shown = await request("POST", "/discover/show");
       if (shown?.steps) paint(shown);
