@@ -1010,7 +1010,26 @@ speaker/earpiece toggle and, while a refused or dropped line is up, a Try again 
 
 ---
 
-## 8d. What the shell must give native audio (VOICE-15)
+## 8d. What the shell must give native audio (VOICE-15): shipped in build 17, working from build 20
+
+**Status: every shape in this section shipped in TestFlight build 17 on 2026-09-12, and the path did
+not carry a microphone frame until build 20.** The page half went live on the relay at 22:11 CDT that
+evening and is inert without the flag below, so a shell may adopt this contract at its own pace. The
+four builds, measured on Jason's own iPhone and read off the relay's session report, are the reason
+the `route()` call carries as much as it does:
+
+| build | what a call did | what the route report said |
+|---|---|---|
+| 17 | the greeting spoke, **0 s of audio in**, mic peak -inf | session `playAndRecord` / `videoChat`, output **Speaker**, so the earpiece problem was over, and **mic frames 0 seen** |
+| 18 | still nothing in | record permission **granted**, so the permission gate was not it |
+| 19 | still nothing in | `MicrophoneBuiltIn` at 48 kHz, **the engine STOPPED right after start**, 0 buffers, the player idle, **6 route changes in one second** |
+| 20 | **331 s of call, 331 s of audio in, 294 s out, 3 turns, 3 barge-ins, 3296 frames seen and all 3296 sent**, route speaker | mic peak 0.0 dBFS, which is clipping, and rms -27.1 dBFS |
+
+**So a shell on this contract MUST restart its engine on `AVAudioEngineConfigurationChange`** while
+the call still wants it, and retry once immediately after a start. iOS stops `AVAudioEngine` on a
+route change and nothing else will bring it back, which is three builds of silence if it is missed. The
+route snapshot taken at the start of a call still reads "engine stopped", because it is taken before
+the restart lands, so do not read one as a fault.
 
 Forcing the speaker never worked in the app. While a `WKWebView` holds a `getUserMedia` capture, WebKit
 owns the `AVAudioSession` and routes a live capture's playback to the receiver, and an app-level
@@ -1028,8 +1047,9 @@ window.__titanbotShell = { platform: "ios", build: "17", canOpenAppSettings: tru
 A page without `nativeAudio === true` — every browser, an old app build — opens its own microphone and
 plays through Web Audio, byte for byte what it did before. Nothing here is a guess about a user agent.
 
-**Page to shell**, through the bridge `TitaniumVoice.swift` already installs
-(`window.webkit.messageHandlers.titaniumVoice.postMessage`), every message an object with an `action`:
+**Page to shell**, five actions, all shipped in build 17, through the bridge `TitaniumVoice.swift`
+already installs (`window.webkit.messageHandlers.titaniumVoice.postMessage`), every message an object
+with an `action`:
 
 | action | fields | meaning |
 |---|---|---|
@@ -1043,8 +1063,9 @@ plays through Web Audio, byte for byte what it did before. Nothing here is a gue
 does not send a second teardown. The base64 is a plain string field, so there is no JSON-escaping
 problem with the bytes.
 
-**Shell to page**, through `webView.evaluateJavaScript` (the path `stop()` already uses), into
-`window.__titanbotAudio`, which the console installs at load and which no-ops until a call is up:
+**Shell to page**, three calls, all shipped in build 17, through `webView.evaluateJavaScript` (the
+path `stop()` already uses), into `window.__titanbotAudio`, which the console installs at load and
+which no-ops until a call is up:
 
 | call | meaning |
 |---|---|
@@ -1059,11 +1080,28 @@ not the thing scheduling the audio any more. Report `playedMs` at least every 25
 plays.
 
 **The session the shell should set**, from the root cause above: `.playAndRecord`, mode `.videoChat`
-(voice-chat echo cancellation, speaker by default), options
-`[.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP]`, then `overrideOutputAudioPort` per the
-person's `audioOutput` choice, re-applied on a route change only when the route is the built-in receiver
-or speaker — headphones, Bluetooth, CarPlay and AirPlay win the route on their own. The choice persists
-in `UserDefaults`, which is why the contract says "remembered for the next".
+for voice-chat echo cancellation, then `overrideOutputAudioPort` per the person's `audioOutput` choice,
+re-applied on a route change only when the route is entirely the built-in receiver or speaker, because
+headphones, Bluetooth, CarPlay and AirPlay each sit on the route as their own port and win it. The
+choice persists in `UserDefaults`, which is why the contract says "remembered for the next", and the
+same route and choice is never re-applied twice in a row, so a choice the hardware will not satisfy
+costs one attempt per distinct route and then stops while the route line reports what is actually true.
+
+**The category options are part of the choice and not a constant, which VOICE-15b had to learn on a
+phone.** Build 17 shipped `[.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP]` always, so
+choosing the earpiece was only `overrideOutputAudioPort(.none)`, which undoes an override rather than
+the category's own default, and Jason's note on the 22:36 CDT call of 2026-09-12 was "the speaker button
+doesn't work". A shell on this contract sets both Bluetooth options always and **`.defaultToSpeaker`
+only while the person has chosen the speaker**, and sets the category again on a mid-call change rather
+than only the port, because adding or dropping that option is the half of the choice an override cannot
+make. One consequence to expect and not to treat as a fault: setting the category posts a configuration
+change, so a mid-call toggle costs an engine restart and may be heard as a short gap at the moment of
+the tap.
+
+**The capture wants headroom.** Build 20's 331 second call peaked at **0.0 dBFS**, a microphone pinned
+to the top of the scale, against an rms of -27.1. The shipped shell scales every converted sample by
+0.5, about -6 dB, before the bytes reach the framing. That factor is a first guess against one measured
+peak, so a shell author reading this should treat it as a knob and not as the contract.
 
 **The relay-down state is the page's, not the shell's (VOICE-15c).** When the voice socket fails to
 open, errors, or drops without the person pressing End, the call screen stays up, turns the orb off, and

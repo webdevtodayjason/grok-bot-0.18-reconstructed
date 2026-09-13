@@ -1309,7 +1309,7 @@ read from their documentation above and is marked as such.
 
 ---
 
-## 14. The call screen on the phone (VOICE-13)
+## 14. The call screen on the phone (VOICE-13, and what VOICE-15b changed)
 
 Jason recorded ChatGPT's voice mode on his iPhone on 2026-09-10 and said **"this is what I want"**:
 press Talk and a full-screen surface comes up over the chat, Titan large and alive in the middle,
@@ -1320,13 +1320,23 @@ whole exchange in it.
 That is what a press at phone width does now. A laptop keeps section 13's shape, the strip and the
 words panel, unchanged.
 
+**Two days later the same person used it on a real phone, and three things about that bottom row were
+wrong.** Jason, on TestFlight build 17, 2026-09-12 22:30 CDT: *"there's no reason to have a text box
+there for chatting in this view"*, *"The buttons do not look so great ... the shapes are wrong and
+they kind of overlap on the text"*, and *"when it was done, it said that the call ended and only one
+word was said: them. Nobody said that"*. VOICE-15b answered all three, and from here on this section
+describes the screen that shipped at 00:32 CDT on 2026-09-13, relay restarted and host
+`8be946ebc832` on all nine boxes. In the app there is **no message box on the call screen**, the four
+controls share **one shape**, and the card after a call reads back **only what this page's own
+microphone heard**. A phone in a plain browser keeps VOICE-13's screen, message box and all.
+
 ### It is not a new talk mode
 
 A phone call is always-listening with a different surface, and **the relay cannot tell the two
 apart**: the session frame is written once and byte-identically for the life of a socket with server
 turn detection at 700 ms of silence, and the only difference between push and always is the page's own
 `muted()` callback. So this wave added **no frame, no field and no relay change**. `talkMode()` is not
-touched either — Settings paints the Talk mode row from it, and a phone-shaped lie there would
+touched either. Settings paints the Talk mode row from it, and a phone-shaped lie there would
 contradict the person's stored choice (SETTINGS-3). On a phone that row governs their laptop, which is
 a thing to say in a help line one day and not a reason to change the value.
 
@@ -1335,7 +1345,7 @@ a thing to say in a help line one day and not a reason to change the value.
 `callWanted()` is a shell that names its own platform, **or** 690 px of width, **or** 500 px of
 height, read live on every press and never cached. Both numbers are the console's own: 690 px is the
 phone width four blocks of `styles.css` already use, and 500 px is the landscape-phone height the
-sheet already has a block for — which is what keeps a call screen up when somebody turns the phone
+sheet already has a block for, which is what keeps a call screen up when somebody turns the phone
 mid-call.
 
 `LINE_SHELF_WIDTH` stays 900 and answers a **different** question: "is there room in a 358 px composer
@@ -1350,8 +1360,8 @@ two cannot drift apart the way 690 and 900 already had.
 
 This is the decision the wave turns on, and it is what makes opening the screen **optimistically**
 safe at all. The screen is up in tens of milliseconds; the line takes 224 ms on loopback and 1.6 to
-2.0 s through console.titanium.bot. Every refusal — no key, the day cap, a session cap, a box that is
-not running, a dropped line — arrives through `stop()`, which is the call screen's one close funnel.
+2.0 s through console.titanium.bot. Every refusal (no key, the day cap, a session cap, a box that is
+not running, a dropped line) arrives through `stop()`, which is the call screen's one close funnel.
 So the screen goes, and the sentence lands in its **one existing home** on the shelf's first row,
 where the person is already looking.
 
@@ -1388,7 +1398,7 @@ level is one custom property written once a frame on the screen, smoothed in JS 
 flattens every CSS transition to 1 ms globally.
 
 Titan is `min(632px, 162vw)` wide, which is deliberate: his body is 0.422 of the canvas at every size
-and **stops growing** where the canvas hits the kit's own 430 px height clamp — an element width of
+and **stops growing** where the canvas hits the kit's own 430 px height clamp, an element width of
 632 px, giving 266.5 x 244 CSS px, 68% of a 390 px phone and the largest the shipped kit can draw. The
 kit clamps its dpr at 2, so a real 3x iPhone screen upscales him 1.5x. His three moods are the kit's
 own three and no others, because a fourth name **throws** a `RangeError`. Under
@@ -1399,16 +1409,16 @@ changes the still when the mood changes.
 
 Jason, on the avatar: *"We don't want ChatGPT's orb. We're going to have Titan's blob, the one already
 on the homepage. That's what I want there, so it can react and act and morph."* So the middle of this
-screen is the vendored kit's own `<titan-mascot>` — the same element the roster faces, the onboarding
-face and the boot cover draw — and the level reaches **his body**, not just a ring around him.
+screen is the vendored kit's own `<titan-mascot>` (the same element the roster faces, the onboarding
+face and the boot cover draw), and the level reaches **his body**, not just a ring around him.
 
 Two mechanisms, both reading the kit rather than editing it. The kit is vendored byte for byte, its own
 `ASSETS.md` forbids editing this copy, a test fails on drift, and the real change would move
 titanium.bot's marketing site with it.
 
 **1. The kit's own outline.** Read off its source: `strength` multiplies the three summed sine waves
-and the swell that deform the 120-point superellipse contour — the silhouette's wobble *is* that
-number — `speed` scales the clock those waves advance on, and `bob` the float. The only input to all
+and the swell that deform the 120-point superellipse contour, and the silhouette's wobble *is* that
+number. `speed` scales the clock those waves advance on, and `bob` the float. The only input to all
 three is the mood, and its own frame loop eases toward the mood's triple at 0.035 a frame. So the
 **level picks the mood**, with a hysteresis band, and Titan's body deforms more, and faster, the louder
 the room is. calm is 0.8 strength, curious 1.3, excited 1.65. The mood is written only when it
@@ -1419,9 +1429,9 @@ whole page.
 **2. Squash and stretch, on the canvas inside the kit's own shadow root.** This is the seam that makes
 per-frame deformation safe at all: `resize()` measures the **host**, and a child's transform does not
 change its parent's layout box, so the kit's own measurement cannot see a transform on its canvas. The
-canvas takes a volume-preserving squash from the level (7% across, 5.6% down), a slow breath at rest —
-translateY -4px and 1.02 over 2600 ms, which is `boot.css`'s own `boot-sprite-breathe`, this console's
-breathing vocabulary for Titan — and a degree of tilt on a slow sine so the **edge moves** rather than
+canvas takes a volume-preserving squash from the level (7% across, 5.6% down), a slow breath at rest
+(translateY -4px and 1.02 over 2600 ms, which is `boot.css`'s own `boot-sprite-breathe`, this console's
+breathing vocabulary for Titan), and a degree of tilt on a slow sine so the **edge moves** rather than
 the whole of him just inflating. The breath gets out of the way as soon as there is a voice to follow.
 While he is thinking the breath is slower and deeper and the level is not read at all, which is on
 purpose: a person should be able to hear that nothing is expected of them.
@@ -1448,7 +1458,7 @@ Titan would have passed a halo check and failed his instruction.
 
 **He is centred by margins and not by a transform.** A 632 px Titan on a 390 px phone is wider than
 the screen, and laid out naively the grid track grows to fit him: MEASURED on the live server on the
-first ship, his rect was 632x430 at x=16 — his left edge against the padding, and everything past
+first ship, his rect was 632x430 at x=16, his left edge against the padding, and everything past
 390 px clipped away, so half of him was off the phone. The two negative margins make his margin box
 exactly the width of the face, so the track cannot grow, the surplus hangs off both sides evenly and
 the screen's own overflow clips it. A transform would have done it too, and is deliberately not used:
@@ -1456,17 +1466,24 @@ every transform in that file is kept off the mascot and its ancestors on princip
 
 ### The three things the recording had that the design did not
 
-**A typed field.** A line typed on the call screen fills the console's own message box and submits the
-composer, so the pin, the attachments and the adapter are all kept once rather than twice. **Its
-answer is not spoken**, and that is a limit rather than a bug being hidden: the relay speaks a reply
-because it is the side that handed the turn to the box, and a typed turn goes straight from this
+**A typed field, and in the app it is gone.** On a phone in a plain browser a line typed on the call
+screen fills the console's own message box and submits the composer, so the pin, the attachments and
+the adapter are all kept once rather than twice. **In the app that row is not drawn at all.** A
+full-screen app has no chat one swipe behind it, Jason asked for the box to go, and
+`typedLineWanted()` reads the platform the shell names, beside `bargeInWanted` and
+`nativeAudioWanted`. `paintCall` hides the whole ROW rather than the field inside it, because a bare
+input left in a flex row is still a 44 px gap in the middle of the controls. The screen carries
+`data-voice-call-host="app"` or `"browser"`, so a gate can say which of the two it measured. Where the
+field is drawn, **its answer is not spoken**, and that is a limit rather than a bug being hidden: the
+relay speaks a reply because it is the side that handed the turn to the box, and a typed turn goes
+straight from this
 console to the box with the relay not in it. The browser sends exactly three JSON shapes down the
 voice socket and none of them carries text, so speaking a typed line would be a new wire frame. The
 line and its answer are in the chat behind the screen, which is where a person looks when the call
 ends.
 
 **A status line.** The thin line under him while the word is Thinking is the chat's **own** tool
-receipt — the adapter summarises a tool step into a system row, app.js draws it, and the screen reads
+receipt. The adapter summarises a tool step into a system row, app.js draws it, and the screen reads
 the newest one. A second source for that sentence would be a second wording to keep in step. Only a
 row newer than the moment the call opened is ever shown: a receipt from this morning is not what Titan
 is doing now.
@@ -1475,12 +1492,157 @@ is doing now.
 Titan shrinks to a small orb above the bottom row, then grows back when the card is no longer the
 newest thing. The shrink is a **width** change, which is safe for the same reason as above: nothing is
 scaled, so the kit re-measures once and draws him smaller rather than stretched. The copy on the
-screen has its **controls removed** — every card's buttons are wired against its row in the transcript
+screen has its **controls removed**. Every card's buttons are wired against its row in the transcript
 and carry its id, so the ones in the chat are the ones that work, and the copy is there to be read.
+
+### The four controls are one shape, and the hidden attribute really hides (VOICE-15b)
+
+**MEASURED in Chrome 153.0.8010.36 at 390x844, device pixel ratio 1, touch, on MacBook-Pro.local
+(macOS 26.6.2, node v22.23.1).** The phone's own engine is WebKit and no worker can reach a phone, so
+these numbers settle geometry, the cascade and the `hidden` attribute. They settle nothing about how
+iOS lays out an emoji glyph, or what the safe areas do to the bottom row.
+
+Two causes, and the first is the one fifty passing cases could not see. **`[hidden]` did nothing to
+any of these controls.** `.voice-call-mute, .voice-call-end` in `voice-call.css` and
+`.voice-call-output, .voice-call-retry` in `styles.css` each set `display: grid` unconditionally, and
+an author display rule beats the attribute. So the speaker toggle painted in a plain browser, where
+WebKit owns the route and that control decides nothing, and Try again painted on a live line beside
+Mute. Every existing case asserted `node.hidden === true`, which is the module's own state and was
+always right; the sheet was what put the control on the screen. `verify-ui-in-a-real-browser`, paid
+for twice. The second cause is five controls in 358 px of pill: with all five drawn the message box
+was 86 px, and a 28 px radius on a 46 px box is clamped to 22, so the flat edge is gone exactly where
+an 11 px label sits.
+
+| before, with all five drawn | box | radius | the label inside it |
+|---|---|---|---|
+| the message box | 86 x 44 at 16,775.03 | 22px | reads "Type ins" |
+| speaker and earpiece | 56 x 45.94 at 114,774.06 | 28px | Earpiece 45.59 px, drawn with `hidden` set |
+| Mute | 56 x 45.94 at 182,774.06 | 28px | 26.5 px, drawn with `hidden` set |
+| Try again | 56 x 45.94 at 250,774.06 | 28px | 48.05 px, drawn on a live line |
+| End | 56 x 45.94 at 318,774.06 | 28px | 19.92 px |
+
+Now every control is `display: none` with its shape on `:not([hidden])`, and all four share **one
+rule**, so consistent shapes are a property of the sheet rather than of whoever edits it next: 72 px
+wide, a 44 px floor on both axes, a 16 px rounded rect rather than a pill, an explicit 20 px glyph row
+so the word under it starts at the same height on all four, and `white-space: nowrap` so a label can
+never wrap and grow the row under the screen's own bottom padding. **72 is measured and not picked:**
+the widest word any of them carries is "Try again" at 48.05 px, and 16 px corners leave 65 px of flat
+edge across the band the label sits in.
+
+| after, in the same Chrome at 390x844 | box | radius | the label inside it |
+|---|---|---|---|
+| live in the app: speaker and earpiece | 72 x 50.19 at 75,769.81 | 16px | Earpiece 45.59 px, cut by 0 px |
+| live in the app: Mute | 72 x 50.19 at 159,769.81 | 16px | 26.5 px |
+| live in the app: End | 72 x 50.19 at 243,769.81 | 16px | 19.92 px |
+| live in the app: the message box | **not drawn** | | |
+| the line is down: Try again | 72 x 50.19 at 117,769.81 | 16px | 48.05 px |
+| the line is down: End | 72 x 50.19 at 201,769.81 | 16px | 19.92 px |
+| the line is down: Mute and the toggle | **not drawn** | | |
+| a plain browser: the message box | 190 px | 22px | |
+| a plain browser: the toggle and Try again | **not drawn** | | |
+
+Asserted rather than only printed, in all three of those states: every drawn control is at least
+44x44, all of them share a width, a height and a radius, each label's box sits inside its control's
+with 3 px of clearance on both sides and above the bottom edge and is cut by 0 px, no two controls
+overlap, the page does not scroll sideways, and a thumb landing where the console's message box is
+hits the call screen rather than the composer. `machine-room-voice` with `machine-room-gateway` is
+**130 of 130 and 0 skipped** on that Mac, both real-browser legs run rather than passed over.
+
+**The four VOICE-15 rules have gone home.** VOICE-15 put the toggle and Try again in `styles.css`
+because `voice-call.css` belonged to another wave at the time, which is how one shape came to be
+written in two files with the broken copy of `[hidden]` in it. `.voice-call-output`,
+`.voice-call-retry`, their glyph rule, the pressed fill and `.voice-call-route` now live in
+`voice-call.css` beside the Mute and End they were meant to match. Nothing about the call screen is
+styled from `styles.css` any more, and a case asserts it.
+
+**Portrait only, and that half is not the console's.** Jason's other build 17 note was *"if you turn
+your phone sideways by accident, it should not go into landscape mode. It should stay upright"*, and
+the fix is `UISupportedInterfaceOrientations` in the app's own Info.plist, set for iPhone in build 18.
+
+### The card after a call reads back the person's own words (VOICE-15b)
+
+Build 17's call had 0 s of audio in, and the card at the end of it said one word: *them.* Nobody said
+it. The word came from the provider transcribing its own greeting, or silence, and the card showed it
+as the person's words.
+
+`rememberHeard()` now takes a string only when **this page's own microphone made the sound it was made
+of**: `stats.sent > 0`, frames this page really put on the socket, and `stats.micPeak > 0`, the
+loudest of them, which is a new additive field on both capture paths beside `micLevel` because
+`micLevel` answers a different question and could not answer this one. Anything Titan said on the call
+is dropped as well, by exact match or by a short transcript sitting inside one of his sentences, which
+is the shape "them." actually took. What is left is the person's own words, and the card reads back
+the last of them, cut at 120 characters, because the durable record of a spoken turn is the two rows
+the relay writes. A call with nothing of the person's on it says **"Nothing was heard."** in plain
+words. The list is emptied when a line starts rather than when one closes, because the card is painted
+one frame after `closeCall()` has already run.
+
+MEASURED in the same Chrome at 390x844: the ended card is 187 x 49.09 reading "The call ended. Nothing
+was heard." and 187 x 66.64 reading "The call ended. You said: ...". The unit case drives a real frame
+of sound through the real capture path, 2400 samples at 0.5 for an RMS of 0.5, and the browser leg
+drives a call that heard nothing at all, which is build 17's call exactly. **What no test here can
+produce is a provider transcribing its own greeting onto a real line**, so the guard is proved against
+a fabricated frame and not against a vendor.
+
+**This is the page's half only, and the relay is where "them." came from.** A build 17 call with 0 s
+of audio in produced a `heard-confirmed` frame; that frame is written in `ui/voice-edge.mjs`, and the
+same string still reaches the live speech panel mid-call and still reaches the agent's own conversation
+as a user turn. That half is **VOICE-15d** in docs/GAP-ANALYSIS.md, and the page's two numbers, `sent`
+and `micPeak`, are published on `stats()` for it to read.
+
+### Think harder is a row of the + menu on a phone (ROUTER-1d)
+
+ROUTER-1 hides the composer's Think harder switch at 690 px and below, and until this wave that switch
+had no home on a phone at all. It is now one row in the capability dock's own markup, which is
+PHONE-CONSOLE-1's pattern and the same markup at both widths so nothing is wired twice: `display:
+none` above 690 px, where the composer's own switch is right there, and drawn at 690 px and below,
+where ROUTER-1 hides that switch.
+
+It carries **no `data-capability`**, deliberately. `app.js` closes the sheet on any press that has one,
+and a switch a person has just flipped should show its new state rather than take the menu away. There
+is one piece of state and this row is not it: the row presses `#think-harder`, the checkbox
+`gateway-adapter.js` listens to, and fires that checkbox's own `change`, so a phone and a laptop cannot
+hold two different answers. The row is read again every time the menu opens, because the adapter writes
+that checkbox directly on a conversation switch with no event on that path to follow. The desktop
+switch is untouched in markup, in CSS and in behaviour. MEASURED in the same Chrome at 390x844: the row
+is 360 x 44 at 15,680, and a thumb at 195,702 reaches it.
+
+### What is in the conversation when a call ends (VOICE-16, VOICE-16b, VOICE-16c)
+
+VOICE-13 promised that End puts you back in the conversation "with the whole exchange in it", and three
+relay waves on the night of 2026-09-12 changed what that sentence means.
+
+**The voice is Titan rather than a phone line (VOICE-16).** Before the dial the relay reads one thing
+off the box, `getVoiceBrief`: the agent's own persona, its remembered facts and the last twenty turns
+of the conversation the person is already having. It goes into the session instructions once and is
+never rewritten during the call, which is the prefix-cache rule. So a question the agent already knows
+the answer to is answered by the voice itself with no round trip to the box, and the turns it answers
+itself leave no row of their own while the call is open.
+
+**He answers short out loud and the screen still has all of it (VOICE-16b).** Jason, 2026-09-12 23:36
+CDT: *"Titan needs to be less verbose. It can be verbose in the text that's being printed out, but it
+needs to be shorter and more conversational ... less like a syllabus coming back every time."* Only the
+first sentence of a written draft is read out now, and the rest rides back on the tool result with one
+line asking for the gist in one sentence. **The page's `said` frame still carries the whole reply and
+the conversation on screen still holds every word.** A held card is the exception, with a guard of its
+own: its question is asked in full, because a question gisted down to "there is something waiting on
+you" is how somebody says yes to the wrong thing.
+
+**The closing note is filed, not asked (VOICE-16c).** The spoken exchange goes into the conversation as
+one row carrying both sides, written through a new gateway command, `appendTranscriptNote`, that runs
+**no turn**: no model call, no reply, no bill. It is the same row the send pipeline writes for a typed
+message, so the console draws it as the existing "You" bubble with no page change, and the next real
+turn carries it because an unconfirmed user row is prepended to that turn. Before this, the note
+reached the box as a prompt that politely asked not to be answered, and five of them went out on the
+night of 2026-09-12. **What to look for on screen after a call: the note as your own bubble with
+nothing under it.** An answer under it means the note travelled as a prompt, and the relay's own log
+line will already have said `sent` rather than `filed`.
+
+None of those three is measured on a phone or against a real realtime model. Sections 5, 7 and 9 carry
+what each one did measure, and on which machine.
 
 ### Where it lives, and what it locks
 
-A plain fixed div on `document.body` at `z-index: 80` — above the phone drawers at 70, below the toast
+A plain fixed div on `document.body` at `z-index: 80`, above the phone drawers at 70, below the toast
 at 100, so a toast is still readable over a call. Not `.conversation-space`, whose layer measures
 374x587 at 8,124 on a phone and covers the conversation only. Not a `<dialog>`, because the page
 refuses to act on Escape while any `dialog[open]` stands, and a dialog screen would make Escape refuse
@@ -1488,22 +1650,22 @@ to end the call it is in. The five `showModal` dialogs live in the browser's top
 opened from a refusal still paints over everything.
 
 While a call is up, `<body data-voice-call="up">` and the sheet's own rule lock the background, and
-`.app-shell` is `inert`. Both are released by the one close funnel on every path — End, Escape,
+`.app-shell` is `inert`. Both are released by the one close funnel on every path: End, Escape,
 `visibilitychange`, `pagehide`, `beforeunload`, the 4001-4004 refusals and the push idle timer all
 already reach `stop()`. A person left on a chat they cannot scroll is worse than the bug this wave
 fixes, which is why there is one release point rather than seven.
 
 On close, one animation frame after the synchronous work, the transcript is pinned to the newest line.
 An involuntary ending with no sentence to show raises one self-dismissing line in the conversation,
-"The call ended." — **not** the toast, whose 2.8 s is shorter than unlocking a phone, which is the
+"The call ended.", and **not** the toast, whose 2.8 s is shorter than unlocking a phone, which is the
 exact case the note exists for. Its dismiss is armed on the next visible `visibilitychange` rather
 than on the ending.
 
 ### One live defect this wave met and fixed, because a press that says nothing is the worst of them
 
 Gating the screen on the R750 turned up a workspace where **pressing Talk said nothing at all**. The
-demo tenant's talking door answers `{"status":200,"enabled":false,"available":true}` — a realtime key
-exists and the customer's own switch is off — and the relay refuses that one with `acceptAndSay`, which
+demo tenant's talking door answers `{"status":200,"enabled":false,"available":true}` (a realtime key
+exists and the customer's own switch is off), and the relay refuses that one with `acceptAndSay`, which
 writes the note, the bye and the close **together**: `{t:"note",text:"Talking is switched off in
 Settings."}`, then `{t:"bye",reason:""}` (that frame's `reason` field carries the **condition**, and
 this refusal names none), then a clean 1000 close.
@@ -1536,10 +1698,10 @@ drives the exact four frames off the live wire in order.
 | six seconds of a live call with a level on it | 347 frames, **57.8 fps**, 4 frames over 20 ms, median 17 ms, worst 233 ms |
 | the same page with no call screen on it | 267 frames, 44.5 fps, 12 over 20 ms, median 17 ms, worst 337 ms |
 | mute | the word reads Muted and the page dropped 6 frames in the window, with nothing sent to the relay for it |
-| the three controls | End 56x46, Mute 56x46, the text field 222x44, all fully on screen |
+| the three controls, **the 2026-09-11 shape and superseded by VOICE-15b** | End 56x46, Mute 56x46, the text field 222x44, all fully on screen |
 | End to the screen being gone | **61 ms** |
 | the chat afterwards | the spoken line once with its chip, byte-identical to the confirmed bytes, 0 px from the bottom |
-| the footer when the screen came up | shelf 390x133 at 0,711, composer 358x56 at 16,778, talk 44x44 at 245,784 — byte-identical to before the press |
+| the footer when the screen came up | shelf 390x133 at 0,711, composer 358x56 at 16,778, talk 44x44 at 245,784, byte-identical to before the press |
 | an app switch | the line closed, the screen went, one plain line in the conversation, the background released |
 
 ### MEASURED ON THE R750 THROUGH console.titanium.bot, 2026-09-11, as a throwaway customer on the demo tenant
@@ -1551,12 +1713,14 @@ removed afterwards. Two engines, because each can measure a half the other canno
 59px, `--sab` 34px, the way the phone-layout gate restates them): one press brought it up in **50 ms**,
 390x844 at 0,0, `position: fixed`, `z-index: 80`; End 56x46, Mute 56x46 and the text field 222x44, all
 at least 44 px and all on screen; the screen's own padding read 16 px top and 24 px bottom. WebKit
-threw nothing.
+threw nothing. **Those three control boxes are the 2026-09-11 shape and VOICE-15b replaced them**: the
+four controls are one 72 x 50.19 shape now and the app draws no text field at all, measured in the
+table above. Everything else in this R750 run still stands.
 
 **A real spoken turn through the real vendor, in Chromium at 390x844** with speech made on this Mac by
 `say` as the capture device, because WebKit has no fake-capture switch. The person's line, as the
-vendor transcribed it: *"Low Titan, in one short sentence, what is the team working on today?"* —
-"Hello" misheard, which is the vendor on a synthetic voice and is quoted rather than tidied. Titan
+vendor transcribed it: *"Low Titan, in one short sentence, what is the team working on today?"* That
+is "Hello" misheard, which is the vendor on a synthetic voice and is quoted rather than tidied. Titan
 answered out loud: *"I don't have any record of active team work today — nothing's been assigned or
 reported to me..."*. The words on the screen went Connecting, Listening, Talking and Thinking across
 it; End put the person back in the chat, the exchange is in the transcript with the **Spoken** chip on
@@ -1564,23 +1728,23 @@ the person's line, and the chat was scrolled to the newest line, 0 px from the b
 Connecting, Thinking, Talking and the chat afterwards are in the scratchpad.
 
 **ONE turn, not two, and the reason is the gate's microphone rather than the product.** The capture
-file plays **once** — `%noloop`, which matters: the first live attempt looped it, so the vendor heard
+file plays **once**, which is `%noloop`, and it matters: the first live attempt looped it, so the vendor heard
 one sentence over and over with no gap and its own 700 ms silence detector never fired. Measured then:
 the microphone level read 0.114, the word reached Listening, and nothing was ever confirmed in 150 s.
 Played once there is exactly one utterance in the file, so there is exactly one turn.
 
 **The workspace's own talking switch was off and the gate put it back.** The demo tenant's door
-answers `{"enabled":false,"available":true}` — a realtime key is stored and the customer's switch is
-off — so the gate turns that switch on as the customer whose account it is, takes the turn, and
+answers `{"enabled":false,"available":true}` (a realtime key is stored and the customer's switch is
+off), so the gate turns that switch on as the customer whose account it is, takes the turn, and
 restores the value it found, which it then re-reads and asserts. Five minutes of the day's 120 were
 spent across both attempts. The first version of that restore ran **after** closing the browser, had
 no page to run on, and left the switch on until it was put back by hand; it now runs first and is
 checked.
 
 **A screenshot artifact, named so nobody reads it as a defect:** WebKit's capture at device scale 3
-paints the fixed bottom row a second time at the top of the image. The DOM says otherwise — one
+paints the fixed bottom row a second time at the top of the image. The DOM says otherwise: one
 `#voice-call`, one `.voice-call-controls` at y=774, measured through `elementFromPoint` and rects on
-the live server — and the Chromium screenshot of the same screen shows one row.
+the live server. The Chromium screenshot of the same screen shows one row.
 
 **Injected, not measured:** the microphone level. WebKit ships no fake capture device and the leg's
 microphone is built out of Web Audio, so the avatar's reaction to a person's own voice is driven
@@ -1610,7 +1774,7 @@ section.
 
 ---
 
-## 15. The phone owns its own audio (VOICE-15)
+## 15. The phone owns its own audio (VOICE-15, VOICE-15b, VOICE-15c)
 
 Forcing the speaker in the iPhone app never worked: it was always the earpiece. The cause is not the
 app's code. While a `WKWebView` holds a `getUserMedia` capture, WebKit owns the `AVAudioSession` and
@@ -1628,7 +1792,7 @@ app's alone, on the loudspeaker by default with an earpiece choice for the perso
 
 The shell says so about itself, once, in the script it injects before first paint:
 `window.__titanbotShell.nativeAudio = true`, beside the `platform` it already states. A page without
-that flag — every browser, an old app build — opens its own microphone and plays through Web Audio,
+that flag, whether a browser or an old app build, opens its own microphone and plays through Web Audio,
 byte for byte what it did before this wave. Nothing here reads a user agent. The full wire contract the
 shell and the page both build to is in `docs/APPS.md` section 8d.
 
@@ -1642,31 +1806,134 @@ and on every change, and a running count of how many milliseconds have actually 
 page books how long sound is still in the room from that count, not from the bytes it handed over,
 because it is no longer the thing scheduling the audio.
 
+### What it took before the phone's own audio path carried a single frame
+
+The page half shipped on the relay at 22:11 CDT on 2026-09-12 and the shell half went to TestFlight as
+build 17 three minutes later. **Three builds after that carried no sound into the line at all**, and
+each one is written down here because the next person in this path meets the same four questions. Every
+row is Jason's own iPhone through TestFlight, read off the relay's own session report.
+
+| build | what the call did | what the route report said |
+|---|---|---|
+| 17 | brief loaded, the greeting spoke, **0 s of audio in**, mic peak -inf | nothing said why; the relay had no report to print yet |
+| 17, once the relay had the report | session `playAndRecord` / `videoChat`, output **Speaker**, 2 s of playback out of the loudspeaker | **mic frames 0 seen**: the earpiece problem was over and the microphone was producing nothing |
+| 18 | still nothing in | record permission **granted**, so the permission gate was not it |
+| 19 | still nothing in | `MicrophoneBuiltIn` on the route at 48 kHz, **the engine STOPPED right after start**, 0 buffers, the player idle, **6 route changes in one second** |
+| 20 | **331 s of call, 331 s of audio in, 294 s out, 3 turns to the agent, 3 barge-ins, 3296 frames seen and all 3296 sent**, route speaker | mic peak **0.0 dBFS**, which is clipping, rms -27.1 dBFS |
+
+**The cause was iOS and the fix is one notification.** iOS stops `AVAudioEngine` on a route change
+(`AVAudioEngineConfigurationChange`) and nothing restarted it, so every call started an engine the
+system shut down a moment later. Build 20 restarts the engine on that notification while the call still
+wants it, retries once immediately after a start, and counts the restarts in the report. Jason, 23:36
+CDT, on that 331 second call: build 20 *"landed and it worked"*. The snapshots taken at the start of a
+call still read "engine stopped", because they are taken before the restart lands, which is worth
+knowing before anybody reads one as a fault.
+
+**Builds 17 to 20 are the argument for the route report itself.** Three builds spent on a silent
+microphone were three builds that could not say which of three things was wrong: the phone's session
+failed, the microphone produced nothing, or the page dropped what it was handed. The report answers
+that in one line, which is why `route()` carries the category, the mode, the port list, the permission,
+the input list and the restart count rather than only a word.
+
 ### The toggle, and the line under it
 
 On a native call the bottom row carries a speaker/earpiece toggle, speaker by default because a
 hands-free call wants the loudspeaker. Pressing it tells the shell, which applies the choice and
-remembers it for the next call. Under it one quiet line says where the audio really is, as a plain word
-— Speaker, Earpiece, Headphones, Bluetooth — with the shell's error after it if there is one. Headphones
-and Bluetooth win the route on their own; the line says so, and the person's speaker/earpiece choice is
-left as it was. In a browser neither the toggle nor the line is there, because WebKit owns the route and
-the choice would do nothing.
+remembers it for the next call. Under it one quiet line says where the audio really is, as a plain
+word, one of Speaker, Earpiece, Headphones or Bluetooth, with the shell's error after it if there is
+one. Headphones and Bluetooth win the route on their own, the line says so, and the person's
+speaker and earpiece choice is left as it was. In a browser neither the toggle nor the line is there,
+because WebKit owns the route and the choice would do nothing.
 
 ### When the relay does not answer (VOICE-15c)
 
 VOICE-13 sends every refusal to the shelf and takes the call screen away, which is right for a refusal
-that has a home and a way forward — no key, a cap, a box that is off. A relay that never answered, or a
-line that dropped, has neither, and taking the screen away would leave a phone on a full-screen surface
-with a dead microphone and nothing said. So in the app those two keep the screen: the orb goes off, the
-Mute control becomes Try again, and the screen reads, in plain words,
+that has a home and a way forward, such as no key, a cap, or a box that is off. A relay that never
+answered, or a line that dropped, has neither, and taking the screen away would leave a phone on a
+full-screen surface with a dead microphone and nothing said. So in the app those two keep the screen:
+the orb goes off, the Mute control becomes Try again, and the screen reads, in plain words,
 **"Voice is unavailable: the relay did not answer"** or **"Voice is unavailable: the line dropped"**. A
 phone in a plain browser keeps VOICE-13's behaviour, the sentence on the shelf and the screen gone, so
 nothing without the shell's flag changes.
 
+### The capture has headroom, and the earpiece is a real choice (VOICE-15b)
+
+Build 20's two faults were both the shell's. A peak of **0.0 dBFS** is a microphone pinned to the top
+of the scale, and the speaker and earpiece toggle had no audible effect at all.
+
+**The capture is trimmed by half before it is framed.** `RealAudioIO.captureTrim` is `0.5`, about
+-6 dB, with build 20's peak and rms in its own comment; `trimmed()` scales every converted Int16 sample
+and `convertAndDeliver` hands the trimmed bytes to the framing. Build 20's 0.0 dBFS peak lands near
+-6 dBFS after it and the rms moves with it, to roughly -33 dBFS. The trim is a pure function over one
+frame of bytes, which is what makes it testable off a device, and **-6 dB is a first guess**: if the
+next call reads quiet at the model rather than clipped, that factor is the one number to change.
+
+**The earpiece needed the category and not only the override.** VOICE-15 shipped with
+`.defaultToSpeaker` always among the options, so choosing the earpiece was only
+`overrideOutputAudioPort(.none)`, which undoes an override rather than the category's own default. The
+shell's own report predicted exactly that in its "not proven" section before the phone found it. Now
+`categoryOptions(for:)` is the one place the options are decided: both Bluetooth options always, and
+`.defaultToSpeaker` **only when the person chose the speaker**. Both seams carry the options, so a
+start and a mid-call change follow one rule. The category stays `.playAndRecord` with mode `.videoChat`
+in both, so echo cancellation and the call path do not move, and the anti-loop guard is untouched: a
+correction fires only when the route is entirely the built-in receiver or speaker, only when it is not
+already where the person asked, and never twice for the same route and choice.
+
+**A mid-call toggle now costs an engine restart**, because setting the category posts the same
+configuration change a route change posts. On a phone that could be heard as a short gap at the moment
+of the tap, and a reply already speaking resumes only because the restart calls `play()` again when
+something is scheduled.
+
+MEASURED on Jason's MacBook Pro, Apple M5 Max, macOS 26.6.2 build 25G83, Xcode 26.6 build 17F113,
+against the iPhone 17 Pro simulator on iOS 26.5, node v22.23.1: `xcodebuild test -scheme
+TitaniumBotBridge`, the command `ios.yml` runs, **57 tests and 0 failures** (12 of them
+`TitaniumAudioTests`, 3 new; 13 `TitaniumVoiceTests`, none new); `xcodebuild build` succeeded with no
+warnings; the bridge TypeScript suite 105 of 105; the scripts suite 13 of 13, which includes the test
+that runs the actual injected `WKUserScript`, so `nativeAudio: true` did not break it. VOICE-15's own
+shell pass on the same machine was 54 tests. **A simulator has no built-in receiver, no real microphone
+and no loudspeaker of its own**, so neither change can be heard there: the trim is proved as arithmetic
+over a known frame, the category rule through the injected seams, and whether the earpiece now holds is
+hardware's answer. Build 21 carries both and was built for the morning of 2026-09-13.
+
+### What the page half measured, and on what
+
+MEASURED on this Mac (MacBook-Pro.local, macOS 26.6.2, node v22.23.1) under `node --test`, against a
+fake shell bridge with no phone anywhere: `machine-room-voice`, `voice-capture`, `voice-wire` and
+`voice-turn` together are **163 of 163 with 0 skipped**, and `# skipped 0` is the point, because the
+real-browser leg ran on Chrome through playwright-core rather than being passed over. The broader voice
+set is 278 of 278. The nine VOICE-15 cases drive the switch between the two audio paths: `audioStart`
+at the 24 kHz the contract names with **zero `getUserMedia` calls**, one base64 shell frame arriving as
+one 4800-byte socket frame with its sound still in it, a muted call dropping the frame and counting it
+as a mute rather than as the echo gate, a frame after hang-up reaching nobody, three deltas becoming
+three `audioPlay` messages, a barge-in sending one `audioFlush` and putting the booking back to zero,
+and a browser line inside an iOS shell with no flag still opening its own microphone.
+
+**The base64 codec is the module's own**, a pure-JS pair rather than `atob` and `btoa`, because the
+module runs under a bare window in its tests and under WebKit in the app, and a codec present in one
+and missing in the other is the kind of bug only a phone finds. It round-trips at lengths 0 through
+4800 and against the RFC 4648 vectors.
+
 ### What is not proven here
 
-No phone. That iOS really keeps the call on the loudspeaker at full volume, and that a person can cut
-Titan off by talking over the shell's own echo-cancelled microphone, is Jason's call on the TestFlight
-build. These cases prove the switch between the two audio paths, the five shell messages, the toggle
-and the two relay-down sentences, against a fake shell bridge on this Mac. They cannot prove the route
-the shell actually gets from `AVAudioSession`.
+- **No phone reached any of this from a worker.** Everything above that is a phone is Jason's own call
+  through TestFlight rather than a gate, read off the relay's session report, which is the product's
+  own instrument and not an independent one. That a person can cut Titan off by talking over the
+  shell's echo-cancelled microphone is his call too, and on build 20 it happened three times in one
+  call.
+- **`RealAudioIO` is untested plumbing.** The conversion from the hardware format to 24 kHz mono Int16,
+  the player node's scheduling, the voice-processing I/O unit and the 250 ms played-milliseconds timer
+  are proved by compilation. The unit tests inject a fake engine and never reach the tap, so the trim's
+  wiring into the live capture is one line read and compiled rather than executed by any test.
+- **Whether the earpiece now holds is the open question.** The category without `.defaultToSpeaker`
+  plus `overrideOutputAudioPort(.none)` is the documented way to ask for the receiver, and it is what
+  build 20's evidence says was missing, but only hardware settles it. If it still does not move, the
+  next thing to try is deactivating the session around the category change rather than changing it
+  live.
+- **`playedMs` across a flush** assumes the shell's count is cumulative for the whole call and is not
+  reset on `audioFlush`. On iOS the microphone is not gated on that booking at all, so a disagreement
+  here is cosmetic: it moves a reported number and never whether a frame is sent.
+- **The native microphone uses the system permission prompt, not the console's gate.** WebKit's
+  `requestMediaCapturePermission` never fires on this path, so the first native call raises the
+  standard iOS alert, governed by `NSMicrophoneUsageDescription`. `UIBackgroundModes` carries no
+  `audio` entry, which is correct: the app stops audio when it backgrounds.
+- **-6 dB of trim has been heard by nobody.** It is arithmetic against one measured peak.
