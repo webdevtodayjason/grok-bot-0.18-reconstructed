@@ -90,10 +90,17 @@ same normalizer a Cursor fetch uses.
 
 This is the part that is easy to get wrong, so it is written down. **Seeding guarantees the packs
 exist and guarantees nothing about Titan knowing they do.** `getSystemPrompt` adds no section listing
-managed skills; the `<available_skills>` catalog only renders when `resolveAgentSkills` supplies
-something and **nothing in this tree supplies it** (`agentSkillsFromWorkflows` is exported and called
-from nowhere); and no tool runs a skill. So the only two routes from a seed to a turn are a path
-written into the standing persona section, and a `workflowReference` node in a dispatched prompt.
+managed skills, and no tool runs a skill. When this wave landed the `<available_skills>` catalog did
+not render either, because it renders only when `resolveAgentSkills` supplies something and nothing
+in the tree supplied it, so the only two routes from a seed to a turn were a path written into the
+standing persona section and a `workflowReference` node in a dispatched prompt.
+
+**KB-1f has since supplied that producer** (`source/host/runner/agent-skills-resolver.ts`, wired in
+`host-runner-composition.ts`), so every installed skill's name and description now reach the prompt
+in `<available_skills>` with the `/home/box/agent-data` path the model can open. That is a third
+route and it is what changed the "five descriptions" line in section 3 from zero to a real number.
+The persona sentence stays: a catalog row says a pack exists, and the sentence is the instruction to
+read the index **before** answering, which is the half the R750 demo tenant's model needed.
 
 So `source/host/runner/standing-persona.ts` carries **two sentences** in the general block — not
 behind the lead marker, because every agent here answers an owner sooner or later:
@@ -115,7 +122,7 @@ what order — read `docs/PLUMBING-AUDIT.md:2002-2030` rather than a second acco
 | | |
 |---|---|
 | **Standing, per turn, per agent** | the two persona sentences and nothing else: **699 characters** of the 700 budgeted, the pointer 409 and the guardrail 290, printed by `tests/handbook-seeds.test.mjs` so the figure is copied from a run rather than from prose. **Measured** against grok-bot-local-vm's own state on 2026-09-10 the section went from **2,985 to 3,683 characters**, +698; rendered against this test's own box state on 2026-09-11 the whole section is 3,766 |
-| **The five descriptions** | **zero today.** Nothing renders a managed skill's name or description into any prompt on these boxes, because nothing supplies `resolveAgentSkills` (filed as KB-1f). The day that is wired, five descriptions begin to cost what they say |
+| **The five descriptions** | **zero until KB-1f, a real number since.** With `resolveAgentSkills` supplied, the `<available_skills>` catalog names every installed skill. **Measured on this Mac 2026-09-12** with the ten seeds a box carries and its own `/home/box/agent-data` paths: the whole section is **3,927 characters / 982 estimated tokens**, of which the five handbook packs are **2,516 / 629**; one skill alone is 886 / 222, so the fixed preamble is about 700 characters and each further skill about **338 characters (84 estimated tokens)**. Pinned by `tests/agent-skill-catalog.test.mjs` |
 | **On demand, per pack read** | the body plus about 195 characters of wrapper, in the USER half of one turn. **Measured** on grok-bot-local-vm: a 6,744-character seed cost 7,195 |
 | **Worst honest case** | a question that makes him read the map and one pack, roughly 20,000 characters of one turn, and nothing standing |
 
@@ -363,8 +370,10 @@ is written down rather than guessed: that box's transcript shows **no pack was o
 five questions — the model answered from memory and from `SearchPlugins`. Told to read the map in the
 message itself, the same model on the same box read it and answered the phone question almost in the
 pack's own words. So the packs are right and reachable there, and the standing pointer alone does not
-make that model open one. That is **KB-1h**, and it is why `resolveAgentSkills` (KB-1f) is the fix
-rather than more words in the persona.
+make that model open one. That is **KB-1h**, and it is why `resolveAgentSkills` (KB-1f) was the fix
+rather than more words in the persona. KB-1f landed on 2026-09-12 and the catalog now renders; the
+`--console a`, `--console b` and `--console c` re-runs against the 32 line are still owed, because a
+worker has no box.
 
 Pictures, logs and the answer jsonls are in the wave's scratchpad: `console-{a,b}.jsonl`, the ten
 `shots/console-*.png`, and `leg-{a,b}-final.jsonl`.

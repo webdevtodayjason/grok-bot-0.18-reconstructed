@@ -58,12 +58,18 @@ export const SAND_ONBOARDING_SKILL_LOOKUP = "onboarding";
  * KB-1. The id of the handbook pack that is the INDEX of the other four, so the section names one
  * path instead of five.
  *
- * Why a path at all. A seeded managed skill costs zero standing prompt bytes and is also named
- * nowhere the model can see: `getSystemPrompt` adds no section listing managed skills, the
- * `agent_skills` catalog section only renders when `resolveAgentSkills` supplies something and
- * nothing in this tree supplies it, and no tool runs a skill. So the two ways a seed reaches a turn
- * are a path written into THIS section and a `workflowReference` node in a dispatched prompt.
- * Seeding guarantees the packs exist; this sentence is what makes them reach an answer.
+ * Why a path at all. When this section was written a seeded managed skill cost zero standing prompt
+ * bytes and was also named nowhere the model could see: `getSystemPrompt` adds no section listing
+ * managed skills, the `agent_skills` catalog renders only when `resolveAgentSkills` supplies
+ * something and nothing in the tree supplied it, and no tool runs a skill. So the two ways a seed
+ * reached a turn were a path written into THIS section and a `workflowReference` node in a
+ * dispatched prompt.
+ *
+ * KB-1f changed the first half: `agent-skills-resolver.ts` now supplies the catalog, so every
+ * installed skill's name and description do reach the prompt and a pack costs standing bytes. This
+ * sentence stays, and stays load-bearing, for two reasons. It is an INSTRUCTION to read the index
+ * BEFORE answering, which a catalog entry is not, and it is the only one of the two that survives
+ * a box where the managed seeds failed to materialize their files.
  */
 export const SAND_HANDBOOK_SKILL_LOOKUP = "handbook-what-i-can-do";
 
@@ -262,7 +268,9 @@ function onboardingSentences(record: SandOnboardingRecord | null, sandRoot: stri
  * One path, not five ids: the first pack is the index and names the other four, so the section pays
  * for one file name rather than five. Nothing of the handbook's own content is pasted here -- a
  * glossary or a guardrail list in this section would be paid for on every turn of every agent
- * forever, while a file costs nothing until a question needs it.
+ * forever, while a file costs nothing until a question needs it. Since KB-1f the other four are
+ * named anyway, by the `<available_skills>` catalog, which is where their standing cost is now
+ * measured; this section's own budget is unchanged.
  *
  * The first sentence is an INSTRUCTION, not a described habit. Measured on the R750 demo tenant on
  * 2026-09-11: with the habit wording ("I read whichever fits before answering"), that box's model

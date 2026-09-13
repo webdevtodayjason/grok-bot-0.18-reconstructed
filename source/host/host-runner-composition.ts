@@ -142,6 +142,10 @@ import {
 } from "./runner/remote-box-resources.js";
 import { createStreamAttempt } from "./runner/stream-attempt.js";
 import {
+  createAgentSkillsResolver,
+  type AgentSkillCatalogStore,
+} from "./runner/agent-skills-resolver.js";
+import {
   createTurnAgentRunStreamInput,
   createTurnAgentStreamStart,
   type TurnLocalResourceProjectionInput,
@@ -3161,6 +3165,26 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
       if (turnRequestContext === undefined || turnAutoReviewGate === undefined) {
         throw new TypeError("production turn context owners are not bound");
       }
+      /**
+       * KB-1f. The producer for the `<available_skills>` catalog. `resolveAgentSkills` has been on
+       * the turn projection input since the reconstruction and nothing ever filled it, so
+       * `agentSkills` arrived empty on every turn, the catalog section never rendered, and no
+       * installed skill's name or description reached any prompt -- a seeded handbook or bot pack
+       * was on disk and invisible unless the standing persona spelled out its path.
+       *
+       * The store is the session's own `FileWorkflowStore`, which is the list the Skills panel
+       * shows: managed seeds, plugin skills, and this agent's enabled library rows. Routines drop
+       * out in the resolver, because a triggered workflow is a job and not a file the model may
+       * open on its own.
+       *
+       * Built once per runner, not once per turn: the resolver carries the one piece of state here
+       * that has to survive a turn, which is whether the over-the-cap notice has already been
+       * said. The list itself is still read fresh on every request-context execution.
+       */
+      const agentSkillsResolver = session.workflows != null
+        && typeof (session.workflows as { list?: unknown }).list === "function"
+        ? createAgentSkillsResolver({ store: session.workflows as AgentSkillCatalogStore })
+        : undefined;
       const autoReviewModes = autoReview.autoReviewModes ?? {
         hostShell: "off",
         boxShell: "off",
@@ -3589,6 +3613,9 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
                   dispatch: input => runner.subagents.dispatchBackgroundSubagent(input),
                 },
                 requestContext: turnRequestContext,
+                ...(agentSkillsResolver === undefined
+                  ? {}
+                  : { resolveAgentSkills: agentSkillsResolver }),
                 includeTranscripts: !isSharedRoomTurn,
                 autoReviewEnforceEnabled: Object.values(autoReviewModes).includes("enforce"),
                 ...(autoReview.autoReviewClassifierExecutor === undefined
