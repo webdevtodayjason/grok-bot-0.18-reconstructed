@@ -684,10 +684,16 @@
     return name !== "" && rosterNames.has(name);
   }
 
-  /** "by Anoop Baliga, from the community" on a community row; our own rows say only the team. */
+  /**
+   * Jason, 2026-09-13: "We don't have a community contributing so we have to remove that line,
+   * until we have community-contributed ones." A catalog row that came from elsewhere shows no
+   * credit line at all; our own rows still say the team. The creator stays in the catalog data for
+   * the day the line comes back.
+   */
   function creditLine(bot) {
-    const creator = text(bot && bot.creator) || "Titanbot team";
     const note = text(bot && bot.creatorNote);
+    if (note === "from the community") return "";
+    const creator = text(bot && bot.creator) || "Titanbot team";
     return note ? `by ${creator}, ${note}` : `by ${creator}`;
   }
 
@@ -709,7 +715,7 @@
     return `<div class="marketplace-bot-row" data-bot-row="${escapeHtml(id)}">`
       + `<button class="marketplace-bot-open" type="button" data-bot-id="${escapeHtml(id)}">`
       + tileMarkup(bot, "small")
-      + `<span class="marketplace-bot-copy"><strong>${escapeHtml(text(bot.name))} <span class="marketplace-bot-by">${escapeHtml(creditLine(bot))}</span></strong>`
+      + `<span class="marketplace-bot-copy"><strong>${escapeHtml(text(bot.name))} ${creditLine(bot) ? `<span class="marketplace-bot-by">${escapeHtml(creditLine(bot))}</span>` : ""}</strong>`
       + `<small>${escapeHtml(oneLine(bot.description))}</small></span></button>`
       + add
       + `</div>`;
@@ -1191,7 +1197,7 @@
       : "";
     return `<div data-bot-page="${escapeHtml(text(bot.id))}">`
       + `<button class="quiet-button" type="button" data-bots-back style="margin-bottom:12px">← All bots</button>`
-      + `<div class="plugin-hero">${tileMarkup(bot, "large")}<div class="plugin-hero-copy"><h3>${escapeHtml(text(bot.name))}</h3><p>${escapeHtml(creditLine(bot))} · ${escapeHtml(text(bot.category) || "Bots")}</p><p>${escapeHtml(text(bot.description))}</p></div><div style="display:grid;gap:6px;align-content:start">${importButton}</div></div>`
+      + `<div class="plugin-hero">${tileMarkup(bot, "large")}<div class="plugin-hero-copy"><h3>${escapeHtml(text(bot.name))}</h3><p>${creditLine(bot) ? `${escapeHtml(creditLine(bot))} · ` : ""}${escapeHtml(text(bot.category) || "Bots")}</p><p>${escapeHtml(text(bot.description))}</p></div><div style="display:grid;gap:6px;align-content:start">${importButton}</div></div>`
       + detailNote
       + `<div class="plugin-browser" style="min-height:300px;margin-top:16px"><aside class="plugin-sidebar">${nav}</aside><section class="plugin-detail"><div class="plugin-sections">${body}${outcomeMarkup(bot)}</div></section></div>`
       + `</div>`;

@@ -298,7 +298,9 @@ test("the Add control says in plain words that adding starts the bot talking", (
 
 test("the credit line names the creator and says where the row came from", () => {
   const html = list();
-  assert.ok(html.includes("by Adam Tanguay, from the community"), html.slice(0, 600));
+  // 2026-09-13: no credit line on a community row until there is a community of our own.
+  assert.ok(!html.includes("from the community"), html.slice(0, 600));
+  assert.ok(!html.includes("by Adam Tanguay"), html.slice(0, 600));
   assert.ok(html.includes("by Titanbot team"), "our own rows lost their credit");
 });
 

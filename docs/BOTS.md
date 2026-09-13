@@ -330,8 +330,11 @@ Recruiting & People, and **lost the duplicate "Marketing" entry it had been ship
 goes out on the wire and the console draws one chip per entry, so the Bots half of the panel had two
 identical Marketing chips filtering to the same rows.
 
-**The creator stays**, as a credit line: `creator` is the person's name and `creatorNote` is
-"from the community", so a row reads "by Adam Tanguay, from the community". The upstream account
+**The creator stays in the data, and the credit line is off** (Jason, 2026-09-13: "We don't have a
+community contributing so we have to remove that line, until we have community-contributed ones"):
+`creator` is the person's name and `creatorNote` is "from the community", and the console draws no
+line for such a row; our own rows still read "by Titanbot team". When a community exists the line
+comes back as "by Adam Tanguay, from the community". The upstream account
 handle is not shipped and neither is the creator's photo. One scraped description ended
 "Created by @karenxcheng", which shipped that credit a second time as a handle on another product's
 platform; the overlay strips it, and the generator fails on any string matching `Created by @handle`
