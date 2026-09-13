@@ -223,10 +223,18 @@ test("events reach the listener with the session they belong to", async () => {
     const seen = [];
     connection.on("Page.loadEventFired", (params, sessionId) => seen.push([params.timestamp, sessionId]));
     const ours = connection.waitFor("Page.loadEventFired", (_params, sessionId) => sessionId === "S1", 3000);
+    // The other tab's event is waited for too. The fake browser writes both frames back to back,
+    // but back to back is not the same read: under load the S2 frame lands in a later one, and
+    // asserting on `seen` the instant S1 resolves was asserting that a frame nobody waited for had
+    // already been parsed. That is what failed once in 3,488 under a full-suite run and never
+    // alone. The claim is unchanged -- both events were routed, each with its own session -- and
+    // the 3 s deadline still fails a lost event.
+    const theirs = connection.waitFor("Page.loadEventFired", (_params, sessionId) => sessionId === "S2", 3000);
 
     const attached = await connection.send("Target.attachToTarget", { targetId: "t1", flatten: true });
     assert.equal(attached.sessionId, "S1");
     assert.deepEqual(await ours, { timestamp: 1 }, "the other tab's event was not mistaken for ours");
+    assert.deepEqual(await theirs, { timestamp: 2 }, "and the other tab's event did arrive, under its own session");
     assert.deepEqual(seen, [[1, "S1"], [2, "S2"]]);
     connection.close();
   } finally {

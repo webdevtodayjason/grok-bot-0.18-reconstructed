@@ -32,7 +32,7 @@ async function loadAdapter(answers = {}) {
   const body = source.slice(source.indexOf("(function attachGatewayAdapter"));
   const exposed = body.replace(
     "  global.__bootMachineRoom =",
-    "  global.__test = { createGatewayAdapter, messagesOf, weaveToolRows, skillsOf, channelsOf, describeAcceptance, boxHandoffOf, displayOfVncUrl, recordSig };\n  global.__bootMachineRoom =",
+    "  global.__test = { createGatewayAdapter, hydrate, DEFAULTS, messagesOf, weaveToolRows, skillsOf, channelsOf, describeAcceptance, boxHandoffOf, displayOfVncUrl, recordSig };\n  global.__bootMachineRoom =",
   );
   const calls = [];
   const window = {
@@ -778,4 +778,124 @@ test("HANDBACK-1: an un-upgraded host reports unsupported and is never handed a 
   assert.deepEqual(await adapter.skipHandoff("w1"), { supported: false });
   assert.equal(only(calls, "skipBoxHandoff").length, before);
   adapter.destroy();
+});
+
+// ------------------------------------------------------------------------------------- BOOT-1
+// hydrate used to `await connectorPlugins()` -- every installed connector's listMcpServerTools --
+// BEFORE it called loadContext, so the transcript was not even asked for until the connectors
+// answered, and call() has no deadline of its own. Measured on grok-bot-local-vm with one cold
+// stdio connector held at 45 s: live at 46,318 ms and the first row at 93,680 ms, against
+// 1,083 ms and 1,099 ms with the read started and not awaited. These five pin the restructure:
+// the page does not wait, the answer is adopted when it lands, a later hydrate wins, a connector
+// that never answers is survivable, and a rebuild does not blank the cards a person is reading.
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((r) => { resolve = r; });
+  return { promise, resolve };
+};
+const rosterOf = (...ids) => ids.map((id, i) => ({
+  id, name: `Agent ${id}`, isGroup: false,
+  createdAt: 1_700_000_000_000 + i, lastActivityAt: 1_700_000_000_000 + i,
+}));
+const installedServer = (id, name, status = "connected") => ({ id, name, status, transport: "stdio", toolCount: 1 });
+const connectorCardsOf = (snapshot) => snapshot.plugins.filter((p) => String(p.id).startsWith("mcp:"));
+
+test("BOOT-1: the conversation is asked for and drawn while the connector is still cold", async () => {
+  const gate = deferred();
+  let toolsAnswered = false;
+  gate.promise.then(() => { toolsAnswered = true; });
+  const { hydrate, DEFAULTS, calls } = await loadAdapter({
+    listAgents: rosterOf("w1"),
+    getAgentTranscriptTail: { entries: [entry("m1", "user", "first row", 1_700_000_000_000)] },
+    listInstalledMcpServers: [installedServer(1, "tinyfish")],
+    listMcpServerTools: () => gate.promise,
+  });
+  const state = await hydrate(DEFAULTS);
+  assert.equal(toolsAnswered, false, "hydrate came back while the connector was still cold");
+  assert.equal(only(calls, "getAgentTranscriptTail").length, 1, "the transcript was asked for anyway");
+  assert.ok(state.workers[0].messages.length > 0, "and the first row is on the record");
+  assert.equal(connectorCardsOf(state).length, 0, "no connector card yet: the box has not answered for one");
+  gate.resolve([]);
+  await settle();
+});
+
+test("BOOT-1: the connector's tools are adopted when they land, and the cards already drawn survive", async () => {
+  const gate = deferred();
+  const { hydrate, DEFAULTS, createGatewayAdapter } = await loadAdapter({
+    listAgents: rosterOf("w1"),
+    getAgentTranscriptTail: { entries: [] },
+    listInstalledMcpServers: [installedServer(1, "tinyfish")],
+    listMcpServerTools: () => gate.promise,
+  });
+  const state = await hydrate(DEFAULTS);
+  const adapter = createGatewayAdapter(state);
+  const seen = [];
+  adapter.subscribe((event) => seen.push(event.type));
+  // A card from another group, on screen before the box answered. An adoption that rebuilt the
+  // whole list rather than swapping the connector rows would take this with it.
+  state.plugins.push({ id: "listener:slack", name: "Slack", group: "Chat platforms", tools: [] });
+  gate.resolve([{ name: "search", description: "web search", enabled: true }]);
+  await settle();
+  const cards = connectorCardsOf(adapter.getSnapshot());
+  assert.deepEqual(cards.map((c) => c.name), ["tinyfish"]);
+  assert.deepEqual(cards[0].tools.map((t) => t.name), ["search"], "the tool list the cold call was holding");
+  assert.ok(adapter.getSnapshot().plugins.some((p) => p.id === "listener:slack"), "the card already drawn was kept");
+  assert.ok(seen.includes("plugin:state"), "the panel was told the cards moved");
+  adapter.destroy();
+});
+
+test("BOOT-1: a hydrate started while a connector read is out wins, and the older answer is dropped", async () => {
+  const gate = deferred();
+  let reads = 0;
+  const { hydrate, DEFAULTS } = await loadAdapter({
+    listAgents: rosterOf("w1"),
+    getAgentTranscriptTail: { entries: [] },
+    listInstalledMcpServers: () => { reads += 1; return [installedServer(reads, reads === 1 ? "older" : "newer")]; },
+    listMcpServerTools: () => gate.promise,
+  });
+  const first = await hydrate(DEFAULTS);
+  const second = await hydrate(first);
+  gate.resolve([]);
+  await settle();
+  assert.equal(connectorCardsOf(first).length, 0, "the superseded hydrate's state took no connector card");
+  assert.deepEqual(connectorCardsOf(second).map((c) => c.name), ["newer"], "the current hydrate's answer is the one adopted");
+});
+
+test("BOOT-1: a connector that never answers leaves the page complete", async () => {
+  const { hydrate, DEFAULTS, createGatewayAdapter } = await loadAdapter({
+    listAgents: rosterOf("w1", "w2"),
+    getAgentTranscriptTail: { entries: [entry("m1", "user", "hello", 1_700_000_000_000)] },
+    listInstalledMcpServers: [installedServer(1, "tinyfish", "initializing")],
+    listMcpServerTools: () => new Promise(() => { /* this one never comes back */ }),
+  });
+  const state = await hydrate(DEFAULTS);
+  const adapter = createGatewayAdapter(state);
+  await settle(60);
+  const snapshot = adapter.getSnapshot();
+  assert.equal(snapshot.workers.length, 2, "the roster is drawn");
+  const active = snapshot.workers.find((w) => w.id === snapshot.activeContext.id);
+  assert.ok(active.messages.length > 0, "the conversation is drawn");
+  assert.equal(connectorCardsOf(snapshot).length, 0, "the Connectors group is empty rather than the page being held");
+  adapter.destroy();
+});
+
+test("BOOT-1: a rebuild keeps the connector cards on screen while its own read is out", async () => {
+  const boot = deferred();
+  const rebuild = deferred();
+  let reads = 0;
+  const { hydrate, DEFAULTS } = await loadAdapter({
+    listAgents: rosterOf("w1"),
+    getAgentTranscriptTail: { entries: [] },
+    listInstalledMcpServers: [installedServer(1, "tinyfish")],
+    listMcpServerTools: () => { reads += 1; return reads === 1 ? boot.promise : rebuild.promise; },
+  });
+  const booted = await hydrate(DEFAULTS);
+  boot.resolve([{ name: "search", enabled: true }]);
+  await settle();
+  assert.deepEqual(connectorCardsOf(booted).map((c) => c.name), ["tinyfish"]);
+  const rebuilt = await hydrate(booted);
+  assert.deepEqual(connectorCardsOf(rebuilt).map((c) => c.name), ["tinyfish"], "the card a person is reading stays while the rebuild's read is out");
+  rebuild.resolve([{ name: "search", enabled: true }, { name: "fetch", enabled: true }]);
+  await settle();
+  assert.deepEqual(connectorCardsOf(rebuilt)[0].tools.map((t) => t.name), ["search", "fetch"], "and is replaced by the fresh answer");
 });
