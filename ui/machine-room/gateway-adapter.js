@@ -1791,6 +1791,63 @@
     return [...connectors, ...shellTools];
   }
 
+  // ---- BOOT-1: a cold connector is no longer a console that never comes up -------------------
+  //
+  // hydrate used to `await connectorPlugins()` BEFORE it asked for the first conversation, and
+  // call() has no deadline of its own, so a connector that never answered was a page that never
+  // came up. MEASURED on grok-bot-local-vm with one cold stdio connector held at 45 s: live at
+  // 46,318 ms and the first row at 93,680 ms, against 1,083 ms and 1,099 ms with the read started
+  // and not awaited. With connectors warm the first listMcpServerTools still issues 55 ms AFTER
+  // the first row is on screen, so nothing here is paid for by the common case.
+  //
+  // The read is STARTED here and the page carries on without it. When the answer lands it is
+  // ADOPTED: the Connector and Shell tool cards are swapped into whatever plugin list is on
+  // screen by then, and the panel is told. Deliberately not a rebuild of the whole list -- the
+  // Provider and Listener cards a person may already be looking at were drawn from answers this
+  // read knows nothing about, and rebuilding from scratch would drop them.
+  //
+  // WHICH read wins: the newest. hydrate is re-run in place at seven call sites (a create, a
+  // delete, a duplicate, a listener disconnect, a membership change), so the roster an older read
+  // was started for can be gone by the time it lands; its answer is dropped on arrival rather
+  // than written over the current one. refreshConnectors supersedes it the same way, because that
+  // is a fresher read of the same question and an older one landing after it would put the
+  // pre-write cards back.
+  let connectorGeneration = 0;
+  let pendingConnectors = null;
+  // Set by createGatewayAdapter so an adoption can tell the panel. Null while the page is still
+  // booting: app.js has not constructed the adapter yet, nothing is subscribed, and the answer
+  // only has to be in the state hydrate is about to hand over.
+  let announceConnectors = null;
+  const isConnectorCard = (plugin) => {
+    const id = String(plugin?.id ?? "");
+    return id.startsWith("mcp:") || id.startsWith("shell:");
+  };
+  function startConnectors() {
+    const generation = ++connectorGeneration;
+    pendingConnectors = { generation, promise: connectorPlugins().catch(() => []) };
+    return generation;
+  }
+  // A read started by a fresher path makes an outstanding one stale: whatever it answers
+  // describes connectors.json as it was before the write that asked for the fresher one.
+  function supersedeConnectors() {
+    connectorGeneration += 1;
+    pendingConnectors = null;
+  }
+  // `built` is the state object hydrate is returning, which IS the object the adapter assigns to
+  // its own `state` -- so `built.plugins` here is the list on screen, including anything written
+  // into it between hydrate resolving and this answer landing. Returned for a test to await; no
+  // caller in the page awaits it, which is the whole point.
+  function adoptConnectorsInto(built, generation) {
+    const held = pendingConnectors;
+    if (held == null || held.generation !== generation) return Promise.resolve([]);
+    return held.promise.then((connectors) => {
+      if (connectorGeneration !== generation) return [];
+      built.plugins = [...(built.plugins ?? []).filter((p) => !isConnectorCard(p)), ...connectors];
+      announceConnectors?.(built);
+      return connectors;
+    });
+  }
+
   async function connectorCards(config) {
     const tools = await call("listRoutedMcpTools").catch(() => null);
     const rows = Array.isArray(tools) ? tools : [];
@@ -2558,6 +2615,14 @@
   }
 
   async function hydrate(seed) {
+    // BOOT-1. Started first and awaited nowhere in here. Started FIRST because the sooner it goes
+    // out the sooner it lands, and it no longer sits on the path to the first conversation.
+    const connectorRead = startConnectors();
+    // The connector cards already on screen, carried across a rebuild. A rebuild's own read is in
+    // flight and will replace them; dropping them in the meantime would blank the Connectors
+    // group every time an agent is created or a listener is unbound. A boot carries none, because
+    // DEFAULTS has none, which is why a booting page draws the group when the box answers.
+    const drawnConnectors = (seed.plugins ?? []).filter(isConnectorCard);
     const [agents, integrations, subscriptions, catalog, agentCount, searchEnabled, hostStatus] = await Promise.all([
       call("listAgents"),
       call("getListenerIntegrations").catch(() => null),
@@ -2649,10 +2714,12 @@
     const byRecent = (a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0);
     workers.sort(byRecent); rooms.sort(byRecent);
 
-    const connectors = await connectorPlugins().catch(() => []);
-
     const first = workers[0] ?? rooms[0];
-    if (!first) return { ...seed, host, workers: [], rooms: [], routines: [], plugins: [...connectors, ...pluginsOf(integrations)], openContexts: [], agentCount: Number.isFinite(Number(agentCount)) && agentCount !== null ? Number(agentCount) : null, search: { enabled: searchEnabled === true } };
+    if (!first) {
+      const empty = { ...seed, host, workers: [], rooms: [], routines: [], plugins: [...drawnConnectors, ...pluginsOf(integrations)], openContexts: [], agentCount: Number.isFinite(Number(agentCount)) && agentCount !== null ? Number(agentCount) : null, search: { enabled: searchEnabled === true } };
+      void adoptConnectorsInto(empty, connectorRead);
+      return empty;
+    }
 
     // A rebuild (a duplicate, a delete, a plugin disconnect) keeps the conversation on screen and
     // the open tabs, as long as those agents still exist; only a context that is gone, or a
@@ -2678,7 +2745,7 @@
     const teaching = await call("getTeachRecordingStatus").catch(() => null);
     const hostSettings = await call("getHostSettings").catch(() => null);
 
-    return {
+    const built = {
       ...seed,
       teaching: teaching?.state === "recording"
         ? { active: true, workerId: teaching.agentId, startedAt: teaching.startedAtMs, maxDurationMs: teaching.maxDurationMs }
@@ -2709,10 +2776,13 @@
         : loaded.routines,
       // The plan first, because it is what most customers answer through and the one group that
       // needs nothing done to it; then the providers a user connects, the box's own connectors, and
-      // the chat listeners the host reports.
-      plugins: [...includedPlugins(catalog?.included, models.default), ...subscriptionPlugins(subscriptions, models.default, catalog), ...connectors, ...pluginsOf(integrations)],
+      // the chat listeners the host reports. BOOT-1: `drawnConnectors` is what a rebuild carries
+      // over and is empty on a boot; adoptConnectorsInto replaces it when the box answers.
+      plugins: [...includedPlugins(catalog?.included, models.default), ...subscriptionPlugins(subscriptions, models.default, catalog), ...drawnConnectors, ...pluginsOf(integrations)],
       models,
     };
+    void adoptConnectorsInto(built, connectorRead);
+    return built;
   }
 
   function createGatewayAdapter(state) {
@@ -2775,6 +2845,14 @@
       return event.snapshot;
     }
 
+    // BOOT-1. The connector read hydrate started, landing after the page is already up.
+    // adoptConnectorsInto has already written the cards into the state object; this only tells
+    // the panel. It fires ONLY for the state this adapter is showing: a hydrate whose answer was
+    // thrown away (a rebuild the next one superseded) must not repaint the panel from a list
+    // nobody is looking at.
+    const onConnectorsAdopted = (target) => { if (target === state) emit("plugin:state", {}); };
+    announceConnectors = onConnectorsAdopted;
+
     // Anything the gateway cannot do yet surfaces as a message in the active transcript rather
     // than as a silent no-op, so an unwired control is visible instead of merely inert.
     function notWired(what) {
@@ -2831,6 +2909,9 @@
     // grouped by `group`, so their position in this array does not matter.
     async function refreshConnectors() {
       const generation = ++connectorSettleGeneration;
+      // BOOT-1: this read is fresher than any a hydrate has outstanding, and that older answer
+      // landing after this one would put the pre-write cards back over the write that asked.
+      supersedeConnectors();
       const connectors = await connectorPlugins(failed).catch(() => []);
       state.plugins = [...state.plugins.filter((p) => !String(p.id).startsWith("mcp:") && !String(p.id).startsWith("shell:")), ...connectors];
       const emitted = emit("plugin:state", {});
@@ -3180,6 +3261,9 @@
       destroy() {
         listeners.clear();
         suspend();
+        // BOOT-1: only if this adapter is still the one registered. A page that replaced its
+        // adapter has already overwritten the hook, and clearing it here would silence the live one.
+        if (announceConnectors === onConnectorsAdopted) announceConnectors = null;
         thinkHarderToggle?.removeEventListener?.("change", onThinkHarderToggle);
         global.document?.removeEventListener?.("visibilitychange", onVisibility);
         global.removeEventListener?.("pagehide", suspend);
