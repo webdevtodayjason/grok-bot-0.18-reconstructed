@@ -66,6 +66,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+// The gates drive real browsers through fake calls; without this the stub vendor's reply and the fake
+// microphone come out of the operator's speakers (Jason, 2026-09-13: "some sort of beep on my computer").
+const muted = (engine, options = {}) => (String(engine?.name?.() ?? "") === "chromium"
+  ? { ...options, args: [...(options.args ?? []), "--mute-audio"] } : options);
 import { gateUserAgent } from "./gate-agent.mjs";
 
 const exec = promisify(execFile);
@@ -684,7 +688,7 @@ async function legNoKey() {
 async function noKeyInABrowser(relay) {
   const playwright = await loadPlaywright();
   const { chromium } = playwright;
-  const browser = await chromium.launch({ args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"] });
+  const browser = await chromium.launch(muted(chromium, { args: ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream"] }));
   cleanups.push(() => { try { browser.close(); } catch { /* gone */ } });
 
   const readRects = (page) => page.evaluate(() => {
@@ -1180,14 +1184,14 @@ async function legBrowser() {
   // list warns that a fake audio file is mangled by the capture pipeline's processing, so the page
   // also asks for echoCancellation, noiseSuppression and autoGainControl off when it opens the
   // microphone. Without both halves the WAV arrives unusable and reads as a bad model.
-  const browser = await chromium.launch({
+  const browser = await chromium.launch(muted(chromium, {
     args: [
       "--use-fake-ui-for-media-stream",
       "--use-fake-device-for-media-stream",
       `--use-file-for-fake-audio-capture=${wav}`,
       "--autoplay-policy=no-user-gesture-required",
     ],
-  });
+  }));
   cleanups.push(() => { try { browser.close(); } catch { /* gone */ } });
   const context = await browser.newContext({ userAgent: GATE_AGENT, permissions: ["microphone"] });
   const page = await context.newPage();
@@ -1443,14 +1447,14 @@ async function legFrames() {
   info(`this run talks to ${chosen?.name ?? "(nobody)"}`);
 
   const { chromium } = await loadPlaywright();
-  const browser = await chromium.launch({
+  const browser = await chromium.launch(muted(chromium, {
     args: [
       "--use-fake-ui-for-media-stream",
       "--use-fake-device-for-media-stream",
       `--use-file-for-fake-audio-capture=${wav}`,
       "--autoplay-policy=no-user-gesture-required",
     ],
-  });
+  }));
   cleanups.push(() => { try { browser.close(); } catch { /* gone */ } });
 
   for (const viewport of VOICE_VIEWPORTS) {
@@ -1626,14 +1630,14 @@ async function legOverlay() {
   info(`this run talks to ${chosen?.name ?? "(nobody)"}`);
 
   const { chromium } = await loadPlaywright();
-  const browser = await chromium.launch({
+  const browser = await chromium.launch(muted(chromium, {
     args: [
       "--use-fake-ui-for-media-stream",
       "--use-fake-device-for-media-stream",
       `--use-file-for-fake-audio-capture=${wav}`,
       "--autoplay-policy=no-user-gesture-required",
     ],
-  });
+  }));
   cleanups.push(() => { try { browser.close(); } catch { /* gone */ } });
 
   // Read in ONE evaluate so every rectangle comes off the same layout. Two evaluates straddle a frame
@@ -2168,7 +2172,7 @@ async function legPerson() {
   });
 
   const { chromium } = await loadPlaywright();
-  const browser = await chromium.launch();
+  const browser = await chromium.launch(muted(chromium));
   cleanups.push(() => { try { browser.close(); } catch { /* gone */ } });
 
   // A GATE THAT CANNOT SAY WHY IS ONE THE NEXT PERSON DEBUGS BY GUESSING. If the console does not boot
@@ -2471,7 +2475,7 @@ async function legRelease() {
     step(`${view.engine} ${view.width}x${view.height}`);
     let browser = null;
     try {
-      browser = await engine.launch(view.engine === "chromium" ? {
+      browser = await engine.launch(muted(engine, view.engine === "chromium" ? {
         args: [
           "--use-fake-ui-for-media-stream",
           "--use-fake-device-for-media-stream",
@@ -2483,7 +2487,7 @@ async function legRelease() {
           `--use-file-for-fake-audio-capture=${wav}`,
           "--autoplay-policy=no-user-gesture-required",
         ],
-      } : {});
+      } : {}));
     } catch (error) {
       skip(`${view.engine} would not launch`, String(error?.message ?? error).split("\n")[0]);
       continue;
@@ -2822,7 +2826,7 @@ async function legCall() {
   const engine = playwright.webkit;
   if (engine == null) { skip("webkit at 390x844", "this playwright build has no webkit"); return; }
   let browser = null;
-  try { browser = await engine.launch({}); }
+  try { browser = await engine.launch(muted(engine, {})); }
   catch (error) { skip("webkit would not launch", String(error?.message ?? error).split("\n")[0]); return; }
   cleanups.push(() => { try { browser.close(); } catch { /* gone */ } });
 

@@ -58,6 +58,10 @@ import path from "node:path";
 // the Sign-in attempts panel could not otherwise tell it from a stranger. A hint, never a credential.
 import { gateUserAgent } from "./gate-agent.mjs";
 
+// The gates drive real browsers through fake calls; without this the stub vendor's reply and the fake
+// microphone come out of the operator's speakers (Jason, 2026-09-13: "some sort of beep on my computer").
+const muted = (engine, options = {}) => (String(engine?.name?.() ?? "") === "chromium"
+  ? { ...options, args: [...(options.args ?? []), "--mute-audio"] } : options);
 const BASE = process.env.CONSOLE_BASE ?? "https://console.titanium.bot";
 const EMAIL = process.env.GATE_EMAIL;
 const PASSWORD = process.env.GATE_PASSWORD;
@@ -138,12 +142,12 @@ const footerHeld = (before, now, what) => {
 
 // Chrome is left to playwright the way every other gate in this tree leaves it: an executablePath
 // guessed from /Applications is one OS upgrade away from a gate that cannot run.
-const browser = await chromium.launch({
+const browser = await chromium.launch(muted(chromium, {
   ...(process.env.CHROME ? { executablePath: process.env.CHROME } : {}),
   headless: true,
   args: ["--no-sandbox", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
     "--autoplay-policy=no-user-gesture-required"],
-});
+}));
 
 try {
   for (const v of VIEWPORTS) {
@@ -588,7 +592,7 @@ else {
   let switchedOn = false;
   let doorBefore = null;
   let restoreTalking = async () => null;
-  const spoken = await chromium.launch({
+  const spoken = await chromium.launch(muted(chromium, {
     ...(process.env.CHROME ? { executablePath: process.env.CHROME } : {}),
     headless: true,
     args: ["--no-sandbox", "--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
@@ -599,7 +603,7 @@ else {
       // confirmed inside 150 s. Played once, the file is followed by silence, which is what a person
       // stopping talking sounds like.
       `--use-file-for-fake-audio-capture=${speechWav}%noloop`, "--autoplay-policy=no-user-gesture-required"],
-  });
+  }));
   try {
     const context = await spoken.newContext({
       userAgent: GATE_AGENT, permissions: ["microphone"],
