@@ -6,11 +6,13 @@
 //
 // TWO THINGS THIS FILE IS REALLY ABOUT, and both are about what must never end up somewhere.
 //
-// The sign-in link is an UNREVOCABLE BEARER CREDENTIAL IN A URL. The relay verifies the signature and
-// the expiry and checks no revocation list, so the link works as many times as it is clicked until it
-// expires and the only cancel is rotating CP_SESSION_SECRET, which signs the whole fleet out. So the
-// tests below hold it to a 24 hour ceiling, prove it opens exactly one workspace and no other, and
-// prove it is in the answer to the caller and in NO row.
+// The sign-in link is a BEARER CREDENTIAL IN A URL: whoever holds it is signed in as that person. It
+// used to be unrevocable too -- the relay checked a signature and an expiry and asked nobody anything,
+// so the link worked as many times as it was clicked until it expired and the only cancel was rotating
+// CP_SESSION_SECRET, which signs the whole fleet out. ONBOARD-5 made it SINGLE USE and revocable by
+// writing the token's jti down before the url exists. So the tests below hold it to a 24 hour ceiling,
+// prove it opens exactly one workspace and no other, prove the URL is in the answer to the caller and
+// in NO row, and prove the mail does not go at all when the id could not be recorded.
 //
 // The temporary password is shown once on the card and stored as a scrypt hash nobody can ask back.
 // So the tests hold the 'link' shape -- a second welcome -- to carrying no password at all, and hold
@@ -24,6 +26,7 @@ import { fileURLToPath } from "node:url";
 import {
   PRODUCT_MAIL_ROUTE,
   WELCOME_BAD_RECIPIENT,
+  WELCOME_LINK_NOT_RECORDED,
   WELCOME_LINK_SHAPE_WITH_PASSWORD,
   WELCOME_LINK_TTL_MS,
   WELCOME_NO_ACCOUNT,
@@ -114,8 +117,9 @@ test("the link is that workspace's own session token, signed with that workspace
     assert.equal(verdict.payload.tenant, "acme-roofing");
     assert.equal(verdict.payload.host, "console.titanium.bot");
 
-    // Twenty four hours to the millisecond, and a CEILING rather than a target: this is an
-    // unrevocable bearer and the only cancel is rotating the master, which signs the fleet out.
+    // Twenty four hours to the millisecond, and a CEILING rather than a target: single use bounds what
+    // a leaked link can do to one sign-in, which is a reason to keep the window short and not a reason
+    // to widen it.
     assert.equal(verdict.payload.iat, AT);
     assert.equal(verdict.payload.exp, AT + WELCOME_LINK_TTL_MS);
     assert.equal(WELCOME_LINK_TTL_MS, 24 * 60 * 60 * 1000);
@@ -142,12 +146,76 @@ test("the relay's own sso door accepts that link, and refuses the same token und
     const wrong = ssoVerdict({ token, keyOf: () => tenantSessionSecret(MASTER, "other-co"), now: AT + 1000 });
     assert.equal(wrong.kind, "bad", JSON.stringify(wrong));
 
-    // And it is dead once it expires, which is the only thing that ever cancels it.
+    // And it is dead once it expires. Expiry is no longer the ONLY thing that cancels it -- the first
+    // click and the console's Revoke both do, and both of those are decided on the control plane rather
+    // than in this function, which is why ssoVerdict alone cannot see them.
     const late = ssoVerdict({ token, keyOf: (slug) => tenantSessionSecret(MASTER, slug), now: AT + WELCOME_LINK_TTL_MS + 1 });
     assert.equal(late.kind, "bad");
     // One millisecond before, it still works, which is what pins the ceiling to exactly 24 hours.
     const justInTime = ssoVerdict({ token, keyOf: (slug) => tenantSessionSecret(MASTER, slug), now: AT + WELCOME_LINK_TTL_MS - 1 });
     assert.equal(justInTime.kind, "session");
+  });
+});
+
+test("ONBOARD-5: the link is written down before it exists, and a link that cannot be is not sent", async () => {
+  await withWelcome(async ({ store, welcome, account, posted }) => {
+    const tenant = store.getTenant("acme-roofing");
+    const link = welcome.mintSignInLink({ account, tenant, at: AT, mintedBy: "jason@titaniumcomputing.com" });
+    assert.equal(link.ok, true, link.why);
+    const token = new URL(link.url).searchParams.get("sso");
+    const payload = verifySessionToken(token, tenantSessionSecret(MASTER, "acme-roofing"), AT).payload;
+
+    // The id IS the jti, so the relay can ask about the link it was handed.
+    assert.equal(link.id, payload.jti);
+    assert.equal(link.singleUse, true);
+    const held = store.getSignInLink(link.id);
+    assert.equal(held.tenant, "acme-roofing");
+    assert.equal(held.email, "jane@acmeroofing.com");
+    assert.equal(held.purpose, "welcome");
+    assert.equal(held.mintedBy, "jason@titaniumcomputing.com");
+    assert.equal(held.expiresAt, AT + WELCOME_LINK_TTL_MS);
+    // THE TOKEN IS IN NO FIELD OF THAT ROW. The row exists so a link can be cancelled, never so one
+    // can be replayed.
+    assert.equal(JSON.stringify(held).includes(token), false);
+
+    // A real send carries the id out beside the url, which is what lets the card offer Revoke on the
+    // link this mail is carrying.
+    const sent = await welcome.send({
+      slug: "acme-roofing", email: "jane@acmeroofing.com", name: "Jane", to: "jane@acmeroofing.com",
+      temporaryPassword: PASSWORD, titanAddress: TITAN, actor: "jason@titaniumcomputing.com", at: AT,
+    });
+    assert.equal(sent.ok, true, sent.why);
+    assert.equal(posted.length, 1);
+    const mailed = store.getSignInLink(sent.signInLinkId);
+    assert.equal(mailed.email, "jane@acmeroofing.com");
+    assert.equal(mailed.usedAt, 0);
+    // The mail's body carries the url and the row does not, so the two cannot be matched up from this
+    // database alone. That is the whole point of recording the id and nothing else.
+    assert.equal(JSON.stringify(store.listWelcomeSends("acme-roofing")).includes(sent.signInUrl), false);
+  });
+});
+
+test("ONBOARD-5: a link the store could not write is a refusal and not a mail", async () => {
+  await withWelcome(async ({ store, account, posted }) => {
+    const tenant = store.getTenant("acme-roofing");
+    // FAIL CLOSED AND SAY SO. A link whose row is missing is refused at the relay's door, so a mail
+    // carrying one would reach a customer with a credential that can never work and nobody able to say
+    // why. Nothing is posted.
+    const broken = createWelcome({
+      store: { ...store, recordSignInLink() { throw new Error("the disk is full"); } },
+      config: CONFIG,
+      askRelayPost: async () => { throw new Error("nothing should be sent"); },
+      now: () => AT,
+    });
+    assert.equal(broken.mintSignInLink({ account, tenant, at: AT }).why, WELCOME_LINK_NOT_RECORDED);
+    const sent = await broken.send({
+      slug: "acme-roofing", email: "jane@acmeroofing.com", name: "Jane", to: "jane@acmeroofing.com",
+      temporaryPassword: PASSWORD, titanAddress: TITAN, at: AT,
+    });
+    assert.equal(sent.ok, false);
+    assert.equal(sent.sent, false);
+    assert.equal(sent.why, WELCOME_LINK_NOT_RECORDED);
+    assert.equal(posted.length, 0);
   });
 });
 

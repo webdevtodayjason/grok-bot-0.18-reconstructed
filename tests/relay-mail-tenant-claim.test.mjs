@@ -17,7 +17,9 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { signSvix } from "../ui/mail-edge.mjs";
-import { RELAY_TOKEN, signInAsTenant, startRelay, tenantRow, tenantsFile } from "./relay-tenant-support.mjs";
+import {
+  RELAY_TOKEN, signInAsTenant, startRelay, startRelayWithLinks, tenantRow, tenantsFile,
+} from "./relay-tenant-support.mjs";
 
 const OWNER_SECRET = `whsec_${Buffer.from("the owner's signing secret").toString("base64")}`;
 const IMPOSTOR_SECRET = `whsec_${Buffer.from("a secret Resend never signed").toString("base64")}`;
@@ -100,9 +102,9 @@ test("the console refuses a mail domain another workspace on it already holds", 
   writeFileSync(path.join(held.state, "mail.json"), JSON.stringify({
     enabled: true, domain: "titanium.bot", webhookSecret: OWNER_SECRET,
   }));
-  const relay = await startRelay({
-    CP_URL: "http://127.0.0.1:1",
-    CP_RELAY_TOKEN: RELAY_TOKEN,
+  // startRelayWithLinks and not startRelay: signInAsTenant below is a sign-in link, and since
+  // ONBOARD-5 a link is checked with the control plane on every click.
+  const relay = await startRelayWithLinks({
     SAND_UI_TENANTS_FILE: tenantsFile([held.row, other.row]),
   }, { pathValue: "/nonexistent" });
   try {

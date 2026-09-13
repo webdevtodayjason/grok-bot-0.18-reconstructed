@@ -25,6 +25,10 @@
 // sign-in link. The password is minted by cp/signup.mjs, shown once on the card, and stored only as
 // a scrypt hash nobody can ask back. The link is a bearer credential in a URL (see mintSignInLink),
 // so it is handed to the caller exactly once, in the answer, and is written nowhere.
+//
+// ONBOARD-5 qualifies the second half of that and does not soften it. The link's ID is written down
+// -- cp/store.mjs sign_in_links, so the link is single-use and the console can cancel it -- and the
+// TOKEN still is not, anywhere. An id lets you cancel a link; it never lets you use one.
 
 import { createHash, randomUUID } from "node:crypto";
 
@@ -36,11 +40,14 @@ export const WELCOME_SUBJECT = "Your Titanium Bot workspace is ready";
 /**
  * Twenty four hours, and it is a CEILING rather than a target.
  *
- * Understand what the link is: a stateless signed bearer in a URL that the relay verifies and never
- * checks for revocation (ui/session-token.mjs says so outright), that works as many times as it is
- * clicked until it expires, and that cannot be cancelled short of rotating CP_SESSION_SECRET, which
- * signs the whole fleet out. That is why click tracking is off for titanium.bot, why the link is
- * never written down, and why this number is not larger.
+ * Understand what the link is: a signed bearer in a URL, so whoever holds it is signed in as that
+ * person. Since ONBOARD-5 it is SINGLE USE and revocable -- its id is in cp/store.mjs's sign_in_links
+ * and the relay asks this service once per click -- which bounds the damage a leaked link can do to
+ * one sign-in that the console can also cancel. Before that it worked as many times as it was clicked
+ * for the whole window and the only cancel was rotating CP_SESSION_SECRET, which signs the whole
+ * fleet out. That history is why click tracking is off for titanium.bot, why the TOKEN is still
+ * written down nowhere, and why this number is not larger: single use is a bound on a credential in
+ * an inbox, not a reason to hand out a longer one.
  *
  * The relay caps the COOKIE it sets from the link at its own SESSION_TTL_MS, so a 24 hour link
  * yields a 12 hour session. Both numbers are right: one is how long the customer may arrive, the
@@ -110,6 +117,13 @@ export const WELCOME_NO_TENANT = "There is no workspace by that name, so no link
 export const WELCOME_NO_HOST = "That workspace has no address to sign in at, so no link could be made.";
 export const WELCOME_NO_SECRET =
   "This control plane has no session secret, so it cannot mint a sign-in link. Set CP_SESSION_SECRET.";
+// ONBOARD-5. A link that is not written down is refused at the relay's door, so one that could not be
+// written down is not mailed. The sentence names the table rather than the symptom, because the
+// symptom a customer would otherwise meet is "that sign-in link is not on record" a day later with
+// nobody able to say why.
+export const WELCOME_LINK_NOT_RECORDED =
+  "That sign-in link could not be written down, so it was not sent: a link this service has no record "
+  + "of is refused when the customer clicks it.";
 
 // ---- the brand, as a mail client will actually render it ----------------------------------------
 //
@@ -397,20 +411,28 @@ export function createWelcome({
   };
 
   /**
-   * A sign-in link for one account on one workspace, good for 24 hours and not one-time.
+   * A sign-in link for one account on one workspace, good for 24 hours, SINGLE USE and revocable.
    *
    * It is ui/session-token.mjs's ordinary session token, minted with that tenant's DERIVED key, and
    * the relay already consumes it at GET /login?sso=<token> (ui/server.mjs handleSso, verified by
    * ssoVerdict against the same derivation). So nothing new is signed and ui/session-token.mjs is
    * not edited: all seven required claims are present on the rows this wave creates.
    *
-   * WHAT THIS HANDS OUT. An unrevocable bearer credential in a URL. It works as many times as it is
-   * clicked until exp, the relay never checks a revocation list, and the only cancel is rotating
-   * CP_SESSION_SECRET, which signs the whole fleet out. Hence the 24 hour ceiling, hence click
-   * tracking off for titanium.bot so a scanner does not fetch it, and hence the rule that it is
-   * returned to the caller once and written nowhere.
+   * WHAT THIS HANDS OUT, AND WHAT ONBOARD-5 CHANGED. Still a bearer credential in a URL: whoever
+   * holds the link is signed in as that person. No longer STATELESS. The token's `jti` is written to
+   * cp/store.mjs's sign_in_links BEFORE the URL exists, the relay asks this service once per click
+   * whether that id is still good, one click spends it, and the console can cancel it. Hence the
+   * welcome mail's link and the operator's "Copy a sign-in link" are the same kind of thing, which is
+   * the half of ONBOARD-3 that is about the link.
+   *
+   * THE ORDER IS THE RULE: record, then answer. A link whose row did not get written is refused by the
+   * relay, so the mail must not carry one -- WELCOME_LINK_NOT_RECORDED is that refusal, and it sends
+   * nothing rather than sending a link that will fail a day later with nobody able to say why.
+   *
+   * Still true: the 24 hour ceiling, click tracking off for titanium.bot so a scanner does not fetch
+   * it, and the rule that the URL is returned to the caller once and written nowhere.
    */
-  function mintSignInLink({ account = null, tenant = null, at = now(), ttlMs = WELCOME_LINK_TTL_MS } = {}) {
+  function mintSignInLink({ account = null, tenant = null, at = now(), ttlMs = WELCOME_LINK_TTL_MS, mintedBy = "" } = {}) {
     const secret = String(config?.sessionSecret ?? "");
     if (secret.length === 0) return { ok: false, why: WELCOME_NO_SECRET };
     if (tenant == null || String(tenant.slug ?? "").length === 0) return { ok: false, why: WELCOME_NO_TENANT };
@@ -422,6 +444,24 @@ export function createWelcome({
 
     const iat = Number(at);
     const exp = iat + Math.max(60_000, Number(ttlMs) || WELCOME_LINK_TTL_MS);
+    const id = randomUUID();
+    // WRITTEN DOWN FIRST, and a store that cannot do it is refused rather than worked around. This is
+    // the same rule cp/onboard.mjs mintSignInLink keeps, and the two are separate call sites on one
+    // store method rather than one of them calling the other, because each has its own refusal
+    // vocabulary and a translation layer between them is how a refusal goes missing.
+    try {
+      store.recordSignInLink({
+        id,
+        tenant: String(tenant.slug),
+        accountId: String(account.id),
+        email: String(account.email),
+        mintedBy: String(mintedBy ?? ""),
+        purpose: "welcome",
+        at: iat,
+        expiresAt: exp,
+        singleUse: true,
+      });
+    } catch { return { ok: false, why: WELCOME_LINK_NOT_RECORDED }; }
     let token;
     try {
       token = mintSessionToken({
@@ -431,7 +471,7 @@ export function createWelcome({
         host,
         iat,
         exp,
-        jti: randomUUID(),
+        jti: id,
       }, tenantSessionSecret(secret, String(tenant.slug)), iat).token;
     } catch (error) {
       return { ok: false, why: `that sign-in link could not be made (${String(error?.message ?? error)})` };
@@ -441,6 +481,9 @@ export function createWelcome({
       url: `https://${host}/login?sso=${token}`,
       expiresAt: new Date(exp).toISOString(),
       expiresAtMs: exp,
+      // The id, never the token. It is what a card needs to offer Revoke on the link it just sent.
+      id,
+      singleUse: true,
       // The relay caps the cookie it sets from this link at its own session lifetime, so a customer
       // arriving on hour 23 gets a session that lasts this long and not one minute of the link's
       // remainder. Reported so a card can say it rather than a reader having to know it.
@@ -534,7 +577,7 @@ export function createWelcome({
       : `${String(temporaryPassword ?? "").length > 0 ? "link+password" : "link"}`
         + `${oneAddress(titanAddress).length === 0 ? "-no-bot-mail" : ""}`;
 
-    const link = mintSignInLink({ account: person, tenant: row, at });
+    const link = mintSignInLink({ account: person, tenant: row, at, mintedBy: actor });
     if (!link.ok) return { ok: false, sent: false, shape: wanted, to: one, override, why: link.why };
 
     const mail = render({
@@ -596,6 +639,9 @@ export function createWelcome({
       // link" for a customer whose mail bounced without ever minting a second one.
       signInUrl: link.url,
       expiresAt: link.expiresAt,
+      // The link's id, which IS written down (cp/store.mjs sign_in_links). A card holding it can offer
+      // Revoke on the link this mail carries without asking for the workspace's whole list.
+      signInLinkId: String(link.id ?? ""),
       from: String(answer.body?.from ?? ""),
       why: "",
     };

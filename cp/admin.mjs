@@ -1426,6 +1426,10 @@ export function createAdminApi({
           ? onboarding.state(tenant.slug)
           : null,
         welcome: welcomeSends(tenant.slug, 5),
+        // ONBOARD-5. The sign-in links to this workspace that a click would still open. One read of a
+        // table this service already holds, so it costs no round trip, and it is what puts a Revoke
+        // beside every live link rather than leaving the operator to guess whether one is out there.
+        signInLinks: signInLinks(tenant.slug, { limit: 5, open: true }),
         // Named rather than left out, because a fact that could not be measured has to read as one
         // and never as an empty column.
         spend: byTenant.get(tenant.slug) ?? null,
@@ -2916,6 +2920,49 @@ export function createAdminApi({
     }
   };
 
+  /**
+   * ONBOARD-5. The sign-in links still live for one customer, and what has happened to the rest.
+   *
+   * Read through a guard rather than called straight, the way welcomeSends above is and for the same
+   * reason: the table belongs to this wave and the panel has to render a row on a control plane that
+   * predates it. A control plane with no table says so in words, because an empty list of links would
+   * read as "nobody holds a link to this workspace", which is the opposite of not knowing.
+   *
+   * WHAT IS IN THIS ANSWER: the id, who it is for, who minted it, when it expires and whether it has
+   * been used or cancelled. The token is not, and the table has never held one, so there is no link in
+   * here that anybody could sign in with. An id lets you cancel a link; it never lets you use one.
+   */
+  const signInLinks = (slug, { limit = 5, open = true } = {}) => {
+    if (typeof store.listSignInLinks !== "function") {
+      return { rows: [], read: false, why: "this control plane keeps no record of sign-in links yet, so it cannot say which are still live" };
+    }
+    try {
+      const at = now();
+      const rows = store.listSignInLinks(String(slug), { limit, open, at }).map((row) => ({
+        id: String(row.id ?? ""),
+        email: String(row.email ?? ""),
+        mintedBy: String(row.mintedBy ?? ""),
+        purpose: String(row.purpose ?? ""),
+        mintedAt: new Date(Number(row.mintedAt ?? 0)).toISOString(),
+        expiresAt: new Date(Number(row.expiresAt ?? 0)).toISOString(),
+        singleUse: row.singleUse !== false,
+        usedAt: Number(row.usedAt ?? 0) > 0 ? new Date(Number(row.usedAt)).toISOString() : "",
+        usedFrom: String(row.usedFrom ?? ""),
+        uses: Number(row.uses ?? 0),
+        revokedAt: Number(row.revokedAt ?? 0) > 0 ? new Date(Number(row.revokedAt)).toISOString() : "",
+        revokedBy: String(row.revokedBy ?? ""),
+        // Open means a click on it would work right now: the set a Revoke button is for. The store
+        // decides it, in the same statement the door claims with, so a panel cannot offer Revoke on a
+        // link that has already been spent.
+        open: Number(row.revokedAt ?? 0) === 0 && Number(row.expiresAt ?? 0) > at
+          && (row.singleUse === false || Number(row.usedAt ?? 0) === 0),
+      }));
+      return { rows, read: true, why: "" };
+    } catch (error) {
+      return { rows: [], read: false, why: notMeasured(error) };
+    }
+  };
+
   /** cp/decommission.mjs, resolved the same way the welcome sender is, and for the same reason. */
   async function removalModule() {
     if (deps.decommission != null) return deps.decommission;
@@ -3179,6 +3226,25 @@ export function createAdminApi({
       return true;
     }
 
+    /**
+     * ONBOARD-5. The sign-in links for one customer.
+     *
+     * `?all=1` widens it from the live ones to the workspace's recent history, which is what answers
+     * "was that link ever clicked, and from where". There is no token in either answer.
+     */
+    if (rest.length === 3 && rest[0] === "clients" && rest[2] === "sign-in-links" && method === "GET") {
+      const slug = decodeURIComponent(rest[1]);
+      if (store.getTenant(slug) == null) { json(response, 404, { error: "not_found" }); return true; }
+      const all = ["1", "true", "yes"].includes(String(url.searchParams.get("all") ?? "").toLowerCase());
+      json(response, 200, {
+        slug,
+        ...signInLinks(slug, { limit: all ? 50 : 20, open: !all }),
+        open: !all,
+        measuredAt: new Date(now()).toISOString(),
+      });
+      return true;
+    }
+
     /** The welcome sends on this customer's row. Who, whom, when, the outcome, the provider id. */
     if (rest.length === 3 && rest[0] === "clients" && rest[2] === "welcome" && method === "GET") {
       const slug = decodeURIComponent(rest[1]);
@@ -3211,6 +3277,59 @@ export function createAdminApi({
       } catch (error) {
         json(response, 200, { slug, read: false, effects: [], why: notMeasured(error) });
       }
+      return true;
+    }
+
+    /**
+     * ONBOARD-5. Cancel one sign-in link, by the id the mint answered with.
+     *
+     * A link is dead a moment after this: the relay asks this service on every click, so there is no
+     * cache to wait out and no session to end -- a person who ALREADY signed in on that link keeps the
+     * cookie they were given, which is a session and not a link, and it expires on the relay's own
+     * twelve hour clock.
+     *
+     * A second press is not an error. It answers the first revocation's own time and actor, because
+     * "it was already cancelled, by you, a minute ago" is the useful thing to be told.
+     */
+    if (rest.length === 4 && rest[0] === "clients" && rest[2] === "sign-in-link" && rest[3] === "revoke" && method === "POST") {
+      const slug = decodeURIComponent(rest[1]);
+      if (store.getTenant(slug) == null) { json(response, 404, { error: "not_found" }); return true; }
+      const id = String(body?.id ?? "").trim();
+      if (id.length === 0) {
+        json(response, 400, { error: "bad_request", message: "Name the link to cancel." });
+        return true;
+      }
+      const held = typeof store.getSignInLink === "function" ? store.getSignInLink(id) : null;
+      // A link belongs to one workspace, and a revoke aimed at another one's is refused rather than
+      // carried out: the panel's Revoke button is per client row, so a mismatch is a bug somewhere and
+      // not an operator's intention.
+      if (held == null || held.tenant !== slug) {
+        json(response, 404, { error: "not_found", message: "There is no sign-in link by that id on this workspace." });
+        return true;
+      }
+      const ledger = beginAction(guard, request, {
+        action: "client.sign-in-link.revoke",
+        target: slug,
+        detail: `cancelling the sign-in link for ${held.email} on ${slug}`,
+      });
+      const verdict = onboarding.revokeSignInLink(id, { by: guard?.account?.email ?? "the operator token" });
+      const closed = verdict.link ?? held;
+      ledger.done(verdict.ok === true
+        ? `cancelled the sign-in link for ${closed.email}`
+        : `that sign-in link was already cancelled at ${new Date(Number(closed.revokedAt ?? 0)).toISOString()}`);
+      json(response, 200, {
+        slug,
+        id,
+        revoked: verdict.ok === true,
+        alreadyRevoked: verdict.ok !== true,
+        email: String(closed.email ?? ""),
+        revokedAt: Number(closed.revokedAt ?? 0) > 0 ? new Date(Number(closed.revokedAt)).toISOString() : "",
+        revokedBy: String(closed.revokedBy ?? ""),
+        links: signInLinks(slug, { limit: 20, open: true }),
+        message: verdict.ok === true
+          ? `That sign-in link is cancelled. Clicking it now signs nobody in.`
+          : `That sign-in link was already cancelled${String(closed.revokedBy ?? "").length > 0 ? ` by ${closed.revokedBy}` : ""}.`,
+      });
       return true;
     }
 
@@ -3291,6 +3410,12 @@ export function createAdminApi({
           shape: String(verdict.shape ?? "") || (temporaryPassword.length > 0 ? "link and a new password" : "link only"),
           steps: verdict.steps ?? [],
           sends: welcomeSends(slug, 20),
+          // ONBOARD-5. The id of the link this mail carries, and every other live link to this
+          // workspace, so the operator can cancel any of them from the row they are already on. A Send
+          // again mints a fresh link and DOES NOT cancel the previous one, which is why the list is
+          // here: two live links after two presses is a thing to be able to see.
+          signInLinkId: String(verdict.signInLinkId ?? ""),
+          links: signInLinks(slug, { limit: 20, open: true }),
           message: sent
             ? `The welcome went${to.length > 0 ? ` to ${to}` : ""}.${temporaryPassword.length > 0 ? " It carries a new temporary password, and the old one stopped working." : ""}`
             : `The welcome did not go: ${String(verdict.detail?.why ?? "nothing said why")}`,
@@ -3302,31 +3427,41 @@ export function createAdminApi({
        * A fresh sign-in link, answered ONCE.
        *
        * This is the operator's recovery when a welcome bounced, and it is the gate's way to a link
-       * without reading anybody's inbox. It is a bearer credential in a url that the relay never
-       * checks for revocation, so the 24 hours is a ceiling and not a target, and the link is in
-       * this answer and in no row, no log line, no screenshot and no report. ONBOARD-5.
+       * without reading anybody's inbox. It is a bearer credential in a url -- anybody holding it is
+       * signed in as that person -- so it is sent the way a password is sent.
+       *
+       * ONBOARD-5 made it SINGLE USE AND REVOCABLE. The id is written down before the url exists, the
+       * relay asks this service on every click, the first click spends it, and Revoke on this panel
+       * kills it. The 24 hours is still a ceiling and not a target, and the URL is still in this answer
+       * and in no row, no log line, no screenshot and no report: what is written down is the id, which
+       * cancels a link and can never use one.
        */
       const ledger = beginAction(guard, request, {
         action: "client.sign-in-link",
         target: slug,
-        detail: `minting a ${Math.round(SIGN_IN_LINK_TTL_MS / 3600000)} hour sign-in link for ${slug}`,
+        detail: `minting a single-use ${Math.round(SIGN_IN_LINK_TTL_MS / 3600000)} hour sign-in link for ${slug}`,
       });
       let link;
-      try { link = onboarding.mintSignInLink(slug); }
+      try { link = onboarding.mintSignInLink(slug, { mintedBy: guard?.account?.email ?? "the operator token" }); }
       catch (error) { ledger.failed(notMeasured(error)); json(response, 500, { error: "mint_failed", message: notMeasured(error) }); return true; }
       if (link == null) {
         ledger.failed("nobody to sign in as");
         json(response, 409, { error: "no_account", message: "That workspace has nobody to sign in as yet." });
         return true;
       }
-      // The EMAIL and the EXPIRY are on the record. The link is not.
-      ledger.done(`a sign-in link for ${link.email}, good until ${link.expiresAt}`);
+      // The EMAIL, THE EXPIRY AND THE ID are on the record. The link is not.
+      ledger.done(`a sign-in link for ${link.email}, good until ${link.expiresAt}, id ${link.id}`);
       json(response, 200, {
         slug,
         email: link.email,
         url: link.url,
         expiresAt: link.expiresAt,
-        message: `This link signs ${link.email} in and works until ${link.expiresAt}. It is shown once, it is not written down anywhere, and anybody holding it is signed in as them, so send it the way you would send a password.`,
+        // The id, so the card can offer Revoke on the link it has just handed over. Not a secret: it
+        // cancels a link and cannot sign anybody in.
+        id: String(link.id ?? ""),
+        singleUse: link.singleUse !== false,
+        links: signInLinks(slug, { limit: 20, open: true }),
+        message: `This link signs ${link.email} in ONCE and works until ${link.expiresAt}. It is shown once here, anybody holding it is signed in as them, so send it the way you would send a password. You can cancel it on this row before it is used.`,
       });
       return true;
     }

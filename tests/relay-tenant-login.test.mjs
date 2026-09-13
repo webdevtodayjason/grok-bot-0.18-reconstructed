@@ -199,13 +199,50 @@ test("a sign-in link is verified with the claimed workspace's own key", () => {
 // records what it saw. The registry route is the new half: it is the only place a gateway token or
 // a derived session key is ever handed out, and it is opened by the relay credential and by nothing
 // else.
-function startFakeControlPlane({ accounts, tenants = [], relayToken = RELAY_TOKEN }) {
+function startFakeControlPlane({ accounts, tenants = [], relayToken = RELAY_TOKEN, links = {} }) {
   const seen = [];
   const registryCalls = [];
+  // ONBOARD-5. The third route this fake has to answer, because a /login?sso= click is no longer
+  // decided by the signature alone: the relay asks whether that link's id is still good and refuses the
+  // click when it cannot ask. It SPENDS a link the way the real store does -- an unseen id is good and
+  // is then remembered, a second claim on it answers `used` -- so the single-use rule is enforced here
+  // by the same mechanism as in production rather than by a flag a test sets.
+  const claims = [];
+  const spent = new Set(links.spent ?? []);
+  const revoked = new Set(links.revoked ?? []);
+  let forced = links.verdict ?? null;
+  let down = links.down === true;
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => { body += chunk; });
     req.on("end", () => {
+      if (req.method === "POST" && req.url === "/v1/relay/sign-in-links/claim") {
+        let asked = {};
+        try { asked = JSON.parse(body); } catch {}
+        claims.push({
+          id: String(asked.id ?? ""), tenant: String(asked.tenant ?? ""), from: String(asked.from ?? ""),
+          authorization: String(req.headers.authorization ?? ""),
+        });
+        // The real route is behind CP_RELAY_TOKEN, so this one is too: a relay that forgot the header
+        // would pass every test here and refuse every link in production.
+        if (String(req.headers.authorization ?? "") !== `Bearer ${relayToken}`) {
+          res.writeHead(401, { "content-type": "application/json" });
+          return res.end(JSON.stringify({ error: "unauthorized" }));
+        }
+        // A control plane that is up and answering nonsense, which must read as unreachable and never
+        // as a verdict: a proxy error page is not permission to sign somebody in.
+        if (down) {
+          res.writeHead(502, { "content-type": "text/html" });
+          return res.end("<html>Bad Gateway</html>");
+        }
+        const id = String(asked.id ?? "");
+        const verdict = forced ?? (revoked.has(id) ? "revoked" : spent.has(id) ? "used" : "good");
+        if (verdict === "good") spent.add(id);
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify(verdict === "good"
+          ? { ok: true, verdict: "good", tenant: String(asked.tenant ?? ""), singleUse: true }
+          : { ok: false, verdict }));
+      }
       if (req.method === "GET" && req.url === "/v1/relay/tenants") {
         const header = String(req.headers.authorization ?? "");
         registryCalls.push({ authorization: header });
@@ -243,7 +280,13 @@ function startFakeControlPlane({ accounts, tenants = [], relayToken = RELAY_TOKE
       url: `http://127.0.0.1:${server.address().port}`,
       seen,
       registryCalls,
-      stop: () => new Promise((done) => server.close(done)),
+      claims,
+      revoke: (id) => revoked.add(String(id)),
+      force: (value) => { forced = value; },
+      breakIt: (value = true) => { down = value; },
+      // closeAllConnections first: the relay keeps the claim call's socket alive, and close() alone
+      // waits for it, which is a test run that finishes and then hangs.
+      stop: () => new Promise((done) => { server.closeAllConnections(); server.close(done); }),
     }));
   });
 }
@@ -447,8 +490,11 @@ test("a control plane that cannot be reached at all leaves the operator's passwo
 
 test("a sign-in link mints a session, and a forged one does not", async () => {
   const demo = tenantRow(TENANT);
+  // A control plane that can answer about links, because since ONBOARD-5 a click is not decided by the
+  // signature alone. The registry still comes out of the override file: this test is about the door.
+  const cp = await startFakeControlPlane({ accounts: {}, tenants: [demo.row] });
   const relay = await startRelay({
-    CP_URL: "http://127.0.0.1:1", CP_RELAY_TOKEN: RELAY_TOKEN,
+    CP_URL: cp.url, CP_RELAY_TOKEN: RELAY_TOKEN,
     SAND_UI_TENANTS_FILE: tenantsFile([demo.row]),
   }, { pathValue: "/nonexistent" });
   try {
@@ -483,7 +529,138 @@ test("a sign-in link mints a session, and a forged one does not", async () => {
     assert.equal(away.status, 503);
     assert.equal(cookieOf(away), "");
     assert.match(await away.text(), /That workspace is not available right now\./);
-  } finally { relay.stop(); }
+
+    // NOTHING THAT DID NOT VERIFY WAS EVER ASKED ABOUT. Six refusals above, and the control plane was
+    // asked exactly once, for the one link that got in. A door that asked about every forged token
+    // would be a free amplifier pointed at the control plane from an unauthenticated route.
+    assert.equal(cp.claims.length, 1, JSON.stringify(cp.claims));
+    assert.equal(cp.claims[0].tenant, TENANT);
+    assert.equal(cp.claims[0].authorization, `Bearer ${RELAY_TOKEN}`);
+  } finally { relay.stop(); await cp.stop(); }
+});
+
+// ---- ONBOARD-5: one click each, and a door that refuses when it cannot ask ----------------------
+
+test("a sign-in link works once and the second click is refused in words", async () => {
+  const demo = tenantRow(TENANT);
+  const cp = await startFakeControlPlane({ accounts: {}, tenants: [demo.row] });
+  const relay = await startRelay({
+    CP_URL: cp.url, CP_RELAY_TOKEN: RELAY_TOKEN,
+    SAND_UI_TENANTS_FILE: tenantsFile([demo.row]),
+  }, { pathValue: "/nonexistent" });
+  try {
+    const link = tokenFor(TENANT, KEY, { jti: "the-one-link" });
+    const click = () => fetch(`${relay.base}/login?sso=${encodeURIComponent(link)}`,
+      { redirect: "manual", headers: { accept: "text/html" } });
+
+    const first = await click();
+    assert.equal(first.status, 302);
+    assert.ok(cookieOf(first).length > 0);
+
+    // The same link, still validly signed and still inside its hour. This is the whole of ONBOARD-5:
+    // until 2026-09-12 this answered 302 and minted a second session, for a full day, for anybody who
+    // had the URL.
+    const second = await click();
+    assert.equal(second.status, 401, "a link that has been used must not sign anybody in again");
+    assert.equal(cookieOf(second), "", "and it must not leave a cookie behind");
+    assert.match(await second.text(), /That sign-in link has already been used\. Ask for a new one\./);
+    // The page it says that on is still a page somebody can sign in from.
+    assert.match(await (await click()).text(), /or the instance password/);
+
+    // Every click asked, and each one named the same id and the same workspace off the verified token.
+    assert.equal(cp.claims.length, 3);
+    for (const claim of cp.claims) {
+      assert.equal(claim.id, "the-one-link");
+      assert.equal(claim.tenant, TENANT);
+    }
+    // And the caller's own address went with it, so the control plane's row says where the link was
+    // clicked from.
+    assert.ok(cp.claims[0].from.length > 0, `the claim names the caller: ${JSON.stringify(cp.claims[0])}`);
+  } finally { relay.stop(); await cp.stop(); }
+});
+
+test("a revoked link, an expired one and one nobody recorded each get their own sentence", async () => {
+  const demo = tenantRow(TENANT);
+  const cp = await startFakeControlPlane({ accounts: {}, tenants: [demo.row] });
+  const relay = await startRelay({
+    CP_URL: cp.url, CP_RELAY_TOKEN: RELAY_TOKEN,
+    SAND_UI_TENANTS_FILE: tenantsFile([demo.row]),
+  }, { pathValue: "/nonexistent" });
+  try {
+    const click = (token) => fetch(`${relay.base}/login?sso=${encodeURIComponent(token)}`,
+      { redirect: "manual", headers: { accept: "text/html" } });
+
+    // Revoked on the console a second ago. The token is untouched and still verifies, which is exactly
+    // why the signature cannot be the whole answer.
+    const killed = tokenFor(TENANT, KEY, { jti: "a-link-somebody-cancelled" });
+    cp.revoke("a-link-somebody-cancelled");
+    const refused = await click(killed);
+    assert.equal(refused.status, 401);
+    assert.equal(cookieOf(refused), "");
+    assert.match(await refused.text(), /That sign-in link was cancelled\. Ask for a new one\./);
+
+    // A link the control plane has no row for, which is EVERY LINK MAILED BEFORE ONBOARD-5 SHIPPED:
+    // those carry a jti nothing ever wrote down.
+    cp.force("unknown");
+    const old = await click(tokenFor(TENANT, KEY, { jti: "a-jti-from-before-tonight" }));
+    assert.equal(old.status, 401);
+    assert.match(await old.text(), /That sign-in link is not on record here, so it cannot be used\. Ask for a new one\./);
+
+    // The control plane's own expiry word, which is not the same refusal as a token whose exp has passed:
+    // that one never reaches the claim at all, and answers the generic "not valid here".
+    cp.force("expired");
+    assert.match(await (await click(tokenFor(TENANT, KEY, { jti: "a-link-past-its-day" }))).text(),
+      /That sign-in link has expired\. Ask for a new one\./);
+    cp.force(null);
+
+    // A token whose own exp has passed is refused before anything is asked, because there is nothing to
+    // ask about: it would be refused whatever the answer.
+    const asked = cp.claims.length;
+    const stale = await click(tokenFor(TENANT, KEY, { ttlMs: 1000, now: Date.now() - 60_000 }));
+    assert.equal(stale.status, 401);
+    assert.match(await stale.text(), /That sign-in link is not valid here\./);
+    assert.equal(cp.claims.length, asked, "an expired token is not worth a round trip");
+  } finally { relay.stop(); await cp.stop(); }
+});
+
+test("a console that cannot ask about a link refuses the click rather than falling open", async () => {
+  const demo = tenantRow(TENANT);
+  const cp = await startFakeControlPlane({ accounts: {}, tenants: [demo.row] });
+  // The registry is read at boot and cached, so the workspace stays served while the control plane is
+  // unreachable. That is deliberate and unchanged: an outage must not sign a customer out.
+  const relay = await startRelay({
+    CP_URL: cp.url, CP_RELAY_TOKEN: RELAY_TOKEN,
+    SAND_UI_TENANTS_FILE: tenantsFile([demo.row]),
+  }, { pathValue: "/nonexistent" });
+  try {
+    const click = (token) => fetch(`${relay.base}/login?sso=${encodeURIComponent(token)}`,
+      { redirect: "manual", headers: { accept: "text/html" } });
+    const sentence = /That sign-in link could not be checked just now, so it was not used\. Try it again in a minute, or sign in with your email and password\./;
+
+    // 1. The control plane answering nonsense -- a proxy error page, which is the shape an outage
+    // actually takes behind Cloudflare. It must read as "I do not know" and never as a verdict.
+    cp.breakIt(true);
+    const nonsense = await click(tokenFor(TENANT, KEY));
+    assert.equal(nonsense.status, 503, "not 401: the link may be perfectly good and nobody could check");
+    assert.equal(cookieOf(nonsense), "");
+    assert.match(await nonsense.text(), sentence);
+    cp.breakIt(false);
+
+    // 2. And with the control plane gone altogether. The relay keeps serving the workspace it read at
+    // boot, so this is a live workspace whose link cannot be checked, which is the case that matters.
+    await cp.stop();
+    const gone = await click(tokenFor(TENANT, KEY));
+    assert.equal(gone.status, 503);
+    assert.equal(cookieOf(gone), "");
+    assert.match(await gone.text(), sentence);
+
+    // THE OPERATOR'S OWN DOOR IS UNTOUCHED, which is what makes refusing the link safe: the sentence
+    // above points at the account door, and the instance password is what is left when the control
+    // plane is what is broken.
+    const byPassword = await fetch(`${relay.base}/login`, form({ email: "", password: RELAY_PASSWORD }));
+    assert.equal(byPassword.status, 302);
+    assert.ok(cookieOf(byPassword).length > 0);
+  } finally { relay.stop(); await cp.stop().catch(() => {}); }
 });
 
 test("a control plane that is not answering says so, and does not take the password door away", async () => {
@@ -513,12 +690,27 @@ test("a control plane that is not answering says so, and does not take the passw
     assert.equal(byPassword.status, 302, "the instance password still works after the control plane failed seven times");
     assert.ok(cookieOf(byPassword).length > 0);
 
-    // The workspaces read before it went down are still served, which is the point of keeping the
-    // last good answer: a control plane outage must not sign a customer out.
+    // The workspaces read before it went down are still SERVED, which is the point of keeping the last
+    // good answer: a control plane outage must not sign a customer out.
+    //
+    // WHAT A LINK DOES IN THAT OUTAGE CHANGED WITH ONBOARD-5, and this is the one place the trade is
+    // visible. Until 2026-09-12 this answered 302: the link was a stateless bearer, the relay checked a
+    // signature and nothing else, and an unreachable control plane cost a link nothing. Now the relay
+    // cannot know whether that link has already been used or cancelled, and the safe reading of "I do
+    // not know" about a credential is no. So the click is refused IN WORDS that point at the door that
+    // still works, and the instance password above is proof that one does.
     const sso = await fetch(`${relay.base}/login?sso=${encodeURIComponent(tokenFor(TENANT, KEY))}`,
       { redirect: "manual", headers: { accept: "text/html" } });
-    assert.equal(sso.status, 302);
-    assert.ok(cookieOf(sso).length > 0);
+    assert.equal(sso.status, 503, "a link nobody can check is refused, not honoured");
+    assert.equal(cookieOf(sso), "");
+    assert.match(await sso.text(),
+      /That sign-in link could not be checked just now, so it was not used\. Try it again in a minute, or sign in with your email and password\./);
+    // And the session a customer ALREADY holds is untouched by any of this: the cookie minted above is
+    // still good, because it is a session and not a link.
+    const stillIn = await fetch(`${relay.base}/api/getHostStatus`, {
+      method: "POST", headers: { "content-type": "application/json", cookie: cookieOf(byPassword) }, body: "{}",
+    });
+    assert.notEqual(stillIn.status, 401);
   } finally { relay.stop(); }
 });
 
@@ -673,16 +865,23 @@ test("a relay with the wrong relay credential serves the operator and nobody els
  */
 test("a login by sign-in link lands in the login ledger, and a bad link lands as a refusal", async () => {
   const demo = tenantRow(TENANT);
+  const cp = await startFakeControlPlane({ accounts: {}, tenants: [demo.row] });
   // No SAND_UI_STATE_DIR on purpose: with none the ledger lands beside the code, which for a test is
   // the relay's own copy directory, and the auth.json serverCopy wrote stays the one the door reads.
   const relay = await startRelay({
-    CP_URL: "http://127.0.0.1:1", CP_RELAY_TOKEN: RELAY_TOKEN,
+    CP_URL: cp.url, CP_RELAY_TOKEN: RELAY_TOKEN,
     SAND_UI_TENANTS_FILE: tenantsFile([demo.row]),
   }, { pathValue: "/nonexistent" });
   try {
-    const arrived = await fetch(`${relay.base}/login?sso=${encodeURIComponent(tokenFor(TENANT, KEY))}`,
+    const used = tokenFor(TENANT, KEY, { jti: "a-link-clicked-twice" });
+    const arrived = await fetch(`${relay.base}/login?sso=${encodeURIComponent(used)}`,
       { redirect: "manual", headers: { accept: "text/html" } });
     assert.equal(arrived.status, 302, "the link itself still works");
+    // ONBOARD-5's own row: a link that verified and was turned away anyway, which is the one refusal
+    // this console decides with real knowledge behind it.
+    const spent = await fetch(`${relay.base}/login?sso=${encodeURIComponent(used)}`,
+      { redirect: "manual", headers: { accept: "text/html" } });
+    assert.equal(spent.status, 401);
     const refused = await fetch(`${relay.base}/login?sso=not-a-token`,
       { redirect: "manual", headers: { accept: "text/html" } });
     assert.equal(refused.status, 401);
@@ -691,23 +890,37 @@ test("a login by sign-in link lands in the login ledger, and a bad link lands as
     // immediately. The ledger is a record of the door and must never hold a sign-in open.
     const file = path.join(relay.dir, "login-attempts.jsonl");
     let rows = [];
-    for (let attempt = 0; attempt < 50 && rows.length < 2; attempt += 1) {
+    for (let attempt = 0; attempt < 50 && rows.length < 3; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 20));
       try {
         rows = readFileSync(file, "utf8").split("\n").filter((line) => line.trim().length > 0).map((line) => JSON.parse(line));
       } catch { rows = []; }
     }
-    assert.equal(rows.length, 2, `the ledger has ${rows.length} rows, not two`);
-    const [ok, bad] = rows;
+    assert.equal(rows.length, 3, `the ledger has ${rows.length} rows, not three`);
+    const [ok, reused, bad] = rows;
     assert.equal(ok.door, "link", "a third door, named, so the control plane can count it as a login");
     assert.equal(ok.outcome, "ok");
     assert.equal(ok.tenant, TENANT, "the workspace comes off the verified token");
     assert.equal(ok.email, `${TENANT}@titanium.bot`, "and so does the person, which is what the Clients panel joins on");
     assert.equal(ok.triedHash, "", "no password was typed, so there is nothing derived from one");
+    assert.equal(ok.reason, "", "a sign-in that worked has nothing to explain");
+
+    // The spent link. Its row names the workspace and the person, because both are known off the
+    // verified token, and carries the REASON -- which is the difference between an operator reading
+    // "refused" and an operator knowing this is a support call rather than an attack.
+    assert.equal(reused.door, "link");
+    assert.equal(reused.outcome, "refused");
+    assert.equal(reused.tenant, TENANT);
+    assert.equal(reused.email, `${TENANT}@titanium.bot`);
+    assert.equal(reused.reason, "that sign-in link had already been used");
+    assert.equal(reused.triedHash, "", "there is still no password anywhere near this door");
+
+    // The forged one names nothing, because nothing about it was ever proved.
     assert.equal(bad.door, "link");
     assert.equal(bad.outcome, "refused");
     assert.equal(bad.triedHash, "", "a forged link carries no password either");
-  } finally { relay.stop(); }
+    assert.equal(bad.tenant, "", "a token that did not verify proves no workspace");
+  } finally { relay.stop(); await cp.stop(); }
 });
 
 // mintSessionToken is imported for the hand-made token above; naming it here keeps the linter and

@@ -1304,10 +1304,103 @@ async function handleAccountLogin(req, res, { email, password, next, key, wantsH
     "titanium bot sign-in is not answering right now; the instance password still works");
 }
 
+// ---- ONBOARD-5: a sign-in link is spent when it is clicked -------------------------------------
+//
+// WHAT A SIGNATURE CANNOT TELL YOU. Until 2026-09-12 this console verified a link's signature and its
+// expiry against that workspace's derived key and asked nobody anything else, so a link worked as many
+// times as it was clicked for its whole 24 hours and the only way to cancel one was to rotate
+// CP_SESSION_SECRET, which signs the whole fleet out. A link that reached the wrong inbox, a link in
+// the history of a shared browser and a link a mail gateway logged were all a standing key to
+// somebody's console that nobody could take back.
+//
+// So the link now carries an id -- the token's own jti, which ui/session-token.mjs has always required
+// and which means that file is untouched -- the control plane writes it down at the mint, and this
+// console asks once per click whether that id is still good. The control plane's answer SPENDS the
+// link in the same statement that checks it, so two clicks a millisecond apart cannot both be allowed.
+//
+// IT REFUSES RATHER THAN FALLING OPEN. A control plane that cannot be reached means this console
+// cannot know whether a link has been used, and the safe reading of "I do not know" on a credential is
+// no. The person is told so in plain words and told what still works, which is their email and
+// password: the account door reaches the same control plane, so if that is down they have a sentence
+// for that too, and the operator still has the instance password. An unreachable control plane turning
+// a single-use link into an unlimited one would make this whole wave decorative.
+//
+// EVERY LINK MINTED BEFORE THIS SHIPPED IS REFUSED. Its jti was never recorded, so it matches no row
+// and the answer is `unknown`. That invalidates any link mailed earlier, which is a real cost and the
+// right trade: the alternative is accepting an unrecorded link, which is exactly the credential this
+// wave exists to retire.
+const SIGN_IN_LINK_CLAIM_ROUTE = "/v1/relay/sign-in-links/claim";
+const SIGN_IN_LINK_CLAIM_TIMEOUT_MS = 10_000;
+
+// What the person at the login page reads. One sentence each, and each one says what to do next,
+// because "invalid" on a link somebody was mailed tells them nothing they can act on.
+const SIGN_IN_LINK_SENTENCES = {
+  used: "That sign-in link has already been used. Ask for a new one.",
+  revoked: "That sign-in link was cancelled. Ask for a new one.",
+  expired: "That sign-in link has expired. Ask for a new one.",
+  unknown: "That sign-in link is not on record here, so it cannot be used. Ask for a new one.",
+  another_tenant: "That sign-in link is not for this workspace.",
+  unreachable: "That sign-in link could not be checked just now, so it was not used. Try it again in a minute, or sign in with your email and password.",
+};
+
+// And what the ledger row says, which is the operator's side of the same fact. Short, plain, and
+// never anything derived from a credential. ui/login-ledger.mjs carries it as `reason`, the same name
+// and the same meaning the control plane's own ledger uses.
+const SIGN_IN_LINK_REASONS = {
+  used: "that sign-in link had already been used",
+  revoked: "that sign-in link was cancelled",
+  expired: "that sign-in link had expired",
+  unknown: "that sign-in link is not on record",
+  another_tenant: "that sign-in link is for another workspace",
+  unreachable: "the control plane could not be asked about that sign-in link",
+};
+
+const signInLinkVerdict = (said) =>
+  (Object.hasOwn(SIGN_IN_LINK_SENTENCES, String(said ?? "")) ? String(said) : "unknown");
+
+/**
+ * One question to the control plane, and the answer spends the link.
+ *
+ * Three failures have to stay apart, because they want three different sentences: the control plane
+ * said no, the control plane could not be reached, and the control plane answered something this code
+ * does not understand. The last two are both `unreachable`: an answer that makes no sense is not a
+ * verdict, and treating it as one would let a proxy error page sign somebody in.
+ */
+async function claimSignInLink({ id, tenant, from }) {
+  if (RELAY == null) return { ok: false, verdict: "unreachable", detail: "this console has no control plane" };
+  if (String(id ?? "").length === 0) {
+    // A token with no jti cannot be minted by ui/session-token.mjs, which requires the claim, so this
+    // is a hand-made token. It is refused as unknown rather than asked about: there is nothing to ask.
+    return { ok: false, verdict: "unknown", detail: "the link carries no id" };
+  }
+  let response;
+  try {
+    response = await fetch(`${RELAY.cpUrl}${SIGN_IN_LINK_CLAIM_ROUTE}`, {
+      method: "POST",
+      body: JSON.stringify({ id: String(id), tenant: String(tenant ?? ""), from: String(from ?? "") }),
+      headers: {
+        authorization: `Bearer ${RELAY.relayToken}`,
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      signal: AbortSignal.timeout(SIGN_IN_LINK_CLAIM_TIMEOUT_MS),
+    });
+  } catch (error) {
+    return { ok: false, verdict: "unreachable", detail: error?.name === "TimeoutError" ? "timed out" : "no answer" };
+  }
+  let body = null;
+  try { body = await response.json(); } catch { body = null; }
+  if (response.status !== 200 || body == null || typeof body.ok !== "boolean") {
+    return { ok: false, verdict: "unreachable", detail: `HTTP ${response.status}` };
+  }
+  if (body.ok === true) return { ok: true, verdict: "good" };
+  return { ok: false, verdict: signInLinkVerdict(body.verdict) };
+}
+
 // A sign-in link from another instance's login page: /login?sso=<token>. The token is verified with
 // this relay's own key, and its tenant claim is checked against this relay's own name, before
 // anything is minted. Nothing about the link is trusted, including that it came from us.
-function handleSso(req, res, token) {
+async function handleSso(req, res, token) {
   const verdict = ssoVerdict({ token, keyOf: sessionKeyFor });
   // CP-FIX 2. EVERY ANSWER HERE IS WRITTEN DOWN, the same way the two password doors are. Until
   // this wave a link login was a console log line and nothing else: the control plane never hears
@@ -1315,12 +1408,24 @@ function handleSso(req, res, token) {
   // therefore read a workspace somebody had been using by link as a workspace nobody had ever
   // opened. There is no password on any branch, so there is nothing to hash and nothing is passed.
   if (verdict.kind === "session") {
-    console.log(`login by sign-in link on ${verdict.payload.tenant} from ${clientOf(req)}`);
-    noteLoginAttempt(req, {
-      door: "link", outcome: "ok",
-      email: String(verdict.payload.email ?? ""),
-      tenant: String(verdict.payload.tenant ?? ""),
-    });
+    const email = String(verdict.payload.email ?? "");
+    const tenant = String(verdict.payload.tenant ?? "");
+    // ONBOARD-5. The signature, the workspace and the expiry are settled. Whether this particular link
+    // has already been spent or cancelled is not a thing a signature can say, so it is asked, and
+    // nothing is minted until it is answered.
+    const claim = await claimSignInLink({ id: String(verdict.payload.jti ?? ""), tenant, from: clientOf(req) });
+    if (!claim.ok) {
+      const reason = SIGN_IN_LINK_REASONS[claim.verdict] ?? SIGN_IN_LINK_REASONS.unknown;
+      console.log(`sign-in link for ${tenant} refused from ${clientOf(req)} (${reason}${claim.detail == null ? "" : `: ${claim.detail}`})`);
+      // The tenant and the address are KNOWN on this branch, unlike a link that did not verify, so
+      // they go on the row: "who was this link for" is the first thing an operator asks.
+      noteLoginAttempt(req, { door: "link", outcome: "refused", email, tenant, reason });
+      return sendLoginPage(res, claim.verdict === "unreachable" ? 503 : 401, {
+        error: SIGN_IN_LINK_SENTENCES[claim.verdict] ?? SIGN_IN_LINK_SENTENCES.unknown,
+      });
+    }
+    console.log(`login by sign-in link on ${tenant} from ${clientOf(req)}`);
+    noteLoginAttempt(req, { door: "link", outcome: "ok", email, tenant });
     return mintAccountSession(req, res, verdict.payload, "/");
   }
   if (verdict.kind === "unknown") {
@@ -4240,7 +4345,9 @@ const server = createServer(async (req, res) => {
           // workspace's own key, out of the registry, and nothing about the link is taken on trust
           // including that it came from us. TENANT-2, reshaped by TENANT-5.
           const sso = url.searchParams.get("sso");
-          if (RELAY != null && sso != null) return handleSso(req, res, sso);
+          // Awaited since ONBOARD-5: the door now asks the control plane whether this link is still
+          // good before it mints anything.
+          if (RELAY != null && sso != null) return await handleSso(req, res, sso);
           return sendLoginPage(res, 200, { next: safeNextPath(url.searchParams.get("next")) });
         }
         if (req.method === "POST") return await handleLogin(req, res, url);

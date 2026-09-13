@@ -199,7 +199,9 @@ test("the sign-in link is signed with that workspace's own key and carries a 24 
   await withPlane(async (plane) => {
     const seeded = plane.seedTenant({ slug: "acme" });
     const at = 1_757_000_000_000;
-    const link = mintSignInLink({ account: seeded.account, tenant: seeded.tenant, config: plane.config, now: at });
+    const link = mintSignInLink({
+      account: seeded.account, tenant: seeded.tenant, config: plane.config, store: plane.store, now: at,
+    });
     assert.match(link.url, /^https:\/\/console\.titanium\.bot\/login\?sso=/);
     const token = decodeURIComponent(new URL(link.url).searchParams.get("sso"));
 
@@ -214,6 +216,145 @@ test("the sign-in link is signed with that workspace's own key and carries a 24 
     assert.equal(verifySessionToken(token, tenantSessionSecret(plane.config.sessionSecret, "other"), at).ok, false);
     // And it really does expire.
     assert.equal(verifySessionToken(token, tenantSessionSecret(plane.config.sessionSecret, "acme"), at + 24 * 60 * 60 * 1000 + 1).reason, "expired");
+
+    // ONBOARD-5. The id IS the token's jti, so the relay can ask about the link it was handed without
+    // a second claim in the token and without ui/session-token.mjs being touched.
+    assert.equal(link.id, mine.payload.jti);
+    assert.equal(link.singleUse, true);
+
+    // And the row was written down BEFORE the url existed, which is what makes the link answerable.
+    const held = plane.store.getSignInLink(link.id);
+    assert.equal(held.tenant, "acme");
+    assert.equal(held.email, seeded.account.email);
+    assert.equal(held.accountId, seeded.account.id);
+    assert.equal(held.expiresAt, mine.payload.exp);
+    assert.equal(held.usedAt, 0);
+    assert.equal(held.revokedAt, 0);
+    // THE TOKEN IS NOT IN THE ROW, in any field. A table of live credentials is the thing this wave
+    // exists to stop, and an id that could be a token is how one arrives by accident.
+    assert.equal(JSON.stringify(held).includes(token), false);
+  });
+});
+
+// ---- ONBOARD-5: one click, and an operator who can take it back --------------------------------
+
+test("a sign-in link is spent by its first click and refused on the second", async () => {
+  await withPlane(async (plane) => {
+    const seeded = plane.seedTenant({ slug: "acme" });
+    const at = 1_757_000_000_000;
+    const link = mintSignInLink({
+      account: seeded.account, tenant: seeded.tenant, config: plane.config, store: plane.store, now: at,
+    });
+
+    const first = plane.store.claimSignInLink({ id: link.id, tenant: "acme", at: at + 1000, from: "203.0.113.9" });
+    assert.equal(first.ok, true);
+    assert.equal(first.verdict, "good");
+    assert.equal(first.link.usedAt, at + 1000);
+    assert.equal(first.link.usedFrom, "203.0.113.9");
+    assert.equal(first.link.uses, 1);
+
+    const second = plane.store.claimSignInLink({ id: link.id, tenant: "acme", at: at + 2000 });
+    assert.equal(second.ok, false);
+    assert.equal(second.verdict, "used");
+    // The refused click does NOT move the row: who came in on this link and when is the fact the row
+    // is for, and a second opinion overwriting it would lose it.
+    assert.equal(second.link.usedAt, at + 1000);
+    assert.equal(second.link.usedFrom, "203.0.113.9");
+    assert.equal(second.link.uses, 1);
+  });
+});
+
+test("a revoked link is refused, an expired one says so, and a link nobody recorded is unknown", async () => {
+  await withPlane(async (plane) => {
+    const seeded = plane.seedTenant({ slug: "acme" });
+    plane.seedTenant({ slug: "beta" });
+    const at = 1_757_000_000_000;
+    const mint = (now = at) => mintSignInLink({
+      account: seeded.account, tenant: seeded.tenant, config: plane.config, store: plane.store, now,
+    });
+
+    const killed = mint();
+    const verdict = plane.store.revokeSignInLink(killed.id, { at: at + 10, by: "jason@titaniumcomputing.com" });
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.link.revokedBy, "jason@titaniumcomputing.com");
+    assert.equal(plane.store.claimSignInLink({ id: killed.id, tenant: "acme", at: at + 20 }).verdict, "revoked");
+    // A second Revoke is not an error, and it leaves the FIRST revocation's time and actor alone.
+    const again = plane.store.revokeSignInLink(killed.id, { at: at + 99, by: "somebody else" });
+    assert.equal(again.ok, false);
+    assert.equal(again.verdict, "revoked");
+    assert.equal(again.link.revokedAt, at + 10);
+    assert.equal(again.link.revokedBy, "jason@titaniumcomputing.com");
+
+    // Expired. The token's own expiry would catch this at the relay, and the claim catches it here too,
+    // because the relay is not the only thing that will ever ask.
+    const stale = mint();
+    assert.equal(plane.store.claimSignInLink({ id: stale.id, tenant: "acme", at: at + 24 * 60 * 60 * 1000 + 1 }).verdict, "expired");
+
+    // A link minted before this table existed. Its jti was never written down, so it matches no row.
+    // THIS IS THE CASE THAT INVALIDATES EVERY LINK MAILED BEFORE ONBOARD-5 SHIPPED, and it has to be
+    // a refusal rather than a pass, because accepting an unrecorded link is the credential this wave
+    // retires.
+    assert.equal(plane.store.claimSignInLink({ id: "a-jti-nobody-recorded", tenant: "acme", at }).verdict, "unknown");
+    assert.equal(plane.store.claimSignInLink({ id: "", tenant: "acme", at }).verdict, "unknown");
+
+    // And a real link claimed under the wrong workspace is named as that rather than as unknown, so a
+    // configuration mistake reads as one. The row is untouched by the attempt.
+    const owned = mint();
+    assert.equal(plane.store.claimSignInLink({ id: owned.id, tenant: "beta", at: at + 1 }).verdict, "another_tenant");
+    assert.equal(plane.store.getSignInLink(owned.id).usedAt, 0);
+    assert.equal(plane.store.claimSignInLink({ id: owned.id, tenant: "acme", at: at + 2 }).ok, true);
+  });
+});
+
+test("the open list is the set a Revoke button is for, and a dead row is kept for a week", async () => {
+  await withPlane(async (plane) => {
+    const seeded = plane.seedTenant({ slug: "acme" });
+    const at = 1_757_000_000_000;
+    const mint = () => mintSignInLink({
+      account: seeded.account, tenant: seeded.tenant, config: plane.config, store: plane.store, now: at,
+    });
+
+    const spent = mint();
+    const cancelled = mint();
+    const live = mint();
+    plane.store.claimSignInLink({ id: spent.id, tenant: "acme", at: at + 1 });
+    plane.store.revokeSignInLink(cancelled.id, { at: at + 2, by: "the operator token" });
+
+    const open = plane.store.listSignInLinks("acme", { open: true, at: at + 10 });
+    assert.deepEqual(open.map((one) => one.id), [live.id]);
+    // All three are still on the workspace's history, which is where "was that link ever clicked, and
+    // from where" is answered days later.
+    assert.equal(plane.store.listSignInLinks("acme", { open: false }).length, 3);
+
+    // Pruned only once the link has been dead for a week. An hour after it expires the row is still
+    // there; eight days after, it is not.
+    const died = at + 24 * 60 * 60 * 1000;
+    assert.equal(plane.store.pruneSignInLinks(died + 60 * 60 * 1000), 0);
+    assert.equal(plane.store.listSignInLinks("acme", { open: false }).length, 3);
+    assert.equal(plane.store.pruneSignInLinks(died + 8 * 24 * 60 * 60 * 1000), 3);
+    assert.equal(plane.store.listSignInLinks("acme", { open: false }).length, 0);
+  });
+});
+
+test("a control plane that cannot write a link down refuses to mint one", async () => {
+  await withPlane(async (plane) => {
+    const seeded = plane.seedTenant({ slug: "acme" });
+    const at = 1_757_000_000_000;
+    // FAIL CLOSED. A link whose row is missing is refused at the relay's door, so minting one would
+    // hand a customer a credential that can never work with nobody able to say why. The alternative --
+    // minting the old unrecorded kind when the table is not there -- is the fault this wave closes.
+    for (const blind of [null, {}, { recordSignInLink: null }]) {
+      assert.throws(() => mintSignInLink({
+        account: seeded.account, tenant: seeded.tenant, config: plane.config, store: blind, now: at,
+      }), /will not hand one out/);
+    }
+    // And a store that throws on the write takes the mint down with it rather than answering a url.
+    const angry = {
+      recordSignInLink() { throw new Error("the disk is full"); },
+    };
+    assert.throws(() => mintSignInLink({
+      account: seeded.account, tenant: seeded.tenant, config: plane.config, store: angry, now: at,
+    }), /the disk is full/);
   });
 });
 
@@ -694,6 +835,111 @@ test("the sign-in link route answers it once and writes the address, never the l
     assert.equal(row.target, "acme");
     assert.equal(actions.text.includes("sso="), false, "a sign-in link reached the record of who changed what");
     assert.match(row.detail, /24 hour sign-in link/);
+
+    // ONBOARD-5. The answer carries the link's ID and says the link is single use, which is what lets
+    // the card offer Revoke on the link it has just handed over, and the record names the id rather than
+    // the link: an id cancels a link and can never use one.
+    assert.equal(answer.body.id.length > 0, true);
+    assert.equal(answer.body.singleUse, true);
+    assert.match(answer.body.message, /signs jane@acme\.com in ONCE/);
+    assert.match(row.detail, new RegExp(`id ${answer.body.id}`));
+    // The live links come back with the mint, so the panel draws the new one without a second request.
+    assert.deepEqual(answer.body.links.rows.map((one) => one.id), [answer.body.id]);
+    assert.equal(answer.body.links.rows[0].open, true);
+    assert.equal(answer.body.links.rows[0].email, "jane@acme.com");
+    // And no token in the list, in any field.
+    assert.equal(JSON.stringify(answer.body.links).includes("sso="), false);
+  });
+});
+
+// ---- ONBOARD-5: the Clients panel lists the live links and can cancel one ----------------------
+
+test("the panel lists the sign-in links a click would still open, and Revoke kills one", async () => {
+  await withPlane(async (plane) => {
+    plane.seedTenant({ slug: "acme", ownerEmail: "jane@acme.com" });
+    const mint = async () => (await plane.request("POST", "/v1/admin/clients/acme/sign-in-link", { body: {} })).body;
+
+    const first = await mint();
+    const second = await mint();
+    // TWO LIVE LINKS AFTER TWO PRESSES, and nothing else on the panel would ever say so. Minting a
+    // replacement has never cancelled the previous one, which was half of why the old link was worth
+    // filing: an operator pressing the button twice had handed out two standing keys.
+    const listed = await plane.request("GET", "/v1/admin/clients/acme/sign-in-links");
+    assert.equal(listed.status, 200, listed.text);
+    assert.equal(listed.body.read, true);
+    assert.deepEqual(listed.body.rows.map((one) => one.id).sort(), [first.id, second.id].sort());
+    for (const row of listed.body.rows) {
+      assert.equal(row.email, "jane@acme.com");
+      assert.equal(row.open, true);
+      assert.equal(row.singleUse, true);
+      assert.equal(row.purpose, "operator");
+      assert.ok(row.mintedBy.length > 0, "who minted it is on the row");
+    }
+
+    // Revoke one. The other is untouched, which is what makes the button safe to press.
+    const killed = await plane.request("POST", "/v1/admin/clients/acme/sign-in-link/revoke", { body: { id: first.id } });
+    assert.equal(killed.status, 200, killed.text);
+    assert.equal(killed.body.revoked, true);
+    assert.equal(killed.body.email, "jane@acme.com");
+    assert.ok(killed.body.revokedBy.length > 0);
+    assert.deepEqual(killed.body.links.rows.map((one) => one.id), [second.id]);
+    // The door agrees, which is the thing that matters: the same statement the relay's claim runs.
+    assert.equal(plane.store.claimSignInLink({ id: first.id, tenant: "acme" }).verdict, "revoked");
+    // The surviving link is claimed here the way the relay claims one, which also SPENDS it -- that is
+    // the point of the claim, and it is why the live list is empty a few lines down.
+    assert.equal(plane.store.claimSignInLink({ id: second.id, tenant: "acme", from: "203.0.113.9" }).ok, true);
+
+    // A second press is not an error, and it leaves the FIRST revocation's actor and time alone.
+    const again = await plane.request("POST", "/v1/admin/clients/acme/sign-in-link/revoke", { body: { id: first.id } });
+    assert.equal(again.status, 200);
+    assert.equal(again.body.revoked, false);
+    assert.equal(again.body.alreadyRevoked, true);
+    assert.equal(again.body.revokedAt, killed.body.revokedAt);
+    assert.match(again.body.message, /already cancelled/);
+
+    // The record of who changed what has the cancel on it, with the address and never the link.
+    const actions = await plane.request("GET", "/v1/admin/actions");
+    const row = actions.body.rows.find((one) => one.action === "client.sign-in-link.revoke");
+    assert.equal(row.target, "acme");
+    assert.match(row.detail, /cancelling the sign-in link for jane@acme\.com/);
+    assert.equal(actions.text.includes("sso="), false);
+
+    // A spent link drops off the live list and stays on the history, which is where "was it ever
+    // clicked, and from where" is answered days later.
+    assert.deepEqual((await plane.request("GET", "/v1/admin/clients/acme/sign-in-links")).body.rows, []);
+    const history = await plane.request("GET", "/v1/admin/clients/acme/sign-in-links?all=1");
+    assert.equal(history.body.rows.length, 2);
+    const clicked = history.body.rows.find((one) => one.id === second.id);
+    assert.equal(clicked.open, false);
+    assert.equal(clicked.usedFrom, "203.0.113.9");
+    assert.ok(clicked.usedAt.length > 0);
+
+    // And the client row itself carries the live set, so the panel needs no extra call to draw it.
+    const clients = await plane.request("GET", "/v1/admin/clients");
+    assert.deepEqual(clients.body.clients[0].signInLinks.rows, []);
+    assert.equal(clients.body.clients[0].signInLinks.read, true);
+  });
+});
+
+test("a revoke aimed at a link that is not this workspace's, or at nothing, is refused", async () => {
+  await withPlane(async (plane) => {
+    plane.seedTenant({ slug: "acme", ownerEmail: "jane@acme.com" });
+    plane.seedTenant({ slug: "beta", ownerEmail: "sam@beta.com" });
+    const mine = (await plane.request("POST", "/v1/admin/clients/acme/sign-in-link", { body: {} })).body;
+
+    // Another workspace's row. The panel's Revoke is per client, so a mismatch is a bug somewhere and
+    // never an operator's intention: it is refused rather than carried out.
+    const crossed = await plane.request("POST", "/v1/admin/clients/beta/sign-in-link/revoke", { body: { id: mine.id } });
+    assert.equal(crossed.status, 404);
+    assert.equal(plane.store.getSignInLink(mine.id).revokedAt, 0, "a cross-workspace revoke cancelled it anyway");
+
+    assert.equal((await plane.request("POST", "/v1/admin/clients/acme/sign-in-link/revoke", { body: {} })).status, 400);
+    assert.equal((await plane.request("POST", "/v1/admin/clients/acme/sign-in-link/revoke", { body: { id: "nothing" } })).status, 404);
+    assert.equal((await plane.request("POST", "/v1/admin/clients/nobody/sign-in-link/revoke", { body: { id: mine.id } })).status, 404);
+    assert.equal((await plane.request("GET", "/v1/admin/clients/nobody/sign-in-links")).status, 404);
+    // None of those four wrote a record, because none of them did anything.
+    const actions = await plane.request("GET", "/v1/admin/actions");
+    assert.equal(actions.body.rows.filter((one) => one.action === "client.sign-in-link.revoke").length, 0);
   });
 });
 

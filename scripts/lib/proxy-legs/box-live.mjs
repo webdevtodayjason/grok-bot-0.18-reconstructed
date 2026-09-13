@@ -36,6 +36,8 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
+import { startLinkClaimCp } from "../link-claim-cp.mjs";
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const BOX = process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
 // The box's own gateway token lives in the profile directory the desktop app writes, the same
@@ -146,6 +148,11 @@ writeFileSync(tenantsFile, JSON.stringify({ tenants: [{
   sessionKey: tenantKey(MASTER, SLUG), stateDir, profileDir, status: "running", included: INCLUDED,
 }] }));
 
+// ONBOARD-5. A sign-in link is checked with the control plane on every click, and a relay that cannot
+// ask refuses the click, so this leg needs something on the other end of that one call. It answers
+// nothing else: the registry still comes out of the override file above.
+const linkCp = await startLinkClaimCp({ relayToken: RELAY_TOKEN });
+
 const PORT = 36000 + Math.floor(Math.random() * 4000);
 let relayLog = "";
 const child = spawn(process.execPath, [path.join(relayDir, "server.mjs")], {
@@ -154,7 +161,7 @@ const child = spawn(process.execPath, [path.join(relayDir, "server.mjs")], {
     SAND_UI_PORT: String(PORT), SAND_UI_BIND_HOST: "127.0.0.1",
     SAND_HOST_GATEWAY_URL: GATEWAY, SAND_HOST_GATEWAY_TOKEN: GATEWAY_TOKEN,
     SAND_BOX_CONTAINER: BOX,
-    CP_URL: "http://127.0.0.1:1", CP_RELAY_TOKEN: RELAY_TOKEN, SAND_UI_TENANTS_FILE: tenantsFile,
+    CP_URL: linkCp.base, CP_RELAY_TOKEN: RELAY_TOKEN, SAND_UI_TENANTS_FILE: tenantsFile,
     SAND_UI_STATE_DIR: "", SAND_UI_AUTH_FILE: "", SAND_UI_ENDPOINTS_FILE: "",
     SAND_PROFILE_DIRS: PROFILE, TITAN_JOB_TOKEN: "",
   },
@@ -168,7 +175,7 @@ const up = await new Promise((resolve) => {
   child.on("exit", () => { clearTimeout(timer); resolve(false); });
 });
 const BASE = `http://127.0.0.1:${PORT}`;
-const stopAll = () => { try { child.kill("SIGKILL"); } catch {} proxy.close(); try { rmSync(work, { recursive: true, force: true }); } catch {} };
+const stopAll = () => { try { child.kill("SIGKILL"); } catch {} proxy.close(); linkCp.stop(); try { rmSync(work, { recursive: true, force: true }); } catch {} };
 
 try {
   check(up, "a relay copy serving the local box as a customer is up", `port ${PORT}`);

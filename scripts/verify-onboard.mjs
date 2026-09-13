@@ -20,9 +20,15 @@
 // process. api.resend.com is never called by anything repeatable; the one real send in this wave is
 // the R750 measurement and it is not this file.
 //
-// THE SIGN-IN LINK IS NEVER WRITTEN DOWN. It is read out of the captured mail, exercised against the
-// stub relay's /login?sso=, and dropped. It is a stateless bearer with no revocation, so it does not
-// go into a file, a log line, a screenshot or this gate's own output.
+// THE SIGN-IN LINK IS NEVER WRITTEN DOWN. It is read out of the captured mail, aimed at the stub
+// relay's /login?sso=, and dropped: it is a bearer credential in a URL, so it does not go into a file,
+// a log line, a screenshot or this gate's own output.
+//
+// WHAT THIS GATE DOES NOT MEASURE ABOUT THAT LINK, since ONBOARD-5 made it single-use and revocable:
+// the relay here is a STUB that answers /login?sso= without verifying anything, so "the link works, once
+// and only once" is not measurable in this process at all. It is measured where the real door is:
+// tests/cp-relay-pair.test.mjs drives the real ui/server.mjs handleSso against the real
+// POST /v1/relay/sign-in-links/claim, and the box leg of verify-proxy clicks a real link twice.
 //
 // Exit 0 nothing failed, 1 a check failed, 2 nothing could be measured.
 import assert from "node:assert/strict";
@@ -514,19 +520,23 @@ async function sequenceArm() {
       }
       return `${sweeps.length} sweeps, every one of them naming ${slug} only`;
     });
-    await checking("the welcome is captured, its link works once, and it is then dropped", async () => {
+    // The LABEL says what is measured, which is not "the link works": see the header. This leg proves the
+    // mail carries one, that exactly one person got it, and that the link goes no further than here.
+    await checking("the welcome is captured with one recipient and a link, which is then dropped", async () => {
       const sent = relay.mail();
       assert.equal(sent.length, 1, `${sent.length} mails were sent`);
       assert.equal(sent[0].to, "gate@onboard.test", "the welcome went to the owner instead of the override");
       assert.ok(String(sent[0].text ?? "").length > 0, "there is no plain-text alternative");
       const link = /https?:\/\/[^\s"'<>]*\/login\?sso=[A-Za-z0-9._-]+/.exec(String(sent[0].html ?? ""));
       assert.ok(link, "the mail carries no sign-in link");
-      // Exercised and dropped. It is a stateless bearer with no revocation, so it is never written
-      // to a file, a log line or this gate's output.
+      // Aimed at the stub and dropped. The status is REPORTED rather than asserted on, because this
+      // relay is a stub with no tenant keys and no control plane: what it answers says nothing about
+      // whether the link would work. It is never written to a file, a log line or this gate's output.
       const landed = await fetch(link[0].replace(/^https?:\/\/[^/]+/, relay.url), { headers: { "user-agent": UA } })
         .then((response) => response.status).catch(() => 0);
-      assert.notEqual(landed, 0, "the sign-in link could not be exercised");
-      return `one recipient, a plain-text alternative, and a link the relay answered ${landed} to`;
+      assert.notEqual(landed, 0, "the sign-in link could not be aimed at anything");
+      return `one recipient, a plain-text alternative, and a link this stub answered ${landed} to`
+        + " (a stub verifies nothing; the real door is measured in tests/cp-relay-pair.test.mjs)";
     });
     await checking("the removal leaves nothing and frees the name", async () => {
       const removed = await ask("DELETE", `/v1/admin/clients/${encodeURIComponent(slug)}`, { confirm: slug, deleteData: true });

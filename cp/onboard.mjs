@@ -264,36 +264,80 @@ export function foldSteps(rows, { at = Date.now(), stallMs = 180_000, sendWelcom
 }
 
 /**
- * The sign-in link for an account, minted here. Good for 24 hours, and NOT one-time.
+ * The sign-in link for an account, minted here. Good for 24 hours, SINGLE USE, and revocable.
  *
- * UNDERSTAND WHAT THIS IS. A stateless bearer credential in a URL. The relay verifies it with that
- * tenant's derived key (ui/server.mjs's handleSso) and NEVER checks it for revocation, so it works
- * as many times as it is clicked until it expires and cannot be cancelled short of rotating
- * CP_SESSION_SECRET, which signs the whole fleet out. Therefore:
+ * UNDERSTAND WHAT THIS IS AND WHAT CHANGED. It is still a bearer credential in a URL: anybody
+ * holding the link is signed in as that person, so it is sent the way a password is sent. What
+ * ONBOARD-5 changed is that it is no longer STATELESS. Until 2026-09-12 the relay verified the
+ * signature and the expiry against that workspace's derived key and asked nobody anything, so a link
+ * worked as many times as it was clicked for a full day and the only cancel was rotating
+ * CP_SESSION_SECRET, which signs the whole fleet out.
  *
+ * Now every link carries an id, this service writes the id down BEFORE the URL is handed to anybody,
+ * and the relay asks this service once per click whether that id is still good (ui/server.mjs
+ * handleSso, POST /v1/relay/sign-in-links/claim). One click spends it. The console can revoke it. A
+ * relay that cannot reach this service refuses the click rather than falling open.
+ *
+ * THE ID IS THE TOKEN'S OWN jti, so ui/session-token.mjs is not touched -- and it must not be,
+ * because it is the one file the relay and this service share.
+ *
+ * THE ORDER IS THE RULE: record, then answer. A link whose row did not get written is refused at the
+ * door, so handing one out would hand a customer a link that can never work. `store` is therefore
+ * required, and a store with no `recordSignInLink` on it throws rather than quietly minting the old
+ * unrevocable kind.
+ *
+ * Still true, and still worth keeping:
  *   24 hours is a CEILING and not a target.
  *   The link is never written to a send row, an audit row, a log line, a screenshot or a report.
+ *   The sign_in_links row holds the id, never the token.
  *   Click tracking is off for titanium.bot so a scanner does not fetch it.
- *
- * It is filed as ONBOARD-5. Every one of the seven claims ui/session-token.mjs requires exists on
- * the rows this makes, so that file is not touched.
  */
 export const SIGN_IN_LINK_TTL_MS = 24 * 60 * 60 * 1000;
 
-export function mintSignInLink({ account, tenant, config, now = Date.now(), ttlMs = SIGN_IN_LINK_TTL_MS }) {
+export function mintSignInLink({
+  account, tenant, config, store = null, now = Date.now(), ttlMs = SIGN_IN_LINK_TTL_MS,
+  mintedBy = "", purpose = "operator",
+}) {
   const host = String(tenant?.host ?? "");
   if (host.length === 0) throw new Error("that workspace has no host on its row, so there is nothing to sign in at");
+  if (typeof store?.recordSignInLink !== "function") {
+    // Fail closed, loudly. The alternative is a link this service cannot answer for, which the relay
+    // refuses -- so the customer meets "that link is not on record" and nobody can say why.
+    throw new Error("this control plane cannot write a sign-in link down, so it will not hand one out");
+  }
   const at = Number(now);
+  const exp = at + Math.max(60_000, Number(ttlMs));
+  const id = randomUUID();
+  // WRITTEN DOWN FIRST. A throw here leaves no link and no row, which is the only pair of outcomes
+  // that cannot confuse anybody.
+  store.recordSignInLink({
+    id,
+    tenant: String(tenant?.slug ?? ""),
+    accountId: String(account?.id ?? ""),
+    email: String(account?.email ?? ""),
+    mintedBy: String(mintedBy ?? ""),
+    purpose: String(purpose ?? ""),
+    at,
+    expiresAt: exp,
+    singleUse: true,
+  });
   const { token, payload } = mintSessionToken({
     sub: String(account?.id ?? ""),
     email: String(account?.email ?? ""),
     tenant: String(tenant?.slug ?? ""),
     host,
     iat: at,
-    exp: at + Math.max(60_000, Number(ttlMs)),
-    jti: randomUUID(),
+    exp,
+    jti: id,
   }, tenantSessionSecret(config.sessionSecret, String(tenant?.slug ?? "")), at);
-  return { url: `https://${host}/login?sso=${encodeURIComponent(token)}`, expiresAt: new Date(payload.exp).toISOString() };
+  return {
+    url: `https://${host}/login?sso=${encodeURIComponent(token)}`,
+    expiresAt: new Date(payload.exp).toISOString(),
+    // The id, so a card can offer Revoke on the link it has just handed out without listing the
+    // workspace again. It is not a secret: holding it lets you cancel a link, never use one.
+    id,
+    singleUse: true,
+  };
 }
 
 /**
@@ -778,8 +822,14 @@ export function createOnboarding(options = {}) {
           tenant: asked.tenant,
         });
         // The link comes back under its own name and is handed on under this file's. It is read
-        // once here and written to no row, no log and no ledger detail.
-        return { ...answer, signIn: String(answer?.signInUrl ?? answer?.signIn ?? "") };
+        // once here and written to no row, no log and no ledger detail. Its ID is carried beside it:
+        // that one IS written down (cp/store.mjs sign_in_links) and is what a card needs to offer
+        // Revoke on the link this mail carries.
+        return {
+          ...answer,
+          signIn: String(answer?.signInUrl ?? answer?.signIn ?? ""),
+          signInLinkId: String(answer?.signInLinkId ?? ""),
+        };
       }
       : (typeof sender?.sendWelcome === "function" ? sender.sendWelcome : (typeof sender?.default === "function" ? sender.default : null));
     if (send == null) {
@@ -818,7 +868,9 @@ export function createOnboarding(options = {}) {
         askRelayPost,
         // Handed in rather than left for the sender to work out, so there is one mint in the tree.
         // A sender that mints its own is free to ignore this.
-        signInLink: () => mintSignInLink({ account: owner, tenant, config, now: now() }),
+        signInLink: () => mintSignInLink({
+          account: owner, tenant, config, store, now: now(), mintedBy: plan.actor, purpose: "welcome",
+        }),
         actor: plan.actor,
       });
     } catch (error) {
@@ -844,7 +896,14 @@ export function createOnboarding(options = {}) {
     // Handed back to the caller ONCE and stored nowhere: this is what lets the card offer
     // "Copy a sign-in link" for a customer whose mail bounced.
     record.signIn = String(answer.signIn ?? "");
-    return { ok: true, signIn: record.signIn, shape: String(answer.shape ?? ""), to: String(answer.to ?? "") };
+    record.signInLinkId = String(answer.signInLinkId ?? "");
+    return {
+      ok: true,
+      signIn: record.signIn,
+      signInLinkId: record.signInLinkId,
+      shape: String(answer.shape ?? ""),
+      to: String(answer.to ?? ""),
+    };
   }
 
   // ---- the runner --------------------------------------------------------------------------------
@@ -908,14 +967,31 @@ export function createOnboarding(options = {}) {
     ONBOARD_LABELS,
     state,
     storedPlan,
-    mintSignInLink: (slug, { ttlMs } = {}) => {
+    mintSignInLink: (slug, { ttlMs, mintedBy = "", purpose = "operator" } = {}) => {
       const tenant = store.getTenant(slug);
       if (tenant == null) return null;
       const accounts = store.listAccountsForTenant(slug);
       const owner = accounts.find((one) => String(one.email) === String(tenant.ownerEmail ?? "")) ?? accounts[0] ?? null;
       if (owner == null) return null;
-      return { ...mintSignInLink({ account: owner, tenant, config, now: now(), ...(ttlMs ? { ttlMs } : {}) }), email: String(owner.email) };
+      return {
+        ...mintSignInLink({
+          account: owner, tenant, config, store, now: now(), mintedBy, purpose, ...(ttlMs ? { ttlMs } : {}),
+        }),
+        email: String(owner.email),
+      };
     },
+
+    /**
+     * The open links for one workspace, and cancelling one.
+     *
+     * Thin pass-throughs rather than logic, because the deciding is the store's: one statement marks a
+     * link used and one marks it revoked, and a second opinion about which links are "open" living up
+     * here is how a panel ends up offering Revoke on a link the door has already spent.
+     */
+    listSignInLinks: (slug, { limit = 20, open = true } = {}) =>
+      store.listSignInLinks(String(slug ?? ""), { limit, open, at: now() }),
+
+    revokeSignInLink: (id, { by = "" } = {}) => store.revokeSignInLink(id, { at: now(), by }),
 
     /** Two presses cannot build two boxes: a slug already running answers with the job it has. */
     start(wanted = {}) {
@@ -972,7 +1048,12 @@ export function createOnboarding(options = {}) {
         temporaryPassword: String(temporaryPassword ?? ""),
       };
       const verdict = await sendWelcome(record, { force: true });
-      return { ...verdict, signIn: record.signIn ?? "", steps: state(key).steps };
+      return {
+        ...verdict,
+        signIn: record.signIn ?? "",
+        signInLinkId: record.signInLinkId ?? "",
+        steps: state(key).steps,
+      };
     },
 
     /** For a shutdown, and for a test that wants the job settled before it asserts. */
