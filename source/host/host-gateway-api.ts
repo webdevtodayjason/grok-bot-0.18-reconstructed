@@ -900,6 +900,12 @@ export function createHostGatewayApi(
       method(manager, "portAgentLocalSkills")(args.id),
     getConversationOutline: (args: any) =>
       method(manager, "getConversationOutline")(args.id),
+    // VOICE-3. The reply an agent is still writing, so a spoken turn can start on sentence one
+    // instead of waiting 5.5 to 25 s for the finished entry. `{draft: null}` when no turn is open,
+    // which is a fact and not an error: the caller's own turn may not have reached the runner yet.
+    getTurnDraft: (args: any) => ({
+      draft: method(manager, "getTurnDraft")(String(args.id ?? args.agentId ?? "")) ?? null,
+    }),
     getAgentEvidence: async (args: any) =>
       readAgentEvidence(String(args.id), {
         ...(args.attemptId == null ? {} : { attemptId: String(args.attemptId) }),

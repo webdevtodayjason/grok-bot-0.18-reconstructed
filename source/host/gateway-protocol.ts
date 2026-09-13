@@ -77,6 +77,10 @@ export const SAND_GATEWAY_COMMANDS = {
   importAgentWorkflowUrl: (api: GatewayApi, body: string) => api.importAgentWorkflowUrl(parseCommandArgs(body)),
   portAgentLocalSkills: (api: GatewayApi, body: string) => api.portAgentLocalSkills(parseCommandArgs(body)),
   getConversationOutline: (api: GatewayApi, body: string) => api.getConversationOutline(parseCommandArgs(body)),
+  // VOICE-3. The in-progress reply of one agent's open turn, for ui/voice-edge.mjs. Safe to call on an
+  // older host: it answers "unknown gateway method" and the relay degrades to reading the finished
+  // entry, which is what it did for the whole of VOICE-1.
+  getTurnDraft: (api: GatewayApi, body: string) => api.getTurnDraft(parseCommandArgs(body)),
   getAgentEvidence: (api: GatewayApi, body: string) => api.getAgentEvidence(parseCommandArgs(body)),
   getAgentActionAudit: (api: GatewayApi, body: string) => api.getAgentActionAudit(parseCommandArgs(body)),
   repairAgentTranscript: (api: GatewayApi, body: string) => api.repairAgentTranscript(parseCommandArgs(body)),
