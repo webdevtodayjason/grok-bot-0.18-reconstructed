@@ -70,7 +70,12 @@ test("the sqlite file is 0600 and the accounts table never hands a hash back", a
     assert.equal(Object.hasOwn(account, "password_json"), false);
     assert.equal(Object.hasOwn(account, "hash"), false);
     for (const row of store.listAccounts()) {
-      assert.deepEqual(Object.keys(row).sort(), ["createdAt", "disabled", "email", "id", "name", "superAdmin", "tenant", "updatedAt"]);
+      // The exact key set, so nothing derived from a password can join this row unnoticed.
+      // passwordChangedAt is named here deliberately: it is a TIMESTAMP and not anything derived
+      // from a password, CP-FIX 3 added it so a refused sign-in can say the password on file was
+      // changed and when, and it is kept out of publicAccount on purpose.
+      assert.deepEqual(Object.keys(row).sort(), ["createdAt", "disabled", "email", "id", "name", "passwordChangedAt", "superAdmin", "tenant", "updatedAt"]);
+      assert.equal(row.passwordChangedAt, 0, "a new account has never had its password changed");
     }
     assert.equal(store.getAccountByEmail("OWNER@example.com").id, account.id);
     assert.equal(normalizeEmail("  Mixed@Case.io "), "mixed@case.io");

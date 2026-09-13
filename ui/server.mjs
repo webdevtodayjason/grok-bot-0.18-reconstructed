@@ -1309,15 +1309,30 @@ async function handleAccountLogin(req, res, { email, password, next, key, wantsH
 // anything is minted. Nothing about the link is trusted, including that it came from us.
 function handleSso(req, res, token) {
   const verdict = ssoVerdict({ token, keyOf: sessionKeyFor });
+  // CP-FIX 2. EVERY ANSWER HERE IS WRITTEN DOWN, the same way the two password doors are. Until
+  // this wave a link login was a console log line and nothing else: the control plane never hears
+  // about it -- no password is typed, so POST /v1/sessions is not called -- and its Clients panel
+  // therefore read a workspace somebody had been using by link as a workspace nobody had ever
+  // opened. There is no password on any branch, so there is nothing to hash and nothing is passed.
   if (verdict.kind === "session") {
     console.log(`login by sign-in link on ${verdict.payload.tenant} from ${clientOf(req)}`);
+    noteLoginAttempt(req, {
+      door: "link", outcome: "ok",
+      email: String(verdict.payload.email ?? ""),
+      tenant: String(verdict.payload.tenant ?? ""),
+    });
     return mintAccountSession(req, res, verdict.payload, "/");
   }
   if (verdict.kind === "unknown") {
     console.log(`sign-in link for ${verdict.slug} from ${clientOf(req)}, which is not a workspace this console serves`);
+    // A correct link for a workspace this console does not serve is not somebody being refused, so
+    // it is recorded as what it is: the tenant is named because the token's claim said it, and the
+    // address is the only other thing known.
+    noteLoginAttempt(req, { door: "link", outcome: "refused", tenant: String(verdict.slug ?? "") });
     return sendLoginPage(res, 503, { error: NOT_AVAILABLE_SENTENCE });
   }
   console.log(`sign-in link refused from ${clientOf(req)} (${verdict.detail ?? "not valid"})`);
+  noteLoginAttempt(req, { door: "link", outcome: "refused" });
   return sendLoginPage(res, 401, { error: "That sign-in link is not valid here." });
 }
 

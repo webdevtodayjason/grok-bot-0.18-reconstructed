@@ -8,7 +8,9 @@ import { readFileSync } from "node:fs";
 
 import { readProxyKey, tenantPaths } from "../cp/provision.mjs";
 import { CP_VERSION } from "../cp/server.mjs";
-import { LOCKOUT_MAX_FAILURES } from "../cp/store.mjs";
+import { ATTEMPT_USER_AGENT_LIMIT, LOCKOUT_MAX_FAILURES } from "../cp/store.mjs";
+// SIGNIN-1b asserts the label as well as the column, because a column nothing reads is not the fix.
+import { GATE_AGENT_PREFIX, markGateRows } from "../cp/admin.mjs";
 import { tenantSessionSecret, verifySessionToken } from "../cp/session.mjs";
 import { startControlPlane, startFakeCoolify } from "./cp-support.mjs";
 import { startFakeProxy } from "./cp-proxy-support.mjs";
@@ -217,6 +219,104 @@ test("ten wrong tries lock the address out with a retryAfter, and a Retry-After 
     // The lock is on the attempt, not on the password: the right one is refused too while it holds.
     const rightPassword = await plane.request("POST", "/v1/sessions", { body: { email: "owner@example.com", password: PASSWORD } });
     assert.equal(rightPassword.status, 429);
+  });
+});
+
+/**
+ * CP-FIX 3. A failed sign-in reaches the ledger WITH THE REASON IN WORDS.
+ *
+ * MEASURED ON THE R750 2026-09-12: beta-36's tester said he could not sign back in after his
+ * password was changed, and there was nothing anywhere that said so. The outcome word was the whole
+ * record, and "refused" is the same word for a stranger guessing, for a customer holding a password
+ * somebody changed under him, and for an account whose door was turned off on purpose. An operator
+ * cannot act on any of those without the sentence behind it.
+ */
+test("a refusal after a password change says so, and a lockout says how long", async () => {
+  await withPlane(async (plane) => {
+    const account = await seedTenantAndAccount(plane);
+    assert.equal((await plane.admin("POST", `/v1/accounts/${account.id}/password`, { password: "a-brand-new-password" })).status, 204);
+
+    // The browser that still holds the old password, which is exactly what the tester had.
+    assert.equal((await plane.request("POST", "/v1/sessions", { body: { email: "owner@example.com", password: PASSWORD } })).status, 401);
+    const refused = plane.store.listLoginAttempts({ since: 0 })[0];
+    assert.equal(refused.outcome, "refused");
+    assert.match(refused.reason, /did not match the one on file/);
+    assert.match(refused.reason, /changed/, "and the row says the password was changed, which is the fact that explains it");
+    assert.equal(refused.triedHash.length, 64, "the keyed hash is still the only thing derived from a password");
+    assert.equal(refused.reason.includes(PASSWORD), false, "and no reason ever carries a password");
+
+    for (let attempt = 0; attempt < LOCKOUT_MAX_FAILURES; attempt += 1) {
+      await plane.request("POST", "/v1/sessions", { body: { email: "owner@example.com", password: "not-the-password" } });
+    }
+    const locked = plane.store.listLoginAttempts({ since: 0 })[0];
+    assert.equal(locked.outcome, "locked");
+    assert.match(locked.reason, /too many/);
+    assert.match(locked.reason, /\d+ more seconds/, "a lockout with no duration in it is a dead end for whoever reads it");
+    assert.equal(locked.triedHash, "", "a lockout still answers before the password check, so there is nothing to hash");
+  });
+});
+
+/**
+ * SIGNIN-1b, the row that has been waiting for a wave to open cp/store.mjs. Filed 2026-09-09.
+ *
+ * The control plane's login_attempts table had no user_agent column: the insert never sent one and
+ * listLoginAttempts handed the panel a hardcoded empty string. So a sign-in posted STRAIGHT at
+ * api.titanium.bot could never be labelled as one of our own gates, and that is the path that never
+ * touches a customer's console, which is the path an attacker is most likely to use. Every gate has
+ * been sending the header since SIGNIN-1 on the strength of the line being right the day the column
+ * landed.
+ */
+test("a sign-in posted straight at this service carries the agent it called itself, clipped", async () => {
+  await withPlane(async (plane) => {
+    await seedTenantAndAccount(plane);
+    const agent = `${GATE_AGENT_PREFIX}verify-control-plane`;
+    await plane.request("POST", "/v1/sessions", {
+      body: { email: "owner@example.com", password: "not-the-password" },
+      headers: { "user-agent": agent },
+    });
+    const refused = plane.store.listLoginAttempts({ since: 0 })[0];
+    assert.equal(refused.userAgent, agent, "the hardcoded empty string is gone");
+
+    // And it is labelled, which is the whole point of the column. The gate's own successful sign-in
+    // is what proves the address is ours, the same rule SIGNIN-1 built for the relay's rows.
+    await plane.request("POST", "/v1/sessions", {
+      body: { email: "owner@example.com", password: PASSWORD },
+      headers: { "user-agent": agent },
+    });
+    const rows = plane.store.listLoginAttempts({ since: 0 });
+    const gates = markGateRows(rows, { isOperatorAccount: () => true });
+    assert.equal(gates.rows, 1, "the refusal is ours and says so");
+    assert.deepEqual([...gates.scripts], ["verify-control-plane"]);
+    assert.equal(rows.find((row) => row.outcome === "refused").gate, true);
+
+    // A header is a string a stranger writes, so it is clipped and never trusted.
+    await plane.request("POST", "/v1/sessions", {
+      body: { email: "owner@example.com", password: "not-the-password" },
+      headers: { "user-agent": "z".repeat(400) },
+    });
+    assert.equal(plane.store.listLoginAttempts({ since: 0 })[0].userAgent.length, ATTEMPT_USER_AGENT_LIMIT);
+  });
+});
+
+test("a door that was turned off, and a workspace that is gone, are both written down as themselves", async () => {
+  await withPlane(async (plane) => {
+    const account = await seedTenantAndAccount(plane);
+    plane.store.setAccountDisabled(account.id, true);
+    assert.equal((await plane.request("POST", "/v1/sessions", { body: { email: "owner@example.com", password: PASSWORD } })).status, 403);
+    const off = plane.store.listLoginAttempts({ since: 0 })[0];
+    assert.equal(off.outcome, "refused");
+    assert.match(off.reason, /turned off/);
+    assert.equal(off.tenant, "acme", "the workspace is known on this one, because the password was right");
+
+    plane.store.setAccountDisabled(account.id, false);
+    // A workspace removed while its people's sign-ins still point at it. The password is RIGHT, so
+    // this is not a refusal in the lockout's sense, and before this wave it was not recorded at all:
+    // the one answer a customer meets for ever with nothing on any panel to say why.
+    plane.store.deleteTenant("acme");
+    assert.equal((await plane.request("POST", "/v1/sessions", { body: { email: "owner@example.com", password: PASSWORD } })).status, 409);
+    const gone = plane.store.listLoginAttempts({ since: 0 })[0];
+    assert.match(gone.reason, /not registered/);
+    assert.equal(gone.triedHash, "", "the password was right, so nothing derived from it is kept");
   });
 });
 
@@ -970,6 +1070,89 @@ test("a workspace that is deleted names the sign-ins it leaves standing, and the
     assert.equal((await plane.admin("DELETE", "/v1/accounts/%E0%A4%A", { confirm: "whatever" })).status, 404);
     assert.equal((await plane.admin("DELETE", "/v1/accounts/nobody@nowhere.test", { confirm: "nobody@nowhere.test" })).status, 404);
   }, { withCoolify: true });
+});
+
+/**
+ * DEVICE-1. Removing an account kills the bearers it minted.
+ *
+ * MEASURED ON THE R750 2026-09-10: after `cp account remove` took a throwaway account away, two of
+ * its device bearers were still live rows on the demo workspace and would have kept opening /api and
+ * /push for the rest of their thirty days. A device bearer is an HMAC payload plus a row in the
+ * TENANT'S OWN state directory, and the account row this service deletes is neither of those, so
+ * nothing about the delete reached them. The two rows were revoked by hand with
+ * `cp device revoke demo <id>`, which is the hand operation a verb is supposed to replace.
+ */
+function fakeDeviceRelay(devices) {
+  const asked = [];
+  const rows = devices.map((row) => ({ ...row }));
+  const fetchImpl = async (url, init = {}) => {
+    const parsed = new URL(url);
+    const method = init.method ?? "GET";
+    asked.push({ pathname: parsed.pathname, search: parsed.search, method });
+    const slug = /^\/admin\/tenants\/([^/]+)\/devices$/.exec(parsed.pathname)?.[1] ?? null;
+    if (slug == null) return { ok: false, status: 404, text: async () => "", json: async () => ({}) };
+    if (method === "DELETE") {
+      const id = parsed.searchParams.get("id");
+      const row = rows.find((one) => one.id === id);
+      if (row == null) return { ok: false, status: 404, text: async () => "no such device", json: async () => ({}) };
+      row.revokedAt = Date.now();
+      const body = { slug, revoked: id };
+      return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body };
+    }
+    const body = { slug, measuredAt: new Date().toISOString(), devices: rows };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body };
+  };
+  return { asked, rows, fetchImpl };
+}
+
+test("removing an account revokes every device bearer it minted, and says how many", async () => {
+  const relay = fakeDeviceRelay([
+    { id: "phone-1", name: "iPhone", platform: "ios", sub: "", createdAt: 1, lastSeenAt: 2, revokedAt: null },
+    { id: "phone-2", name: "iPad", platform: "ios", sub: "", createdAt: 1, lastSeenAt: 3, revokedAt: null },
+    { id: "mac-1", name: "the other person's Mac", platform: "macos", sub: "somebody-else", createdAt: 1, lastSeenAt: 4, revokedAt: null },
+  ]);
+  await withPlane(async (plane) => {
+    const account = await seedTenantAndAccount(plane, { slug: "acme", email: "leaver@acme.test" });
+    // The two rows that belong to this person. A device row keys on the account id off the verified
+    // session token, which is what `sub` is.
+    for (const id of ["phone-1", "phone-2"]) relay.rows.find((row) => row.id === id).sub = account.id;
+
+    const removed = await plane.admin("DELETE", `/v1/accounts/${encodeURIComponent("leaver@acme.test")}`, { confirm: "leaver@acme.test" });
+    assert.equal(removed.status, 200, removed.text.slice(0, 200));
+    assert.deepEqual(removed.body.devices.revoked.sort(), ["phone-1", "phone-2"]);
+    assert.equal(removed.body.devices.asked, true);
+    // THE OTHER PERSON ON THE SAME WORKSPACE IS UNTOUCHED. Two people can share a workspace, and a
+    // revoke that took the workspace's devices rather than the account's would sign out a colleague.
+    assert.equal(relay.rows.find((row) => row.id === "mac-1").revokedAt, null);
+    for (const id of ["phone-1", "phone-2"]) assert.ok(relay.rows.find((row) => row.id === id).revokedAt > 0, `${id} is still live`);
+    // One list and one delete per row that had to go, and never a delete for the colleague's.
+    const deletes = relay.asked.filter((one) => one.method === "DELETE");
+    assert.equal(deletes.length, 2);
+    assert.equal(deletes.some((one) => one.search.includes("mac-1")), false);
+    // And the sentence the operator reads says it, because "can no longer sign in" was the whole
+    // answer before and a live bearer needs no sign-in at all.
+    assert.match(removed.body.message, /2 device/);
+  }, { fetchImpl: relay.fetchImpl, env: { CP_RELAY_URL: "http://relay.invalid", CP_RELAY_TOKEN: "a-relay-token-of-real-length-here" } });
+});
+
+test("a relay that cannot be asked does not hold up the removal, and the answer says what is unknown", async () => {
+  await withPlane(async (plane) => {
+    await seedTenantAndAccount(plane, { slug: "acme", email: "leaver@acme.test" });
+    const removed = await plane.admin("DELETE", `/v1/accounts/${encodeURIComponent("leaver@acme.test")}`, { confirm: "leaver@acme.test" });
+    // The account is gone either way: leaving it because a device list could not be read would be
+    // the worse of the two failures.
+    assert.equal(removed.status, 200, removed.text.slice(0, 200));
+    assert.equal((await plane.admin("GET", "/v1/accounts")).body.accounts.length, 0);
+    assert.equal(removed.body.devices.asked, false);
+    assert.deepEqual(removed.body.devices.revoked, []);
+    assert.ok(String(removed.body.devices.why).length > 0);
+    // Named in the message too, so an operator reading the answer knows to check by hand rather than
+    // assuming the phones are dead.
+    assert.match(removed.body.message, /could not/i);
+  }, {
+    fetchImpl: async () => { throw new Error("the relay is down"); },
+    env: { CP_RELAY_URL: "http://relay.invalid", CP_RELAY_TOKEN: "a-relay-token-of-real-length-here" },
+  });
 });
 
 test("a workspace name with sign-ins still pointing at it is never handed to a second company", async () => {

@@ -55,7 +55,7 @@ import { createCodeTasks } from "./code.mjs";
 // this file answers with. The routes are at the bottom of the dispatcher and the reasoning is there.
 import { beginKeyAction, keyDefinition, keyEvidence, keysDoor, parseKeyValue, proveKey, relaySecrets } from "./secrets.mjs";
 import { INTAKE_BYTES as FEEDBACK_BODY_BYTES, normalizeReport } from "./feedback.mjs";
-import { createProxyClient, includedModelRows } from "./proxy.mjs";
+import { createProxyClient, includedModelRows, visionFallbackTarget } from "./proxy.mjs";
 import { createAllowanceService } from "./allowance.mjs";
 import {
   VERIFY_INTERVAL_MS,
@@ -498,7 +498,12 @@ export function createApp(options = {}) {
     const wanted = new Map();
     for (const row of rows) {
       const alias = String(row?.alias ?? "");
-      const target = String(row?.visionFallback ?? "");
+      // visionFallbackTarget, never the stored field: a deployment that names ITSELF has no route,
+      // and reading the raw value here is what made every boot print
+      // `plan-minimax still has no route to plan-minimax, the proxy answered 400: Model
+      // 'plan-minimax' cannot be its own fallback`. There was nothing to restore and nothing to
+      // report, so such an alias never enters this map and the boot says nothing about it.
+      const target = visionFallbackTarget(row);
       if (alias.length === 0 || target.length === 0 || wanted.has(alias)) continue;
       wanted.set(alias, target);
     }
@@ -727,6 +732,43 @@ export function createApp(options = {}) {
     };
   }
 
+  /**
+   * "2 minutes ago", for the one place a sign-in refusal needs it: the reason it writes down.
+   *
+   * Rounded and coarse on purpose. The exact millisecond is in the row's own timestamp; what the
+   * sentence is for is an operator reading a Clients row and knowing whether the password moved
+   * under this person today or last spring.
+   */
+  function agoWords(thenMs, atMs) {
+    const ms = Math.max(0, Number(atMs) - Number(thenMs));
+    const units = [["day", 86_400_000], ["hour", 3_600_000], ["minute", 60_000]];
+    for (const [name, size] of units) {
+      const n = Math.round(ms / size);
+      if (n >= 1) return `${n} ${name}${n === 1 ? "" : "s"} ago`;
+    }
+    return "less than a minute ago";
+  }
+
+  /**
+   * CP-FIX 3. WHY a sign-in did not work, in words, for the row this service writes down.
+   *
+   * MEASURED ON THE R750 2026-09-12: beta-36's tester could not sign back in after his password was
+   * changed and there was nothing on any panel that said so. Every refusal carried the word
+   * "refused" and nothing else, which is the same word for a stranger guessing, for a customer
+   * holding a password somebody changed under him, and for a door that was turned off on purpose.
+   *
+   * NONE OF THESE EVER REACH THE CALLER. The answers on the wire are unchanged -- a wrong email and
+   * a wrong password still get the identical 401 body, because telling them apart tells a guesser
+   * who has an account here. This is what the operator reads, not what the visitor is told.
+   */
+  const passwordReason = (account, at) => {
+    if (account == null) return "there is no account for that address on this control plane";
+    const changedAt = Number(account.passwordChangedAt ?? 0);
+    return changedAt > 0
+      ? `the password did not match the one on file, which was changed ${agoWords(changedAt, at)}`
+      : "the password did not match the one on file, which has not been changed since the account was made";
+  };
+
   async function handleSessionCreate(request, response, body) {
     const email = normalizeEmail(body.email);
     const password = typeof body.password === "string" ? body.password : "";
@@ -741,19 +783,36 @@ export function createApp(options = {}) {
     // attempt with the visitor's real address on it; this one is marked so the merge can drop it
     // and so the by-address table can leave the phantom address out. ADMIN-1.
     const via = viaRelay ? "relay" : "";
+    // SIGNIN-1b. What the caller called itself, written onto every row this route makes. Until this
+    // wave the column did not exist and listLoginAttempts handed the panel a hardcoded empty string,
+    // so a sign-in posted STRAIGHT at api.titanium.bot could never be labelled as one of our own
+    // gates: the path that never touches a customer's console is exactly the path the label could
+    // not reach. scripts/gate-agent.mjs has been sending the header since SIGNIN-1 on the strength of
+    // the line costing nothing and being right the day the column landed. This is that day.
+    const userAgent = String(request.headers["user-agent"] ?? "");
     const at = now();
     store.pruneLoginFailures(at);
     const lock = store.loginLock({ email, ip, at, countIp: !viaRelay });
     if (lock.locked) {
       // ADMIN-1. Written down before the answer goes out. No hash: this branch never reached the
       // password check, so there is nothing that was tried, only somebody who kept knocking.
-      admin.recordAttempt({ email, ip, outcome: "locked", at, via });
+      admin.recordAttempt({
+        email, ip, outcome: "locked", at, via, userAgent,
+        reason: `too many failed tries on ${lock.which.join(" and ") || "this account"} in the last ten minutes, so the door is shut for ${lock.retryAfter} more seconds`,
+      });
       return json(response, 429, { error: "locked", retryAfter: lock.retryAfter }, { "retry-after": String(lock.retryAfter) });
     }
 
     // The cap goes on before the derivation and comes off after it, in a finally, because a
     // counter that leaks on a throw is a service that stops answering sign-ins for good.
     if (derivations >= MAX_CONCURRENT_DERIVATIONS) {
+      // Written down, because this is a sign-in that did not work and nothing else would ever say
+      // so: it never reaches the password check, so it is not a refusal of anybody's password, and
+      // a customer meeting it twice would otherwise be a silent 429 on a panel showing nothing.
+      admin.recordAttempt({
+        email, ip, outcome: "refused", at, via, userAgent,
+        reason: `${MAX_CONCURRENT_DERIVATIONS} sign-ins were already being checked on this service, so this one was refused before the password was looked at`,
+      });
       return json(response, 429, {
         error: "busy",
         retryAfter: 1,
@@ -774,7 +833,12 @@ export function createApp(options = {}) {
     if (!attempt.ok) {
       store.recordLoginFailure({ email, ip, at });
       // The keyed hash of what was tried, never the password. cp/admin.mjs carries the decision.
-      admin.recordAttempt({ email, ip, outcome: "refused", password, at, via });
+      // The reason says whether the password on file has been changed, and when, which is the fact
+      // that explains a customer who was signing in fine yesterday.
+      admin.recordAttempt({
+        email, ip, outcome: "refused", password, at, via, userAgent,
+        reason: passwordReason(store.getAccountByEmail(email), at),
+      });
       return json(response, 401, { error: "invalid_login" });
     }
 
@@ -782,7 +846,10 @@ export function createApp(options = {}) {
     // not a refusal in the lockout's sense and it is not counted as one; it is a sentence saying
     // their sign-in is off. ADMIN-1.
     if (attempt.account.disabled === true) {
-      admin.recordAttempt({ email, ip, outcome: "refused", password, tenant: attempt.account.tenant, at, via });
+      admin.recordAttempt({
+        email, ip, outcome: "refused", password, tenant: attempt.account.tenant, at, via, userAgent,
+        reason: "the password was right and this sign-in has been turned off, so nobody is guessing: somebody closed this door",
+      });
       return json(response, 403, {
         error: "disabled",
         message: "This sign-in has been turned off. Contact your Titanium Bot support contact.",
@@ -791,6 +858,13 @@ export function createApp(options = {}) {
 
     const tenant = store.getTenant(attempt.account.tenant);
     if (tenant == null) {
+      // The password was RIGHT, so nothing derived from it is kept and the lockout is not charged.
+      // It is written down all the same: this is the answer a customer meets for ever after their
+      // workspace is removed from under their account, and until this wave no panel could show it.
+      admin.recordAttempt({
+        email, ip, outcome: "refused", tenant: attempt.account.tenant, at, via, userAgent,
+        reason: `the password was right and the workspace ${attempt.account.tenant} is not registered on this control plane, so there is nothing to sign in to`,
+      });
       return json(response, 409, {
         error: "tenant_missing",
         message: "Your account is set up but its instance is not registered yet. Please contact support.",
@@ -801,7 +875,7 @@ export function createApp(options = {}) {
     // Successes are recorded too, and with no hash: there is no reason to hold anything derived
     // from a password that worked, and a file of keyed hashes where one is known-good is a worse
     // file than one where none is. This is also what fills the "last sign-in" column.
-    admin.recordAttempt({ email, ip, outcome: "ok", tenant: attempt.account.tenant, at, via });
+    admin.recordAttempt({ email, ip, outcome: "ok", tenant: attempt.account.tenant, at, via, userAgent });
     store.pruneRevocations(at);
     const host = tenant.host || consoleHost(config);
     const { token, payload } = mintSessionToken({
@@ -1485,13 +1559,30 @@ export function createApp(options = {}) {
             message: `To remove this account send {"confirm": "${account.email}"} in the body.`,
           });
         }
+        // DEVICE-1. The bearers FIRST, while the account row is still there to read a sub from, and
+        // then the row. A bearer needs no sign-in at all, so "can no longer sign in" was never the
+        // whole truth: MEASURED ON THE R750 2026-09-10, two bearers belonging to a removed account
+        // were still opening /api and /push on the demo workspace and had 30 days left on them.
+        //
+        // A relay that cannot be asked does NOT stop the delete. Leaving the account in place
+        // because a device list could not be read is the worse of the two failures, so the answer
+        // says what is still live and names the command that finishes it.
+        const devices = await admin.revokeDevicesForAccount({ slug: account.tenant, sub: account.id });
         store.deleteAccount(account.id);
+        const saidAboutDevices = !devices.asked
+          ? ` Its device bearers could not be revoked: ${devices.why}`
+          : devices.revoked.length > 0
+            ? ` ${devices.revoked.length} device bearer${devices.revoked.length === 1 ? "" : "s"} on ${account.tenant} ${devices.revoked.length === 1 ? "was" : "were"} revoked, so an app signed in on ${devices.revoked.length === 1 ? "it" : "them"} stops at its next request.`
+            : ` That account held no live device bearer on ${account.tenant}.`;
         return json(response, 200, {
           deleted: true,
           email: account.email,
           tenant: account.tenant,
+          // What happened to the bearers, as an object rather than only in the sentence, so the CLI
+          // and a gate can read it without parsing prose.
+          devices,
           // Said out loud because it is the question the operator is actually asking.
-          message: `${account.email} can no longer sign in. Nothing in that workspace was touched, and a session they already hold keeps working until it expires, which is at most 12 hours.`,
+          message: `${account.email} can no longer sign in.${saidAboutDevices}${devices.failed.length > 0 ? ` ${devices.why}` : ""} Nothing in that workspace was touched, and a session they already hold keeps working until it expires, which is at most 12 hours.`,
         });
       }
 

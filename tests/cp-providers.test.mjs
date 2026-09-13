@@ -759,6 +759,52 @@ test("a fallback target the proxy does not serve is reported, not written", asyn
   }, { models: zaiPair("plan-zai-retired").slice(0, 1) });
 });
 
+/**
+ * CP-FIX 1. A deployment that names ITSELF has no fallback, and the boot says nothing about it.
+ *
+ * MEASURED ON THE R750: plan-minimax was created customer visible with tb_vision_fallback set to
+ * plan-minimax, which satisfied the "name a model a screenshot falls back to" guard while
+ * registering no route at all. Every control plane start then read that value back, tried to write
+ * it, and LiteLHM refused it, so every boot printed
+ *   vision fallbacks: plan-minimax still has no route to plan-minimax, the proxy answered 400:
+ *   Model 'plan-minimax' cannot be its own fallback
+ * An error on every start that nobody can act on is an error everybody learns to scroll past, and
+ * there was nothing to act on: a plan model with no OTHER plan to fall back to simply has none.
+ */
+test("a deployment that names itself as its screenshot fallback has none, and the boot is silent", async () => {
+  await withServer(async ({ app, proxy }) => {
+    const answer = await app.reconcileFallbacks();
+    assert.equal(answer.ok, true, answer.why);
+    // Not restored, not skipped, not kept: there is no such route, so there is nothing to say. The
+    // boot printer walks restored and skipped and then says "N already in place", so an empty
+    // skipped list is exactly what "silent about plan-minimax" means.
+    assert.deepEqual(answer.restored, [], "nothing was written");
+    assert.deepEqual(answer.skipped, [], "and nothing is reported, because a self-route is not a missing route");
+    assert.deepEqual(answer.kept.map((row) => row.alias), ["plan-zai"], "a real pair is still reconciled on the same pass");
+    assert.deepEqual(proxy.fallbacks(), { "plan-zai": ["plan-zai-vision"] });
+  }, {
+    models: [
+      ...zaiPair(),
+      {
+        model_name: "plan-minimax",
+        litellm_params: { model: "openai/MiniMax-M3" },
+        model_info: { id: "mm-1", [TB.visionFallback]: "plan-minimax" },
+      },
+    ],
+    fallbacks: { "plan-zai": ["plan-zai-vision"] },
+  });
+});
+
+test("the proxy refuses a model its own fallback, which is what made that boot line", async () => {
+  // The fixture carries the refusal the real build has, so the case above is proving a resolution
+  // and not a fake that quietly accepted nonsense.
+  await withServer(async ({ client }) => {
+    const written = await client.setFallback({ alias: "plan-zai", fallbacks: ["plan-zai"] });
+    assert.equal(written.ok, false);
+    assert.match(written.why, /cannot be its own fallback/);
+  }, { models: zaiPair() });
+});
+
 test("a proxy that is down leaves the map alone and says why", async () => {
   await withServer(async ({ app, proxy }) => {
     await proxy.close();

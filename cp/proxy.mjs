@@ -235,6 +235,27 @@ export const MCP_SERVERS = Object.freeze(["tinyfish"]);
 
 // The one place that knows a key belongs to a plan model rather than to a customer's own provider.
 export const isPlanModel = (id) => String(id ?? "").startsWith(PLAN_MODEL_PREFIX);
+
+/**
+ * Where a screenshot-carrying turn on this deployment actually goes, or "" for nowhere.
+ *
+ * A DEPLOYMENT THAT NAMES ITSELF HAS NO FALLBACK, and this is the one place that decides it. The
+ * stored tb_vision_fallback is a name somebody typed into the Providers panel, and plan-minimax
+ * shipped on the R750 with its own alias in it: the panel's "name a model a screenshot falls back
+ * to" guard was satisfied and no route existed. Every control plane start then read that value
+ * back, tried to write it, and the proxy refused it -- `Model 'plan-minimax' cannot be its own
+ * fallback` -- so every boot printed an error with nothing behind it to act on.
+ *
+ * Self-naming is still an allowed thing to SAY, on one deployment only: a model whose vision check
+ * has passed says "images stop here" that way (see the vision_unproved refusal in cp/admin.mjs).
+ * What it never means is a second model to route to, so everything that resolves a route reads it
+ * through here and a plan model with no other plan to fall back to simply has none.
+ */
+export const visionFallbackTarget = (row) => {
+  const alias = String(row?.alias ?? "");
+  const target = String(row?.visionFallback ?? "");
+  return target.length === 0 || target === alias ? "" : target;
+};
 export const isTalkPlanModel = (id) => isPlanModel(id) && String(id).endsWith("-talk");
 // ROUTER-1c: every caller hands in the list the proxy SAID it serves, and that list already
 // carries `<plan>-talk` whenever the deployment exists. Inventing the sibling here granted

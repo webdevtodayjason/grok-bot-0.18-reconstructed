@@ -120,7 +120,12 @@ CREATE TABLE IF NOT EXISTS accounts (
   tenant        TEXT NOT NULL,
   password_json TEXT NOT NULL,
   created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
+  updated_at    INTEGER NOT NULL,
+  -- WHEN THE PASSWORD LAST CHANGED, which updated_at cannot answer: that column moves for a promote,
+  -- a disable and a rename too. It exists so a refused sign-in can say the one thing that explains
+  -- it -- the password on file is not the one this person is holding, and here is when it changed.
+  -- Zero means it has never changed since the account was made, which is its own honest answer.
+  password_changed_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS tenants (
   slug                  TEXT PRIMARY KEY,
@@ -183,7 +188,20 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   tenant     TEXT NOT NULL DEFAULT '',
   -- "relay" when a tenant console forwarded this sign-in, which makes the ip column that machine's
   -- egress address rather than the visitor's. Empty is a client posting straight at this service.
-  via        TEXT NOT NULL DEFAULT ''
+  via        TEXT NOT NULL DEFAULT '',
+  -- WHY this attempt ended the way it did, in the words the sign-in route decided, and never
+  -- anything derived from a password. An outcome word alone cannot tell an operator the difference
+  -- between somebody guessing and a customer holding a password that was changed under him, which
+  -- is exactly the question beta-36 asked on 2026-09-12. Empty is honest for a row written before
+  -- this column existed and for a relay row, which carries no reason of its own.
+  reason     TEXT NOT NULL DEFAULT '',
+  -- SIGNIN-1b. What the caller called itself, truncated, so a row posted STRAIGHT at
+  -- api.titanium.bot can be told from anybody's. Without it the gate label could only ever reach
+  -- rows that came through a customer's console, and the path that never touches one is the path an
+  -- attacker is most likely to use. It is a string a stranger writes, so it is clipped rather than
+  -- trusted, at the same 120 characters the relay's own ledger clips to: enough to tell a browser
+  -- from curl from one of our gates, and not enough to be a payload.
+  user_agent TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS login_attempts_at ON login_attempts (at);
 -- A workspace name that has been removed while sign-ins still pointed at it.
@@ -466,6 +484,15 @@ export const FEEDBACK_FIELD_LIMIT = 256 * 1024;
 // now, held here and read only by the relay behind CP_RELAY_TOKEN, so they go in this set for the
 // same reason the three above are in it -- listSettings hands every value back wholesale and
 // cp/verification.mjs reads that list, so a name left out of here is a key in somebody's answer.
+// How long a refusal's reason may be. Two hundred characters is a sentence an operator can read on
+// a row; anything longer is not a reason, and a column with no ceiling on it is somewhere a caller
+// could eventually put a body.
+export const ATTEMPT_REASON_LIMIT = 200;
+
+// SIGNIN-1b. The same ceiling ui/login-ledger.mjs puts on a user agent, so a row from either ledger
+// is clipped the same way and two rows about one attempt cannot differ on the tail of a string.
+export const ATTEMPT_USER_AGENT_LIMIT = 120;
+
 // The names are cp/secrets.mjs's allowlist and are spelled out rather than imported: this module is
 // the store and importing a route module into it would invert the dependency. Its test asserts the
 // two lists are the same three names.
@@ -489,6 +516,9 @@ const accountRow = (row) => (row == null ? null : {
   disabled: Number(row.disabled ?? 0) === 1,
   createdAt: Number(row.created_at),
   updatedAt: Number(row.updated_at),
+  // DELIBERATELY NOT IN publicAccount: the sign-in route uses it to write one sentence into the
+  // ledger, and the exact key set /v1/accounts answers is pinned by a test on purpose.
+  passwordChangedAt: Number(row.password_changed_at ?? 0) || 0,
 });
 
 const tenantRow = (row) => (row == null ? null : {
@@ -556,11 +586,20 @@ const TENANT_MIGRATIONS = [
   // Jason's own flag is set afterwards by hand, with `account promote`, on an account he creates.
   "ALTER TABLE accounts ADD COLUMN super_admin INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE accounts ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0",
+  // Zero on every existing row, which reads as "never changed since it was made". Backdating it to
+  // updated_at would be inventing a password change that may never have happened.
+  "ALTER TABLE accounts ADD COLUMN password_changed_at INTEGER NOT NULL DEFAULT 0",
   // Whether this row's address is a person's or a relay's. "relay" means the sign-in arrived here
   // forwarded by a tenant console, so `ip` is that machine's egress address and not the visitor's;
   // the relay wrote its own richer row for the same attempt at its own door. Empty is the ordinary
   // case, a client posting straight at this service. See recordLoginAttempt.
   "ALTER TABLE login_attempts ADD COLUMN via TEXT NOT NULL DEFAULT ''",
+  // The reason in words, for the R750's database, which has held this table since ADMIN-1. Both
+  // places are needed for the same reason the two mail columns below need both.
+  "ALTER TABLE login_attempts ADD COLUMN reason TEXT NOT NULL DEFAULT ''",
+  // SIGNIN-1b, the ALTER that row has been waiting for. Empty on every existing row, which is what
+  // those rows have always reported anyway: listLoginAttempts handed the panel a hardcoded "".
+  "ALTER TABLE login_attempts ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''",
   // MAIL-3. The provider's id for a message and the reason an outcome is what it is. The same two
   // columns are on the CREATE TABLE in SCHEMA and BOTH places are needed: the DDL makes them on a
   // database that has no mail_send_log, and these make them on the R750's, which has held that
@@ -606,7 +645,7 @@ export function openStore(options = {}) {
   const selectAccounts = statement("SELECT * FROM accounts ORDER BY created_at, email");
   const selectAccountsByTenant = statement("SELECT * FROM accounts WHERE tenant = ? ORDER BY created_at, email");
   const deleteAccountRow = statement("DELETE FROM accounts WHERE id = ?");
-  const updateAccountPassword = statement("UPDATE accounts SET password_json = ?, updated_at = ? WHERE id = ?");
+  const updateAccountPassword = statement("UPDATE accounts SET password_json = ?, updated_at = ?, password_changed_at = ? WHERE id = ?");
   const countAccountsRow = statement("SELECT COUNT(*) AS n FROM accounts");
 
   const insertTenant = statement("INSERT INTO tenants (slug, name, host, status, coolify_service_uuid, owner_email, last_error, box_container, box_ready, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)");
@@ -632,7 +671,7 @@ export function openStore(options = {}) {
   const updateDisabled = statement("UPDATE accounts SET disabled = ?, updated_at = ? WHERE id = ?");
   const countSuperAdminsRow = statement("SELECT COUNT(*) AS n FROM accounts WHERE super_admin = 1");
 
-  const insertAttempt = statement("INSERT INTO login_attempts (at, email, ip, outcome, tried_hash, tenant, via) VALUES (?, ?, ?, ?, ?, ?, ?)");
+  const insertAttempt = statement("INSERT INTO login_attempts (at, email, ip, outcome, tried_hash, tenant, via, reason, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
   const selectAttempts = statement("SELECT * FROM login_attempts WHERE at >= ? ORDER BY at DESC, id DESC LIMIT ?");
   const selectAttemptsByOutcome = statement("SELECT * FROM login_attempts WHERE at >= ? AND outcome = ? ORDER BY at DESC, id DESC LIMIT ?");
   const deleteOldAttempts = statement("DELETE FROM login_attempts WHERE at < ?");
@@ -864,7 +903,8 @@ export function openStore(options = {}) {
     setAccountPassword(id, password) {
       const account = selectAccountById.get(String(id));
       if (account == null) return null;
-      updateAccountPassword.run(JSON.stringify(hashPassword(password)), now(), String(id));
+      const changedAt = now();
+      updateAccountPassword.run(JSON.stringify(hashPassword(password)), changedAt, changedAt, String(id));
       return accountRow(selectAccountById.get(String(id)));
     },
 
@@ -902,7 +942,7 @@ export function openStore(options = {}) {
     // reaches this service from one egress address, so without the flag the whole fleet's console
     // sign-ins pile into one bucket that belongs to nobody. The relay wrote its own row for the same
     // attempt, with the real address on it, and the merge drops this one in favour of that.
-    recordLoginAttempt({ at = now(), email = "", ip = "", outcome = "refused", triedHash = "", tenant = "", via = "" }) {
+    recordLoginAttempt({ at = now(), email = "", ip = "", outcome = "refused", triedHash = "", tenant = "", via = "", reason = "", userAgent = "" }) {
       insertAttempt.run(
         Number(at), normalizeEmail(email), String(ip ?? ""), String(outcome),
         // Only ever a hex digest. A caller that passed a password here by mistake would be writing
@@ -910,6 +950,11 @@ export function openStore(options = {}) {
         /^[0-9a-f]{64}$/i.test(String(triedHash ?? "")) ? String(triedHash) : "",
         String(tenant ?? ""),
         String(via ?? "") === "relay" ? "relay" : "",
+        // A sentence this service wrote, capped so it cannot become somewhere a caller parks
+        // anything long, and with the newlines out so one row stays one row on a page.
+        String(reason ?? "").replace(/\s+/g, " ").trim().slice(0, ATTEMPT_REASON_LIMIT),
+        // SIGNIN-1b. A header a stranger writes, clipped and never trusted.
+        String(userAgent ?? "").slice(0, ATTEMPT_USER_AGENT_LIMIT),
       );
     },
 
@@ -923,11 +968,14 @@ export function openStore(options = {}) {
         door: "account",
         email: row.email ?? "",
         ip: row.ip ?? "",
-        userAgent: "",
+        // SIGNIN-1b. The row's own agent, which was a hardcoded empty string until this wave. A row
+        // written before the column landed still reads empty, and that is the truth about it.
+        userAgent: row.user_agent ?? "",
         triedHash: row.tried_hash ?? "",
         outcome: row.outcome ?? "refused",
         tenant: row.tenant ?? "",
         via: row.via ?? "",
+        reason: row.reason ?? "",
       }));
     },
 
@@ -1417,17 +1465,22 @@ export function openStore(options = {}) {
     loginLock({ email = "", ip = "", at = now(), countIp = true }) {
       const since = Number(at) - LOCKOUT_WINDOW_MS;
       const buckets = [
-        countFailuresByEmail.get(normalizeEmail(email), since),
-        countIp ? countFailuresByIp.get(String(ip ?? ""), since) : null,
+        ["this account", countFailuresByEmail.get(normalizeEmail(email), since)],
+        ["this address", countIp ? countFailuresByIp.get(String(ip ?? ""), since) : null],
       ];
       let retryAfter = 0;
-      for (const bucket of buckets) {
+      // WHICH BUCKET FIRED, so the reason written into the ledger can say it. "Somebody has been
+      // guessing at this account" and "this address has been knocking on several" are different
+      // things to do about it, and a retryAfter alone cannot tell them apart.
+      const which = [];
+      for (const [name, bucket] of buckets) {
         if (Number(bucket?.n ?? 0) < LOCKOUT_MAX_FAILURES) continue;
         const oldest = Number(bucket.oldest);
         retryAfter = Math.max(retryAfter, Math.ceil((oldest + LOCKOUT_WINDOW_MS - Number(at)) / 1000));
+        which.push(name);
       }
-      if (retryAfter <= 0) return { locked: false, retryAfter: 0 };
-      return { locked: true, retryAfter };
+      if (retryAfter <= 0) return { locked: false, retryAfter: 0, which: [] };
+      return { locked: true, retryAfter, which };
     },
   };
 

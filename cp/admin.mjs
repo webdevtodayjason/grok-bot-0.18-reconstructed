@@ -90,6 +90,7 @@ import {
   proxyKeyAlias,
   planModelTier,
   servedPlanModels,
+  visionFallbackTarget,
 } from "./proxy.mjs";
 
 export const ADMIN_SALT_NAME = "login-attempt-salt";
@@ -575,6 +576,25 @@ export function summariseByAccount(rows, {
   }
   summaries.sort((a, b) => (b.sprayed === a.sprayed ? b.attempts - a.attempts : (b.sprayed ? 1 : -1)));
   return summaries;
+}
+
+/**
+ * Which door a sign-in came in by, in the words a panel shows a person.
+ *
+ * THREE DOORS AND NOT TWO. `account` is an email and a password, checked here; `instance` is the
+ * operator's own console password, which names nobody; `link` is a sign-in link this service minted
+ * and the relay verified against the workspace's own key, where nothing is typed at all. The third
+ * is the one the Clients panel used to be blind to, and a workspace reached by link looked exactly
+ * like a workspace nobody had ever opened.
+ *
+ * An unknown or absent door reads as the email-and-password door, because that is the only one this
+ * service's own ledger records and its rows name no door of their own.
+ */
+export function signInKind(row) {
+  const door = String(row?.door ?? "");
+  if (door === "link") return "by sign-in link";
+  if (door === "instance") return "with the instance password";
+  return "with an email and password";
 }
 
 /**
@@ -1316,13 +1336,45 @@ export function createAdminApi({
         modelWhy = sweep?.month?.why ?? "the proxy's request log could not be read";
       }
     }
-    // The last time each person actually got in, out of the sign-in record. Read ONCE for the whole
-    // fleet rather than per account: the rows come back newest first, so the first one seen for an
-    // address is that person's most recent sign-in. "never" is a real answer and reads as one -- an
-    // account nobody has ever used is a thing an operator wants to see rather than a blank.
-    const lastSignIn = new Map();
-    for (const row of store.listLoginAttempts({ since: 0, outcome: "ok", limit: 5000 })) {
-      if (!lastSignIn.has(row.email)) lastSignIn.set(row.email, row.at);
+    // CP-FIX 2 and 3. Every sign-in each person has had, how they got in, and the last one that
+    // failed with the reason it failed. Read ONCE for the whole fleet rather than per account: the
+    // merged rows come back newest first, so the first one seen for an address is that person's
+    // most recent. "never" is still a real answer and still reads as one.
+    //
+    // BOTH LEDGERS FOR THE SUCCESSES, and that is the fix rather than a nicety. A sign-in-link
+    // login is verified by the relay against the workspace's own key and mints a cookie there: no
+    // password is typed, POST /v1/sessions is never called, and this service never hears about it.
+    // MEASURED ON THE R750 2026-09-12: beta-36's tester signed in by link at 13:52, his Titan then
+    // spent 9.7M input tokens in 38 minutes, and this panel said he had never logged in the whole
+    // time, because this count read this service's own ledger alone. mergeAttempts is the same
+    // reader the Sign-in attempts panel uses, so the one attempt a tenant console forwards -- once
+    // at its own door and once to this service -- is one sign-in here too and not two.
+    //
+    // THE FAILURES COME FROM THIS SERVICE'S LEDGER ONLY, deliberately. A relay row carries an
+    // outcome word and no reason, because the relay does not know why: the password check, the
+    // lockout and the disabled door are all decided here, and the sentence is written here with it.
+    const successes = await askRelay("/admin/login-attempts", "?outcome=ok&limit=5000");
+    const relaySuccessRows = successes.ok && Array.isArray(successes.body?.rows) ? successes.body.rows : [];
+    const signInsByEmail = new Map();
+    for (const row of mergeAttempts(relaySuccessRows, store.listLoginAttempts({ since: 0, outcome: "ok", limit: 5000 }))) {
+      const email = String(row.email ?? "").trim().toLowerCase();
+      if (email.length === 0) continue;
+      const seen = signInsByEmail.get(email);
+      if (seen == null) signInsByEmail.set(email, { count: 1, at: row.at, kind: signInKind(row) });
+      else seen.count += 1;
+    }
+    const failuresByEmail = new Map();
+    for (const row of store.listLoginAttempts({ since: 0, limit: 5000 })) {
+      if (String(row.outcome ?? "") === "ok") continue;
+      const email = String(row.email ?? "").trim().toLowerCase();
+      if (email.length === 0) continue;
+      const seen = failuresByEmail.get(email);
+      if (seen == null) {
+        failuresByEmail.set(email, {
+          count: 1,
+          last: { at: row.at, outcome: String(row.outcome ?? ""), reason: String(row.reason ?? "") },
+        });
+      } else seen.count += 1;
     }
     // AGENTS-CAP-2. How many bots each workspace may hold, read off each box. One sweep for the
     // whole panel, sharing the box cache window, so the column costs one round trip per customer
@@ -1331,10 +1383,22 @@ export function createAdminApi({
     const rows = [];
     for (const tenant of store.listTenants()) {
       const view = await tenantView(tenant);
-      const users = store.listAccountsForTenant(tenant.slug).map((account) => ({
-        ...publicAccount(account),
-        lastSignInAt: lastSignIn.get(account.email) ?? null,
-      }));
+      const users = store.listAccountsForTenant(tenant.slug).map((account) => {
+        const got = signInsByEmail.get(account.email) ?? null;
+        const missed = failuresByEmail.get(account.email) ?? null;
+        return {
+          ...publicAccount(account),
+          lastSignInAt: got?.at ?? null,
+          // The KIND of the last one, in words, because "logged in 20 minutes ago" and "was handed
+          // a link 20 minutes ago" are different facts about how somebody reached a workspace.
+          lastSignInKind: got?.kind ?? "",
+          signIns: got?.count ?? 0,
+          failures: missed?.count ?? 0,
+          // Always a reason or nothing, never a bare outcome word: "refused" on its own does not
+          // tell an operator that this person is holding a password somebody changed under him.
+          lastFailure: missed?.last ?? null,
+        };
+      });
       const ran = runningBySlug.get(tenant.slug) ?? [];
       // The flagship first when a workspace ran both it and its vision fallback, because the
       // fallback is not a thing anybody chose and is not what this workspace is "on".
@@ -1384,7 +1448,17 @@ export function createAdminApi({
     return {
       clients: rows,
       allowanceLevels: allowanceService == null ? [] : allowanceService.settings(rows[0]?.slug ?? "").levels,
-      proxy: { configured: spending.configured, why: spending.why }, measuredAt: new Date(now()).toISOString(),
+      proxy: { configured: spending.configured, why: spending.why },
+      // Whether the sign-in counts on these rows are whole. A link login exists only in the relay's
+      // ledger, so a relay that could not be asked makes this count short, and a short count has to
+      // say so rather than be read as "this person has never been here".
+      signIns: {
+        relay: successes.ok ? { reachable: true, why: "" } : { reachable: false, why: successes.why },
+        why: successes.ok
+          ? ""
+          : `The relay could not be asked for its own sign-in ledger (${successes.why}), so these counts are this control plane's ledger alone. A person who has only ever used a sign-in link reads as never until it answers.`,
+      },
+      measuredAt: new Date(now()).toISOString(),
     };
   }
 
@@ -2240,7 +2314,10 @@ export function createAdminApi({
           ? ""
           : "Every dollar figure for this model is zero until a cost per token is set on it, and a zero reads as 'they have not spent anything'.",
         supportsVision: rows.some((row) => row.supportsVision),
-        visionFallback: fallback.ok ? (fallback.fallbacks[0] ?? "") : first.visionFallback,
+        // The stored name read through visionFallbackTarget, so a deployment that names ITSELF is
+        // reported as having no route rather than as routing to itself. It reaches this branch only
+        // when the proxy could not be asked for the live row.
+        visionFallback: fallback.ok ? (fallback.fallbacks[0] ?? "") : visionFallbackTarget(first),
         vision: { ok: first.visionOk, at: first.visionAt, why: first.visionAt ? "" : "this model has never been asked whether it takes an image" },
         plans: first.plans,
         customerVisible: first.customerVisible,
@@ -2650,6 +2727,76 @@ export function createAdminApi({
     } catch (error) {
       return { ok: false, why: error?.name === "TimeoutError" ? "the relay did not answer in time" : `the relay did not answer (${notMeasured(error)})` };
     }
+  }
+
+  /**
+   * The relay's box door again, with the one method the two above cannot send. Modelled line for line
+   * on askRelayPost: a bearer, a deadline, and it never throws.
+   */
+  async function askRelayDelete(pathname, query = "") {
+    if (relayBase.length === 0 || String(config.relayToken ?? "").length === 0) {
+      return { ok: false, why: "this control plane has no relay configured (CP_RELAY_URL and CP_RELAY_TOKEN), and only the relay can write inside a box" };
+    }
+    try {
+      const response = await fetchImpl(`${relayBase}${pathname}${query}`, {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${config.relayToken}`, accept: "application/json" },
+        signal: AbortSignal.timeout(relayTimeoutMs),
+      });
+      const text = await response.text();
+      let parsed = null;
+      if (text.length > 0) { try { parsed = JSON.parse(text); } catch { parsed = null; } }
+      if (!response.ok) return { ok: false, why: `the relay answered ${response.status}${parsed?.message ? `: ${String(parsed.message).split("\n")[0].slice(0, 200)}` : ""}` };
+      return { ok: true, body: parsed ?? {} };
+    } catch (error) {
+      return { ok: false, why: error?.name === "TimeoutError" ? "the relay did not answer in time" : `the relay did not answer (${notMeasured(error)})` };
+    }
+  }
+
+  /**
+   * DEVICE-1. Every live device bearer one account holds, taken away.
+   *
+   * MEASURED ON THE R750 2026-09-10: removing an account left two of its bearers live on the demo
+   * workspace, good for the rest of their thirty days. A bearer is an HMAC payload plus a row in the
+   * TENANT'S OWN state directory, and the account row this service deletes is neither of those, so
+   * nothing about a delete reached them and the hand fix was `cp device revoke demo <id>` twice.
+   *
+   * BY `sub`, NEVER BY WORKSPACE. Two people can share a workspace -- accounts.tenant has no unique
+   * constraint -- so revoking the workspace's devices to close one account would sign a colleague's
+   * phone out. The device row's `sub` is the account id off the verified session token that minted
+   * it, which is exactly this account.
+   *
+   * It never throws and it never holds up the delete. A relay that cannot be asked means the bearers
+   * are still live, and the honest thing is to say so with the command that finishes the job rather
+   * than to leave the account in place because a list could not be read.
+   */
+  async function revokeDevicesForAccount({ slug, sub }) {
+    const workspace = String(slug ?? "");
+    const route = `/admin/tenants/${encodeURIComponent(workspace)}/devices`;
+    const listed = await askRelay(route, "");
+    if (!listed.ok) {
+      return {
+        asked: false, revoked: [], failed: [],
+        why: `the relay could not be asked for ${workspace}'s device list (${listed.why}), so a bearer this account holds is still live until it expires. Finish it with: node cp/cli.mjs device list ${workspace}`,
+      };
+    }
+    const rows = Array.isArray(listed.body?.devices) ? listed.body.devices : [];
+    const mine = rows.filter((row) => String(row?.id ?? "").length > 0
+      && String(row?.sub ?? "") === String(sub ?? "")
+      && (row?.revokedAt == null || Number(row.revokedAt) === 0));
+    const revoked = [];
+    const failed = [];
+    for (const row of mine) {
+      const gone = await askRelayDelete(route, `?id=${encodeURIComponent(String(row.id))}`);
+      if (gone.ok) revoked.push(String(row.id));
+      else failed.push({ id: String(row.id), why: gone.why });
+    }
+    return {
+      asked: true, revoked, failed,
+      why: failed.length === 0
+        ? ""
+        : `${failed.length} of ${mine.length} device bearers on ${workspace} would not revoke (${failed.map((one) => `${one.id}: ${one.why}`).join("; ")}). Those are still live: node cp/cli.mjs device revoke ${workspace} <id>`,
+    };
   }
 
   /**
@@ -4886,12 +5033,22 @@ export function createAdminApi({
 
   /**
    * One sign-in written down, from cp/server.mjs's own sign-in route. The PASSWORD comes in and the
-   * keyed hash goes to disk; a success gets no hash at all.
+   * keyed hash goes to disk; a success gets no hash at all. `reason` is the route's own words for
+   * why a refusal is a refusal, which is the difference between a panel an operator can act on and
+   * one that says "refused" about four different things.
    */
-  function recordAttempt({ email, ip, outcome, password = "", tenant = "", at = now(), via = "" }) {
+  function recordAttempt({ email, ip, outcome, password = "", tenant = "", at = now(), via = "", reason = "", userAgent = "" }) {
     store.recordLoginAttempt({
       at, email, ip, outcome, tenant, via,
+      // SIGNIN-1b. What the caller called itself, so markGateRows can label a row posted straight at
+      // api.titanium.bot. The value is a stranger's header; the store clips it and nothing here
+      // decides anything on it except the gate LABEL, which is ink and never a subtraction.
+      userAgent,
       triedHash: outcome === "ok" ? "" : hashTried(password, saltOf()),
+      // CP-FIX 3. The sentence the sign-in route decided, passed through as words. The store caps it
+      // and takes its newlines out; nothing derived from a password is ever in it, and the one field
+      // that is derived from one is the hash above.
+      reason: String(reason ?? ""),
     });
     // Pruned on the same call rather than on a timer, so the table cannot grow without bound on a
     // service nobody restarts.
@@ -4901,5 +5058,8 @@ export function createAdminApi({
   // ONBOARD-2. `onboarding` is on here for one reason: a shutdown and a gate both need to be able to
   // wait for an invite that is still going, and a background job writing into a store somebody has
   // already closed is a stack trace nobody can act on.
-  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system, spend, providers: providersAnswer, feedback, onboarding };
+  // DEVICE-1. revokeDevicesForAccount is on here for the same reason recordAttempt is: the account
+  // door lives in cp/server.mjs and the relay client lives in this file, and a second relay client
+  // in that one is how one of the two ends up without the bearer or without the timeout.
+  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system, spend, providers: providersAnswer, feedback, onboarding, revokeDevicesForAccount };
 }
