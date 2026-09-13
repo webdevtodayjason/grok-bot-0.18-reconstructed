@@ -68,6 +68,9 @@ import {
   parseRepo,
   proveRepoToken,
 } from "./feedback.mjs";
+// SUPPORT-1. The support inbox: the intake's own checks, the panel's answer and the one notification.
+// Its own file for the reason cp/feedback.mjs is.
+import { createSupport } from "./support.mjs";
 // PUSH-1. The two push credentials and the two proofs, in their own file for the reason
 // cp/feedback.mjs is in its own file: every function in it is a pure function over a pasted
 // credential and none of them needs a store, a config or a request to be tested.
@@ -4763,6 +4766,92 @@ export function createAdminApi({
     }
 
     // ---- end PUSH-1 -----------------------------------------------------------------------------
+
+    // ---- SUPPORT-1: the support inbox -----------------------------------------------------------
+    //
+    // Appended at the very bottom for the reason PUSH-1's block above says out loud: the end of this
+    // file is where parallel worktrees can each add a panel without meeting in a diff. Behind
+    // requireSuperAdmin like everything else here without saying so -- the guard ran before `rest`
+    // was computed and returned already if it failed.
+    //
+    // Three routes, and the first two are the panel. The third is the bearer the operator's own
+    // Cloudflare Email Worker presents at POST /v1/relay/support, and it is MINTED here rather than
+    // typed: a secret handed to a CLI as an argument is in a shell history file, and a secret
+    // somebody invents is as good as the afternoon they invented it. It is answered ONCE, the way a
+    // sign-in link is, and nothing on this service will ever show it again.
+    //
+    // The desk is built per request, the shape mailDirectory() uses: it closes over the store and
+    // holds nothing else, so two of them cannot disagree about anything.
+    if (rest[0] === "support") {
+      const desk = createSupport({ store, config, now, probeImpl, log });
+
+      if (rest.length === 1 && method === "GET") {
+        const sinceParam = url.searchParams.get("since");
+        const sinceMs = sinceParam
+          ? (Number.isFinite(Number(sinceParam)) ? Number(sinceParam) : Date.parse(sinceParam))
+          : 0;
+        json(response, 200, desk.panel({
+          state: String(url.searchParams.get("state") ?? ""),
+          sinceMs: Number.isFinite(sinceMs) ? sinceMs : 0,
+          limit: Number(url.searchParams.get("limit") ?? 200),
+        }));
+        return true;
+      }
+
+      if (rest.length === 2 && rest[1] === "token" && method === "POST") {
+        // A ledger row with the evidence on it and never the value, the shape every other credential
+        // door in this file writes. It is written BEFORE the mint so a process killed between the two
+        // leaves a row saying a rotation was started, which is the honest record: the worker's old
+        // token may or may not still work and the operator has to go and look.
+        const ledger = beginAction(guard, request, {
+          action: "support.token",
+          target: "support.inboundToken",
+          detail: "a new inbound token for the support email worker, which stops the old one working",
+        });
+        const minted = desk.mintInboundToken(guard.account?.email ?? "the operator token");
+        ledger.done(minted.evidence);
+        json(response, 200, {
+          // ONCE, to this caller, and written nowhere. The operator pastes it into their Worker's
+          // secret; there is no second copy anywhere in this product and no route that answers it.
+          token: minted.token,
+          evidence: minted.evidence,
+          message: "This is the only time this token is shown. Paste it into the email worker's"
+            + " SUPPORT_TOKEN secret now. Any worker still holding the old one stops being able to deliver.",
+        });
+        return true;
+      }
+
+      if (rest.length === 3 && rest[2] === "state" && method === "POST") {
+        const id = Number(rest[1]);
+        if (!Number.isFinite(id)) { json(response, 404, { error: "not_found", message: "There is no support message by that number." }); return true; }
+        const ledger = beginAction(guard, request, {
+          action: `support.${String(body?.state ?? "state")}`,
+          target: String(id),
+          detail: `support message ${id} to ${String(body?.state ?? "nothing")}`,
+        });
+        const answer = desk.setState(id, {
+          state: body?.state,
+          notes: body?.notes,
+          actor: guard.account?.email ?? "the operator token",
+        });
+        if (!answer.ok) {
+          ledger.failed(String(answer.message ?? answer.error));
+          json(response, answer.error === "not_found" ? 404 : 400, answer);
+          return true;
+        }
+        ledger.done();
+        // `message` is the sentence, the way every other answer in this file spells it, and `support`
+        // is the row. They were the other way round in the first cut of this block, which is how a
+        // panel ends up printing [object Object] at somebody.
+        json(response, 200, { message: answer.note, support: answer.row });
+        return true;
+      }
+
+      json(response, 405, { error: "method_not_allowed" });
+      return true;
+    }
+
+    // ---- end SUPPORT-1 --------------------------------------------------------------------------
 
     json(response, 404, { error: "not_found" });
     return true;

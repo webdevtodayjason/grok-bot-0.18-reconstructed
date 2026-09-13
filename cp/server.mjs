@@ -55,6 +55,10 @@ import { createCodeTasks } from "./code.mjs";
 // this file answers with. The routes are at the bottom of the dispatcher and the reasoning is there.
 import { beginKeyAction, keyDefinition, keyEvidence, keysDoor, parseKeyValue, proveKey, relaySecrets } from "./secrets.mjs";
 import { INTAKE_BYTES as FEEDBACK_BODY_BYTES, normalizeReport } from "./feedback.mjs";
+// SUPPORT-1. Mail to the operator's support address, forwarded by their own Cloudflare Email Worker.
+// Its own file for the reason cp/feedback.mjs and cp/push.mjs are: everything in it is a pure
+// function over a body a stranger wrote, plus one desk that closes over the store.
+import { createSupport } from "./support.mjs";
 import { createProxyClient, includedModelRows } from "./proxy.mjs";
 import { createAllowanceService } from "./allowance.mjs";
 import {
@@ -1358,6 +1362,32 @@ export function createApp(options = {}) {
       if (method !== "POST") return json(response, 405, { error: "method_not_allowed" });
       if (!requireRelay(request, response)) return undefined;
       return handleFeedbackIntake(request, response, body);
+    }
+
+    // ---- support mail, forwarded by the operator's own email worker (SUPPORT-1, docs/SUPPORT.md) --
+    //
+    // The method refusal first, the way every intake above does it: a wrong method learns nothing.
+    //
+    // THEN A CREDENTIAL THAT IS NOT CP_RELAY_TOKEN, which is the whole reason this route is three
+    // lines here and a file of its own. The caller is a Cloudflare Email Worker: code running in
+    // somebody else's datacentre with a secret in its environment, deployed by the operator and not
+    // by this repository. CP_RELAY_TOKEN opens GET /v1/relay/tenants, which hands out every
+    // customer's gateway token and every customer's derived session key, so a Worker holding it
+    // would be one leaked environment away from the whole fleet. It holds `support.inboundToken`
+    // instead, which opens this one door and nothing else, and cp/support.mjs checks it in constant
+    // time. The path sits under /v1/relay because what it carries is forwarded inbound traffic; the
+    // prefix is a description of the traffic and has never been a credential.
+    //
+    // The body is read at MAX_BODY_BYTES like every other route here, and cp/support.mjs's own limits
+    // are sized to fit inside it, so the worker in docs/SUPPORT.md clips to numbers that always land.
+    if (segments[1] === "relay" && segments[2] === "support" && segments.length === 3) {
+      if (method !== "POST") return json(response, 405, { error: "method_not_allowed" });
+      const desk = createSupport({
+        store, config, now, probeImpl,
+        log: (line) => { try { process.stderr.write(`${line}\n`); } catch { /* a closed stderr is not worth throwing over */ } },
+      });
+      const answered = await desk.receive({ presented: bearer(request), body });
+      return json(response, answered.status, answered.answer);
     }
 
     if (segments[1] === "sessions" && segments[2] === "current" && segments.length === 3) {

@@ -428,6 +428,53 @@ CREATE TABLE IF NOT EXISTS welcome_sends (
   detail     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS welcome_sends_tenant ON welcome_sends (tenant, id);
+-- SUPPORT-1. One row per message that arrived at support@titanium.bot, forwarded here by the
+-- operator's own Cloudflare Email Worker. docs/SUPPORT.md is the contract.
+--
+-- No TENANT_MIGRATIONS entry, for the reason written over admin_actions, feedback, voice_sessions
+-- and welcome_sends above: db.exec(SCHEMA) runs on every open and CREATE TABLE IF NOT EXISTS makes
+-- a table that is not there. Only a new COLUMN on a table that already exists needs an ALTER.
+--
+-- WHY from_addr AND to_addr RATHER THAN from AND to. Both are reserved words in SQL, so every
+-- statement touching them would have to quote them and the first one that forgot would be a syntax
+-- error at run time rather than at review. mail_send_log already spells its recipient to_addr for
+-- exactly this reason, and the row shape outside this file says from and to.
+--
+-- NOT A TENANT TABLE. A support mail comes from a stranger and belongs to the operator, not to a
+-- workspace, so there is no tenant column to stamp and nothing here is scoped per customer. That is
+-- the whole difference from feedback, whose rows arrive through a workspace's own console.
+--
+-- message_id IS UNIQUE, and it is what makes a retrying email worker safe. Cloudflare retries a
+-- Worker that threw or timed out, and a second delivery of the same message must be one row and one
+-- notification, not two. A message with no Message-ID header of its own is given a derived one by
+-- cp/support.mjs so this index still holds for it.
+--
+-- notified_at AND notify_detail ARE A RECEIPT AND NOT A PLAN. They say whether the operator's
+-- workspace was actually told about this message and, when it was not, the sentence saying why. A
+-- row with notified_at 0 and a detail is a message that is on this screen and was never announced,
+-- which is a thing an operator has to be able to see rather than infer.
+--
+-- NEVER PRUNED, the same as admin_actions and feedback and for the same reason: "did this person
+-- ever write to us before" is a question asked months later, and the rows are a few kilobytes each.
+CREATE TABLE IF NOT EXISTS support_messages (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  received_at   INTEGER NOT NULL,
+  from_addr     TEXT NOT NULL DEFAULT '',
+  to_addr       TEXT NOT NULL DEFAULT '',
+  subject       TEXT NOT NULL DEFAULT '',
+  text          TEXT NOT NULL DEFAULT '',
+  html_text     TEXT NOT NULL DEFAULT '',
+  message_id    TEXT NOT NULL DEFAULT '',
+  state         TEXT NOT NULL DEFAULT 'new',
+  notes         TEXT NOT NULL DEFAULT '',
+  notified_at   INTEGER NOT NULL DEFAULT 0,
+  notify_detail TEXT NOT NULL DEFAULT '',
+  decided_at    INTEGER NOT NULL DEFAULT 0,
+  decided_by    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS support_messages_at ON support_messages (received_at);
+CREATE INDEX IF NOT EXISTS support_messages_state ON support_messages (state);
+CREATE UNIQUE INDEX IF NOT EXISTS support_messages_message_id ON support_messages (message_id);
 `;
 
 /**
@@ -447,6 +494,29 @@ export const FEEDBACK_STATES = ["new", "approved", "filed", "suppressed", "close
  * and a table that is never pruned must not be a place one caller can fill.
  */
 export const FEEDBACK_FIELD_LIMIT = 256 * 1024;
+
+/**
+ * SUPPORT-1. The three states a support message can be in, and there is no fourth.
+ *
+ * `new` it arrived and nobody has answered it. `replied` somebody wrote back, from their own mail
+ * client, because this product sends no reply and says so rather than pretending to. `closed` it is
+ * dealt with, which covers an answered question and a piece of spam equally.
+ *
+ * There is deliberately no `suppressed`: the feedback table has one because a report a developer
+ * decided was not a bug is itself a record worth keeping apart from one that was fixed. A stranger's
+ * email has no such distinction -- it is open or it is done.
+ */
+export const SUPPORT_STATES = ["new", "replied", "closed"];
+
+/**
+ * 256 KB for the text of one support message, the same ceiling FEEDBACK_FIELD_LIMIT is.
+ *
+ * The relay intake refuses a request body over 64 KB long before this, and cp/support.mjs clamps
+ * every field well inside that. It is here for the reason the feedback one is: the store is the last
+ * thing between a caller and the disk, and a table that is never pruned must not be a place one
+ * caller can fill.
+ */
+export const SUPPORT_FIELD_LIMIT = 256 * 1024;
 
 /**
  * The setting names whose VALUE never comes back out of listSettings.
@@ -541,6 +611,29 @@ const feedbackRow = (row) => {
     decidedBy: row.decidedBy ?? "",
   };
 };
+
+// SUPPORT-1. One support message, as everything outside this file reads it.
+//
+// from and to rather than from_addr and to_addr, because the column names are a SQL accident and not
+// a fact about the message. Both times are numbers in the column and numbers here: the panel and the
+// route turn them into ISO strings, the same way the feedback row is handled, so there is one place
+// that decides the format a person reads.
+const supportRow = (row) => (row == null ? null : {
+  id: Number(row.id),
+  receivedAt: Number(row.received_at),
+  from: row.from_addr ?? "",
+  to: row.to_addr ?? "",
+  subject: row.subject ?? "",
+  text: row.text ?? "",
+  htmlText: row.html_text ?? "",
+  messageId: row.message_id ?? "",
+  state: row.state ?? "new",
+  notes: row.notes ?? "",
+  notifiedAt: Number(row.notified_at ?? 0),
+  notifyDetail: row.notify_detail ?? "",
+  decidedAt: Number(row.decided_at ?? 0),
+  decidedBy: row.decided_by ?? "",
+});
 
 // The columns added after the first release, applied to a database that already exists.
 //
@@ -758,6 +851,17 @@ export function openStore(options = {}) {
     heldFrames: Number(record.held_frames ?? 0),
     closeReason: String(record.close_reason ?? ""),
   });
+
+  // SUPPORT-1. The insert is OR IGNORE on purpose: message_id is unique, and a Cloudflare Email
+  // Worker that timed out and was retried must produce one row rather than a throw the caller has to
+  // tell apart from a real failure. The caller reads the row back by message id and knows which it
+  // got from whether the row it gets is the one it just wrote.
+  const insertSupport = statement("INSERT OR IGNORE INTO support_messages (received_at, from_addr, to_addr, subject, text, html_text, message_id, state, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '')");
+  const selectSupportRow = statement("SELECT * FROM support_messages WHERE id = ?");
+  const selectSupportByMessageId = statement("SELECT * FROM support_messages WHERE message_id = ?");
+  const countSupportRow = statement("SELECT COUNT(*) AS n FROM support_messages");
+  const countSupportStatesRow = statement("SELECT state, COUNT(*) AS n FROM support_messages GROUP BY state");
+  const markSupportNotifiedRow = statement("UPDATE support_messages SET notified_at = ?, notify_detail = ? WHERE id = ?");
 
   const insertFeedback = statement("INSERT INTO feedback (at, tenant, agent, agentName, tier, category, title, body, payload, state, issueUrl, decidedAt, decidedBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, '')");
   const selectFeedbackRow = statement("SELECT * FROM feedback WHERE id = ?");
@@ -1092,6 +1196,117 @@ export function openStore(options = {}) {
      * that may not exist.
      */
     tableNames() { return tableNamesRow.all().map((row) => String(row.name)); },
+
+    // ---- support mail (SUPPORT-1, docs/SUPPORT.md) ------------------------------------------------
+    //
+    // The table is not per tenant and these methods take no slug: a support message comes from a
+    // stranger and belongs to the operator. cp/support.mjs owns every clamp on the way in; what is
+    // here is the disk, the idempotency and the one ceiling below.
+
+    /**
+     * One message, stored, or the one already stored under that message id.
+     *
+     * Answers {row, stored}. `stored` false is the retry case and is NOT an error: the worker's first
+     * delivery already landed, the row is the one it landed as, and the caller must not notify again.
+     * That is the whole reason this answers a pair rather than a row.
+     *
+     * Refused rather than truncated, for the reason recordFeedback is: a message cut in half reads as
+     * a whole one, and the person answering it would be answering half a question.
+     */
+    recordSupportMessage({ receivedAt = now(), from = "", to = "", subject = "", text = "", htmlText = "", messageId = "", state = "new" }) {
+      const bodyText = String(text ?? "");
+      const htmlBody = String(htmlText ?? "");
+      if (bodyText.length > SUPPORT_FIELD_LIMIT || htmlBody.length > SUPPORT_FIELD_LIMIT) {
+        const error = new Error(`a support message has to fit in ${Math.round(SUPPORT_FIELD_LIMIT / 1024)} KB, and this one does not, so nothing was stored`);
+        error.code = "too_large";
+        throw error;
+      }
+      if (!SUPPORT_STATES.includes(String(state))) {
+        const error = new Error(`a support message's state has to be one of ${SUPPORT_STATES.join(", ")}`);
+        error.code = "bad_state";
+        throw error;
+      }
+      const id = String(messageId ?? "");
+      if (id.length === 0) {
+        // The unique index cannot hold without one, and cp/support.mjs derives one for a message
+        // whose sender sent no Message-ID. Reaching here means a caller skipped that, and storing a
+        // row that the next retry would duplicate is worse than refusing it.
+        const error = new Error("a support message needs a message id, which is what makes a retried delivery one row");
+        error.code = "bad_request";
+        throw error;
+      }
+      const before = selectSupportByMessageId.get(id);
+      if (before != null) return { row: supportRow(before), stored: false };
+      insertSupport.run(
+        Number(receivedAt), String(from ?? ""), String(to ?? ""), String(subject ?? ""),
+        bodyText, htmlBody, id, String(state),
+      );
+      return { row: supportRow(selectSupportByMessageId.get(id)), stored: true };
+    },
+
+    getSupportMessage(id) { return supportRow(selectSupportRow.get(Number(id))); },
+
+    getSupportMessageByMessageId(messageId) { return supportRow(selectSupportByMessageId.get(String(messageId ?? ""))); },
+
+    listSupportMessages({ state = "", sinceMs = 0, limit = 200 } = {}) {
+      const where = ["received_at >= ?"];
+      const values = [Number(sinceMs) || 0];
+      if (String(state ?? "").length > 0) { where.push("state = ?"); values.push(String(state)); }
+      const cap = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Math.min(Number(limit), 2000) : 200;
+      values.push(cap);
+      // Newest first, which is the order the panel draws and the order an operator wants: the message
+      // somebody is waiting on an answer to is the one that arrived last.
+      return db.prepare(`SELECT * FROM support_messages WHERE ${where.join(" AND ")} ORDER BY received_at DESC, id DESC LIMIT ?`)
+        .all(...values).map(supportRow);
+    },
+
+    countSupportMessages() { return Number(countSupportRow.get()?.n ?? 0); },
+
+    /** How many are in each state, counted in sqlite rather than by reading every row into node. */
+    countSupportByState() {
+      const counts = Object.fromEntries(SUPPORT_STATES.map((name) => [name, 0]));
+      for (const row of countSupportStatesRow.all()) {
+        if (SUPPORT_STATES.includes(String(row.state))) counts[String(row.state)] = Number(row.n ?? 0);
+      }
+      return counts;
+    },
+
+    /** The receipt for the notification, written after the attempt whichever way it went. */
+    markSupportNotified(id, { at = 0, detail = "" } = {}) {
+      markSupportNotifiedRow.run(Number(at) || 0, String(detail ?? "").slice(0, 300), Number(id));
+      return supportRow(selectSupportRow.get(Number(id)));
+    },
+
+    /** The state, and the operator's own notes beside it. Nothing the sender wrote is editable. */
+    updateSupportMessage(id, patch = {}) {
+      const current = selectSupportRow.get(Number(id));
+      if (current == null) return null;
+      const sets = [];
+      const values = [];
+      if (patch.state !== undefined) {
+        if (!SUPPORT_STATES.includes(String(patch.state))) {
+          const error = new Error(`a support message's state has to be one of ${SUPPORT_STATES.join(", ")}`);
+          error.code = "bad_state";
+          throw error;
+        }
+        sets.push("state = ?"); values.push(String(patch.state));
+      }
+      if (patch.notes !== undefined) {
+        const notes = String(patch.notes ?? "");
+        if (notes.length > SUPPORT_FIELD_LIMIT) {
+          const error = new Error("that note is larger than a note is carried at, so nothing was changed");
+          error.code = "too_large";
+          throw error;
+        }
+        sets.push("notes = ?"); values.push(notes);
+      }
+      if (patch.decidedBy !== undefined) { sets.push("decided_by = ?"); values.push(String(patch.decidedBy ?? "")); }
+      if (sets.length === 0) return supportRow(current);
+      sets.push("decided_at = ?"); values.push(now());
+      values.push(Number(id));
+      db.prepare(`UPDATE support_messages SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+      return supportRow(selectSupportRow.get(Number(id)));
+    },
 
     // ---- tenants -----------------------------------------------------------------------------
 
