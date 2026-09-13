@@ -470,6 +470,7 @@ Behind `CP_RELAY_TOKEN`:
 | route | what it does |
 | --- | --- |
 | `GET /v1/relay/tenants` | the registry. Section 4 |
+| `POST /v1/relay/sign-in-links/claim` | is this sign-in link still good, and spend it. Section 7 |
 
 Behind `CP_ADMIN_TOKEN`:
 
@@ -525,11 +526,70 @@ Two sides check a token, and they check different amounts:
   to call home on every request. So a signed-out session can still open the console for up to twelve
   hours, and the way to end one sooner is to rotate `CP_SESSION_SECRET`.
 
+There is exactly one exception to that second bullet and it is not a session: a **sign-in link** is
+checked with the control plane on every click. One click, not one request, which is why calling home is
+affordable there and is not affordable per request. See the next section.
+
 Both use the same code: `ui/session-token.mjs`, re-exported by `cp/session.mjs`, so there is one
 file and not two. Two implementations of one signature is how a customer ends up locked out of their
 own console on a Sunday.
 
     node cp/cli.mjs session verify <token>
+
+### Sign-in links, and the one question the relay does ask
+
+A sign-in link is a session token in a URL: `https://console.titanium.bot/login?sso=<token>`. The
+welcome mail carries one and **Copy a sign-in link** on the Clients panel mints one. Whoever holds it is
+signed in as that person, so it is sent the way a password is sent.
+
+**It is single use and revocable since ONBOARD-5, 2026-09-12.** Before that it was exactly what the two
+bullets above describe -- the relay checked a signature and an expiry and asked nobody anything -- which
+meant a link worked as many times as it was clicked for a full day and the only way to cancel one was to
+rotate `CP_SESSION_SECRET` and sign the whole fleet out. A link that reached the wrong inbox, a link in
+the history of a shared browser and a link a mail gateway logged were all a standing key to somebody's
+console that nobody could take back.
+
+How it works now, and it is four moving parts and no new token format:
+
+1. **The id is the token's own `jti`.** `ui/session-token.mjs` has always required that claim and fills
+   it with a `randomUUID`, so nothing about the token changed and that file was not touched -- which
+   matters, because it is the one file the relay and the control plane share.
+2. **The control plane writes the id down before the URL exists.** `cp/store.mjs`'s `sign_in_links`
+   holds the id, the workspace, who it is for, who minted it, when it expires, and what has happened to
+   it. It holds **no token**: an id cancels a link and can never use one. Both minters --
+   `cp/onboard.mjs` for the operator's button and `cp/welcome.mjs` for the mail -- record first and
+   refuse to mint at all if the row cannot be written, because a link this service has no row for is
+   refused at the door and handing one out would give a customer a credential that can never work.
+3. **The relay asks once per click.** `ui/server.mjs`'s `handleSso` verifies the signature and the
+   expiry as it always did, and then `POST /v1/relay/sign-in-links/claim` with `{id, tenant, from}`
+   behind `CP_RELAY_TOKEN` -- the same credential and the same shape as the registry read. The control
+   plane **spends** the link in the same statement that checks it, so two clicks a millisecond apart
+   cannot both be allowed. A token that did not verify is never asked about: there is nothing to ask.
+4. **A refusal is a 200 with a verdict**, because the question was answered. `good` signs them in;
+   `used`, `revoked`, `expired`, `unknown` and `another_tenant` do not. A 400 is reserved for a body
+   with no id or no workspace in it, which is a caller bug and not a verdict.
+
+**A relay that cannot ask refuses the click.** Not 401 but 503, and in words that point at the door that
+still works: *That sign-in link could not be checked just now, so it was not used. Try it again in a
+minute, or sign in with your email and password.* The relay cannot know whether a link has been used, and
+the safe reading of "I do not know" about a credential is no. A control plane outage therefore costs the
+link door and costs nothing else: the registry's last good answer still serves every workspace, every
+session already minted is untouched, and the operator's instance password is unaffected.
+
+**Every link minted before this shipped is refused.** Its `jti` was never recorded, so it matches no row
+and the answer is `unknown`: *That sign-in link is not on record here, so it cannot be used. Ask for a new
+one.* That invalidates any link mailed earlier, which is a real cost and the right trade -- the
+alternative is accepting an unrecorded link, which is the credential this change exists to retire.
+
+**What Revoke does and does not end.** A link is dead a moment after the Clients panel cancels it, with
+no cache to wait out, because the question is asked on every click. A person who has **already** signed
+in on that link keeps the session they were given: that is a session and not a link, and it ends on the
+relay's own twelve-hour clock or when the master is rotated. The two bullets above still describe
+sessions exactly.
+
+Rows outlive the links by seven days, then they are pruned on the next claim the way `sessions_revoked` is
+pruned on the next sign-in. "Was that link ever clicked, and from where" is asked days later, usually
+because somebody is worried about where a mail went.
 
 ---
 
