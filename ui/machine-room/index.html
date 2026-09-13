@@ -77,6 +77,10 @@
           <img class="window-lockup" src="assets/titanium-bot-logo.svg" alt="Titanium Bot" />
           <strong class="window-eyebrow">Machine Room</strong>
           <span class="allowance-workspace" id="allowance-workspace" hidden></span>
+          <button class="discover-pill" id="discover-pill" type="button" aria-controls="discover-menu" aria-expanded="false" hidden>
+            <span>Welcome to Titanium Bot</span>
+            <strong data-discover-pct>0%</strong>
+          </button>
           <button class="allowance-meter" id="allowance-meter" type="button" aria-controls="allowance-drawer" aria-expanded="false" hidden>
             <span class="allowance-meter-track" aria-hidden="true"><span class="allowance-meter-fill"></span></span>
             <span class="allowance-meter-pct">—</span>
@@ -140,6 +144,17 @@
           <button class="icon-button" id="logout-button" type="button" aria-label="Log out" title="Log out" hidden>⏻</button>
         </div>
       </header>
+      <aside class="discover-menu" id="discover-menu" aria-label="Welcome to Titanium Bot" hidden>
+        <header class="discover-menu-head">
+          <div><small>Welcome to Titanium Bot</small><strong data-discover-summary></strong></div>
+          <button class="icon-button compact" type="button" data-discover-close aria-label="Close welcome steps">×</button>
+        </header>
+        <div class="discover-progress" role="progressbar" aria-label="Product discovery progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <span data-discover-fill></span>
+        </div>
+        <ol class="discover-steps" data-discover-steps></ol>
+        <button class="discover-hide" type="button" data-discover-hide>Hide</button>
+      </aside>
       <aside class="allowance-drawer" id="allowance-drawer" aria-label="Token allowance" hidden>
         <button class="icon-button compact allowance-close" type="button" aria-label="Close token allowance">×</button>
         <small>Token allowance</small>
@@ -487,6 +502,7 @@
     <script src="gap-badge.js"></script>
     <script src="screen-tile.js"></script>
     <script src="files-viewer.js"></script>
+    <script src="discover.js"></script>
     <!-- PUSH-1. The fourth module on the same seam, and the same contract: it publishes
          window.__pushSettings at load, reads window.__mrUi lazily, carries its own stylesheet, and
          appends one section to the Settings panel when that panel opens. With this line removed the
