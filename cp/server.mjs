@@ -106,6 +106,21 @@ const MIN_PASSWORD_LENGTH = 8;
 const MAX_BODY_BYTES = 64 * 1024;
 const HARD_BODY_CEILING = 8 * 1024 * 1024;
 
+/**
+ * DISCOVER-1. The welcome bar's two control-plane facts, named here because the route below is the
+ * only thing on this service that knows about either of them.
+ *
+ * The flag's name is namespaced because person_flags is a general table and the next flag written
+ * into it will not be this one.
+ *
+ * TEN SECONDS is the brief's own number and it is a threshold rather than a formality: a realtime
+ * session is opened by pressing a button, and a press-and-think-better-of-it leaves a settled row of
+ * two or three seconds behind it. "Make a voice call" means a call happened, so the row has to be
+ * long enough that nothing else explains it.
+ */
+export const DISCOVER_HIDDEN_FLAG = "discover.hidden";
+export const DISCOVER_VOICE_CALL_SECONDS = 10;
+
 const json = (response, status, body, headers = {}) => {
   const text = JSON.stringify(body ?? {});
   response.writeHead(status, {
@@ -1422,6 +1437,59 @@ export function createApp(options = {}) {
         const answer = voice.closeSession(body ?? {});
         return json(response, answer.ok ? 200 : (answer.error === "not_found" ? 404 : 400), answer);
       }
+    }
+
+    // ---- the welcome bar's control-plane half (DISCOVER-1) --------------------------------------
+    //
+    // Beside the voice routes above, behind the same one credential, and shaped the way they are: the
+    // slug rides in the query on the read and in the body on the write, and a wrong method is refused
+    // before anything is looked up.
+    //
+    // TWO FACTS IN ONE ROUND TRIP, and that is deliberate. The relay draws six steps and each one has
+    // its own 1.5 s budget; two of the seven things it needs live here (whether this workspace has
+    // ever finished a voice call, and whether THIS PERSON has hidden the bar), and asking twice would
+    // put two control-plane round trips on a poll that runs every sixty seconds while the list is
+    // open. They fail together, which is the honest cost: a read that does not answer leaves the
+    // voice step not-done and the bar shown, which is what both defaults already are.
+    //
+    // THE PERSON IS THE RELAY'S OWN WORD FOR THEM and is taken on trust from this credential, exactly
+    // as the slug is on every other relay route here. The relay resolved it from a verified session
+    // (ui/server.mjs subOf) before it called; this service cannot re-derive it and must not try, for
+    // the reason ui/session-token.mjs states -- the relay does not ask this service to validate
+    // anything on a request path, and a lookup here would make a preference write depend on it.
+    //
+    // NOTHING ON THIS ROUTE IS REACHABLE BY A CUSTOMER'S BROWSER. It answers a count and a boolean
+    // and it takes a boolean, so there is nothing here to raise, spend or read out of somebody else's
+    // workspace even if the relay's own credential leaked -- which is not the argument for the guard,
+    // only the reason a mistake in it is not a second outage.
+    if (segments[1] === "relay" && segments[2] === "discover" && segments.length === 3) {
+      if (method !== "GET" && method !== "POST") return json(response, 405, { error: "method_not_allowed" });
+      if (!requireRelay(request, response)) return undefined;
+      const slug = String((method === "GET" ? url.searchParams.get("slug") : body?.slug) ?? "").trim();
+      if (slug.length === 0) return json(response, 400, { error: "bad_request", message: "Name the workspace." });
+      // "" is a real person here and is the instance-password door, which names nobody and reads as
+      // the workspace's own everywhere in the relay. It is not a missing argument.
+      const sub = String((method === "GET" ? url.searchParams.get("sub") : body?.sub) ?? "");
+      if (method === "POST") {
+        if (typeof body?.hidden !== "boolean") {
+          return json(response, 400, { error: "bad_request", message: "hidden is true or false." });
+        }
+        // Show CLEARS the row rather than writing a false. See cp/store.mjs setPersonFlag: never
+        // chosen and chose the default are the same fact, and two spellings of it is how a later
+        // reader ends up with three states for a checkbox.
+        store.setPersonFlag({ tenant: slug, sub, name: DISCOVER_HIDDEN_FLAG, value: body.hidden ? "1" : "", at: now() });
+        return json(response, 200, { ok: true, tenant: slug, hidden: body.hidden === true });
+      }
+      return json(response, 200, {
+        ok: true,
+        tenant: slug,
+        hidden: store.getPersonFlag({ tenant: slug, sub, name: DISCOVER_HIDDEN_FLAG }) === "1",
+        // The workspace's, not the person's: a call is made on a workspace's minutes and its rows
+        // carry no person at all (see the voice_sessions DDL), so pretending otherwise here would be
+        // a number this service cannot stand behind.
+        voiceCalls: store.countSettledVoiceSessions({ tenant: slug, minSeconds: DISCOVER_VOICE_CALL_SECONDS }),
+        voiceCallSeconds: DISCOVER_VOICE_CALL_SECONDS,
+      });
     }
 
     // The operator's read, and it is HERE rather than under /v1/admin for the structural reason

@@ -96,6 +96,10 @@ import {
   looksLikeDeviceBearer, mintRequest, newDeviceId, parseAppOrigins, publicDevice, readDeviceToken,
   signDeviceToken,
 } from "./auth-device.mjs";
+// DISCOVER-1. The welcome bar's six steps. Every rule about what counts as evidence, every budget and
+// the one flag this relay keeps for it are in that file; this one holds the mount, the deps it cannot
+// reach for itself, and the one line in the desktop upgrade that records a screen being opened.
+import { DISCOVER_STATE_FILE, createDiscoverEdge } from "./discover-edge.mjs";
 import { loadRelayHooks } from "./relay-hooks.mjs";
 import { stateDir, stateFile } from "./state-dir.mjs";
 import { createLoginLedger, filterAttempts } from "./login-ledger.mjs";
@@ -3864,6 +3868,75 @@ function codeEdge() {
   return codeEdgeBuilt;
 }
 
+// ---- the welcome bar (DISCOVER-1, docs/DISCOVER-1.md) ------------------------------------------
+//
+// ONE EDGE FOR THE PROCESS and the tenant travels in the arguments, which is what codeEdge above does
+// and for the same reason: everything per-tenant here is a file path or a slug, so a map of edges
+// would be a cache of nothing.
+//
+// The five deps are the five things ui/discover-edge.mjs cannot reach for itself, and not one of them
+// is new capability. The gateway call is jobBusCall, which every other edge on this relay already
+// makes; the device rows are the same store /auth/devices reads; the state file is this workspace's
+// own directory; and the two control-plane calls carry the credential this relay already holds and
+// ask for a count and a boolean.
+//
+// WITH NO CONTROL PLANE cpRead and cpWrite are null, which is every single-box install and every gate
+// on a laptop. The bar still draws: five of the six steps are read from the box and this relay, the
+// voice step reads as unreadable rather than as zero, and Hide answers in words that there is nowhere
+// to keep the choice rather than pretending it was kept.
+let discoverEdgeBuilt = null;
+function discoverEdge() {
+  if (discoverEdgeBuilt != null) return discoverEdgeBuilt;
+  const cpUrl = String(RELAY?.cpUrl ?? "");
+  const relayToken = String(RELAY?.relayToken ?? "");
+  const cpConfigured = cpUrl.length > 0 && relayToken.length > 0;
+  discoverEdgeBuilt = createDiscoverEdge({
+    readBody,
+    fail,
+    // The same upstream call the mail sweep and the mail edge make. It throws on anything but a 200,
+    // which is what turns a host with no such command into an unticked row rather than into a step
+    // that reads somebody else's answer.
+    gatewayCall: async (t, command, args, { signal } = {}) => {
+      const upstream = await fetch(`${t.gateway}/api/${command}`, {
+        method: "POST",
+        headers: t.headers({ "content-type": "application/json" }),
+        body: JSON.stringify(args ?? {}),
+        ...(signal == null ? {} : { signal }),
+      });
+      if (upstream.status !== 200) throw new Error(`${command} answered HTTP ${upstream.status}`);
+      return JSON.parse(await upstream.text());
+    },
+    cpRead: !cpConfigured ? null : async ({ slug, sub, signal }) => {
+      const query = new URLSearchParams({ slug: String(slug ?? ""), sub: String(sub ?? "") });
+      const answer = await fetch(`${cpUrl}/v1/relay/discover?${query.toString()}`, {
+        headers: { authorization: `Bearer ${relayToken}`, accept: "application/json" },
+        ...(signal == null ? {} : { signal }),
+      });
+      if (!answer.ok) throw new Error(`the control plane answered HTTP ${answer.status}`);
+      return await answer.json();
+    },
+    cpWrite: !cpConfigured ? null : async ({ slug, sub, hidden, signal }) => {
+      const answer = await fetch(`${cpUrl}/v1/relay/discover`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${relayToken}`, "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({ slug: String(slug ?? ""), sub: String(sub ?? ""), hidden: hidden === true }),
+        ...(signal == null ? {} : { signal }),
+      });
+      if (!answer.ok) throw new Error(`the control plane answered HTTP ${answer.status}`);
+      return true;
+    },
+    devicesFor: (t, sub) => deviceStoreFor(t)?.forSub(sub) ?? [],
+    stateFileFor: (t) => {
+      if (t == null) return "";
+      t.ensureDir();
+      return t.file(DISCOVER_STATE_FILE);
+    },
+    ownLikeParent,
+    log: (line) => console.log(line),
+  });
+  return discoverEdgeBuilt;
+}
+
 /** One sweep at start and one every 60 s: the wall clock, the orphans a restart left behind, and the
  *  networks with nothing in them. Mounted exactly where mailSweepStart is and never awaited, for the
  *  same reason: a docker daemon that is slow must not stop this console coming up.
@@ -4959,6 +5032,14 @@ const server = createServer(async (req, res) => {
     // like every other console route; it reports the key as a boolean and never as a value, and since
     // KEYS-1 a customer's save carrying one is refused rather than written.
     if (url.pathname === "/voice/settings") return await voiceEdgeFor(t, voiceDeps).handleSettings(req, res);
+    // DISCOVER-1. The welcome bar: the six steps for the person asking, and their own Hide and Show.
+    // Behind the session like every console route above, resolved to THIS workspace, and keyed on the
+    // same subOf the device list and the talk mode are keyed on -- two accounts share one workspace,
+    // and one person hiding a bar must not take it off their colleague's screen. Every rule about
+    // what ticks a step, and why nothing here can be told that a step is done, is in ui/discover-edge.mjs.
+    if (url.pathname === "/discover" || url.pathname === "/discover/hide" || url.pathname === "/discover/show") {
+      return await discoverEdge().handle(req, res, url, { t, sub: subOf(req) });
+    }
     // The console's half of coding tasks: what is running, a Stop, and the limits in plain words.
     // Behind the session like every other console route, scoped to the session's own tenant, and it
     // reads the SAME rows the box route reads so the strip in the Computer card and the bot can never
@@ -5031,6 +5112,14 @@ server.on("upgrade", (req, socket, head) => {
   // that never asked whose box it was aiming at.
   const t = contextOf(slug);
   if (t == null) return socket.end("HTTP/1.1 503 Service Unavailable\r\nconnection: close\r\n\r\n");
+  // DISCOVER-1 step 5, "Watch his screen". THIS is the moment the desktop is opened and the only
+  // place in this product that knows it happened: the pane is a websocket and a websocket never
+  // reaches the request handler above. Recorded AFTER both refusals, so a socket that was turned away
+  // never ticks a step; not awaited and unable to fail the upgrade, because a person whose screen
+  // would not open because a checklist could not be written would be the worst trade in this wave.
+  // The edge writes nothing when this person's flag is already set, so a long session of opening and
+  // closing the pane is one write and then none.
+  void discoverEdge().noteDesktop({ t, sub: subOf(req) }).catch(() => {});
   return relayVncSocket(t, req, socket, head, Number(match[1]));
 });
 
