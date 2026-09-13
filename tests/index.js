@@ -256,6 +256,12 @@ import "./voice-transcription.test.mjs";
 // Voice card as they are sliced out of the live console files.
 import "./voice-capture.test.mjs";
 import "./machine-room-voice.test.mjs";
+// The host's own two halves of a spoken turn, both of which were written and then never run by the
+// suite. VOICE-3's draft (`getTurnDraft`) landed on 2026-09-12 with its suite missing from this file,
+// which is the same fault VOICE-1 recorded for seven of its own eight suites; VOICE-16's brief
+// (`getVoiceBrief`) is added here in the commit that writes it, rather than a wave later.
+import "./voice-turn-draft.test.mjs";
+import "./voice-brief.test.mjs";
 
 // BOTS-4: the write path behind Add on a catalog row. The host verb that seeds an agent's own
 // remembered facts and refuses one over the store's ceiling rather than storing it short, and the

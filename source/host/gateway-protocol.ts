@@ -81,6 +81,11 @@ export const SAND_GATEWAY_COMMANDS = {
   // older host: it answers "unknown gateway method" and the relay degrades to reading the finished
   // entry, which is what it did for the whole of VOICE-1.
   getTurnDraft: (api: GatewayApi, body: string) => api.getTurnDraft(parseCommandArgs(body)),
+  // VOICE-16. An agent's persona, its remembered facts and the last turns of its conversation, for
+  // ui/voice-edge.mjs to build one realtime session out of. Safe to call on an older host: it answers
+  // "unknown gateway method" and the relay dials with the phone-line instructions it used before,
+  // byte for byte.
+  getVoiceBrief: (api: GatewayApi, body: string) => api.getVoiceBrief(parseCommandArgs(body)),
   getAgentEvidence: (api: GatewayApi, body: string) => api.getAgentEvidence(parseCommandArgs(body)),
   getAgentActionAudit: (api: GatewayApi, body: string) => api.getAgentActionAudit(parseCommandArgs(body)),
   repairAgentTranscript: (api: GatewayApi, body: string) => api.repairAgentTranscript(parseCommandArgs(body)),

@@ -26,10 +26,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { startStubRealtime } from "./helpers/stub-realtime.mjs";
 import {
-  GREETINGS, MAX_TITAN_ROUNDS, TURN_WAIT_CAP_S, pickGreeting,
-  isUnknownGatewayMethod, makeCallDedupe, makeSentenceCutter, makeTurnRunner, makeVoiceEdge,
-  makeVoicePolicy, matchYesNo, pendingCardsOf, remainderOf, resolveHeldCard, resolveVoiceAgent,
-  splitSentences, toolCallsOf, writeVoiceSettings,
+  GREETINGS, MAX_TITAN_ROUNDS, TURN_WAIT_CAP_S, VOICE_NOTE_MAX_CHARS, pickGreeting,
+  isUnknownGatewayMethod, makeCallDedupe, makeSentenceCutter, makeSpokenExchange, makeTurnRunner,
+  makeVoiceEdge, makeVoicePolicy, matchYesNo, pendingCardsOf, phoneLineInstructions, readVoiceBrief,
+  remainderOf, resolveHeldCard, resolveVoiceAgent, splitSentences, titanTool, toolCallsOf,
+  voiceCallNote, voiceInstructions, writeVoiceSettings,
 } from "../ui/voice-edge.mjs";
 
 // ---- a clock and a gateway nobody has to wait for -------------------------------------------------
@@ -51,10 +52,11 @@ function fakeClock() {
  * answers the projection the host would hand out, or null for "no turn open". A box whose host does
  * not carry the command is spelled `draft: "unknown"`, which throws the 404 the real gateway throws.
  */
-function fakeGateway({ agents = [{ id: "a1", name: "Chief of Staff", isRunning: true }], tail = () => [], fail = null, draft = null } = {}) {
+function fakeGateway({ agents = [{ id: "a1", name: "Chief of Staff", isRunning: true }], tail = () => [], fail = null, draft = null, brief = null } = {}) {
   const calls = [];
   let polls = 0;
   let draftReads = 0;
+  let briefReads = 0;
   const call = async (command, args = {}) => {
     calls.push({ command, args });
     if (typeof fail === "function") {
@@ -69,6 +71,15 @@ function fakeGateway({ agents = [{ id: "a1", name: "Chief of Staff", isRunning: 
       if (draft === "unknown") throw new Error("getTurnDraft answered HTTP 404: unknown gateway method: getTurnDraft");
       return { draft: typeof draft === "function" ? draft(draftReads, args) : null };
     }
+    // VOICE-16. The same two shapes as the draft: `"unknown"` is a host that predates the command and
+    // throws the 404 the real gateway throws; anything else is what the host would hand out, and null
+    // is a box that does not hold that agent. The DEFAULT IS null, so every test written before this
+    // wave still exercises the phone line it was written against.
+    if (command === "getVoiceBrief") {
+      briefReads += 1;
+      if (brief === "unknown") throw new Error("getVoiceBrief answered HTTP 404: unknown gateway method: getVoiceBrief");
+      return { brief: typeof brief === "function" ? brief(args, briefReads) : brief };
+    }
     if (command === "resolveAutoReviewApproval" || command === "resolveLocalToolPermission" || command === "respondToWidget") return { ok: true };
     return {};
   };
@@ -77,8 +88,21 @@ function fakeGateway({ agents = [{ id: "a1", name: "Chief of Staff", isRunning: 
     of: (command) => calls.filter((row) => row.command === command),
     get polls() { return polls; },
     get draftReads() { return draftReads; },
+    get briefReads() { return briefReads; },
   };
 }
+
+/** The shape source/host/extensions/transcript/voice-brief.ts projects. */
+const briefRow = ({
+  persona = "You run a two-person managed services shop with Richard.",
+  facts = ["the deploy gate runs on the R750", "Richard Avery is the business partner"],
+  recent = [
+    { role: "person", text: "did the gate go green in the end", at: 1_700_000_000_000 },
+    { role: "agent", text: "it did, both legs passed on the second run", at: 1_700_000_000_100 },
+  ],
+  agentName = "Titan",
+  workspaceName = "Acme",
+} = {}) => ({ persona, facts, recent, agentName, workspaceName });
 
 /** The shape source/host/extensions/transcript/turn-draft.ts projects. */
 const draftRow = (text, { nonce = "", complete = false, turnId = "att1", turnEpoch = 1 } = {}) => ({
@@ -520,6 +544,230 @@ test("a streamed turn that runs out of time still owes the person the sentence s
   // An empty `remaining` here would have the relay fall silent on the turn that needs words most.
   assert.ok(result.text.includes("5 seconds"), result.text);
   assert.deepEqual(result.remaining, splitSentences(result.text));
+});
+
+// ---- VOICE-16: the voice has the agent's brain ----------------------------------------------------
+//
+// THE PHONE LINE, LITERALLY. This is the string every voice session was given until VOICE-16 and the
+// string a box whose host has no `getVoiceBrief` is still given. It is written out here rather than
+// compared against the function that produces it, because the claim being pinned is "byte for byte
+// what it was", and a test that called the same function would pass through any rewrite of it.
+const PHONE_LINE_TITAN = "You are the voice of Titan. You are his mouth and his ears and nothing else."
+  + " You have no memory, no tools and no knowledge of your own. Every single thing the person says"
+  + " goes to him through the titan function, including short answers like yes, no, that one, or go"
+  + " ahead. Never answer from your own knowledge, never guess, never make something up to fill a"
+  + " silence. He can take five to twenty-five seconds. Say one short natural thing while you wait and"
+  + " then read out exactly what comes back, in a normal speaking voice, without reading out"
+  + " punctuation, headings, file paths character by character, or anything that sounds like a screen"
+  + " being read. If he asks the person to confirm something, read it out as a plain question and send"
+  + " their answer straight back to him. If you get told something went wrong, say so plainly. Keep"
+  + " your own words short. You are a phone line, not a participant.";
+
+test("no brief is the phone line, byte for byte, whichever way it is asked for", () => {
+  assert.equal(phoneLineInstructions("Titan"), PHONE_LINE_TITAN);
+  assert.equal(voiceInstructions({ agentName: "Titan", brief: null }), PHONE_LINE_TITAN);
+  // The three other ways a caller can mean "no brief", including buildSession's own default.
+  assert.equal(voiceInstructions({ agentName: "Titan" }), PHONE_LINE_TITAN);
+  assert.equal(voiceInstructions("Titan"), PHONE_LINE_TITAN);
+  assert.equal(voiceInstructions(), PHONE_LINE_TITAN);
+});
+
+test("the brief's persona, facts and last turn are all in the instructions", () => {
+  const said = voiceInstructions({ agentName: "Titan", brief: briefRow() });
+  assert.ok(said.includes("You run a two-person managed services shop with Richard."), "the persona");
+  assert.ok(said.includes("the deploy gate runs on the R750"), "the first fact");
+  assert.ok(said.includes("Richard Avery is the business partner"), "the second fact");
+  assert.ok(said.includes("it did, both legs passed on the second run"), "the last turn");
+  assert.ok(said.includes("Them: did the gate go green in the end"), "the person's side of it, labelled");
+  assert.ok(said.includes("You: it did, both legs passed on the second run"), "and the agent's own");
+  // And it is the agent, not a line for the agent. The old wording is gone.
+  assert.ok(said.startsWith("You are Titan, and you are talking out loud"));
+  assert.ok(!said.includes("You are the voice of Titan"));
+  assert.ok(!said.includes("you have no memory"));
+});
+
+test("the instructions still say that an answer to a question goes back through the tool", () => {
+  // THE ONE RULE THAT CANNOT MOVE. A spoken yes against a held card is resolved by the relay through
+  // the approval path (dispatch reads matchYesNo against session.heldCard), so a voice that answered
+  // "yes, go ahead" out of its own head would leave the card open with nothing approved.
+  const said = voiceInstructions({ agentName: "Titan", brief: briefRow() });
+  assert.match(said, /confirm, approve or choose/);
+  assert.match(said, /even when it is only yes or no/);
+  assert.match(said, /Never treat a yes as done yourself/);
+});
+
+test("an empty brief is still the agent and never the phone line", () => {
+  // A brand new bot with no description, no facts and no conversation. There is nothing to put in the
+  // three sections, and the voice must still be told it IS the agent rather than a line for one.
+  const said = voiceInstructions({ agentName: "Nova", brief: { persona: "", facts: [], recent: [], agentName: "Nova", workspaceName: "" } });
+  assert.ok(said.startsWith("You are Nova, and you are talking out loud"));
+  assert.ok(!said.includes("WHO YOU ARE"), "no empty heading");
+  assert.ok(!said.includes("WHAT YOU REMEMBER"));
+  assert.ok(!said.includes("WHAT THE TWO OF YOU HAVE BEEN SAYING"));
+  assert.ok(said.includes("WHEN TO USE THE titan FUNCTION"));
+});
+
+test("the tool is a job now: do it, look it up, or check it, and not every syllable", () => {
+  const tool = titanTool();
+  assert.equal(tool.name, "titan");
+  assert.match(tool.description, /DO something, to LOOK something up, or to CHECK something/);
+  assert.match(tool.description, /Do NOT call it for ordinary conversation/);
+  // The old instruction is gone, and it was the whole reason a conversation was a sequence of pauses.
+  assert.ok(!/EVERYTHING the person asks or tells you/.test(tool.description));
+});
+
+test("readVoiceBrief answers null for every way it can fail, and logs which one", async () => {
+  const lines = [];
+  const log = (line) => lines.push(String(line));
+  // An older host. `isUnknownGatewayMethod` is the existing reader and the only 404 that counts.
+  const old = fakeGateway({ brief: "unknown" });
+  assert.equal(await readVoiceBrief(old.call, "a1", { log }), null);
+  assert.ok(lines.some((line) => line.includes("not on this box's host")), lines.join(" | "));
+  // A box that does not hold that agent. The host answers this as a fact, not an error.
+  const none = fakeGateway({ brief: null });
+  assert.equal(await readVoiceBrief(none.call, "a1", { log }), null);
+  assert.ok(lines.some((line) => line.includes("holds no brief for that agent")), lines.join(" | "));
+  // A read that throws for any other reason is not a 404 and says so differently.
+  const broken = { call: async () => { throw new Error("the box answered HTTP 503"); } };
+  assert.equal(await readVoiceBrief(broken.call, "a1", { log }), null);
+  assert.ok(lines.some((line) => line.includes("could not read the brief")), lines.join(" | "));
+  // And no agent at all never asks.
+  const unused = fakeGateway({ brief: briefRow() });
+  assert.equal(await readVoiceBrief(unused.call, "", { log }), null);
+  assert.equal(unused.briefReads, 0);
+});
+
+test("a wedged box does not hold the microphone up: the brief read has its own budget", async () => {
+  const lines = [];
+  // A read that never answers, which is what a wedged box does for the 20 s of makeGatewayCall's own
+  // timeout. A person pressing the talk button must not wait that long for a microphone.
+  const hung = { call: () => new Promise(() => {}) };
+  const started = Date.now();
+  assert.equal(await readVoiceBrief(hung.call, "a1", { timeoutMs: 30, log: (line) => lines.push(String(line)) }), null);
+  assert.ok(Date.now() - started < 2000, "it gave up rather than waiting on the box");
+  assert.ok(lines.some((line) => line.includes("gave up on the brief")), lines.join(" | "));
+});
+
+test("the workspace's own name beats the box's, because the box answers a container name", async () => {
+  const gw = fakeGateway({ brief: briefRow({ workspaceName: "titanbot-acme-abc123" }) });
+  const mine = await readVoiceBrief(gw.call, "a1", { workspaceName: "Acme" });
+  assert.equal(mine.workspaceName, "Acme");
+  // And with no tenant name to hand, the box's own answer is better than nothing.
+  const theirs = await readVoiceBrief(gw.call, "a1", {});
+  assert.equal(theirs.workspaceName, "titanbot-acme-abc123");
+});
+
+test("a malformed brief is read without throwing and without carrying rubbish into the prompt", async () => {
+  const gw = fakeGateway({ brief: { persona: 7, facts: ["ok", "", null, 3], recent: [{ role: "nonsense", text: "kept" }, { text: "" }, null], agentName: null } });
+  const brief = await readVoiceBrief(gw.call, "a1", {});
+  assert.equal(brief.persona, "");
+  assert.deepEqual(brief.facts, ["ok"]);
+  assert.deepEqual(brief.recent, [{ role: "agent", text: "kept", at: 0 }]);
+  assert.equal(brief.agentName, "");
+});
+
+// ---- VOICE-16: the one memory a call leaves behind ------------------------------------------------
+
+test("the exchange keeps both sides in the order they were said, and a later copy replaces an earlier", () => {
+  const exchange = makeSpokenExchange();
+  exchange.person("item_1", "what is the");
+  exchange.person("item_1", "what is the gate doing");
+  exchange.voice("response.output_audio_transcript.delta", { item_id: "item_2", delta: "Two legs " });
+  exchange.voice("response.output_audio_transcript.delta", { item_id: "item_2", delta: "are red." });
+  exchange.person("item_3", "fix them");
+  assert.deepEqual(exchange.rows, [
+    { who: "person", text: "what is the gate doing" },
+    { who: "voice", text: "Two legs are red." },
+    { who: "person", text: "fix them" },
+  ]);
+});
+
+test("the settled transcript of an item overwrites the deltas rather than appearing twice", () => {
+  const exchange = makeSpokenExchange();
+  exchange.voice("response.output_audio_transcript.delta", { item_id: "item_1", delta: "Two legs are re" });
+  // The brief named `response.output_item.done`, and both vendors emit it for a spoken message. It
+  // carries the WHOLE transcript, so it replaces what the deltas had built on the same item.
+  exchange.voice("response.output_item.done", {
+    response_id: "resp_1",
+    item: { id: "item_1", type: "message", role: "assistant", content: [{ type: "audio", transcript: "Two legs are red." }] },
+  });
+  assert.deepEqual(exchange.rows, [{ who: "voice", text: "Two legs are red." }]);
+});
+
+test("the items on response.done are read too, and a function call among them is not a spoken word", () => {
+  const exchange = makeSpokenExchange();
+  exchange.voice("response.done", {
+    response: {
+      id: "resp_1",
+      output: [
+        { id: "item_1", type: "message", content: [{ type: "output_audio", transcript: "On it." }] },
+        { id: "item_2", type: "function_call", call_id: "c1", name: "titan", arguments: "{}" },
+      ],
+    },
+  });
+  assert.deepEqual(exchange.rows, [{ who: "voice", text: "On it." }]);
+});
+
+test("the legacy event name is read as well, because a provider mid-migration sends either", () => {
+  const exchange = makeSpokenExchange();
+  exchange.voice("response.audio_transcript.done", { item_id: "item_1", transcript: "All right." });
+  assert.deepEqual(exchange.rows, [{ who: "voice", text: "All right." }]);
+});
+
+test("an event that carries nobody's words is ignored, so the reader needs no branch at the call site", () => {
+  const exchange = makeSpokenExchange();
+  exchange.voice("response.output_audio.delta", { delta: "AAAA" });
+  exchange.voice("session.updated", { session: {} });
+  exchange.voice("rate_limits.updated", { rate_limits: [] });
+  exchange.voice("response.output_item.done", { item: { id: "i", type: "function_call", call_id: "c", name: "titan", arguments: "{}" } });
+  assert.equal(exchange.size, 0);
+});
+
+test("the exchange is bounded, and it is the OLDEST lines that go", () => {
+  const exchange = makeSpokenExchange({ maxRows: 3 });
+  for (let i = 0; i < 10; i += 1) exchange.person(`item_${i}`, `line ${i}`);
+  assert.deepEqual(exchange.rows.map((row) => row.text), ["line 7", "line 8", "line 9"]);
+});
+
+test("the note is one prompt carrying both sides, labelled, asking to be filed and not answered", () => {
+  const note = voiceCallNote({
+    rows: [
+      { who: "person", text: "what is the gate doing" },
+      { who: "voice", text: "Two legs are red." },
+      { who: "person", text: "fix them" },
+      { who: "voice", text: "Running them again now." },
+    ],
+    agentName: "Titan",
+    startedAtMs: Date.UTC(2026, 8, 12, 21, 32, 4),
+    endedAtMs: Date.UTC(2026, 8, 12, 21, 41, 18),
+  });
+  assert.ok(note.includes("Voice call, 2026-09-12T21:32Z to 2026-09-12T21:41Z."));
+  assert.ok(note.includes("do not reply to it"), "the one-line ask, because no flag on sendPrompt can say it");
+  // The labels are defined IN the note. It lands in the agent's own conversation, where a bare "Them"
+  // is ambiguous: the person it is about is the same person that conversation is with.
+  assert.ok(note.includes('"Them" is the person you were talking to and "Titan" is you.'));
+  assert.ok(note.includes("Them: what is the gate doing"));
+  assert.ok(note.includes("Titan: Two legs are red."));
+  assert.ok(note.includes("Them: fix them"));
+  assert.ok(note.includes("Titan: Running them again now."));
+  // One prompt, in order, and the person's side and the agent's side are told apart.
+  assert.ok(note.indexOf("Them: what is the gate doing") < note.indexOf("Titan: Two legs are red."));
+});
+
+test("a call where nothing was said leaves no note at all, rather than an empty row", () => {
+  assert.equal(voiceCallNote({ rows: [], agentName: "Titan", startedAtMs: 1, endedAtMs: 2 }), "");
+  assert.equal(voiceCallNote({ rows: [{ who: "person", text: "   " }] }), "");
+  assert.equal(voiceCallNote(), "");
+});
+
+test("a long call keeps the END of itself and says how many lines it dropped", () => {
+  const rows = [];
+  for (let i = 0; i < 400; i += 1) rows.push({ who: i % 2 === 0 ? "person" : "voice", text: `line ${i} ${"x".repeat(100)}` });
+  const note = voiceCallNote({ rows, agentName: "Titan", startedAtMs: 1_700_000_000_000, endedAtMs: 1_700_000_600_000 });
+  assert.ok(note.length <= VOICE_NOTE_MAX_CHARS, `the note is ${note.length} characters`);
+  assert.ok(note.includes("line 399"), "the end of the call survived");
+  assert.ok(!note.includes("line 0 "), "and the start of it did not");
+  assert.match(note, /\(the first \d+ lines of the call are not in this note\)/);
 });
 
 // ---- held actions (A6) ---------------------------------------------------------------------------
@@ -1235,6 +1483,161 @@ test("VOICE-7: a transcript for the utterance before this one never paints into 
     assert.deepEqual(late, [], `the previous utterance's sentence was sent as this one's: ${JSON.stringify(late)}`);
     assert.equal(session.of("hear").filter((f) => f.turn === 2).at(-1).text, "what time is it",
       "the open panel's last words are still its own");
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- VOICE-16 end to end: the brief on the wire, and the note at the end --------------------------
+
+test("VOICE-16 end to end: the brief reaches the provider ONCE, inside the instructions", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  const gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    brief: briefRow(),
+    tail: (n) => (n >= 2 ? [reply("e1", "Nothing new in the mail.")] : []),
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0016" }, gateway, dir });
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    const instructions = String(stub.events.sessions[0].instructions ?? "");
+    assert.ok(instructions.includes("You run a two-person managed services shop with Richard."), "the persona is on the wire");
+    assert.ok(instructions.includes("the deploy gate runs on the R750"), "and the facts");
+    assert.ok(instructions.includes("it did, both legs passed on the second run"), "and the last turn");
+    assert.ok(instructions.startsWith("You are Titan, and you are talking out loud"));
+    // READ ONCE AND WRITTEN ONCE. The prefix cache is the whole reason: rewriting the instructions
+    // mid-call re-bills the conversation every turn, and asking the box again every turn would put the
+    // round trip back that this wave exists to remove.
+    assert.equal(gateway.briefReads, 1, `the brief was read ${gateway.briefReads} times`);
+    assert.equal(gateway.of("getVoiceBrief")[0].args.id, "a1");
+    // And nothing sends a second session.update for the life of the socket.
+    stub.emitToolCall({ name: "titan", args: { message: "check the mail" }, triple: false });
+    await session.settle(() => stub.events.toolOutputs.length > 0, "the turn going round");
+    assert.equal(stub.events.sessions.length, 1, "one session.update and no more");
+    assert.equal(stub.events.inbound.filter((event) => event.type === "session.update").length, 1);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-16 end to end: a box with no getVoiceBrief dials the phone line, byte for byte", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  const gateway = fakeGateway({ agents: [{ id: "a1", name: "Titan", isRunning: true }], brief: "unknown", tail: () => [] });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0017" }, gateway, dir });
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    // THE WHOLE FALLBACK, ON THE WIRE. Not "close to" the old instructions: the same bytes.
+    assert.equal(String(stub.events.sessions[0].instructions ?? ""), PHONE_LINE_TITAN);
+    assert.equal(gateway.briefReads, 1, "asked once, and a 404 is not worth asking twice");
+    assert.ok(session.frames.log.some((line) => line.includes("not on this box's host")), session.frames.log.join(" | "));
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-16 end to end: a turn the model answers itself sends NOTHING to the box, and an action sends one", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  const gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    brief: briefRow(),
+    tail: (n) => (n >= 2 ? [reply("e1", "Nothing new in the mail.")] : []),
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0018" }, gateway, dir });
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+
+    // A CONVERSATIONAL TURN. The person speaks and the model answers out of the brief, which on the
+    // wire is a finished response with NO function call in it. What this pins is the relay's half: a
+    // turn with no titan call costs the box nothing and leaves no panel open. Whether a real model
+    // CHOOSES to answer rather than call the tool is a property of the model and the instructions and
+    // cannot be proved against a stub; docs/VOICE-16-REPORT.md says so.
+    stub.emitSpeechStarted({ itemId: "item_1" });
+    await stub.emitUserTranscript("how are you doing today", { itemId: "item_1" });
+    stub.emitUserTranscriptDone("how are you doing today", { itemId: "item_1" });
+    await session.settle(() => session.of("hear").some((frame) => frame.final === true), "the person's settled words");
+    await stub.speak("All good here, thanks.");
+    await session.settle(() => session.of("hear-end").some((frame) => frame.reason === "no-answer"), "the panel closing on its own");
+    assert.equal(gateway.of("sendPrompt").length, 0, "a conversational turn never reached the box");
+
+    // AN ACTION. One titan call, one sendPrompt, and the reply comes back the way it always did.
+    stub.emitToolCall({ name: "titan", args: { message: "check the mail" }, triple: false });
+    await session.settle(() => gateway.of("sendPrompt").length > 0, "the job going to the box");
+    await session.settle(() => stub.events.toolOutputs.length > 0, "and his answer coming back");
+    assert.equal(gateway.of("sendPrompt").length, 1);
+    assert.equal(gateway.of("sendPrompt")[0].args.prompt, "check the mail");
+    assert.equal(JSON.parse(stub.events.toolOutputs[0].output).reply, "Nothing new in the mail.");
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-16 end to end: the call leaves ONE note carrying both sides of what was said", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  const gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    brief: briefRow(),
+    tail: (n) => (n >= 2 ? [reply("e1", "Nothing new in the mail.")] : []),
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0019" }, gateway, dir });
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    const sessionId = String(session.of("ready")[0].sessionId ?? "");
+
+    stub.emitSpeechStarted({ itemId: "item_1" });
+    await stub.emitUserTranscript("did the mail ever come through", { itemId: "item_1" });
+    stub.emitUserTranscriptDone("did the mail ever come through", { itemId: "item_1" });
+    await session.settle(() => session.of("hear").some((frame) => frame.final === true), "the person's settled words");
+    // The voice's own words, which are what `response.output_audio_transcript` carries on both vendors.
+    await stub.speak("Nothing new in the mail.");
+    await session.settle(() => session.frames.binary.length > 0, "the voice actually speaking");
+
+    // The person hangs up.
+    session.client.send(JSON.stringify({ t: "stop" }));
+    await session.settle(() => gateway.of("sendPrompt").length > 0, "the call's note reaching the conversation");
+    const notes = gateway.of("sendPrompt");
+    assert.equal(notes.length, 1, "one note for the whole call and not one per turn");
+    const note = String(notes[0].args.prompt ?? "");
+    assert.ok(note.startsWith("Voice call, "), note.slice(0, 120));
+    assert.ok(note.includes("Them: did the mail ever come through"), `the person's side is missing: ${note}`);
+    assert.ok(note.includes("Titan: Nothing new in the mail."), `the voice's side is missing: ${note}`);
+    assert.ok(note.includes("do not reply to it"), "and it asks to be filed rather than answered");
+    // It is stamped the way every other voice row is, so the console marks it spoken.
+    assert.equal(notes[0].args.clientNonce, `voice:${sessionId}:note`);
+    assert.equal(notes[0].args.agentId, "a1");
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-16 end to end: a line that said nothing leaves no note behind", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  const gateway = fakeGateway({ agents: [{ id: "a1", name: "Titan", isRunning: true }], brief: briefRow(), tail: () => [] });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0020" }, gateway, dir });
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    session.client.send(JSON.stringify({ t: "stop" }));
+    await session.settle(() => session.of("bye").length > 0, "the line going down");
+    assert.equal(gateway.of("sendPrompt").length, 0, "nothing was said, so nothing was written");
   } finally {
     await session?.close();
     await stub.close();

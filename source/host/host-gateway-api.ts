@@ -1,4 +1,5 @@
 
+import { hostname } from "node:os";
 import { Value, type JsonValue } from "@bufbuild/protobuf";
 import { createContext } from "../packages/context/core.js";
 import { shellExecutorResource } from "../packages/agent-exec/shell.js";
@@ -64,7 +65,15 @@ import {
 } from "./extensions/shell-tools/shell-tools-service.js";
 import { setHostRoutedToolExecutor } from "./extensions/inference/provider-session.js";
 import { isSandGroupDir } from "./groups/group-store.js";
-import { isSandBoxSettingEnabled, resolveSandMaxAgents } from "./sand-box-setting.js";
+import {
+  isSandBoxSettingEnabled,
+  readSandBoxSetting,
+  resolveSandMaxAgents,
+} from "./sand-box-setting.js";
+// VOICE-16. The brief the voice is built from goes out through this process's own redactor, the same
+// one the conversation outline, the action audit and the evidence ledger use. Built once here rather
+// than per call: it caches the box's secret stores behind an mtime check of its own.
+import { createBoxSecretRedactor } from "./secret-redaction.js";
 import { sandAgentLimitMessage } from "../shared/agents/agents.js";
 import { createOnboardingService } from "./extensions/onboarding/onboarding-service.js";
 import { createHostBoxUseProbe } from "./extensions/onboarding/onboarding-probe.js";
@@ -115,6 +124,9 @@ const readBoxProxyMcpUrl = (server: string): string | null => {
     return null;
   }
 };
+
+/** VOICE-16. One redactor for the life of the process; it re-reads the secret stores on its own. */
+const redactVoiceBriefSecrets = createBoxSecretRedactor();
 
 const SAND_AGENT_PURPOSES = new Set(["disk-saver", "plugin-auth"]);
 const TEMPLATE_ID_PATTERN = /^[a-z0-9-]{1,64}$/;
@@ -905,6 +917,22 @@ export function createHostGatewayApi(
     // which is a fact and not an error: the caller's own turn may not have reached the runner yet.
     getTurnDraft: (args: any) => ({
       draft: method(manager, "getTurnDraft")(String(args.id ?? args.agentId ?? "")) ?? null,
+    }),
+    // VOICE-16. Who an agent is, what it remembers and what the two of you were just saying, so the
+    // voice on the phone can BE the agent for conversation instead of forwarding every syllable into
+    // a five to twenty-five second round trip. `{brief: null}` for an id this box does not hold,
+    // which is a fact and not an error -- the relay then dials as the phone line it was before.
+    //
+    // The workspace name is THIS box's own, read the way host-runner-composition.ts:1169 reads it for
+    // getBoxName, and the secret redactor is the same one the outline, the action audit and the
+    // evidence ledger run their text through. Neither belongs in the pure builder: one reads a
+    // setting and the other reads the box's secret stores.
+    getVoiceBrief: async (args: any) => ({
+      brief:
+        (await method(manager, "getVoiceBrief")(String(args.id ?? args.agentId ?? ""), {
+          workspaceName: readSandBoxSetting("SAND_TENANT") ?? hostname(),
+          redact: redactVoiceBriefSecrets,
+        })) ?? null,
     }),
     getAgentEvidence: async (args: any) =>
       readAgentEvidence(String(args.id), {

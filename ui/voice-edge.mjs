@@ -3,12 +3,30 @@
  *
  * WHAT THIS IS. One websocket from the browser to this relay (the console's own cookie is the
  * credential; the tenant is stamped here and never sent by the page), one websocket from here to a
- * realtime provider with the workspace's own key, and between them ONE tool: titan(message). The
- * realtime model is a mouth and a pair of ears. It does not search, it does not remember, it does
- * not decide anything; it hands what it heard to Titan through the gateway the console already
- * uses and speaks back what Titan said. Memory, persona, the team and every approval stay Titan's,
- * and the thread stays one thread, because a spoken turn is an ordinary prompt carrying a
- * `voice:` clientNonce.
+ * realtime provider with the workspace's own key, and between them ONE tool: titan(message).
+ *
+ * VOICE-16 CHANGED WHAT THE MODEL ON THE OTHER END IS, and this paragraph used to say the opposite.
+ * It said the realtime model "is a mouth and a pair of ears. It does not search, it does not
+ * remember, it does not decide anything", and that was true and it was also why a conversation was a
+ * sequence of pauses: every syllable, "thanks" included, cost a whole turn of the agent runtime, 5.5
+ * to 25 s of it. Jason, 2026-09-12: "Why can't the voice just be Titan?" So the voice now IS the
+ * agent for CONVERSATION. Before the dial this edge reads one gateway command, `getVoiceBrief`
+ * (source/host/extensions/transcript/voice-brief.ts), which hands back the same three things the
+ * agent's own prompt is built from -- its persona, its remembered facts, and the last twenty turns of
+ * its conversation -- and folds them into the session instructions ONCE, at session.update. A
+ * question it can answer out of that is answered in under two seconds with no sendPrompt at all.
+ *
+ * THE BOX STILL DOES THE WORK. Anything that needs DOING, LOOKING UP or CHECKING goes to the agent
+ * through titan(message) exactly as it always did, and so does every answer to a question that came
+ * back from there: a spoken yes still resolves a held card through the approval path and never in the
+ * voice's own head. Tools, files, machines, mail, the team and every approval stay the agent's, the
+ * thread stays one thread, and a spoken turn is still an ordinary prompt carrying a `voice:`
+ * clientNonce. At close the whole spoken exchange goes back as ONE note, so the conversation on
+ * screen holds what was said out loud.
+ *
+ * AND A BOX WHOSE HOST HAS NO `getVoiceBrief` IS UNCHANGED. It answers 404, the reader says so in the
+ * log, and the line dials with `phoneLineInstructions` -- the words above, byte for byte, which a
+ * test asserts literally.
  *
  * WHY THE RELAY HOLDS THE SOCKET. Both vendors ship a browser path that is easier to build -- xAI
  * an `xai-client-secret.<token>` subprotocol, OpenAI client secrets and WebRTC, which OpenAI
@@ -264,32 +282,47 @@ export const ECHO_TAIL_MS = 350;
  */
 export const TURN_DETECTION = { type: "server_vad", threshold: 0.55, silence_duration_ms: 700, prefix_padding_ms: 300 };
 
-/** The one tool. One string parameter, and nothing else is ever added to this array. */
+/**
+ * The one tool. One string parameter, and nothing else is ever added to this array.
+ *
+ * VOICE-16 CHANGED WHAT IT IS FOR, not what it is. It used to say "call this for EVERYTHING the
+ * person asks or tells you", because the voice genuinely knew nothing: the description and the
+ * instructions below were a phone line's, and every syllable cost a whole turn of the agent runtime.
+ * Now the voice carries the agent's own persona, facts and conversation (`getVoiceBrief`), so this is
+ * the seam for a JOB and not for a sentence -- do it, look it up, or check it. The result path is
+ * untouched: VOICE-3 sentence streaming, held cards and the spoken yes all still come back through
+ * the same output.
+ */
 export function titanTool() {
   return {
     type: "function",
     name: "titan",
     description:
-      "Give what the person just said to Titan, the head of their team, and get his answer back. "
-      + "Call this for EVERYTHING the person asks or tells you: questions, instructions, answers to "
-      + "a question you read out, yes and no. You have no knowledge of your own about their work, "
-      + "their team, their files or their machines -- he has all of it. While waiting, say one short "
-      + "thing like \"on it\" so the line is not silent, then read his answer out as it comes back.",
+      "Hand a job to the rest of yourself: the part of you at the desk, with the files, the machines, "
+      + "the mail, the team and every tool. Call this to DO something, to LOOK something up, or to "
+      + "CHECK something -- send it, run it, open it, read it, fix it, book it, a file, a machine, a "
+      + "log, a number you do not already have, anything that has happened since you last spoke, and "
+      + "anything at all you are not sure of. Do NOT call it for ordinary conversation you can already "
+      + "answer out of who you are and what you remember. Say one short thing first, like \"checking "
+      + "the mail now\", so the line is not silent, then read out what comes back. It takes five to "
+      + "twenty-five seconds.",
     parameters: {
       type: "object",
-      properties: { message: { type: "string", description: "What the person said, in their own words." } },
+      properties: { message: { type: "string", description: "The job, in the person's own words." } },
       required: ["message"],
     },
   };
 }
 
 /**
- * The base instructions, written ONCE at session.update and byte-identical for the life of the
- * socket. Rewriting them invalidates the cached prefix and re-bills the whole conversation every
- * turn, which was the single most expensive thing omarchy's session did -- the same lesson as
- * m3-glm-prefix-cache.md. Nothing per-turn goes in here.
+ * THE PHONE LINE. What every voice session was told until VOICE-16, and what a box whose host has no
+ * `getVoiceBrief` is still told, byte for byte.
+ *
+ * It is kept as its own function rather than inlined into the fallback branch so that the fallback is
+ * provably the same words and not a paraphrase of them -- tests/voice-turn.test.mjs asserts this
+ * string literally, so an edit here fails there.
  */
-export function voiceInstructions(agentName = "Titan") {
+export function phoneLineInstructions(agentName = "Titan") {
   return [
     `You are the voice of ${agentName}. You are his mouth and his ears and nothing else.`,
     "You have no memory, no tools and no knowledge of your own. Every single thing the person says",
@@ -302,6 +335,85 @@ export function voiceInstructions(agentName = "Titan") {
     "answer straight back to him. If you get told something went wrong, say so plainly.",
     "Keep your own words short. You are a phone line, not a participant.",
   ].join(" ");
+}
+
+/**
+ * The base instructions, written ONCE at session.update and byte-identical for the life of the
+ * socket. Rewriting them invalidates the cached prefix and re-bills the whole conversation every
+ * turn, which was the single most expensive thing omarchy's session did -- the same lesson as
+ * m3-glm-prefix-cache.md. NOTHING PER-TURN GOES IN HERE, and VOICE-16 does not change that: the brief
+ * is read once, before the dial, and folded in once, at session.update.
+ *
+ * WHAT VOICE-16 CHANGED. Jason, 2026-09-12, about the pause before every single answer: "Why can't
+ * the voice just be Titan?" So with a brief this is no longer a phone line's script. The voice is
+ * handed the same three things the agent's own prompt is built from -- its persona, its remembered
+ * facts, and the last turns of the conversation -- and answers conversation out of them, in under two
+ * seconds, with no round trip at all. A JOB still goes to the box through the titan function, because
+ * the box is where the files, the machines, the mail and the team are.
+ *
+ * THE ONE RULE THAT SURVIVED WORD FOR WORD is the held card. A question that came back from the box
+ * asking the person to confirm or choose is resolved by the relay through the approval path
+ * (makeVoiceSession's dispatch reads matchYesNo against session.heldCard), so their answer HAS to
+ * arrive as a titan call. A voice that answered "yes, go ahead" out of its own head would leave the
+ * card open and nothing approved, which is the worst outcome on this path.
+ *
+ * NO BRIEF, NO CHANGE. `brief: null` -- an older host, a box that does not hold that agent any more,
+ * a read that timed out -- answers phoneLineInstructions above, byte for byte.
+ *
+ * @param {string|{agentName?: string, brief?: object|null}} [options] the agent's name, or the name
+ *        and the brief. The string form is what buildSession's own default uses and is unchanged.
+ */
+export function voiceInstructions(options = {}) {
+  const flat = typeof options === "string" || options == null;
+  const agentName = flat ? options : options.agentName;
+  const brief = flat ? null : options.brief;
+  const name = String(agentName ?? "").trim() || "Titan";
+  if (brief == null || typeof brief !== "object") return phoneLineInstructions(name);
+  const line = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+  const persona = String(brief.persona ?? "").trim();
+  const facts = (Array.isArray(brief.facts) ? brief.facts : []).map(line).filter((fact) => fact.length > 0);
+  const recent = (Array.isArray(brief.recent) ? brief.recent : [])
+    .map((turn) => ({ role: String(turn?.role ?? ""), text: line(turn?.text) }))
+    .filter((turn) => turn.text.length > 0);
+  const place = line(brief.workspaceName);
+  const out = [
+    `You are ${name}, and you are talking out loud to the person who called you. You are not `
+    + `${name}'s phone line and you are not reading his words to somebody: you ARE him, on the phone. `
+    + "Everything below is yours -- who you are, what you remember, and what the two of you have been "
+    + "saying. Answer out of it, straight away, in your own voice, the way a person on a phone does.",
+  ];
+  if (persona.length > 0) out.push(`WHO YOU ARE.\n${persona}`);
+  if (facts.length > 0) out.push(`WHAT YOU REMEMBER.\n${facts.map((fact) => `- ${fact}`).join("\n")}`);
+  if (recent.length > 0) {
+    out.push(`WHAT THE TWO OF YOU HAVE BEEN SAYING, oldest first. "Them" is the person you are on the `
+      + `phone with now.\n${recent.map((turn) => `${turn.role === "person" ? "Them" : "You"}: ${turn.text}`).join("\n")}`);
+  }
+  if (place.length > 0) {
+    out.push(`WHERE THIS IS. The workspace you both work in is called ${place}. Say that name only if `
+      + "the person asks which workspace or which machine they are on.");
+  }
+  out.push(
+    "WHEN TO USE THE titan FUNCTION. You are the part of you that is talking. The rest of you is at "
+    + "the desk, with the files, the machines, the mail, the team and every tool. Send it anything "
+    + "that needs DOING, LOOKING UP or CHECKING: send it, run it, open it, read it, fix it, book it, "
+    + "a file, a machine, a log, a number you do not already have, anything that has happened since "
+    + "the conversation above, and anything at all you are not sure of. Say one short thing first, "
+    + "like \"checking the mail now\", so the line is not silent, then read out what comes back. It "
+    + "takes five to twenty-five seconds.",
+    "ANSWERS TO A QUESTION THAT CAME BACK ALWAYS GO THROUGH IT. If you read out something that asks "
+    + "the person to confirm, approve or choose, their answer goes straight back through the titan "
+    + "function, every time, even when it is only yes or no. Never treat a yes as done yourself: "
+    + "nothing is approved until it has been back through there.",
+    "WHEN NOT TO USE IT. Ordinary talk you can already answer -- who you are, what you do, what the "
+    + "two of you just decided, something you remember, what a thing means, an opinion, a greeting, "
+    + "a thank you. Answer those yourself, immediately, with no function call and no waiting.",
+    "NEVER MAKE ANYTHING UP. Not a number, not a name, not a file, not a result, and never a thing "
+    + "you did. If you do not have it, the rest of you does: call titan and ask. If what comes back "
+    + "says something went wrong, say so plainly.",
+    "HOW YOU SOUND. Short sentences, a normal speaking voice. Never read out punctuation or headings, "
+    + "never spell a file path character by character, and never sound like a screen being read.",
+  );
+  return out.join("\n\n");
 }
 
 /**
@@ -684,6 +796,254 @@ export function remainderOf(allPieces, spokenPieces) {
 export function isUnknownGatewayMethod(error) {
   const message = String(error?.message ?? error ?? "");
   return message.includes("unknown gateway method") || message.includes("HTTP 404");
+}
+
+// ---- VOICE-16: the brief, and the one memory the call leaves behind -------------------------------
+
+/**
+ * How long the brief read may hold the handshake up.
+ *
+ * It is read in handleUpgrade, in the same stretch that already awaits the settings file, the
+ * operator's key, the policy, the ledger and the roster, and BEFORE the provider is dialled -- which
+ * is what keeps the provider's `open` handler synchronous. That handler sends session.update the
+ * instant the socket opens, and an await inside it would let forwarded microphone audio reach the
+ * provider before its session was configured.
+ *
+ * The budget exists because a wedged box answers a gateway read in 20 s (makeGatewayCall's own
+ * timeout) and a person pressing the talk button must not wait 20 s for a microphone. A brief that
+ * does not arrive in time is no brief, and the line is the phone line it always was.
+ */
+export const VOICE_BRIEF_READ_MS = 2500;
+
+/**
+ * The brief, once, before the dial.
+ *
+ * EVERY FAILURE IS null AND NEVER A THROW, and that is the whole fallback: an older host (404, which
+ * `isUnknownGatewayMethod` is the existing reader for), a box that no longer holds that agent
+ * (`{brief:null}`, which the host answers as a fact), a read that timed out, a malformed answer. Each
+ * of those dials with phoneLineInstructions, byte for byte, and the relay logs which one it was
+ * because "the voice does not know anything today" is otherwise indistinguishable between them.
+ *
+ * THE WORKSPACE NAME IS THE RELAY'S when it has one. The box answers its own SAND_TENANT or its
+ * hostname, which is a container name on the R750; the tenant's display name is what a person calls
+ * the place, and this edge is the only half that knows it.
+ */
+export async function readVoiceBrief(call, agentId, {
+  workspaceName = "",
+  timeoutMs = VOICE_BRIEF_READ_MS,
+  now = () => Date.now(),
+  log = () => {},
+} = {}) {
+  const id = String(agentId ?? "");
+  if (id.length === 0) return null;
+  const started = now();
+  const LATE = Symbol("late");
+  let answer = null;
+  // THE TIMER IS NOT unref'd, and every other timer in this file is. An unref'd timer cannot fire when
+  // nothing else is holding the event loop open, so the await would never settle and the budget would
+  // be no budget at all. It is cleared the instant either side answers, so it holds the loop for at
+  // most the budget and never for longer.
+  let timer = null;
+  try {
+    answer = await Promise.race([
+      Promise.resolve(call("getVoiceBrief", { id })).finally(() => { if (timer != null) clearTimeout(timer); }),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(LATE), Math.max(1, Number(timeoutMs) || VOICE_BRIEF_READ_MS));
+      }),
+    ]);
+  } catch (error) {
+    if (isUnknownGatewayMethod(error)) log("voice getVoiceBrief is not on this box's host, so this line is a phone line");
+    else log(`voice could not read the brief, so this line is a phone line: ${error?.message ?? error}`);
+    return null;
+  } finally {
+    if (timer != null) clearTimeout(timer);
+  }
+  if (answer === LATE) {
+    log(`voice gave up on the brief after ${timeoutMs} ms, so this line is a phone line`);
+    return null;
+  }
+  const raw = answer?.brief ?? null;
+  if (raw == null || typeof raw !== "object") {
+    log("voice this box holds no brief for that agent, so this line is a phone line");
+    return null;
+  }
+  const text = (value) => (typeof value === "string" ? value : "");
+  const brief = {
+    persona: text(raw.persona),
+    facts: (Array.isArray(raw.facts) ? raw.facts : []).map(text).filter((fact) => fact.trim().length > 0),
+    recent: (Array.isArray(raw.recent) ? raw.recent : [])
+      .map((turn) => ({ role: text(turn?.role) === "person" ? "person" : "agent", text: text(turn?.text), at: Number(turn?.at) || 0 }))
+      .filter((turn) => turn.text.trim().length > 0),
+    agentName: text(raw.agentName),
+    workspaceName: workspaceName.trim().length > 0 ? workspaceName.trim() : text(raw.workspaceName),
+  };
+  log(`voice brief for ${id}: ${brief.persona.length} character(s) of persona, ${brief.facts.length} fact(s), `
+    + `${brief.recent.length} turn(s) of conversation, read in ${now() - started} ms`);
+  return brief;
+}
+
+/**
+ * How long the closing note may hold the line shut.
+ *
+ * The ledger row is settled BEFORE the note is written, so the day cap and the Spend line are never
+ * delayed by it. What is still behind it is the session being released, which is what lets the next
+ * press in: a person who hangs up and presses again must not be told "this workspace is already in a
+ * call" because a box was slow to take a note. A note abandoned here may still land on the box, and
+ * the log says so rather than claiming it failed.
+ */
+export const VOICE_NOTE_WRITE_MS = 5000;
+
+/** At most this many spoken lines are kept for the closing note; the oldest go first. */
+export const VOICE_NOTE_MAX_ROWS = 400;
+/** And at most this many characters of them are written into it. */
+export const VOICE_NOTE_MAX_CHARS = 6000;
+
+/**
+ * What was actually said out loud, both sides, in the order it was said.
+ *
+ * WHY A MAP AND NOT AN ARRAY. Both sides arrive in pieces that REPLACE rather than append: the
+ * person's caption is replace-whole on both vendors (makeCaption says why), and the voice's own
+ * transcript arrives as deltas and then as a settled whole. A Map keyed by the item keeps insertion
+ * ORDER while letting a later, better copy of the same item overwrite the earlier one, which an array
+ * of pushes cannot do without writing every sentence twice.
+ *
+ * THE KEY IS THE ITEM, not the turn. `item_id` is what both vendors stamp on every transcript event
+ * of one spoken item, so the deltas, the `.done` and the `response.output_item.done` for one item all
+ * land on one row. A vendor that omits it falls back to the response id, which is coarser: two
+ * message items in one response would collapse into one row. That is the one shape this cannot tell
+ * apart and it is named in docs/VOICE.md rather than guessed at.
+ */
+export function makeSpokenExchange({ maxRows = VOICE_NOTE_MAX_ROWS } = {}) {
+  const rows = new Map();
+  /** Deltas for an item, accumulated, because a delta is a piece and not the whole. */
+  const growing = new Map();
+  const put = (who, key, value) => {
+    const clean = String(value ?? "").replace(/\s+/g, " ").trim();
+    if (clean.length === 0) return undefined;
+    rows.set(`${who}:${String(key ?? "")}`, { who, text: clean });
+    while (rows.size > Math.max(1, maxRows)) rows.delete(rows.keys().next().value);
+    return undefined;
+  };
+  const keyOf = (event) => String(event?.item_id ?? event?.item?.id ?? event?.response_id ?? event?.response?.id ?? "");
+  /** The transcript carried by one output item, whichever content part holds it. */
+  const transcriptOf = (item) => {
+    if (item == null || item.type !== "message") return "";
+    const parts = Array.isArray(item.content) ? item.content : [];
+    const said = parts
+      .map((part) => (typeof part?.transcript === "string" ? part.transcript : (typeof part?.text === "string" ? part.text : "")))
+      .filter((part) => part.trim().length > 0);
+    return said.join(" ");
+  };
+  return {
+    /** The person, from the caption. The final transcript replaces the partials on the same item. */
+    person: (itemId, value) => put("person", itemId, value),
+    /**
+     * The voice, from whichever of the three surfaces carried it. The later and more authoritative
+     * one overwrites the earlier on the same item: deltas, then `.done`, then the item on
+     * `response.done`. Anything that is not one of those is ignored, so this can be called for every
+     * provider event without a branch at the call site.
+     */
+    voice: (type, event) => {
+      const name = canonicalEvent(type);
+      if (name === "response.output_audio_transcript.delta") {
+        const key = keyOf(event);
+        const grown = `${growing.get(key) ?? ""}${String(event?.delta ?? "")}`;
+        growing.set(key, grown);
+        return put("voice", key, grown);
+      }
+      if (name === "response.output_audio_transcript.done") {
+        const key = keyOf(event);
+        growing.delete(key);
+        return put("voice", key, event?.transcript);
+      }
+      if (name === "response.output_item.done") {
+        const key = keyOf(event);
+        const said = transcriptOf(event?.item);
+        if (said.length > 0) growing.delete(key);
+        return put("voice", key, said);
+      }
+      if (name === "response.done") {
+        for (const item of Array.isArray(event?.response?.output) ? event.response.output : []) {
+          const said = transcriptOf(item);
+          if (said.length === 0) continue;
+          const key = String(item?.id ?? event?.response?.id ?? "");
+          growing.delete(key);
+          put("voice", key, said);
+        }
+        return undefined;
+      }
+      return undefined;
+    },
+    get rows() { return [...rows.values()]; },
+    get size() { return rows.size; },
+  };
+}
+
+/** A minute-precision UTC stamp, which is the most a spoken call is worth recording to. */
+const noteStamp = (ms) => (Number(ms) > 0 ? new Date(Number(ms)).toISOString().replace(/:\d\d\.\d+Z$/, "Z") : "");
+
+/**
+ * The ONE memory a call leaves behind: the whole spoken exchange, as a single prompt.
+ *
+ * WHY IT ASKS RATHER THAN FLAGS, and this is the deviation to argue with. The brief said to tag it so
+ * the box files it and does not answer, "if none exists, the note asks Titan in one line". MEASURED:
+ * no such flag exists. The host's sendPrompt takes agentId, directAddressedAcceptance, attachments,
+ * richText, replyToId, clientNonce, thinkHarder, isFork, traceparent, enterEpochMs, composedAtMs and
+ * awaitTurn (host-gateway-api.ts sendPrompt) and not one of them suppresses the reply. The hidden
+ * prompt that box hand-offs, MCP authorizations and widget answers ride
+ * (`boxHandoff.resumeWithHiddenPrompt`) is not on the gateway protocol at all, and it RESUMES a turn
+ * rather than silencing one, so it is the wrong mechanism even if it were reachable. So the note asks,
+ * in its own first lines, and whether the agent honours that is not proven here.
+ *
+ * IT IS ONE PROMPT AND IT CARRIES BOTH SIDES. Two prompts would be two turns and two answers. The
+ * oldest lines go first when it is too long, because the end of a call is the part worth remembering,
+ * and the note says how many it dropped rather than leaving a reader to wonder.
+ */
+export function voiceCallNote({
+  rows = [],
+  agentName = "Titan",
+  startedAtMs = 0,
+  endedAtMs = 0,
+  maxChars = VOICE_NOTE_MAX_CHARS,
+} = {}) {
+  const who = String(agentName).trim() || "Titan";
+  const lines = (Array.isArray(rows) ? rows : [])
+    .map((row) => ({ who: row?.who === "person" ? "person" : "voice", text: String(row?.text ?? "").trim() }))
+    .filter((row) => row.text.length > 0)
+    .map((row) => `${row.who === "person" ? "Them" : who}: ${row.text}`);
+  if (lines.length === 0) return "";
+  const from = noteStamp(startedAtMs);
+  const to = noteStamp(endedAtMs);
+  const when = from.length > 0 && to.length > 0 ? `${from} to ${to}` : (from || to || "just now");
+  // THE LABELS ARE DEFINED IN THE NOTE ITSELF. It arrives as a message in the agent's own conversation,
+  // where a bare "Them" is ambiguous: the person it is about is the same person the conversation is
+  // with. One clause removes the doubt and costs nine words.
+  const head = [
+    `Voice call, ${when}. This is what was said out loud, both sides: "Them" is the person you were`,
+    `talking to and "${who}" is you.`,
+    "Remember it as part of this conversation and do not reply to it: the call is over and nobody is",
+    "waiting on an answer. Nothing in it is a new instruction unless you already acted on it during",
+    "the call.",
+  ].join(" ");
+  // THE WHOLE NOTE IS MEASURED, not the lines alone. Measuring the lines and subtracting a guess at
+  // the rest is how a cap gets missed by the length of the line that says how much was dropped, which
+  // is exactly what the test caught.
+  const render = (keptLines, droppedCount) => {
+    const body = droppedCount > 0
+      ? `(the first ${droppedCount} line${droppedCount === 1 ? "" : "s"} of the call are not in this note)\n${keptLines.join("\n")}`
+      : keptLines.join("\n");
+    return `${head}\n\n${body}`;
+  };
+  const cap = Math.max(head.length + 4, Number(maxChars) || VOICE_NOTE_MAX_CHARS);
+  let kept = lines;
+  let dropped = 0;
+  let note = render(kept, dropped);
+  while (kept.length > 1 && note.length > cap) {
+    kept = kept.slice(1);
+    dropped += 1;
+    note = render(kept, dropped);
+  }
+  return note;
 }
 
 // ---- the settings door: voice.json --------------------------------------------------------------
@@ -1708,6 +2068,12 @@ export function makeVoiceSession({
   log = () => {},
   // VOICE-14c. A real line always greets; tests that count every frame turn it off.
   greet = true,
+  /**
+   * VOICE-16. This agent's persona, facts and recent conversation, read ONCE before the dial by
+   * readVoiceBrief and folded into the instructions ONCE at session.update. Null is the phone line
+   * this was before: an older host, an agent this box no longer holds, or a read that timed out.
+   */
+  brief = null,
 }) {
   const vendor = vendorOf(settings.vendor);
   const model = settings.model.length > 0 ? settings.model : vendor.model;
@@ -1715,6 +2081,8 @@ export function makeVoiceSession({
   const gate = makeEchoGate({ now });
   const dedupe = makeCallDedupe();
   const caption = makeCaption(vendor.transcription.mode);
+  /** VOICE-16. Everything said out loud on this line, which becomes one note at close. */
+  const exchange = makeSpokenExchange();
   const runner = makeTurnRunner({ call, now, sleep, log });
   const startedMs = now();
   const meter = { audioInBytes: 0, audioOutBytes: 0, billedItemEvents: 0, toolCalls: 0, browserHeld: 0, audioInPeak: 0, audioInSumSq: 0, audioInSamples: 0, bargeIns: 0 };
@@ -2118,6 +2486,11 @@ export function makeVoiceSession({
       const text = caption.apply(event);
       browser?.sendJson({ t: "heard", text });
       hear(text, { final: false, itemId: event?.item_id ?? caption.itemId });
+      // VOICE-16. The closing note's person side, under the SAME guard the panel uses: a transcript
+      // produced while the machine is the one making noise is the model's own voice coming back
+      // through the microphone (docs/VOICE.md 8 records that loop), and writing it into the note as
+      // the person's words would put words in their mouth in a durable row.
+      if (!machineTalking()) exchange.person(event?.item_id ?? caption.itemId, text);
       return undefined;
     }
     if (type === "conversation.item.input_audio_transcription.completed") {
@@ -2125,6 +2498,7 @@ export function makeVoiceSession({
       const itemId = event?.item_id ?? caption.itemId;
       caption.reset();
       browser?.sendJson({ t: "heard", text });
+      if (!machineTalking()) exchange.person(itemId, text);
       // The transcription model's own last word. It is a `hear` and NOT the end of the turn: this
       // and the tool call race, and dissolving here would flicker the panel back when the confirmed
       // text arrives a moment later.
@@ -2178,6 +2552,12 @@ export function makeVoiceSession({
       }
       if (!gate.holding()) setState("listening");
     }
+    // VOICE-16. The closing note's own side: the words the voice itself said, off the transcript the
+    // provider emits for them. Called for every event that reached here rather than behind a branch,
+    // because the three surfaces that carry it -- the transcript deltas, their `.done`, and the
+    // message items on `response.output_item.done` and `response.done` -- are exactly the events that
+    // fall through to the bottom of this reader, and makeSpokenExchange ignores everything else.
+    exchange.voice(type, event);
     const calls = toolCallsOf(event);
     for (const toolCall of calls) {
       // ONE call_id, dispatched once, on whichever of the three surfaces carried it first.
@@ -2189,6 +2569,44 @@ export function makeVoiceSession({
     if (type === "response.done" && !calls.some((toolCall) => toolCall.name === "titan")) hearEnd("no-answer", responseTurn);
     return undefined;
   };
+
+  /**
+   * VOICE-16. The call's one memory, written once.
+   *
+   * `noted` is what makes it once: close() already guards against re-entry, but a future caller that
+   * settles a row twice must not put the same transcript into somebody's conversation twice. A failure
+   * is LOGGED AND SWALLOWED -- a box that would not take the note must not stop the ledger row being
+   * settled, because the row is what the day cap is read from.
+   */
+  let noted = false;
+  async function writeCallNote() {
+    if (noted) return undefined;
+    noted = true;
+    if (String(agent.agentId ?? "").length === 0) return undefined;
+    const note = voiceCallNote({
+      rows: exchange.rows,
+      agentName: agent.agentName || "Titan",
+      startedAtMs: startedMs,
+      endedAtMs: now(),
+    });
+    if (note.length === 0) return undefined;
+    const LATE = Symbol("late");
+    let timer = null;
+    try {
+      const answer = await Promise.race([
+        Promise.resolve(call("sendPrompt", { agentId: agent.agentId, prompt: note, clientNonce: `voice:${sessionId}:note` }))
+          .finally(() => { if (timer != null) clearTimeout(timer); }),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(LATE), VOICE_NOTE_WRITE_MS); }),
+      ]);
+      if (answer === LATE) log(`voice gave up waiting ${VOICE_NOTE_WRITE_MS} ms for the box to take this call's note; it may still land`);
+      else log(`voice ${t.slug} left ${agent.agentName || agent.agentId} one note for this call: ${exchange.size} line(s), ${note.length} characters`);
+    } catch (error) {
+      log(`voice could not leave the call's note in the conversation: ${error?.message ?? error}`);
+    } finally {
+      if (timer != null) clearTimeout(timer);
+    }
+    return undefined;
+  }
 
   async function close(reason, sentence = "", condition = "") {
     if (stopping) return;
@@ -2211,6 +2629,13 @@ export function makeVoiceSession({
       + `${settled.audioOutSeconds} s out, ${settled.toolCalls} turn(s) to the agent, ${settled.heldFrames} held frame(s), `
       + `${meter.bargeIns} barge-in(s), mic peak ${dbfs(meter.audioInPeak)} rms ${dbfs(meter.audioInSamples > 0 ? Math.sqrt(meter.audioInSumSq / meter.audioInSamples) : 0)}, `
       + `and it ended because ${reason}`);
+    // VOICE-16. ONE MEMORY FOR THE WHOLE CALL, and it is written AFTER the ledger row is settled on
+    // purpose. The row is what the day cap is read out of and what the operator's Spend line shows, so
+    // nothing may delay it; and the session is released below, which is what lets the next press in, so
+    // the note carries its own budget rather than holding the line shut for a gateway timeout. A call
+    // where nothing was said -- a refusal, a line that dropped before a word -- writes nothing at all
+    // rather than putting an empty row in somebody's conversation.
+    await writeCallNote();
     // The edge forgets this session here, so "what is live right now" is a truthful answer and the
     // one-call-at-a-time check reads it. Every finished session used to be retained for the life of
     // the relay process, with its socket wrappers, its gate and its meter.
@@ -2334,7 +2759,15 @@ export function makeVoiceSession({
         if (dialWatch != null) { clearTimeout(dialWatch); dialWatch = null; }
         // Written ONCE, byte-identical for the life of the socket: rewriting the instructions
         // invalidates the cached prefix and re-bills the whole conversation every turn.
-        sendProvider(buildSession(vendor.id, { instructions: voiceInstructions(agent.agentName || "Titan"), voice, model, tools: [titanTool()] }));
+        //
+        // VOICE-16 folds the brief in HERE and nowhere else. It was read before the dial, so this
+        // handler stays synchronous -- an await in it would let forwarded microphone audio reach a
+        // provider whose session was not configured yet -- and nothing rewrites it for the rest of the
+        // call. A null brief is the phone line this always was, to the byte.
+        const instructions = voiceInstructions({ agentName: agent.agentName || brief?.agentName || "Titan", brief });
+        log(`voice ${t.slug} opened with ${brief == null ? "the phone-line instructions" : `${agent.agentName || "the agent"}'s own brief`}`
+          + `, ${instructions.length} character(s) of instructions`);
+        sendProvider(buildSession(vendor.id, { instructions, voice, model, tools: [titanTool()] }));
       });
       provider.addEventListener("message", (event) => {
         let parsed = null;
@@ -2643,10 +3076,19 @@ export function makeVoiceEdge({
       if (agent.agentId.length === 0) return acceptAndSay(socket, key, `${SENTENCE.noAgent} Reason: ${agent.why}.`, "no agent");
       log(`voice ${t.slug} talks to ${agent.agentName || agent.agentId}: ${agent.why}`);
 
+      // VOICE-16. ONCE, HERE, BEFORE THE DIAL. This is the only read of the brief in a call's whole
+      // life: the instructions are written from it at session.update and never rewritten, which is the
+      // prefix-cache rule. It is read in this stretch -- which already awaits the settings file, the
+      // operator's key, the policy, the ledger and the roster -- rather than in the provider's `open`
+      // handler, so that handler stays synchronous and no microphone audio can reach a provider whose
+      // session has not been configured. Null is never fatal: the line is then the phone line it was
+      // before this wave, and readVoiceBrief logs which of the four reasons it was.
+      const brief = await readVoiceBrief(call, agent.agentId, { workspaceName: String(t.name ?? ""), log, now });
+
       const sessionId = newSessionId();
       const ledger = ledgerFor(sessionId);
       const session = makeVoiceSession({
-        greet,
+        greet, brief,
         t, settings, policy, agent, call, ledger, sessionId, now, WebSocketImpl, providerUrl, capTickMs, log,
         dialWatchdogMs,
         onClosed: (one) => { sessions.delete(one); },

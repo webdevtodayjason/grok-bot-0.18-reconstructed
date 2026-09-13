@@ -43,6 +43,11 @@ import { SharedRooms } from "./shared-rooms.js";
 import { RUNNER_UNATTACHED_MESSAGE } from "./transcript-hub.js";
 import { TurnRuntime } from "./turn-runtime.js";
 import { UpgradeRecreateResume } from "./upgrade-recreate-resume.js";
+import {
+  VOICE_BRIEF_TAIL_LIMIT,
+  buildVoiceBrief,
+  type VoiceBrief,
+} from "./voice-brief.js";
 import { WidgetResponses } from "./widget-responses.js";
 import { WorkflowCommands } from "./workflow-commands.js";
 import { ClientSideToolV2Producer } from "./client-side-tool-v2-producer.js";
@@ -373,6 +378,71 @@ export class TranscriptManager {
 
   async getAgentMemories(agentId: string) {
     return this.memory.list({ agentId });
+  }
+
+  /**
+   * VOICE-16. Who this agent is, what it remembers and what the two of you were just saying, in one
+   * object small enough to be a voice session's instructions.
+   *
+   * THREE READS THAT ALREADY EXISTED, and nothing new stored anywhere. The persona is
+   * getAgentProfileText's `description`, which marketplace-bot-import.ts calls the host's ONE
+   * identity field; the facts are `getAgentMemories` above, the same list the gateway already serves
+   * and BOTS-4's Add button already writes; the conversation is the same transcript tail the relay
+   * polls every 400 ms. The shaping, the caps and the trim order are all in voice-brief.ts, which is
+   * pure, so they can be pinned without a box.
+   *
+   * AN UNKNOWN AGENT ANSWERS null, and that is a fact rather than an error: the relay resolves the
+   * agent from its own authenticated session and a null here means the id it resolved is not on this
+   * box any more, which is exactly when the voice should fall back to being a phone line rather than
+   * claiming to be somebody.
+   *
+   * EVERY READ IS GUARDED SEPARATELY. A box with no memory service, a profile file that was never
+   * written, a conversation store mid-repair: each of those costs the brief that one part and not the
+   * call. A voice with a persona and no facts is still the agent.
+   */
+  async getVoiceBrief(
+    agentId: string,
+    options: { readonly workspaceName?: string; readonly redact?: (value: string) => string } = {},
+  ): Promise<VoiceBrief | null> {
+    const id = String(agentId ?? "").trim();
+    if (id.length === 0) return null;
+    let profile: { name?: string; description?: string } | null = null;
+    try {
+      profile = this.sessionStore.getAgentProfileText?.(id) ?? null;
+    } catch {
+      profile = null;
+    }
+    const row =
+      this.roster
+        .listAgentsSync()
+        .find((agent: any) => String(agent?.id ?? "") === id) ?? null;
+    if (profile == null && row == null) return null;
+    let facts: unknown[] = [];
+    try {
+      const memories = await this.getAgentMemories(id);
+      facts = (Array.isArray(memories) ? memories : []).map((memory: any) =>
+        typeof memory === "string" ? memory : memory?.content,
+      );
+    } catch {
+      facts = [];
+    }
+    let entries: readonly any[] = [];
+    try {
+      const window = this.sessions.getAgentTranscriptTail(id, {
+        limit: VOICE_BRIEF_TAIL_LIMIT,
+      }) as { entries?: readonly any[] } | null;
+      entries = Array.isArray(window?.entries) ? window.entries : [];
+    } catch {
+      entries = [];
+    }
+    return buildVoiceBrief({
+      persona: profile?.description ?? row?.description ?? "",
+      agentName: profile?.name ?? row?.name ?? "",
+      workspaceName: options.workspaceName ?? "",
+      facts,
+      entries,
+      ...(options.redact == null ? {} : { redact: options.redact }),
+    });
   }
   /**
    * BOTS-4. Seed an agent's own remembered facts. The catalog's Add button is the only caller: a
