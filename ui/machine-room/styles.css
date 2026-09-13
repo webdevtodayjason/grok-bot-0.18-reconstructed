@@ -5308,6 +5308,158 @@ body[data-composer-drop="1"] .composer {
   cursor: pointer;
 }
 
+/* DISCOVER-1 ========================================================================
+   Signal Cyan on Midnight, with no gradient. The relay supplies every word and number in the six
+   rows; these rules only give that answer a compact place in the window bar and a phone sheet. */
+.discover-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(0, 200, 240, 0.58);
+  border-radius: 999px;
+  color: #e6ebf2;
+  background: #090d14;
+  box-shadow: 0 8px 22px rgba(4, 10, 13, 0.24);
+  white-space: nowrap;
+}
+
+.discover-pill:hover { border-color: #00c8f0; }
+.discover-pill > span { font-size: 12px; }
+body[data-discover-visible] .allowance-workspace { display: none; }
+.window-identity .discover-pill > strong {
+  color: #00c8f0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.discover-menu {
+  position: fixed;
+  z-index: 82;
+  top: 58px;
+  left: var(--discover-left, 214px);
+  width: 360px;
+  padding: 16px;
+  border: 1px solid rgba(0, 200, 240, 0.3);
+  border-radius: 18px;
+  color: #e6ebf2;
+  background: #090d14;
+  box-shadow: var(--shadow-large);
+}
+
+.discover-pill[hidden],
+.discover-menu[hidden] { display: none; }
+
+.discover-menu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.discover-menu-head small,
+.discover-menu-head strong { display: block; }
+.discover-menu-head small { color: rgba(230, 235, 242, 0.7); font-size: 11px; }
+.discover-menu-head strong { margin-top: 2px; font-size: 15px; }
+
+.discover-progress {
+  height: 6px;
+  margin: 13px 0 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(230, 235, 242, 0.16);
+}
+
+.discover-progress > span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: #00c8f0;
+  transition: width var(--duration-standard) var(--ease-standard);
+}
+
+.discover-steps {
+  display: grid;
+  gap: 2px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.discover-step {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  color: #e6ebf2;
+}
+
+.discover-step-mark {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 1px solid rgba(0, 200, 240, 0.48);
+  border-radius: 50%;
+  color: #090d14;
+  font-size: 12px;
+}
+
+.discover-step.is-done .discover-step-mark { border-color: #00c8f0; background: #00c8f0; }
+.discover-step.is-done .discover-step-label { color: rgba(230, 235, 242, 0.55); text-decoration: line-through; }
+.discover-step-label { min-width: 0; font-size: 13px; }
+.discover-step-count { color: rgba(230, 235, 242, 0.62); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+.discover-hide {
+  width: 100%;
+  min-height: 38px;
+  margin-top: 10px;
+  border: 1px solid rgba(230, 235, 242, 0.2);
+  border-radius: 12px;
+  color: #e6ebf2;
+  background: transparent;
+}
+
+.discover-hide:hover { border-color: rgba(0, 200, 240, 0.58); }
+
+@media (max-width: 690px) {
+  .discover-pill {
+    width: min(174px, calc(100vw - 196px));
+    height: 44px;
+    min-height: 44px;
+    gap: 6px;
+    padding: 0 10px;
+  }
+
+  .discover-pill > span {
+    min-width: 0;
+    overflow: hidden;
+    font-size: 11px;
+    text-overflow: ellipsis;
+  }
+
+  .window-identity .discover-pill > strong { display: inline; font-size: 10px; }
+
+  .discover-menu {
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    max-height: calc(100dvh - 24px);
+    padding: 18px max(16px, var(--sar, 0px)) calc(18px + max(0px, var(--sab, 0px)));
+    overflow-y: auto;
+    border-width: 1px 0 0;
+    border-radius: 22px 22px 0 0;
+  }
+
+  .discover-step { min-height: 44px; }
+  .discover-hide { min-height: 44px; }
+}
+
 /* VOICE-1 ===========================================================================
    The talk button, the orb, the live caption strip and the spoken chip.
 

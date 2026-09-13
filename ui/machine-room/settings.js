@@ -259,6 +259,14 @@
       if (f.passwordConfigured === true) {
         add({ id: "sign-out", group: "account", label: "Sign out", line: "Signs this browser out of your workspace.", control: press("Sign out", { action: "sign-out" }) });
       }
+      if (f.discoverAvailable === true) {
+        add({
+          id: "welcome-bar", group: "account",
+          label: "Show the welcome bar",
+          line: "Bring the product discovery steps back to the window bar.",
+          control: press("Show", { action: "welcome-show" }),
+        });
+      }
       if (Array.isArray(f.devices)) {
         add({
           id: "devices", group: "account",
@@ -778,6 +786,7 @@
       // VOICE-7. Read from the voice module rather than from a route, because this one is the
       // browser's own. A console without the module draws no row at all, the PROXY-1 rule.
       talkMode: typeof voice()?.talkMode === "function" ? voice().talkMode() : null,
+      discoverAvailable: typeof global.__discover?.show === "function",
     };
 
     const reads = [];
@@ -1124,6 +1133,13 @@
     if (action === "sign-out") {
       try { await global.fetch("/logout", { method: "POST" }); } catch { /* going anyway */ }
       global.location?.assign?.("/login");
+      return;
+    }
+    if (action === "welcome-show") {
+      node.disabled = true;
+      try { await global.__discover?.show?.(); toast("The welcome bar is back."); }
+      catch (error) { toast(`The welcome bar was not restored: ${error.message}`); }
+      finally { node.disabled = false; }
       return;
     }
     if (action === "revoke-device") {
