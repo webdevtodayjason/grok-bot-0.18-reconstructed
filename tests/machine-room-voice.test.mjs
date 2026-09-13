@@ -2805,6 +2805,221 @@ test("VOICE-13 call: a card takes the middle and the avatar shrinks, with the li
   voice.stop();
 });
 
+// ============================================ VOICE-19: the approval card is answerable ON the call
+//
+// Jason, 2026-09-13 on build 21: "The approval card popped up while I was in my voice chat session,
+// which is beautiful, but it did not have an approve or deny button in that view. When I closed or
+// ended the call, it was there in my chat, and I was able to click approve ... it doesn't exist
+// inside the voice chat and it should."
+//
+// VOICE-13 stripped every control off the copy on purpose, and the reason was right: a card's buttons
+// are wired by delegation against the ROW in the transcript, and a second live control for one
+// decision is a second gate. What it missed is that the chat behind a call is `inert` -- so a card
+// with its buttons taken off, on the one surface the person can reach, is a question with no answer.
+//
+// THE FIX KEEPS BOTH. The copy's button is kept and it PRESSES THE ROW'S BUTTON: one delegated
+// handler, one adapter call, one settled row. This file proves the press lands on the other object
+// and that voice.js never reaches the adapter itself.
+
+/**
+ * A transcript row carrying an approval card, and clones of it that answer the four selectors
+ * paintCallCard reads. Every node's remove() is RECORDED rather than ignored -- which controls come
+ * off the copy and which stay on it is the whole of what this wave changed -- and the buttons count
+ * their own presses, so a case can say which object a thumb really reached.
+ */
+function approvalRow(make, options = {}) {
+  const conf = { id: "reply-1", state: "pending", ...options };
+  const clones = [];
+  const build = () => {
+    const gone = [];
+    const track = (one) => { one.remove = () => gone.push(one); return one; };
+    const pending = conf.state === "pending";
+    const node = make({ "data-message-id": conf.id, class: "message-row" });
+    // The renderer puts the needs-you hook on PENDING cards only (app.js decisionMarkup), and a
+    // shell with no bearer counts those nodes off the DOM.
+    const card = make(pending
+      ? { "data-approval-card": "", "data-approval-state": conf.state, "data-needs-you-card": `a1:${conf.id}`, "data-card-id": `a1:${conf.id}` }
+      : { "data-approval-card": "", "data-approval-state": conf.state });
+    const buttons = (pending ? [["approved", "Allow"], ["denied", "Refuse"], ["always", "Always allow"]] : []).map(([value, label]) => {
+      const one = track(make({ "data-decide": value, "data-message-id": conf.id }));
+      one.textContent = label;
+      one.presses = 0;
+      one.click = () => { one.presses += 1; };
+      return one;
+    });
+    // The "Show the command" disclosure the approval card draws beside them. It is not a control and
+    // it must still come off the copy.
+    const disclosure = track(make({ tag: "details" }));
+    card._findAll["[data-decide]"] = buttons;
+    node._find[".inline-card, [data-attachment]"] = card;
+    node._find["[data-approval-card]"] = card;
+    node._findAll["[data-decide]"] = buttons;
+    node._findAll["button, input, textarea, select, details"] = [...buttons, disclosure];
+    node._findAll["[data-needs-you-card]"] = pending ? [card] : [];
+    node.cloneNode = () => { const made = build(); clones.push(made); return made.node; };
+    return { node, card, buttons, disclosure, gone };
+  };
+  const row = build();
+  return {
+    ...row, clones,
+    copy: () => clones[clones.length - 1] ?? null,
+    /** The host answered: the card is settled, the buttons are gone and so is the hook. */
+    settle: (status) => {
+      conf.state = status;
+      row.card.setAttribute("data-approval-state", status);
+      row.card.removeAttribute("data-needs-you-card");
+      row.card._findAll["[data-decide]"] = [];
+      row.node._findAll["[data-decide]"] = [];
+      row.node._findAll["button, input, textarea, select, details"] = [row.disclosure];
+      row.node._findAll["[data-needs-you-card]"] = [];
+    },
+  };
+}
+
+const putRow = (dom, node) => {
+  dom.document._rows["#transcript .message-row:not(.is-user)"] = [node];
+  dom.document._rows["#transcript .message-row"] = [node];
+};
+
+test("VOICE-19 call: a pending approval card keeps its buttons on the call screen, and nothing else does", async () => {
+  const dom = callDom();
+  const { voice } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const row = approvalRow(dom.made);
+  putRow(dom, row.node);
+  voice._paintCall();
+  assert.equal(voice.stats().call.card, "reply-1", "the approval is the card in the middle");
+  assert.equal(dom.screen.getAttribute("data-voice-call-card"), "up");
+  const copy = row.copy();
+  assert.ok(copy != null, "the row was cloned onto the screen");
+  assert.deepEqual(copy.buttons.filter((one) => copy.gone.includes(one)), [], "Allow, Refuse and Always allow all survived the copy");
+  assert.deepEqual(copy.gone, [copy.disclosure], "and the disclosure beside them did not, because it is not a control");
+  assert.deepEqual(copy.buttons.map((one) => one.getAttribute("data-decide")), ["approved", "denied", "always"]);
+  assert.deepEqual(copy.buttons.map((one) => one.getAttribute("data-message-id")), ["reply-1", "reply-1", "reply-1"],
+    "each one still names the row it was cloned from, which is how the press finds its way back");
+  // THE PUSH HOOK COMES OFF THE COPY. docs/APPS.md section 6 makes data-needs-you-card one node per
+  // pending card and a shell with no bearer counts those nodes; a clone carrying it counted one
+  // approval twice for as long as a call was up. Pre-existing, and fixed here rather than noted.
+  assert.equal(copy.card.getAttribute("data-needs-you-card"), null, "the copy is not a second card waiting on anybody");
+  assert.equal(copy.card.getAttribute("data-card-id"), null);
+  assert.equal(row.card.getAttribute("data-needs-you-card"), "a1:reply-1", "and the row's own hook is untouched");
+  // The copy really is what is on the screen.
+  const slot = dom.screen._find["[data-voice-call-card-slot]"];
+  assert.equal(slot._kids[slot._kids.length - 1], copy.node);
+  voice.stop();
+});
+
+test("VOICE-19 call: a card already waiting when the call opens is drawn if it is a pending approval, and only then", async () => {
+  // VOICE-13's staleness rule: `fromCard` is the newest card when the call opened, so a weather card
+  // from this morning does not take the middle of a call. A pending approval is not that. It is
+  // blocking the agent right now and the relay asks about it out loud the moment it finds one, so a
+  // screen that refused to draw it would leave a question in somebody's ear about a card they cannot
+  // see. That is the exact shape the live gate hit: a real approval raised before the press was
+  // never copied.
+  const dom = callDom();
+  const { voice } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });
+  const waiting = approvalRow(dom.made, { id: "old-1" });
+  putRow(dom, waiting.node);
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(voice._call._state.fromCard, "old-1", "it really was the newest card when the call opened");
+  assert.equal(voice.stats().call.card, "old-1", "and a pending approval is drawn anyway");
+  assert.equal(voice.stats().call.cardState, "pending");
+  // Every other kind keeps VOICE-13's rule exactly as it was.
+  voice.stop();
+  const other = callDom();
+  const second = await loadTalking({ innerWidth: 390, innerHeight: 844, document: other.document });
+  const weather = other.made({ "data-message-id": "old-2", class: "message-row" });
+  weather._find[".inline-card, [data-attachment]"] = other.made();
+  putRow(other, weather);
+  await second.voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(second.voice.stats().call.card, "", "a card that is not a question is still stale");
+  second.voice.stop();
+});
+
+test("VOICE-19 call: the copy's button presses the ROW's button, so there is still one decide path", async () => {
+  const dom = callDom();
+  const { voice } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const row = approvalRow(dom.made);
+  putRow(dom, row.node);
+  voice._paintCall();
+  const copy = row.copy();
+  assert.equal(voice._call.decide(copy.buttons[0]), true, "the press found the row it was cloned from");
+  assert.equal(row.buttons[0].presses, 1, "Allow in the transcript is what was pressed");
+  assert.equal(copy.buttons[0].presses, 0, "and never the copy, which carries no handler of its own");
+  assert.deepEqual(row.buttons.map((one) => one.presses), [1, 0, 0], "one button, once");
+  // And through the screen's own click listener, which is what a thumb actually reaches.
+  const target = { closest: (sel) => (sel === "[data-decide]" ? copy.buttons[1] : null) };
+  dom.screen.fire("click", { target });
+  assert.deepEqual(row.buttons.map((one) => one.presses), [1, 1, 0], "Refuse on the copy pressed Refuse in the chat");
+  // A row that has gone (app.js repaints #transcript wholesale) answers false and presses nothing.
+  dom.document._rows["#transcript .message-row"] = [];
+  assert.equal(voice._call.decide(copy.buttons[0]), false);
+  assert.deepEqual(row.buttons.map((one) => one.presses), [1, 1, 0]);
+  voice.stop();
+});
+
+test("VOICE-19 call: the adapter is called from ONE place, and it is not this file", async () => {
+  // Sliced out of the live files rather than retyped: the claim is that the call screen added no
+  // second way to decide an approval, and a copy of these lines would go on passing after one did.
+  const app = await read("ui/machine-room/app.js");
+  const voiceSource = await read("ui/machine-room/voice.js");
+  const decideCalls = app.split("\n").filter((line) => line.includes("adapter.decideApproval("));
+  assert.equal(decideCalls.length, 1, `app.js should call decideApproval from exactly one place, found ${decideCalls.length}`);
+  const at = app.indexOf(decideCalls[0]);
+  const before = app.slice(Math.max(0, at - 400), at);
+  assert.match(before, /closest\("\[data-decide\]"\)/, "and that one call site is reached from the [data-decide] delegation");
+  assert.ok(!/decideApproval/.test(voiceSource.replace(/^.*app\.js listens.*$/m, "")),
+    "voice.js must never reach the adapter itself: the copy's button presses the row's button");
+  // The copy's controls are sized for a thumb without a breakpoint, because the phone rule in
+  // styles.css that takes an in-transcript card action to 44 px stops at 690 px and a shell that
+  // names its platform gets a call screen at any size.
+  const sheet = await read("ui/machine-room/voice-call.css");
+  assert.match(sheet, /\.voice-call-card \.inline-card-actions \.card-action \{[^}]*min-height: 44px/);
+  assert.match(sheet, /\.voice-call-card \.inline-card-actions \.card-action \{[^}]*min-width: 44px/);
+  assert.ok(!/@media[^{]*width/.test(sheet), "voice-call.css still carries no width breakpoint");
+  // AND THE COPY DOES NOT ANIMATE IN. .message-row carries float-in, which is
+  // `translateY(10px) scale(0.985)` with a spring easing (motion.css), and a fresh clone restarts it
+  // on every paint. MEASURED in --leg call with it running: a button whose computed min-height was
+  // 44px and whose box-sizing was border-box still measured 43.34 px, which is 44 x 0.985, and a
+  // thumb at its own centre missed it. Sliced against the live sheets so neither can drift.
+  assert.match(sheet, /\.voice-call-card \.message-row \{ animation: none; \}/);
+  const motion = await read("ui/machine-room/motion.css");
+  assert.match(motion, /@keyframes float-in \{[^}]*scale\(0\.985\)/, "float-in no longer scales, so the rule above may be describing a fault that is gone");
+});
+
+test("VOICE-19 call: a settled card loses the buttons, and the copy is repainted to say so", async () => {
+  const dom = callDom();
+  const { voice } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const row = approvalRow(dom.made);
+  putRow(dom, row.node);
+  voice._paintCall();
+  assert.equal(row.clones.length, 1);
+  assert.equal(voice.stats().call.cardState, "pending");
+  // A repaint with nothing changed rebuilds nothing, which is the guarded-write rule this file keeps
+  // everywhere: the body-wide observer watches childList and an unguarded write repaints on its own
+  // mutation (console-flicker).
+  voice._paintCall();
+  assert.equal(row.clones.length, 1, "a card that has not moved is not copied again");
+  // The host answered -- by the copy's button, by the row's, or by a spoken yes -- and the row is
+  // redrawn settled. The screen must follow it: a copy still offering Allow over a decision that is
+  // already made is the same lie from the other direction.
+  row.settle("approved");
+  voice._paintCall();
+  assert.equal(row.clones.length, 2, "the state changed, so the copy was rebuilt");
+  assert.equal(voice.stats().call.cardState, "approved");
+  const settled = row.copy();
+  assert.deepEqual(settled.buttons, [], "a settled card has no buttons to keep");
+  assert.deepEqual(settled.gone, [settled.disclosure], "and everything that is not a kept control still comes off");
+  voice.stop();
+});
+
 test("VOICE-13 call: the microphone has a level now, and the four numbers beside it did not move", async () => {
   const { voice } = await loadTalking();
   await voice.talkDown();

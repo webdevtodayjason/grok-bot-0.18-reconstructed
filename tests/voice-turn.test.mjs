@@ -33,8 +33,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { startStubRealtime } from "./helpers/stub-realtime.mjs";
 import {
-  GREETINGS, MAX_TITAN_ROUNDS, SPOKEN_LEAD_SENTENCES, SPOKEN_REMAINDER_HINT, TURN_WAIT_CAP_S,
-  VOICE_NOTE_MAX_CHARS, VOICE_NOTE_WRITE_MS, fileCallNote, pickGreeting,
+  CARD_WATCH_MS, GREETINGS, MAX_TITAN_ROUNDS, SPOKEN_LEAD_SENTENCES, SPOKEN_REMAINDER_HINT,
+  TURN_WAIT_CAP_S, VOICE_NOTE_MAX_CHARS, VOICE_NOTE_WRITE_MS, cardQuestion, fileCallNote, pickGreeting,
   isUnknownGatewayMethod, makeCallDedupe, makeSentenceCutter, makeSpokenExchange, makeTurnRunner,
   makeVoiceEdge, makeVoicePolicy, matchYesNo, pendingCardsOf, phoneLineInstructions, readVoiceBrief,
   remainderOf, resolveHeldCard, resolveVoiceAgent, splitSentences, titanTool, toolCallsOf,
@@ -1091,7 +1091,7 @@ const micFrame = () => {
   return out;
 };
 
-async function openSession({ stub, settings, gateway, dir, greet = false }) {
+async function openSession({ stub, settings, gateway, dir, greet = false, cardWatchMs = undefined }) {
   await writeVoiceSettings(settings, { file: path.join(dir, "voice.json") });
   const t = {
     slug: "acme", name: "Acme", operator: false,
@@ -1106,6 +1106,9 @@ async function openSession({ stub, settings, gateway, dir, greet = false }) {
   const logLines = [];
   const edge = makeVoiceEdge({
     t, call: gateway.call, policy: makeVoicePolicy({}), providerUrl: stub.url, greet,
+    // VOICE-19. Left undefined by every case that predates the watcher, so those lines poll on the
+    // production three seconds and never fire inside a test's own lifetime.
+    ...(cardWatchMs == null ? {} : { cardWatchMs }),
     log: (line) => logLines.push(String(line)),
   });
   const server = net.createServer();
@@ -1300,6 +1303,197 @@ test("\"don't confirm\" spoken at a pending card closes nothing as approved", as
     stub.emitToolCall({ name: "titan", args: { message: "don't confirm" }, callId: "c2", triple: false });
     await session.settle(() => gateway.of("resolveAutoReviewApproval").length > 0, "the denial");
     assert.equal(gateway.of("resolveAutoReviewApproval")[0].args.resolution, "denied", "a negation is a denial and never an approval");
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ================================================== VOICE-19: the card the box raised on its own
+//
+// Jason, 2026-09-13 on build 21: "the approval card popped up while I was in my voice chat session
+// ... I should also be able to tell Titan when it pops up on the screen ... I approve it and let
+// Titan approve it through my verbal approval." Half of that is the screen (the buttons, in
+// tests/machine-room-voice.test.mjs); this half is the relay noticing a card at all.
+//
+// WHAT WAS MISSING. `pendingCardsOf` was read in exactly ONE place -- inside makeTurnRunner.run,
+// against the entries that landed after this line's own prompt -- so the only approval that was ever
+// asked about out loud was one a spoken turn had caused. An approval raised by a turn started in the
+// chat, by a routine, by a subagent, or by Titan carrying on working after his reply had closed the
+// turn, reached the person's screen and was never mentioned. The watcher below is the moment that was
+// missing, and every case here is end to end through the real bridge.
+
+const settledApproval = (id, requestId, { status = "approved", summary = "Send the email to Richard" } = {}) => ({
+  id, kind: "send-message", timestampMs: 1_700_000_000_400,
+  message: { type: "auto-review-approval", approval: { requestId, status, summary, reason: "it sends mail", command: "mail send" } },
+});
+
+const spokenQuestions = (session) => session.of("said").map((one) => String(one.text ?? "")).filter((one) => one.includes("Allow it?"));
+
+test("VOICE-19: one wording for a card, and it ASKS rather than reads a summary out", () => {
+  const card = { kind: "auto-review", title: "Echo hello on Titan's computer", detail: "it runs a shell command - echo hello" };
+  assert.equal(cardQuestion(card), "Echo hello on Titan's computer. it runs a shell command - echo hello. Allow it?");
+  // The detail is optional and the question still ends in the button's own word.
+  assert.equal(cardQuestion({ kind: "auto-review", title: "Send the email to Richard" }), "Send the email to Richard. Allow it?");
+  // A card whose own string already ends is not given a second full stop.
+  assert.equal(cardQuestion({ kind: "local-tool", title: "Run psql?" }), "Run psql? Allow it?");
+  // Two cards are never guessed between, and that sentence is deliberately NOT the Allow it? one.
+  const many = cardQuestion({ kind: "many", count: 2, cards: [{ title: "one" }, { title: "two" }] });
+  assert.match(many, /There are 2 things waiting on you: one; two\. Say which one\./);
+  assert.doesNotMatch(many, /Allow it\?/);
+  assert.equal(cardQuestion(null), "");
+  // And the production tick is the between-turns one, not the turn runner's 400 ms.
+  assert.equal(CARD_WATCH_MS, 3000);
+});
+
+test("VOICE-19: the words a person actually answers \"Allow it?\" with are a decision", () => {
+  // The question now ends in the button's own word, so the matcher has to know that word. Before this
+  // wave "allow it" was prose: it went to Titan as a message and left the card open.
+  for (const yes of ["allow", "allow it", "allowed", "permit", "approve it", "yes", "go ahead", "do it"]) {
+    assert.equal(matchYesNo(yes)?.decision, "yes", `${JSON.stringify(yes)} is a yes`);
+  }
+  for (const no of ["refuse", "refuse it", "reject", "block", "deny it", "stop it", "no", "cancel"]) {
+    assert.equal(matchYesNo(no)?.decision, "no", `${JSON.stringify(no)} is a no`);
+  }
+  // And the guard that all of this hangs on did not move: a negation is never an approval, and a
+  // sentence that merely contains one of these words is still prose.
+  assert.equal(matchYesNo("don't allow it")?.decision, "no");
+  assert.equal(matchYesNo("do not approve it")?.decision, "no");
+  assert.equal(matchYesNo("I am not sure, can you confirm what it would do"), null);
+  assert.equal(matchYesNo("allow the second one only"), null, "a rider is not a bare answer");
+});
+
+test("VOICE-19: a card the box raised with no spoken turn behind it is asked ONCE, and a spoken allow closes it", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  // The card is in the tail from the first read. Nobody has said a word to Titan on this line, which
+  // is the whole point: no sendPrompt has ever gone out, so the turn runner has never polled.
+  const gateway = fakeGateway({ agents: [{ id: "a1", name: "Titan", isRunning: true }], tail: () => [approvalEntry("e1", "req1")] });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0019" }, gateway, dir, cardWatchMs: 60 });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    await session.settle(() => spokenQuestions(session).length > 0, "the card being asked about out loud");
+    const asked = spokenQuestions(session)[0];
+    assert.match(asked, /Send the email to Richard/, "the question names the action rather than gisting it");
+    assert.match(asked, /Allow it\?$/, "and it asks");
+    // The words really went to the vendor, as the one shape that makes a realtime model say a string.
+    const read = stub.events.inbound.filter((event) => event.type === "conversation.item.create"
+      && String(event.item?.content?.[0]?.text ?? "").includes("Send the email to Richard"));
+    assert.equal(read.length, 1, "one item carrying the question, and one only");
+    assert.match(String(read[0].item.content[0].text), /^Read this out to the person, word for word/);
+    assert.equal(gateway.of("sendPrompt").length, 0, "and nothing about the card went into the conversation as prose");
+    // ONE QUESTION AND NOT A NAG. The card stays pending on the box until somebody answers it, so a
+    // watcher with no memory would ask again every tick for the length of the call.
+    const pollsAfter = gateway.polls;
+    await session.settle(() => gateway.polls >= pollsAfter + 4, "four more ticks of the watcher");
+    assert.equal(spokenQuestions(session).length, 1, "it was asked once, however many times it was seen");
+    // A NEW user turn, and the answer goes through the console's own approval command.
+    await session.mic();
+    stub.emitSpeechStopped();
+    stub.emitToolCall({ name: "titan", args: { message: "allow it" }, callId: "c1", triple: false });
+    await session.settle(() => gateway.of("resolveAutoReviewApproval").length > 0, "the approval closing");
+    const closed = gateway.of("resolveAutoReviewApproval")[0].args;
+    assert.equal(closed.resolution, "approved");
+    assert.equal(closed.requestId, "req1", "never a second gate: it is the command the console's own button calls");
+    assert.equal(gateway.of("sendPrompt").length, 0, "a yes that closes a card is not also a message to Titan");
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-19: a spoken no at a card the box raised is a refusal, and nothing is approved", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  const gateway = fakeGateway({ agents: [{ id: "a1", name: "Titan", isRunning: true }], tail: () => [approvalEntry("e1", "req1")] });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0020" }, gateway, dir, cardWatchMs: 60 });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    await session.settle(() => spokenQuestions(session).length > 0, "the card being asked about out loud");
+    await session.mic();
+    stub.emitSpeechStopped();
+    stub.emitToolCall({ name: "titan", args: { message: "refuse it" }, callId: "c1", triple: false });
+    await session.settle(() => gateway.of("resolveAutoReviewApproval").length > 0, "the refusal");
+    assert.equal(gateway.of("resolveAutoReviewApproval")[0].args.resolution, "denied");
+    assert.equal(gateway.of("sendPrompt").length, 0);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-19: a card settled on screen lets the spoken question go, and is never asked again", async () => {
+  // THE TAP. The card on the call screen and the question in the person's ear are the same card, so a
+  // thumb on Allow answers both: the host rewrites the card's status, the watcher sees it is no longer
+  // pending, and the held question stops standing. Without this a "yes" said a minute later would be
+  // read as an answer to a decision that was already made.
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  let tapped = false;
+  const gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    tail: () => (tapped ? [settledApproval("e1", "req1")] : [approvalEntry("e1", "req1")]),
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0021" }, gateway, dir, cardWatchMs: 60 });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    await session.settle(() => spokenQuestions(session).length > 0, "the card being asked about out loud");
+    tapped = true;
+    await session.settle(() => session.frames.log.some((line) => line.includes("settled on screen rather than out loud")),
+      "the relay letting go of a card the person answered with their thumb");
+    const pollsAfter = gateway.polls;
+    await session.settle(() => gateway.polls >= pollsAfter + 4, "four more ticks of the watcher");
+    assert.equal(spokenQuestions(session).length, 1, "a settled card is not asked about again");
+    // And a yes after the tap is a message to Titan rather than an answer to a closed decision.
+    await session.mic();
+    stub.emitSpeechStopped();
+    stub.emitToolCall({ name: "titan", args: { message: "yes" }, callId: "c1", triple: false });
+    await session.settle(() => gateway.of("sendPrompt").length > 0, "the yes reaching Titan as prose");
+    assert.equal(gateway.of("resolveAutoReviewApproval").length, 0, "nothing was closed by it");
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-19: an approval raised inside a tool turn is asked ONCE, by the turn and not also by the watcher", async () => {
+  // Both readers are live on this line and both can see the same card. The turn runner owns the tail
+  // while a turn is with Titan -- it polls at 400 ms and returns whatever card lands beside the reply
+  // -- and the watcher stands aside for the whole of it. Two readers racing on one card is how the
+  // same approval gets asked twice in two different sentences.
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai", audioFrames: 1 });
+  const gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    // Nothing until the turn is in flight, and then the card with no reply beside it: he is waiting
+    // on the person, which is the runner's own card branch.
+    tail: (n) => (n >= 3 ? [approvalEntry("e1", "req1")] : []),
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0022" }, gateway, dir, cardWatchMs: 60 });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    await session.mic();
+    stub.emitSpeechStopped();
+    stub.emitToolCall({ name: "titan", args: { message: "send richard the invoice" }, callId: "c1", triple: false });
+    await session.settle(() => stub.events.toolOutputs.length > 0, "the tool output carrying the question");
+    assert.match(JSON.parse(stub.events.toolOutputs[0].output).reply, /Send the email to Richard\. it sends mail - mail send\. Allow it\?/,
+      "the turn asked it, in the one wording");
+    const pollsAfter = gateway.polls;
+    await session.settle(() => gateway.polls >= pollsAfter + 4, "four more ticks of the watcher over the same pending card");
+    assert.equal(spokenQuestions(session).length, 1, "and the watcher did not ask it a second time");
+    assert.equal(session.of("said").length, 1, "one said frame for the turn, and none of its own");
   } finally {
     await session?.close();
     await stub.close();
