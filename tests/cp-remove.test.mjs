@@ -10,6 +10,10 @@ import path from "node:path";
 import test from "node:test";
 
 import { createDecommission, REFUSALS } from "../cp/decommission.mjs";
+// ONBOARD-4. The marker the removal writes, and the sweep that honours it. Both ends are asserted in
+// this file rather than only in tests/cp-kept.test.mjs, because the bug this item closed lived in the
+// seam: a removal that kept a tree and nothing that ever looked at it again.
+import { createKeptSweep, readKeptMarker } from "../cp/kept.mjs";
 import { createMailDirectory } from "../cp/mail.mjs";
 import {
   boxContainerName, containerProbe, createCoolifyClient, createRelayAsk, loadConfig, tenantDirectory, waitForBox,
@@ -303,22 +307,77 @@ test("a Coolify 404 never closes the step when the relay says the container is s
 
 // ---- the data switch ----------------------------------------------------------------------------
 
-test("with the data switch off the directory is untouched and the sentence says nothing deletes it on a timer", async () => {
+test("with the data switch off the directory is untouched, marked with its date, and the sentence names the day", async () => {
+  // ONBOARD-4. This case used to assert the opposite sentence -- "Nothing deletes it on a timer" --
+  // and it was true when it was written: there was no reaper in this product and nothing counted days.
+  // That was also the leak, because kept data is real disk that grew one removed customer at a time
+  // with nothing watching it. The removal now writes the day the files come back into the customer's
+  // own directory, so what this holds is the stronger thing: the tree is still there, the marker is
+  // beside it, and the date in the marker is the date the operator is told.
   await withWorld(async (world) => {
     const built = await makeCustomer(world);
-    const { decommission } = decommissionFor(world);
+    // The clock is pinned so the date in the marker is a date this test can name, which is the point:
+    // an operator reads one day off the card and the sweep acts on the same one.
+    const at = Date.parse("2026-09-13T02:00:00.000Z");
+    const { decommission } = decommissionFor(world, { deps: { now: () => at } });
     const answer = await decommission.remove({ slug: built.slug, confirm: built.slug, deleteData: false });
     assert.equal(answer.ok, true, answer.message);
     assert.equal(answer.dataDeleted, false);
     assert.equal(existsSync(built.dataPath), true);
     const kept = answer.effects.find((effect) => effect.step === "data");
     assert.equal(kept.status, "kept");
-    assert.equal(kept.detail, `Their data is kept at ${built.dataPath}. Nothing deletes it on a timer.`);
-    assert.match(answer.message, /Nothing deletes it on a timer\./);
-    // And it must NOT claim thirty days. There is no reaper in this product and nothing counts days.
-    assert.equal(/thirty days|30 days/i.test(answer.message), false);
+    assert.equal(kept.detail, `Their data is kept at ${built.dataPath} until 2026-10-13, and this service deletes it then and says how much came back.`);
+    assert.equal(answer.keptUntil, "2026-10-13");
+    assert.equal(answer.keptMarkerWhy, "", "a marker that could not be written has to be said, and this one was written");
+
+    // THE MARKER ITSELF, which is the whole mechanism: cp/kept.mjs deletes nothing without one.
+    const marker = readKeptMarker(built.dataPath);
+    assert.equal(marker.ok, true, marker.why);
+    assert.equal(marker.slug, built.slug);
+    assert.equal(marker.keptUntil, Date.parse("2026-10-13T02:00:00.000Z"));
+    assert.equal(marker.container, built.container,
+      "ONBOARD-6: the relay cannot prove a removed workspace's container is gone unless the caller carries its name");
+    assert.match(marker.reason, /switch off/);
+
     assert.equal(world.relay.callsTo("/tenant/purge").some((call) => call.body?.probeOnly !== true), false,
       "with the switch off the relay is never asked to delete anything");
+  });
+});
+
+test("a removal that kept the files is then swept by the date in its own marker", async () => {
+  // The two halves together, which is the only way this item is really proved: the removal writes the
+  // marker, and the sweep that runs hourly on the control plane acts on THAT date. Nothing in between
+  // recomputes thirty days.
+  await withWorld(async (world) => {
+    const built = await makeCustomer(world);
+    const at = Date.parse("2026-09-13T02:00:00.000Z");
+    const { decommission } = decommissionFor(world, { deps: { now: () => at } });
+    const answer = await decommission.remove({ slug: built.slug, confirm: built.slug, deleteData: false });
+    assert.equal(answer.keptUntil, "2026-10-13");
+
+    let clock = at;
+    const lines = [];
+    const sweep = createKeptSweep({
+      config: world.config,
+      askRelayPost: world.askRelayPost,
+      now: () => clock,
+      log: (line) => lines.push(line),
+    });
+
+    clock = at + 29 * 24 * 60 * 60 * 1000;
+    const early = await sweep.sweep();
+    assert.deepEqual(early.deleted, []);
+    assert.equal(early.kept.length, 1);
+    assert.equal(early.kept[0].slug, built.slug);
+    assert.equal(early.kept[0].size, "5.9 MB", "the size comes from the relay, because this service cannot read inside a box's volumes");
+    assert.equal(existsSync(built.dataPath), true);
+
+    clock = at + 31 * 24 * 60 * 60 * 1000;
+    const late = await sweep.sweep();
+    assert.equal(late.deleted.length, 1, JSON.stringify(late.refused));
+    assert.equal(late.deleted[0].slug, built.slug);
+    assert.equal(existsSync(built.dataPath), false);
+    assert.match(lines.at(-1), /^kept data: .* deleted, 5\.9 MB freed \(kept from 2026-09-13 until 2026-10-13\)$/);
   });
 });
 
@@ -401,7 +460,14 @@ test("a purge the relay refuses does not strand the removal, and the answer says
     assert.equal(answer.ok, true, "the container is proved gone, so the customer is off the air either way");
     assert.equal(answer.dataDeleted, false);
     assert.match(answer.message, /Their data could NOT be deleted/);
-    assert.match(answer.message, /Nothing deletes it on a timer\./);
+    // ONBOARD-4. This is the WORSE of the two ways files end up kept, because the operator asked for
+    // them to go, so it gets the same dated marker and the sweep finishes the job rather than leaving
+    // the tree to be noticed. The sentence names the day either way.
+    assert.match(answer.message, /and this service deletes it then/);
+    assert.equal(String(answer.keptUntil ?? "").length, 10, `a kept tree with no date is the leak this item closed: ${answer.message}`);
+    const marker = readKeptMarker(built.dataPath);
+    assert.equal(marker.ok, true, marker.why);
+    assert.match(marker.reason, /asked for the data to be deleted and the relay would not/);
     assert.equal(world.store.getTenant(built.slug), null, "the workspace is still removed");
   });
 });

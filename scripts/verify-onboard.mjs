@@ -38,6 +38,8 @@ import http from "node:http";
 import path from "node:path";
 
 import { createDecommission, REFUSALS } from "../cp/decommission.mjs";
+// ONBOARD-4. The dated marker the removal leaves on a kept tree, read here rather than described.
+import { KEPT_MARKER_NAME, readKeptMarker } from "../cp/kept.mjs";
 import {
   boxContainerName, createCoolifyClient, createRelayAsk, deriveSlug, loadConfig, tenantDirectory, waitForBox,
 } from "../cp/provision.mjs";
@@ -298,10 +300,19 @@ async function removeArm() {
         assert.equal(world.relay.callsTo("/tenant/purge").some((call) => call.body?.probeOnly !== true), false);
         return built.dataPath;
       });
-      await checking("the sentence says the data is kept with nothing deleting it on a timer", async () => {
-        assert.match(answer.message, /Nothing deletes it on a timer\./);
-        assert.equal(/thirty days|30 days/i.test(answer.message), false, "the card claimed a retention nothing counts");
-        return "there is no reaper in this product, and the card does not pretend there is (ONBOARD-4)";
+      await checking("the sentence names the day the kept files come back, and a marker carries that day", async () => {
+        // ONBOARD-4 reversed what this step asserts, because it reversed the fact. It used to hold
+        // "Nothing deletes it on a timer" and refuse any mention of thirty days, which was honest
+        // while nothing counted them; kept data was then real disk growing one removed customer at a
+        // time with nothing watching it. The removal now writes the date into the customer's own
+        // directory and cp/kept.mjs sweeps hourly, so what this holds is the date, the marker, and
+        // the container name the purge route cannot prove absence without.
+        assert.match(answer.message, /and this service deletes it then/);
+        assert.match(String(answer.keptUntil ?? ""), /^\d{4}-\d{2}-\d{2}$/, "a kept tree with no date is the leak this item closed");
+        const marker = readKeptMarker(built.dataPath);
+        assert.equal(marker.ok, true, marker.why);
+        assert.equal(marker.container, built.container);
+        return `kept until ${answer.keptUntil}, with ${KEPT_MARKER_NAME} beside the tree naming ${marker.container}`;
       });
     } finally { await world.dispose(); }
   }

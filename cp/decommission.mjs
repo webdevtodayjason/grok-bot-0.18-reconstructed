@@ -48,10 +48,17 @@
 // the caller writes, and the one ledger row left behind (remove:audit-ready) is a breadcrumb saying
 // this name was removed once, which is a useful thing for the next tenant built under it to carry.
 //
-// THE DATA IS NOT ON A TIMER. With the switch off the card says what is true: the tree is kept and
-// nothing deletes it. There is no reaper in this product, nothing counts days, and a card promising
-// thirty days while nothing counts them is the product lying to the operator. ONBOARD-4 is filed.
-import { boxContainerName, containerProbe, createRelayAsk, RESERVED_SLUGS, tenantDirectory, validateSlug } from "./provision.mjs";
+// THE DATA IS ON A TIMER NOW, and ONBOARD-4 is what put it there. It used to say the opposite, in
+// these words: "There is no reaper in this product, nothing counts days, and a card promising thirty
+// days while nothing counts them is the product lying to the operator." Both halves of that were
+// true and together they were a leak -- kept data was real disk on the R750 that grew one removed
+// customer at a time with nothing watching it, and the only way it came back was somebody typing rm
+// on a live server. So the removal now WRITES THE DATE DOWN, in kept-until.json inside the
+// customer's own directory, and cp/kept.mjs sweeps once an hour and deletes what is past it. The
+// marker is the whole mechanism: nothing without one is ever deleted, and the date the operator is
+// told is the date in the file rather than a number this code recomputes.
+import { writeKeptMarker, KEPT_DAYS } from "./kept.mjs";
+import { boxContainerFor, containerProbe, createRelayAsk, RESERVED_SLUGS, tenantDirectory, validateSlug } from "./provision.mjs";
 
 /** The sentences an operator reads. Pinned as constants because the tests assert them word for word. */
 export const REFUSALS = Object.freeze({
@@ -72,8 +79,17 @@ export const STILL_RUNNING = (slug, container) =>
   + ` Finish it on the server with: docker rm -f ${container}`
   + `, then run node cp/cli.mjs tenant remove ${slug} again.`;
 
-const KEPT = (path) =>
-  `Their data is kept at ${path}. Nothing deletes it on a timer.`;
+/**
+ * What the operator is told about files that were kept, and it is read off the marker rather than
+ * composed from KEPT_DAYS: if the marker could not be written there is no date, and saying one
+ * anyway is the card lying that this whole item exists to stop.
+ */
+const KEPT = (path, day) => (day
+  ? `Their data is kept at ${path} until ${day}, and this service deletes it then and says how much came back.`
+  : `Their data is kept at ${path}. Nothing is counting the days on it, so somebody has to remove it by hand.`);
+
+/** Why the marker could not be written, said after the sentence above rather than instead of it. */
+const KEPT_UNMARKED = (why) => ` The dated marker that would have had this deleted in ${KEPT_DAYS} days was not written: ${why}.`;
 
 /**
  * Was this instance already running when it was claimed?
@@ -135,7 +151,7 @@ export function createDecommission({
       accounts: store.listAccountsForTenant(name).map((account) => account.email),
       addresses: activeAddresses(name).length,
       dataPath: tenantDirectory(name, config),
-      container: row.boxContainer || (row.coolifyServiceUuid ? boxContainerName(row.coolifyServiceUuid) : ""),
+      container: boxContainerFor(row),
       adopted,
       why: adopted ? REFUSALS.adopted() : operator ? REFUSALS.operator_slug(name) : "",
     };
@@ -164,6 +180,10 @@ export function createDecommission({
     // trips. It is not waiting on a build and it never has been.
     dataDeadlineMs = 90_000,
     pollMs = 2_000,
+    // ONBOARD-4. How many days the files are kept for when they are kept. Passed so a test can write
+    // a marker with a window it can drive, and defaulted to the number the Remove card has always
+    // shown. The value that ends up in the file is what the sweep acts on, never this default.
+    keptDays = KEPT_DAYS,
   } = {}) {
     const slug = String(rawSlug ?? "");
     const effects = [];
@@ -195,7 +215,10 @@ export function createDecommission({
     }
 
     const dataPath = tenantDirectory(slug, config);
-    const container = row.boxContainer || (row.coolifyServiceUuid ? boxContainerName(row.coolifyServiceUuid) : "");
+    // SUPPORT-1d. One helper for the whole service, and this is the caller that most needs it: the
+    // removal carries this name to the relay's purge route, which cannot prove a container is gone
+    // without one (ONBOARD-6 measured a tree that is undeletable for exactly that reason).
+    const container = boxContainerFor(row);
     const accounts = store.listAccountsForTenant(slug);
 
     // ---- 1. disable-signins ---------------------------------------------------------------------
@@ -394,8 +417,30 @@ export function createDecommission({
     // that store.deleteTenant is about to wipe. It goes into the audit-ready row and home to the
     // caller, which is what puts it on the gate's transcript and in the admin_actions detail.
     let dataWhy = "";
+    // ONBOARD-4. The date, read off the marker that was actually written, and the reason there is no
+    // date when there is none. Both are carried down to the sentence the operator reads and into the
+    // audit-ready row, which is the one ledger row that outlives the tenant.
+    let keptUntilDay = "";
+    let keptMarkerWhy = "";
+    /**
+     * Mark the tree with the day it gets deleted.
+     *
+     * Called from BOTH ways the files end up kept -- the switch off, and a purge the relay would not
+     * do -- because "the data is still there and nothing is counting" is the same leak either way,
+     * and the second one is worse: the operator asked for it to go. The container name goes in
+     * because by the time the sweep runs there is nothing left that could look it up.
+     */
+    const mark = (reason) => {
+      const marked = writeKeptMarker({ dir: dataPath, slug, container, reason, at: now(), days: keptDays });
+      if (marked.ok) { keptUntilDay = marked.day; return; }
+      keptMarkerWhy = String(marked.why ?? "");
+      // Nothing to keep is not a failure and must not read like one: a workspace whose files are
+      // already gone has no tree to count days on.
+      if (marked.nothingToKeep === true) keptMarkerWhy = "";
+    };
     if (!deleteData) {
-      record("data", "kept", KEPT(dataPath));
+      mark("the operator left the data switch off");
+      record("data", "kept", `${KEPT(dataPath, keptUntilDay)}${keptMarkerWhy.length > 0 ? KEPT_UNMARKED(keptMarkerWhy) : ""}`);
     } else {
       // THE BODY THE RELAY ACTUALLY TAKES, and every field of it is load-bearing. ui/purge-edge.mjs
       // refuses a body without `confirm` equal to the slug (400 confirm), so a request carrying only
@@ -451,6 +496,10 @@ export function createDecommission({
         dataWhy = `${String(purge.why ?? purge.body?.message ?? `the relay answered ${purge.status}`)}`
           + ` (asked ${purgeTries} time${purgeTries === 1 ? "" : "s"}, last answer ${purge.status}`
           + `${purge.body?.error ? ` ${String(purge.body.error)}` : ""})`;
+        // ONBOARD-4. The operator asked for these files to go and they did not, so the tree is kept
+        // UNINTENTIONALLY -- the one case where nobody is watching it on purpose. It gets the same
+        // marker, so the sweep finishes the job on the date rather than leaving it to be noticed.
+        mark("the operator asked for the data to be deleted and the relay would not");
         record("data", "carried-on", dataWhy);
       }
     }
@@ -514,6 +563,10 @@ export function createDecommission({
       dataDeleted,
       bytesFreed,
       ...(dataWhy.length > 0 ? { dataWhy } : {}),
+      // ONBOARD-4. The date the files come back, in the one ledger row that outlives the tenant, for
+      // the same reason dataWhy rides here: thirty days from now there is no other row left to ask.
+      ...(keptUntilDay.length > 0 ? { keptUntil: keptUntilDay } : {}),
+      ...(keptMarkerWhy.length > 0 ? { keptMarkerWhy } : {}),
       addresses: retired.length + retiredLate.length,
       accounts: accountsRemoved.length,
       tookMs: now() - startedAt,
@@ -521,9 +574,8 @@ export function createDecommission({
 
     const dataSentence = dataDeleted
       ? `Their data is gone: ${dataPath} was deleted${bytesFreed > 0 ? ` and ${bytesFreed} bytes came back` : ""}.`
-      : deleteData
-        ? `Their data could NOT be deleted. ${KEPT(dataPath)}`
-        : KEPT(dataPath);
+      : `${deleteData ? `Their data could NOT be deleted. ` : ""}${KEPT(dataPath, keptUntilDay)}`
+        + (keptMarkerWhy.length > 0 ? KEPT_UNMARKED(keptMarkerWhy) : "");
 
     return {
       ok: true,
@@ -542,6 +594,11 @@ export function createDecommission({
       // The refusal's own words, so the route's admin_actions row and the gate's transcript can both
       // name it. Empty when the data went, and empty when it was never asked for.
       dataWhy,
+      // ONBOARD-4. The day cp/kept.mjs will delete what was kept, and empty when the files went or
+      // when no marker could be written. The route puts it in the admin_actions row and the card
+      // draws it, so the operator reads one date rather than two explanations of thirty days.
+      keptUntil: keptUntilDay,
+      keptMarkerWhy,
       accountsRemoved,
       addressesRetired: [...retired, ...retiredLate],
       slugFree,

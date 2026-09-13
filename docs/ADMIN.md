@@ -575,10 +575,17 @@ removal polls until the container name is really gone and records which proof it
 neither proof arrives it **stops there**, the workspace row is not deleted, and the card says
 *"Coolify took the record and the container is still running"* with the command that finishes it.
 
-The data switch, and what the card says when it is off: **their files are kept and nothing deletes
-them on a timer.** There is no reaper in this product, nothing counts days, and a card promising
-thirty of them would be the product lying to the operator. **ONBOARD-4** is filed for a real one. With
-the switch on, the deletion is done by the relay and not by this service, because this service runs
+The data switch, and what the card says when it is off: **their files are kept for thirty days and then
+this service deletes them**, with the exact date in the answer. That is ONBOARD-4, shipped 2026-09-13.
+Until then this paragraph said the opposite -- the files are kept and nothing deletes them on a timer,
+because there was no reaper in this product and nothing counted days -- which was honest and was also a
+leak, since kept data is real disk that grew one removed customer at a time with nothing watching it. The
+removal now writes `kept-until.json` into the customer's own directory and the hourly sweep deletes a tree
+once its day has passed; every kept directory is listed on **Box health** until it goes. When the marker
+could not be written the card says that instead of naming a day, because a date the product cannot keep is
+the same lie in the other direction.
+
+With the switch on, the deletion is done by the relay and not by this service, because this service runs
 as uid 1001 and a tenant's volumes are 0700 owned by uid 1000: it physically cannot, and a route that
 pretended otherwise would report a success that never happened.
 
@@ -745,6 +752,7 @@ customer. This panel is what you read to decide which of them to press.
 | Disk | `du -sk` on `/data/titanbot/<slug>`, run by the relay |
 | Memory | `docker stats --no-stream` on the relay |
 | Last backup | the newest nightly manifest. **Not measured**, see below |
+| Data kept for removed customers | `kept-until.json` in each directory under `CP_TENANT_ROOT`, read by this service; the size from the relay |
 
 Container state and gateway answering are asked separately on purpose. They come apart often enough
 to matter: a box whose host process died still has a container in state `running`.
@@ -761,6 +769,19 @@ down with it; `du` on the slow one is cut to whatever is left. And the relay ans
 inside a five second window from one sweep, because a single click on Refresh loads this panel and
 System health together and both want the same answer. The control plane waits fifteen seconds for
 it, which is longer than the budget plus the trip; `CP_RELAY_TIMEOUT_MS` moves that.
+
+**Data kept for removed customers (ONBOARD-4).** Under the box table is a second list, and every row in it
+is a customer who is **gone**: a removal with the data switch off leaves their files behind and writes the
+day they come back into their own directory. The list gives the workspace, how long ago it was removed, the
+day it goes with the days left beside it, the size in words, and the directory. This service sweeps once an
+hour and deletes one whose day has passed, logging a line with the bytes that came back.
+
+Two things to read it correctly. **Nothing without that marker is on this list and nothing without it is
+ever deleted**, so an orphan directory from a failed build -- ONBOARD-6, `north-bay-roofing` on the R750 --
+is still yours to look at rather than a timer's. And the **size comes from the relay**, for the same reason
+Disk does: this service cannot read inside a box's volumes. A size it could not get reads "not measured"
+with the reason on hover, never a zero, because a zero there is indistinguishable from an empty directory.
+Sizes are re-asked at most every fifteen minutes, since each one is a walk of a customer's whole tree.
 
 ### System health
 
@@ -1251,7 +1272,10 @@ Email Worker, which posted `POST /v1/relay/support`, which wrote the row and tol
 `titanium` workspace**. Five rows sit in the panel as new, from `farm@tiinyapp.farm`, and they are
 Jason's to close. The first three landed with the notification failing, because the adopted `titanium`
 row carried no `box_container` and no profile token file; the operator wrote both on the R750 from the
-box env, and mail four and five were told. **Still not measured:** no browser leg has walked this panel,
+box env, and mail four and five were told. **That repair is a mechanism now (SUPPORT-1d, 2026-09-13):**
+every reader resolves a container name through one helper that derives `titanbot-box-<uuid>` when the
+column is empty, the token is read through one adoption-aware reader, and `tenant adopt` writes the column
+and takes the token on stdin or refuses to finish. See docs/TENANCY.md §10. **Still not measured:** no browser leg has walked this panel,
 though `scripts/verify-admin.mjs` now carries `panel-support` in its panel walk and its control list, so
 the next run of that gate measures it in real Chromium. Everything behind the intake is measured in
 `tests/cp-support.test.mjs` against a stub box. `docs/SUPPORT.md` section 8 still reads as though none of

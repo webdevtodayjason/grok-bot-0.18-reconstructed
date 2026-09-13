@@ -3,7 +3,7 @@
 // address is attacking, and which row is the same attempt seen twice.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 // PUSH-1. The two credential tests sign with keys generated per run rather than with a fixture: a
 // fixture private key is a private key in git whatever it happens to open.
@@ -23,6 +23,9 @@ import {
   summariseByAddress,
   summariseByPassword,
 } from "../cp/admin.mjs";
+// ONBOARD-4. The marker a removal writes, so this suite can build the state the Box health panel is
+// supposed to report rather than a fixture shaped like a guess at it.
+import { writeKeptMarker } from "../cp/kept.mjs";
 import { createProxyClient } from "../cp/proxy.mjs";
 import { makeTempRoot } from "./cp-support.mjs";
 import { startFakeProxy } from "./cp-proxy-support.mjs";
@@ -381,6 +384,83 @@ test("the box health panel renders each row's age and the fleet sweep stamp in p
   assert.match(block, /age\(box\.ageMs\)/, "the age is drawn beside every workspace row");
   assert.match(block, /fleet last swept/, "the header identifies the fleet sweep timestamp");
   assert.match(block, /fleet sweep has not finished yet/, "the first background sweep is named honestly");
+});
+
+// ---- ONBOARD-4: the data kept for customers who are gone ----------------------------------------
+
+test("the box health answer lists every kept directory with its date and its size in words", async () => {
+  await withStore(async (store, root) => {
+    const tenantRoot = path.join(root, "tenants");
+    // A removed customer's tree, marked the way cp/decommission.mjs marks one.
+    mkdirSync(path.join(tenantRoot, "acme-roofing"), { recursive: true });
+    const at = Date.parse("2026-09-13T02:00:00.000Z");
+    const marked = writeKeptMarker({
+      dir: path.join(tenantRoot, "acme-roofing"), slug: "acme-roofing",
+      container: "titanbot-box-p927bfqm83ioloibamlvyd7g", at,
+    });
+    assert.equal(marked.ok, true, marked.why);
+    // A live customer's tree, which has no marker and must not appear.
+    mkdirSync(path.join(tenantRoot, "north-bay", "volumes"), { recursive: true });
+
+    let clock = at + 10 * 24 * 60 * 60 * 1000;
+    store.createTenant({ slug: "north-bay", name: "North Bay", status: "running" });
+    const api = createAdminApi({
+      config: { dataDir: root, tenantRoot, relayUrl: "http://relay.invalid", relayToken: "r".repeat(32) },
+      store,
+      now: () => clock,
+      client: { base: "", call: async () => ({}) },
+      json: () => {}, noContent: () => {},
+      publicAccount: (account) => account,
+      publicTenant: (tenant) => tenant,
+      tenantView: async (row) => ({ slug: row.slug, status: row.status, coolify: { reachable: false } }),
+      tenantPower: async () => {}, tenantProvision: async () => {},
+      currentSession: () => ({ ok: false }),
+      log: () => {},
+      // The relay answers the box sweep and the purge probe. The probe is what carries the size,
+      // because this service runs as uid 1001 and cannot read inside a box's volumes.
+      fetchImpl: async (url, init) => {
+        const href = String(url);
+        if (href.endsWith("/admin/boxes")) {
+          return { ok: true, status: 200, json: async () => ({ measuredAt: "2026-09-13T12:00:00.000Z", boxes: [] }) };
+        }
+        if (href.endsWith("/tenant/purge")) {
+          const body = JSON.parse(String(init?.body ?? "{}"));
+          assert.equal(body.probeOnly, true, "the panel must never ask the relay to DELETE anything");
+          assert.equal(body.slug, "acme-roofing");
+          return { ok: true, status: 200, text: async () => JSON.stringify({
+            message: "Nothing was touched.", probeOnly: true, slug: body.slug,
+            dir: { path: path.join(tenantRoot, body.slug), exists: true, bytes: 6_200_000, complete: true },
+          }) };
+        }
+        throw new Error(`nothing should have asked for ${href}`);
+      },
+    });
+
+    const answer = await api.boxes();
+    assert.equal(answer.kept.ok, true, answer.kept.why);
+    assert.equal(answer.kept.rows.length, 1, "a live customer's directory has no marker and is not this list's business");
+    const [row] = answer.kept.rows;
+    assert.equal(row.slug, "acme-roofing");
+    assert.equal(row.day, "2026-10-13");
+    assert.equal(row.daysLeft, 20);
+    assert.equal(row.pastDue, false);
+    assert.equal(row.size, "5.9 MB", "the size is in words, with the rounding the box table already uses");
+    assert.equal(row.bytes, 6_200_000);
+  });
+});
+
+test("the box health panel draws the kept directories and says what is not measured", () => {
+  const source = readFileSync(path.join(import.meta.dirname, "../cp/admin/admin.js"), "utf8");
+  const block = /function drawKept\(kept\)[\s\S]*?\n  }\n\n  \/\/ ---- panel 4/.exec(source)?.[0] ?? "";
+  assert.ok(block.length > 0, "the kept-data section is not in the Box health panel");
+  assert.match(source, /drawKept\(answer\.kept\)/, "loading the panel has to draw it");
+  assert.match(block, /Data kept for removed customers/);
+  assert.match(block, /Nothing is being kept\./, "an empty list says so rather than drawing an empty table");
+  // NOT MEASURED IS A SENTENCE AND NEVER A ZERO, which is the rule the whole panel is built on: a
+  // zero in a size column is indistinguishable from an empty directory.
+  assert.match(block, /not measured/);
+  assert.match(block, /due, the next sweep takes it/);
+  assert.match(block, /section\.id = "keptData"/, "the section is found by its id on a redraw rather than appended twice");
 });
 
 // ---- the spend panel (PROXY-1) ------------------------------------------------------------------

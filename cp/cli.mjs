@@ -79,6 +79,9 @@ import { tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken } from
 import { openStore } from "./store.mjs";
 import { mailDomain } from "./mail.mjs";
 import { createCodeTasks } from "./code.mjs";
+// ONBOARD-4. How long a removal keeps a customer's files, so the confirm prompt and the marker cannot
+// say two different numbers.
+import { KEPT_DAYS } from "./kept.mjs";
 import { buildDigest } from "./feedback.mjs";
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -323,7 +326,9 @@ async function tenantRemove(args) {
     out(`This removes the workspace ${slug}: its container, its sign-ins, and its bots' email addresses for ever.`);
     out(deleteData
       ? "--delete-data is set, so everything they made is deleted too and cannot be recovered."
-      : "Their files are kept. Nothing deletes them on a timer.");
+      // ONBOARD-4. The files are on a clock now. The exact date comes back in the answer, off the
+      // marker the removal writes, so this says the window and the answer says the day.
+      : `Their files are kept for ${KEPT_DAYS} days, and this service deletes them then.`);
     const typed = await promptLine(`Type the workspace name to confirm (${slug}): `);
     if (typed.trim() !== slug) die("that is not the workspace name, nothing was done");
   }

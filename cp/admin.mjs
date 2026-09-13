@@ -71,6 +71,13 @@ import {
 // SUPPORT-1. The support inbox: the intake's own checks, the panel's answer and the one notification.
 // Its own file for the reason cp/feedback.mjs is.
 import { createSupport } from "./support.mjs";
+// ONBOARD-4. The dated marker a removal leaves on a customer's files and the sweep that honours it,
+// in their own file for the reason cp/feedback.mjs is in one: the marker, the listing and the size in
+// words are pure functions over a directory, and none of them needs this console to be tested.
+import { createKeptSweep } from "./kept.mjs";
+// SUPPORT-1d. The one answer to "which container is this workspace's box", shared with the registry,
+// the removal, the support desk and the onboarding sequence, and the relay asker the sweep uses.
+import { boxContainerFor, createRelayAsk } from "./provision.mjs";
 // PUSH-1. The two push credentials and the two proofs, in their own file for the reason
 // cp/feedback.mjs is in its own file: every function in it is a pure function over a pasted
 // credential and none of them needs a store, a config or a request to be tested.
@@ -898,6 +905,23 @@ export function createAdminApi({
 
   const relayTimeoutMs = Number(config.relayTimeoutMs) > 0 ? Number(config.relayTimeoutMs) : RELAY_TIMEOUT_MS;
 
+  /**
+   * ONBOARD-4. What is being kept for removed customers, and the hourly pass that deletes what is
+   * past its date.
+   *
+   * ONE of these in the process, handed to cp/server.mjs for its timer as well, because the sizes it
+   * holds are walks of customers' trees on the host: two sweeps would be two walks, and the panel
+   * would show a number the timer had not measured. It is built on createRelayAsk rather than on this
+   * file's own askRelayPost for one reason -- the purge route's refusals are 409s that CARRY the
+   * answer, and askRelayPost throws a non-200 body away.
+   */
+  const keptData = createKeptSweep({
+    config,
+    askRelayPost: createRelayAsk({ config, fetchImpl, timeoutMs: relayTimeoutMs }),
+    now,
+    log,
+  });
+
   /** The relay, asked for the two things only it can see. Never throws; says why instead. */
   async function askRelay(pathname, query = "") {
     if (relayBase.length === 0 || String(config.relayToken ?? "").length === 0) {
@@ -1496,7 +1520,7 @@ export function createAdminApi({
         name: tenant.name,
         status: live.status,
         coolify: live.coolify,
-        boxContainer: tenant.boxContainer ?? "",
+        boxContainer: boxContainerFor(tenant),
         boxReady: tenant.boxReady,
         // Everything below comes from the relay, which has the docker socket this container does
         // not. A relay that did not answer leaves every one of them as "not measured".
@@ -1520,7 +1544,16 @@ export function createAdminApi({
           : backup.why,
       });
     }
-    return { boxes: rows, backup, measuredAt: relay.ok ? (relay.body?.measuredAt ?? null) : null };
+    // ONBOARD-4. Kept data, on this panel rather than on a panel of its own, because it is the same
+    // question the rest of the table answers: what is on this machine, and how much of it. Every row
+    // is a customer who is GONE, so none of them joins a tenant row and the listing is of the disk.
+    const kept = await keptData.list();
+    return {
+      boxes: rows,
+      backup,
+      kept,
+      measuredAt: relay.ok ? (relay.body?.measuredAt ?? null) : null,
+    };
   }
 
   /** The whole machine, as far as this container can see it, with the holes named. */
@@ -3531,8 +3564,14 @@ export function createAdminApi({
       const dataNote = ok && deleteData && removed?.dataDeleted !== true && String(removed?.dataWhy ?? "").length > 0
         ? ` The data was asked for and stayed: ${String(removed.dataWhy).slice(0, 300)}`
         : "";
+      // ONBOARD-4. The DATE the kept files come back, in the admin_actions row, because that row and
+      // the service's log are the only two things that outlive the tenant: thirty days from now the
+      // ledger rows are gone and this is what answers "when does that disk come back".
+      const keptNote = removed?.dataDeleted === true
+        ? ", data and all"
+        : (String(removed?.keptUntil ?? "").length > 0 ? `, data kept until ${String(removed.keptUntil)}` : ", data kept with nothing counting the days");
       ledger[ok ? "done" : "failed"](ok
-        ? `${slug} is gone${removed?.dataDeleted === true ? ", data and all" : ", data kept"}.${dataNote}`
+        ? `${slug} is gone${keptNote}.${dataNote}`
         : said);
       json(response, ok ? 200 : (Number(removed?.status) > 0 ? Number(removed.status) : 409), removed ?? { error: "remove_failed", message: "The removal answered nothing." });
       return true;
@@ -5285,5 +5324,5 @@ export function createAdminApi({
   // DEVICE-1. revokeDevicesForAccount is on here for the same reason recordAttempt is: the account
   // door lives in cp/server.mjs and the relay client lives in this file, and a second relay client
   // in that one is how one of the two ends up without the bearer or without the timeout.
-  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system, spend, providers: providersAnswer, feedback, onboarding, revokeDevicesForAccount };
+  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system, spend, providers: providersAnswer, feedback, onboarding, revokeDevicesForAccount, keptData };
 }

@@ -1003,10 +1003,13 @@
    * ONBOARD-2 / ADMIN-5. Remove a customer, for a test and for churn.
    *
    * Three gates in front of it and they are not ceremony. Click again to confirm, then the workspace
-   * name typed to match, then a switch for their data that is OFF by default. The data switch says
-   * what is TRUE when it is off: the files are kept and nothing deletes them on a timer, because
-   * nothing in this product counts days and a card claiming thirty of them would be the product lying
-   * to the operator.
+   * name typed to match, then a switch for their data that is OFF by default.
+   *
+   * ONBOARD-4 changed what the switch says when it is off. It used to say the files are kept and
+   * nothing deletes them on a timer, which was true and was also a leak: kept data was real disk that
+   * grew one removed customer at a time with nothing watching it. The removal now writes the day they
+   * come back into the customer's own directory and this service sweeps hourly, so the card says
+   * thirty days and the ANSWER carries the exact date, read off the marker that was really written.
    */
   function clientRemoveRow(client) {
     const row = el("div", "row removeRow");
@@ -1047,7 +1050,7 @@
     const saySwitch = () => {
       said.textContent = wipe.checked === true
         ? "Their files at /data/titanbot will be deleted and there is no undo."
-        : "Their files are kept at /data/titanbot. Nothing deletes them on a timer, so somebody has to remove them by hand when the time comes.";
+        : "Their files are kept for thirty days and then this service deletes them. The exact date comes back with the removal and is listed on Box health until it does.";
     };
     wipe.addEventListener("change", saySwitch);
 
@@ -1708,6 +1711,101 @@
     $("measuredAt").textContent = answer.measuredAt
       ? `fleet last swept ${when(answer.measuredAt)}`
       : "fleet sweep has not finished yet";
+    drawKept(answer.kept);
+  }
+
+  /**
+   * ONBOARD-4. The files of customers who are GONE, and the day each tree comes back.
+   *
+   * Under the box table rather than in a panel of its own, because it answers the same question the
+   * rest of this panel does: what is on this machine and how much of it. Every row here is a removed
+   * workspace, so none of them is in the table above and none of them has a tenant row anywhere.
+   *
+   * BUILT IN SCRIPT, idempotently, the way the Keys pointers are: the section is made once, found by
+   * its id on every later draw, and re-filled. A second copy appended on a refresh would be two
+   * lists of the same directories disagreeing about a size.
+   */
+  function drawKept(kept) {
+    const panel = $("panel-boxes");
+    if (!panel) return;
+    let section = $("keptData");
+    if (!section) {
+      section = el("div", "keptData");
+      section.id = "keptData";
+      section.appendChild(el("h3", null, "Data kept for removed customers"));
+      section.appendChild(el("p", "quiet", "A removal with the data switch off leaves the customer's files"
+        + " behind and writes the day they come back into their own directory. This service sweeps once an"
+        + " hour and deletes a directory once that day has passed. Nothing without that marker is ever"
+        + " touched, so an orphan from a failed build is not on this list."));
+      const scroll = el("div", "scroll");
+      const table = document.createElement("table");
+      table.id = "kept";
+      const head = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      for (const label of ["Workspace", "Removed", "Deleted on", "Size", "Directory"]) {
+        headRow.appendChild(el("th", null, label));
+      }
+      head.appendChild(headRow);
+      table.appendChild(head);
+      table.appendChild(document.createElement("tbody"));
+      scroll.appendChild(table);
+      section.appendChild(scroll);
+      section.appendChild(el("p", "quiet keptWhy", ""));
+      panel.appendChild(section);
+    }
+    const body = $("kept").querySelector("tbody");
+    clear(body);
+    const rows = kept?.rows ?? [];
+    const why = section.querySelector(".keptWhy");
+    if (kept?.ok === false) {
+      body.appendChild(rowSpanning(5, "not measured"));
+      why.textContent = String(kept?.why ?? "this service could not read where workspaces live");
+      return;
+    }
+    why.textContent = kept?.complete === false
+      ? "this list stopped early, so there may be more kept directories than these"
+      : "";
+    if (rows.length === 0) {
+      body.appendChild(rowSpanning(5, "Nothing is being kept."));
+      return;
+    }
+    for (const row of rows) {
+      const tr = document.createElement("tr");
+      tr.appendChild(el("td", null, row.slug));
+      tr.appendChild(el("td", null, row.removedAt ? ago(row.removedAt) : "not recorded"));
+
+      // The date, and what it means today. A tree past its date is not an error: the sweep runs
+      // hourly, so "due" is a row the next pass takes. It only stays if the relay refused it, and the
+      // reason for that is in the service's log rather than on this line.
+      const due = document.createElement("td");
+      if (!row.readable) {
+        due.appendChild(el("span", "quiet", "not readable"));
+        due.title = String(row.why ?? "");
+      } else {
+        due.appendChild(text(row.day || "not recorded"));
+        const left = Number(row.daysLeft);
+        due.appendChild(el("div", "quiet", row.pastDue
+          ? "due, the next sweep takes it"
+          : `${left} day${left === 1 ? "" : "s"} left`));
+      }
+      tr.appendChild(due);
+
+      const size = el("td", "num");
+      if (row.size === null || row.size === undefined) {
+        const node = el("span", "quiet", "not measured");
+        node.title = String(row.sizeWhy || "the console relay was not asked for this size");
+        size.appendChild(node);
+      } else {
+        size.appendChild(text(row.size));
+        if (row.sizeWhy) size.title = String(row.sizeWhy);
+      }
+      tr.appendChild(size);
+
+      const where = el("td", "quiet", row.directory);
+      if (row.container) where.title = `its box was ${row.container}`;
+      tr.appendChild(where);
+      body.appendChild(tr);
+    }
   }
 
   // ---- panel 4: system health ------------------------------------------------------------------

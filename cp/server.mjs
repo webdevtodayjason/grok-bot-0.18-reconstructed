@@ -47,6 +47,9 @@ import { clientAddress, containerAddressLookup, createBoxPeers, isTrustedProxy, 
 import { mintSessionToken, tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken, SESSION_TTL_MS } from "./session.mjs";
 import { openStore, burnPasswordTime, normalizeEmail } from "./store.mjs";
 import { createAdminApi } from "./admin.mjs";
+// ONBOARD-4. The hourly pass over what a removal kept. Started in main() and nowhere else, so a test
+// that stands this app up never starts a timer.
+import { startKeptSweepTimer } from "./kept.mjs";
 import { createMailDirectory, createMailSends, mailDomain } from "./mail.mjs";
 import { createVoiceLog } from "./voice.mjs";
 import { createCodeTasks } from "./code.mjs";
@@ -1942,7 +1945,7 @@ export function createApp(options = {}) {
   // closing the store under it writes into a finalized statement, which reaches an operator as
   // "statement has been finalized" on stderr with nothing to act on, and costs the job its last
   // ledger row, which is the row that says where it got to.
-  return { config, store, client, handle: guarded, refreshBoxPeers, boxPeers, reconcileFallbacks, marketplaceVerificationState, voice, onboarding: admin.onboarding };
+  return { config, store, client, handle: guarded, refreshBoxPeers, boxPeers, reconcileFallbacks, marketplaceVerificationState, voice, onboarding: admin.onboarding, keptData: admin.keptData };
 }
 
 export function createHttpServer(app) {
@@ -2025,6 +2028,15 @@ async function main() {
   } else {
     process.stdout.write("marketplace verification is off (CP_MARKETPLACE_VERIFY=0); rows will age into \"under review\" on their own\n");
   }
+  // ONBOARD-4. Once an hour, and once at boot, on the peer timer's pattern above: unref'd, swallowing
+  // its own failures, and the SAME sweep the Box health panel reads, so the panel never shows a size
+  // the timer has not measured. It deletes only directories carrying the dated marker a removal
+  // wrote, and it logs one line per deletion with the size that came back -- which is the only
+  // durable record, because the tenant row and its ledger went thirty days earlier.
+  startKeptSweepTimer({
+    sweep: (options) => app.keptData.sweep(options),
+    log: (line) => process.stdout.write(`${line}\n`),
+  });
   const server = createHttpServer(app);
   server.listen(config.port, "0.0.0.0", () => {
     process.stdout.write(`control plane listening on ${config.port}, tenants under ${config.tenantRoot}, release ${config.releaseRoot}\n`);

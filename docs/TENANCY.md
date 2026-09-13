@@ -703,7 +703,8 @@ are the shape of mistake this pair of scripts exists to stop:
 It must not be created, rendered or rebuilt. Adopt writes a ledger row for an instance that is
 already there:
 
-    node cp/cli.mjs tenant adopt titanium p927bfqm83ioloibamlvyd7g console.titanium.bot
+    node cp/cli.mjs tenant adopt titanium p927bfqm83ioloibamlvyd7g console.titanium.bot \
+      --gateway-token-stdin < /path/to/the-token
 
 The row comes back with status `adopted`, which is its own status and not `running`, so a reader can
 always tell which instances this service built and which it inherited. Nothing is created on
@@ -713,11 +714,45 @@ Coolify and no directory is made.
 that list, because the whole point of the route is the operator taking a reserved name for the
 instance that already exists.
 
-**The adoption is a ledger row and nothing more.** It holds a uuid and a host. It carries no gateway
-token and no directories, which is why the relay cannot get its own registry entry from it and seeds
-that entry from its own environment instead (section 4). Under TENANT-2 this section also set three
-tenancy variables on that service; under TENANT-5 there is nothing to set, because the relay is no
-longer one customer's.
+**The adoption is a ledger row, a container name and a token file (SUPPORT-1d, 2026-09-13).** It used
+to be a ledger row and nothing more -- a uuid and a host -- and that is what broke: the relay could not
+build a registry entry from it and seeded that entry from its own environment instead (section 4), and
+**everything else in the control plane that wanted to talk to that box could not.**
+
+**What went wrong, measured on the R750 on 2026-09-13.** `titanium` had been adopted without `--box`, so
+its `box_container` column was NULL, and no gateway token for it existed anywhere this service reads. The
+first three mails ever to arrive at `support@titanium.bot` were stored and told nobody: the support desk
+answered "this workspace has no container name on its row", and then "this workspace's gateway token
+could not be read". The onboarding sequence's box asks would have answered the same. An operator repaired
+it by writing a database column and a 0600 file on a live server by hand, and anything done by hand on a
+live instance has to become a mechanism.
+
+Two things changed, and both are in `cp/provision.mjs` so there is one of each:
+
+- **The container name.** `boxContainerFor(row)` is the one answer to "which container is this
+  workspace's box" for every reader -- the relay registry, the support desk, the onboarding sequence, the
+  Box health panel, the removal and the CLI's own listing. A written `box_container` always WINS, because
+  a re-provision mints a new uuid and a reader that rebuilt the name off a stale row would land on a
+  container that is not this customer's. When nothing is written and there is a Coolify service uuid, the
+  name is derived as `titanbot-box-<uuid>`, which is what Coolify really calls it. `tenant adopt` writes
+  the column from `--box` or from that rule, through the same helper.
+- **The gateway token.** `--gateway-token-stdin` reads the token from stdin (or, on a terminal, with the
+  echo off) and writes `profileDir/local-docker-vm.json` at 0600. **Never from an argument**, for the
+  three reasons `account add` never takes a password as one: the shell history, `ps` output, and the
+  scrollback of whoever is watching. This token opens a customer's whole box.
+
+**And the verb will not finish an adopt without a token.** It checks before it calls the route, so a
+refused adopt is indistinguishable from never having asked, and the refusal names the file it looked for
+and both ways to supply one. A row with no token is a workspace the relay answers 401 for with nothing in
+any log to say why, which is the state that existed for weeks.
+
+One reader, `readGatewayTokenFor(store, slug, config)`, resolves the directory the way `proxy mint` does:
+wherever the adoption recorded it, falling back to the tenant root for a workspace this service built.
+Before this, the relay registry had that read inline and was the only thing in the service that got it
+right.
+
+Under TENANT-2 this section also set three tenancy variables on that service; under TENANT-5 there is
+nothing to set, because the relay is no longer one customer's.
 
 ---
 
@@ -865,9 +900,9 @@ remove, so the flag cannot reach it.
 the workspace, the agents, the transcripts, the store. Since ONBOARD-2 there **is** one door that
 deletes it, and it is opt-in, separate, and not this one: the Clients panel's Remove with **delete
 their data** on, or `node cp/cli.mjs tenant remove <slug> --delete-data`, which asks the relay to do
-it because the control plane runs as uid 1001 and physically cannot. Nothing deletes a removed
-customer's tree on a timer, because there is no reaper in this product (ONBOARD-4), so with the switch off
-the files sit there until a person decides otherwise. See docs/ONBOARDING.md §4.
+it because the control plane runs as uid 1001 and physically cannot. With the switch off the files are
+kept **for thirty days and then deleted**, which is new in ONBOARD-4 and is section 13.2 below; until
+2026-09-13 nothing counted those days at all. See docs/ONBOARDING.md §4.
 
 ### 13.1 `POST /mail/sweep`'s neighbour: `POST /tenant/purge`, the one route that deletes data
 
@@ -918,6 +953,66 @@ row that gets forgotten about.
 `createTenantPurgeRoute` itself, and `tests/cp-remove.test.mjs`, `tests/onboard-seam.test.mjs` and
 `scripts/verify-onboard.mjs` all use it. No test writes this body out by hand, because two that did
 held the caller's wrong guess in place through 78 green assertions.
+
+### 13.2 Thirty days, counted: the marker and the sweep (ONBOARD-4)
+
+Until 2026-09-13 a removal with the data switch off left the customer's files behind and **nothing ever
+looked at them again**. That was said honestly -- the card read "Nothing deletes it on a timer", because
+there was no reaper in this product and nothing counted days -- and it was still a leak: `/data` on the
+R750 measured 2.6 T with 1.9 T free on 2026-09-10, and kept data grew one removed customer at a time with
+nothing watching it. The only way a tree came back was somebody remembering a name and typing `rm` on a
+live server.
+
+**The marker.** The removal writes `kept-until.json` into the customer's own directory, 0600:
+
+```json
+{
+  "slug": "acme-roofing",
+  "what": "this directory belongs to a workspace that was removed, and this service deletes it on keptUntil",
+  "removedAt": "2026-09-13T02:00:00.000Z",
+  "keptUntil": "2026-10-13T02:00:00.000Z",
+  "days": 30,
+  "container": "titanbot-box-<uuid>",
+  "reason": "the operator left the data switch off"
+}
+```
+
+Every field earns its place. `keptUntil` is what the sweep acts on, so the date an operator reads is the
+date something happens on -- not a window recomputed in code, and not the directory's mtime, which the
+first person to look at the tree would move. `days` records the window the marker was written with, so
+changing the default never moves a date somebody has already been told. And `container` is there because
+of what ONBOARD-6 measured: the relay's registry has forgotten a removed workspace, so `POST /tenant/purge`
+answers `409 container_unknown` unless the caller carries the name, and once the Coolify service is gone
+there is nowhere left to look it up. The removal knows it, so the removal writes it down.
+
+The marker is written in **both** cases where files end up kept: the switch off, and a purge the relay
+refused. The second is the worse one -- the operator asked for the data to go and it stayed -- so leaving
+that tree uncounted was the one case nobody was watching on purpose.
+
+**The sweep** is `cp/kept.mjs`, started once at boot and then hourly from `cp/server.mjs`, unref'd so it
+never holds a shutdown open. Each pass:
+
+1. reads the directories under `CP_TENANT_ROOT` and keeps only the ones carrying a marker. **Nothing
+   without a marker is ever touched**, which is what keeps an orphan from a failed build (ONBOARD-6) an
+   operator's to look at rather than a timer's;
+2. asks the relay `POST /tenant/purge {probeOnly: true}` for each one's size, because this service runs as
+   uid 1001 and cannot read inside a box's volumes. A size it could not get is **"not measured" with the
+   reason**, never a zero, for the same reason every other number on Box health is;
+3. deletes the ones whose day has passed, through the same `POST /tenant/purge` the removal uses, carrying
+   the container name out of the marker, and logs one line each:
+
+       kept data: acme-roofing deleted, 5.9 MB freed (kept from 2026-09-13 until 2026-10-13)
+
+   That line and the `admin_actions` row the removal wrote are the only durable records: the tenant row and
+   its ledger rows went thirty days earlier.
+
+A marker it cannot read is listed with the reason and **never becomes due**, because the alternative is a
+parse error that deletes a customer's files. A refusal from the relay is logged, left, and tried again next
+hour; it is never counted as a deletion.
+
+**Where it shows.** `GET /v1/admin/boxes` carries `kept`, and the **Box health** panel lists every kept
+directory with the day it goes, how many days are left, and its size in words. The removal's own answer
+carries `keptUntil`, and the `admin_actions` row says `data kept until 2026-10-13` rather than `data kept`.
 
 ---
 

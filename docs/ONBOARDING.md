@@ -849,8 +849,10 @@ Each one is a ledger step `remove:<name>`, and one `admin_actions` row is writte
    rules, refuses a reserved or operator slug, refuses a slug its registry still knows as reachable,
    refuses anything whose realpath is not a direct child of the tenant root, measures the tree, removes
    it and answers the bytes freed. **It never takes a path from its caller.** With the switch off the
-   card says what is true: "Their data is kept at /data/titanbot/&lt;slug&gt;. Nothing deletes it on a
-   timer."
+   removal writes `kept-until.json` into the customer's own directory and the card names the day:
+   "Their data is kept at /data/titanbot/&lt;slug&gt; until 2026-10-13, and this service deletes it then
+   and says how much came back." The same marker is written when the switch was ON and the purge was
+   refused, because that tree is kept too and nobody meant to keep it.
 
    **Three answers here mean "ask again", and the third is what kept a customer's data on 2026-09-10.**
    409 `still_reachable` and 409 `container_unknown` clear themselves. **Status 0 does not mean no** - it
@@ -885,9 +887,17 @@ Each one is a ledger step `remove:<name>`, and one `admin_actions` row is writte
 `effects` list and the `admin_actions` row; the one row left behind, `remove:audit-ready`, is a
 breadcrumb saying this name was removed once, which the next tenant built under it usefully carries.
 
-**There is no thirty day retention, and the card does not claim one.** There is no reaper in this
-product and nothing counts days. A card promising thirty days while nothing counts them is the product
-lying to the operator. **ONBOARD-4** is filed for a real one.
+**Thirty days, counted (ONBOARD-4, 2026-09-13).** This paragraph used to say the opposite: there was no
+reaper in this product, nothing counted days, and a card promising thirty of them would have been the
+product lying to the operator. Both halves were true and together they were a leak, because kept data is
+real disk that grew one removed customer at a time with nothing watching it. The removal now writes
+`kept-until.json` into the customer's own directory -- the slug, the day, the window, and the container
+name, which `POST /tenant/purge` cannot prove absence without once the Coolify service is gone -- and
+`cp/kept.mjs` sweeps once an hour, lists every kept directory with its date and its size on **Box
+health**, and deletes one when its day has passed, logging one line with the bytes that came back.
+**Nothing without that marker is ever deleted**, so an orphan from a failed build (ONBOARD-6) is still an
+operator's to look at rather than a timer's. The date the card shows is read off the marker that was
+really written: when the marker could not be written the card says so instead of naming a day.
 
 `DELETE /v1/tenants/{slug}` stays untouched as the low-level door for a *stopped* tenant: it removes the
 Coolify service and the row and nothing else. `DELETE /v1/admin/clients/{slug}` is the customer-shaped
