@@ -996,6 +996,17 @@ const TI_MARK = `<svg class="mark" viewBox="0 0 1024 1024" width="34" height="34
 // #172232, Titanium #E6EBF2, Signal Cyan #00C8F0. The two doors behave exactly as they did -- the
 // email field only when there is a control plane, filled means the account, empty means the instance
 // password, one form, one button, the error inline.
+// The sign-in page is the one page a person sees before they have a session, and every console
+// asset, the favicon included, sits behind that session. So the Ti mark rides inside the page as a
+// data URI, read once here from the same file the console uses. Jason, 2026-09-13: "The favicon for
+// the console is not there for the login screen."
+const LOGIN_FAVICON = (() => {
+  try {
+    const svg = readFileSync(path.join(HERE, "machine-room", "assets", "favicon.svg"), "utf8");
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  } catch { return "data:,"; }
+})();
+
 function loginPage({ error = "", next = "/", tenant = false } = {}) {
   return `<!doctype html>
 <html lang="en" data-theme="dusk">
@@ -1003,7 +1014,7 @@ function loginPage({ error = "", next = "/", tenant = false } = {}) {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Sign in - Titanium Bot</title>
-<link rel="icon" href="data:," />
+<link rel="icon" type="image/svg+xml" href="${LOGIN_FAVICON}" />
 <style>
   :root { color-scheme: dark;
     --midnight: #090D14; --graphite: #172232; --titanium: #E6EBF2; --cyan: #00C8F0; }
