@@ -61,6 +61,11 @@ export const USER_AGENT_LIMIT = 120;
 export const DOORS = new Set(["account", "instance", "link"]);
 export const OUTCOMES = new Set(["ok", "refused", "locked"]);
 
+// ONBOARD-5. How long a refusal's reason may be, and it is the control plane's own ceiling
+// (ATTEMPT_REASON_LIMIT in cp/store.mjs) on purpose: the Sign-in attempts panel merges rows from both
+// ledgers into one list, and two rows about one attempt must not differ on the tail of a sentence.
+export const REASON_LIMIT = 200;
+
 const clip = (value, limit) => {
   const text = String(value ?? "");
   return text.length > limit ? text.slice(0, limit) : text;
@@ -106,10 +111,18 @@ export function hashTried(password, salt) {
  * `email` is lowercased because that is how the control plane stores an address and the panel
  * groups by it; it is otherwise as typed, including the shapes that are not addresses at all,
  * because "who is being guessed at" is the question the operator is asking.
+ *
+ * `reason` IS WRITTEN BY THIS CONSOLE AND NEVER BY A STRANGER, and it holds nothing derived from a
+ * password. ONBOARD-5 added it for the one refusal this console decides with real knowledge behind it:
+ * a sign-in link that verified and was still turned away because the control plane said it had been
+ * used, cancelled or expired. The two password doors leave it empty, deliberately -- the password
+ * check, the lockout and the disabled account are all decided on the control plane and the sentence is
+ * written there with them, which is the rule cp/admin.mjs states when it reads failures out of that
+ * ledger alone. Newlines are squeezed so one row stays one row on a page.
  */
 export function loginAttemptRow({
   at = new Date().toISOString(), door = "instance", email = "", ip = "", userAgent = "",
-  triedHash = "", outcome = "refused", tenant = "",
+  triedHash = "", outcome = "refused", tenant = "", reason = "",
 } = {}) {
   return {
     at: typeof at === "number" ? new Date(at).toISOString() : String(at),
@@ -121,6 +134,7 @@ export function loginAttemptRow({
     triedHash: /^[0-9a-f]{64}$/i.test(String(triedHash ?? "")) ? String(triedHash) : "",
     outcome: OUTCOMES.has(String(outcome)) ? String(outcome) : "refused",
     tenant: clip(tenant, 64),
+    reason: clip(String(reason ?? "").replace(/\s+/g, " ").trim(), REASON_LIMIT),
   };
 }
 

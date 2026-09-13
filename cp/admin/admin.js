@@ -538,7 +538,13 @@
       const at = el("td", null, ago(row.at));
       at.title = when(row.at);
       tr.appendChild(at);
-      tr.appendChild(el("td", null, row.door === "account" ? "account" : "instance password"));
+      // THREE DOORS AND NOT TWO. CP-FIX added `link` to the relay's ledger on 2026-09-12 and this cell
+      // still read it as the instance password, so every sign-in-link login on the panel named the
+      // wrong credential -- which is the same class of wrong as the count that said beta-36's tester
+      // had never logged in. Anything unrecognised still reads as the instance password, because that
+      // is the door an empty email means.
+      tr.appendChild(el("td", null,
+        row.door === "account" ? "account" : row.door === "link" ? "sign-in link" : "instance password"));
       tr.appendChild(el("td", "mono", row.email || "-"));
       // A row this service wrote for a sign-in that came through a customer's console carries that
       // machine's address, not the visitor's, so printing it would name the wrong place.
@@ -548,6 +554,13 @@
       tr.appendChild(el("td", null, row.tenant || "-"));
       const outcomeCell = document.createElement("td");
       outcomeCell.appendChild(el("span", `chip ${row.outcome}`, row.outcome === "ok" ? "signed in" : row.outcome === "locked" ? "locked out" : "refused"));
+      // The reason, when the row carries one. "refused" on its own cannot tell an operator the
+      // difference between somebody guessing and a customer clicking a sign-in link that was already
+      // used, and the second one is a support call rather than an attack. A row with no reason says
+      // less, which is all a row written before this column existed can honestly say.
+      if (String(row.reason ?? "").length > 0) {
+        outcomeCell.appendChild(el("div", "quiet", String(row.reason)));
+      }
       tr.appendChild(outcomeCell);
       const seenBy = el("td", null, row.source === "relay" ? "the console" : "this service");
       if (row.gate === true) { seenBy.appendChild(document.createElement("br")); seenBy.appendChild(gateNote(row)); }
@@ -896,6 +909,67 @@
   }
 
   /**
+   * ONBOARD-5. The sign-in links to this workspace that a click would still open, each with a Revoke.
+   *
+   * WHY THIS ROW EXISTS. Until 2026-09-12 a link was a stateless bearer: it worked as many times as it
+   * was clicked for 24 hours and the only cancel was rotating the fleet's session secret. Now one click
+   * spends it and this button kills it, and neither of those is any use to an operator who cannot SEE
+   * that a live link is out there. A welcome and two presses of Copy a sign-in link leave three live
+   * links on one workspace, and nothing else on this panel would ever say so.
+   *
+   * "Nothing live" is drawn as words rather than as an empty row, and a control plane that keeps no
+   * record says that instead -- an empty list and "I cannot tell" must never look the same, because one
+   * of them means nobody holds a key to this customer's console and the other means nobody knows.
+   *
+   * The id is on the chip's tooltip and not in its label. It is not a secret -- it cancels a link and
+   * can never use one -- but a uuid in a label makes the row unreadable.
+   */
+  function clientSignInLinksRow(client) {
+    const links = client.signInLinks ?? null;
+    const row = el("div", "row");
+    row.appendChild(el("span", "quiet", "Sign-in links"));
+    if (links == null || links.read === false) {
+      row.appendChild(measured(null, String(links?.why || "this control plane keeps no record of sign-in links")));
+      return row;
+    }
+    const live = (links.rows ?? []).filter((one) => one.open !== false);
+    if (live.length === 0) {
+      row.appendChild(el("span", "quiet", "none live"));
+      return row;
+    }
+    // `ago` is the wrong clock for an expiry: it clamps at zero, so a link good for another twenty
+    // hours would read "0s ago". What an operator wants here is how long they have left.
+    const left = (iso) => {
+      const at = Date.parse(String(iso ?? ""));
+      if (!Number.isFinite(at)) return "an unknown time";
+      const seconds = Math.max(0, Math.round((at - Date.now()) / 1000));
+      if (seconds < 60) return `${seconds}s`;
+      if (seconds < 3600) return `${Math.round(seconds / 60)} min`;
+      return `${Math.round(seconds / 3600)} h`;
+    };
+    for (const one of live) {
+      const chip = el("span", "chip locked", `${one.email || "somebody"} for ${left(one.expiresAt)}`);
+      chip.title = `${one.singleUse === false ? "multi-use" : "single use"} -- expires ${when(one.expiresAt)}`
+        + ` -- minted ${when(one.mintedAt)}`
+        + `${one.mintedBy ? ` by ${one.mintedBy}` : ""}${one.purpose ? ` for the ${one.purpose}` : ""} -- id ${one.id}`;
+      row.appendChild(chip);
+      const kill = el("button", "ghost small", "Revoke");
+      kill.type = "button";
+      kill.addEventListener("click", async () => {
+        kill.disabled = true;
+        try {
+          const answer = await api("POST", `/v1/admin/clients/${encodeURIComponent(client.slug)}/sign-in-link/revoke`, { id: one.id });
+          banner(String(answer.message || "That sign-in link is cancelled."), answer.revoked === true || answer.alreadyRevoked === true);
+          await loadClients().catch(() => {});
+        } catch (error) { banner(String(error.message)); }
+        finally { kill.disabled = false; }
+      });
+      row.appendChild(kill);
+    }
+    return row;
+  }
+
+  /**
    * One of a removal's nine effects, drawn the way cp/decommission.mjs actually writes it.
    *
    * THE SHAPE IS `{step, status, detail}` AND NOTHING ELSE. The first cut of this panel read
@@ -1088,6 +1162,9 @@
       // ONBOARD-2. Where their invite got to, what went out to them, and the way to take them away.
       card.appendChild(clientOnboardingRow(client));
       card.appendChild(clientWelcomeRow(client));
+      // ONBOARD-5. Directly under the row that mints them, because "which links to this workspace are
+      // still live" is the question the two buttons above raise.
+      card.appendChild(clientSignInLinksRow(client));
       card.appendChild(clientRemoveRow(client));
 
       const wrap = el("div", "scroll users");

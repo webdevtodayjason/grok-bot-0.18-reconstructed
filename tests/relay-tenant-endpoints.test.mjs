@@ -22,7 +22,7 @@ import { createServer } from "node:http";
 import { statSync } from "node:fs";
 
 import {
-  RELAY_TOKEN, signInAsOperator, signInAsTenant, startRelay, tenantRow, tenantsFile,
+  RELAY_TOKEN, signInAsOperator, signInAsTenant, startRelay, startRelayWithLinks, tenantRow, tenantsFile,
 } from "./relay-tenant-support.mjs";
 import { boxStub, includedSet } from "./relay-proxy-support.mjs";
 
@@ -30,9 +30,10 @@ import { boxStub, includedSet } from "./relay-proxy-support.mjs";
 // registry comes out of the override file, which is what makes this test need no network.
 async function startConsole() {
   const demo = tenantRow("demo");
-  const relay = await startRelay({
-    CP_URL: "http://127.0.0.1:1",
-    CP_RELAY_TOKEN: RELAY_TOKEN,
+  // startRelayWithLinks and not startRelay: since ONBOARD-5 a sign-in link is checked with the control
+  // plane on every click, so a console whose control plane cannot be reached refuses every link, and
+  // signInAsTenant below is a link.
+  const relay = await startRelayWithLinks({
     SAND_UI_TENANTS_FILE: tenantsFile([demo.row]),
   }, { prefix: "relay-endpoints-", pathValue: "/nonexistent" });
   return { relay, demo, tenantCatalog: path.join(demo.state, "endpoints.json") };
@@ -196,9 +197,7 @@ async function startPlanConsole() {
   const demo = tenantRow("demo");
   const stub = boxStub([demo.row.box]);
   const included = labelledSet({ baseUrl: proxy.url, key: "sk-virtual-for-demo-only" });
-  const relay = await startRelay({
-    CP_URL: "http://127.0.0.1:1",
-    CP_RELAY_TOKEN: RELAY_TOKEN,
+  const relay = await startRelayWithLinks({
     SAND_UI_TENANTS_FILE: tenantsFile([{ ...demo.row, included }]),
     ...stub.env,
   }, { prefix: "relay-plan-", pathValue: stub.pathValue });
@@ -400,9 +399,7 @@ test("switching back to a customer's own key takes the plan's wording with it", 
 
 test("a workspace with no included set sees nothing at all, which is what a single-box install is", async () => {
   const demo = tenantRow("plain");
-  const relay = await startRelay({
-    CP_URL: "http://127.0.0.1:1",
-    CP_RELAY_TOKEN: RELAY_TOKEN,
+  const relay = await startRelayWithLinks({
     SAND_UI_TENANTS_FILE: tenantsFile([demo.row]),
   }, { prefix: "relay-plan-off-", pathValue: "/nonexistent" });
   try {

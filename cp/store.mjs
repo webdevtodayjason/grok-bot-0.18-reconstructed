@@ -1,5 +1,5 @@
-// cp/store.mjs -- the control plane's whole memory: accounts, tenants, revoked sessions, the
-// provisioning ledger and the login failure counters.
+// cp/store.mjs -- the control plane's whole memory: accounts, tenants, revoked sessions, sign-in
+// links, the provisioning ledger and the login failure counters.
 //
 // node:sqlite, because a control plane that knows about a few dozen tenants does not need a
 // database server, and a file that can be copied off the R750 with `cp` is a backup an operator
@@ -426,9 +426,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS voice_sessions_session ON voice_sessions (sess
 -- bot-less row in their Sent list on their first morning. docs/MAIL.md keeps the split.
 --
 -- WHAT IS NOT IN HERE AND NEVER WILL BE: no subject, no body, no html, no sign-in link and no
--- password. The link is an unrevocable bearer credential in a URL (cp/welcome.mjs mintSignInLink)
--- and the password is shown once on the card and stored only as a scrypt hash. A row is a receipt,
--- not a copy of the mail.
+-- password. The link is a bearer credential in a URL, single-use and revocable since ONBOARD-5
+-- (cp/welcome.mjs mintSignInLink, and the sign_in_links table below holds its id and never the token
+-- itself), and the password is shown once on the card and stored only as a scrypt hash. A row is a
+-- receipt, not a copy of the mail.
 --
 -- instead_of is the OWNER's address when the operator sent the welcome somewhere else, which is
 -- what the R750 measurement does and what a card has to be able to say in plain words. Empty on
@@ -493,6 +494,58 @@ CREATE TABLE IF NOT EXISTS support_messages (
 CREATE INDEX IF NOT EXISTS support_messages_at ON support_messages (received_at);
 CREATE INDEX IF NOT EXISTS support_messages_state ON support_messages (state);
 CREATE UNIQUE INDEX IF NOT EXISTS support_messages_message_id ON support_messages (message_id);
+-- ONBOARD-5. One row per sign-in link, which is what turns a bearer credential in a URL into a
+-- credential somebody can cancel.
+--
+-- WHAT WAS WRONG, measured 2026-09-10. A sign-in link was a stateless token and nothing else: the
+-- relay verified the signature and the expiry against that workspace's derived key and asked nobody
+-- anything, so the link worked as many times as it was clicked for a full day and the only way to
+-- cancel one was to rotate CP_SESSION_SECRET, which signs the whole fleet out. A link that reaches
+-- the wrong inbox, a link in a browser history on a shared laptop and a link a mail gateway logged
+-- were all the same thing: a standing key to somebody's console that nobody could take back.
+--
+-- THE ID IS THE TOKEN'S OWN jti. ui/session-token.mjs already requires that claim on every token it
+-- mints and fills it with a randomUUID, so this table needs no new claim and that file is not
+-- touched -- which matters, because it is the one file the relay and this service share and a change
+-- there is a change to every session in the fleet. A link minted before this table existed carries a
+-- jti that was never written down, so it matches no row, and the claim below answers unknown for
+-- it: every link mailed before this shipped is refused rather than grandfathered.
+--
+-- single_use IS 1 AND THE COLUMN EXISTS ANYWAY. Nothing in the product mints a multi-use link today
+-- and nothing should, but the claim statement reads the column rather than assuming it, so a later
+-- "a link the whole office can use for an hour" is a row and not a second code path through the one
+-- place that decides whether a click is allowed.
+--
+-- used_at IS THE FIRST USE AND last_used_at IS THE MOST RECENT, which are the same instant on a
+-- single-use link and different on anything else. uses counts every allowed click, so a multi-use
+-- link's row says how many people came in on it.
+--
+-- WHAT IS NOT IN HERE: the token, the URL, the signature and anything derived from them. A row says
+-- a link exists, who it was for and what has happened to it. Holding the token would make this table
+-- a file of live credentials, which is the thing ONBOARD-5 exists to stop.
+--
+-- No TENANT_MIGRATIONS entry, for the reason written over admin_actions, welcome_sends and
+-- support_messages above: db.exec(SCHEMA) runs on every open and CREATE TABLE IF NOT EXISTS makes a
+-- table that is not there. Only a new COLUMN on a table that already exists needs an ALTER.
+CREATE TABLE IF NOT EXISTS sign_in_links (
+  id           TEXT PRIMARY KEY,
+  tenant       TEXT NOT NULL,
+  account_id   TEXT NOT NULL DEFAULT '',
+  email        TEXT NOT NULL DEFAULT '',
+  minted_by    TEXT NOT NULL DEFAULT '',
+  purpose      TEXT NOT NULL DEFAULT '',
+  minted_at    INTEGER NOT NULL,
+  expires_at   INTEGER NOT NULL,
+  single_use   INTEGER NOT NULL DEFAULT 1,
+  used_at      INTEGER NOT NULL DEFAULT 0,
+  last_used_at INTEGER NOT NULL DEFAULT 0,
+  used_from    TEXT NOT NULL DEFAULT '',
+  uses         INTEGER NOT NULL DEFAULT 0,
+  revoked_at   INTEGER NOT NULL DEFAULT 0,
+  revoked_by   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS sign_in_links_tenant ON sign_in_links (tenant, minted_at);
+CREATE INDEX IF NOT EXISTS sign_in_links_expires ON sign_in_links (expires_at);
 `;
 
 /**
@@ -562,6 +615,25 @@ export const ATTEMPT_REASON_LIMIT = 200;
 // SIGNIN-1b. The same ceiling ui/login-ledger.mjs puts on a user agent, so a row from either ledger
 // is clipped the same way and two rows about one attempt cannot differ on the tail of a string.
 export const ATTEMPT_USER_AGENT_LIMIT = 120;
+
+// ONBOARD-5. How long a sign-in link's row is kept after the link itself is dead.
+//
+// The row outlives the credential on purpose. "Was that link ever clicked, and from where" is a
+// question asked days later, usually because somebody is worried about where a mail went, and a row
+// deleted the minute a link expired could not answer it. Seven days, then it is pruned, because the
+// table would otherwise grow one row per invite for ever.
+export const SIGN_IN_LINK_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Why a click on a sign-in link was refused, in one word, decided in one place.
+ *
+ * `good` is the only verdict that signs anybody in. The other five are every way a link that VERIFIES
+ * -- right signature, right workspace, not expired by the token's own clock -- can still be no longer
+ * usable, and they exist as separate words because the sentence a person reads is different for each
+ * one: "already used" tells them to ask for another, "cancelled" tells them somebody took it away,
+ * and "not on record" is what every link minted before this table existed answers.
+ */
+export const SIGN_IN_LINK_VERDICTS = new Set(["good", "unknown", "used", "revoked", "expired", "another_tenant"]);
 
 // The names are cp/secrets.mjs's allowlist and are spelled out rather than imported: this module is
 // the store and importing a route module into it would invert the dependency. Its test asserts the
@@ -860,6 +932,48 @@ export function openStore(options = {}) {
     "INSERT INTO welcome_sends (tenant, email, instead_of, at, actor, outcome, resend_id, shape, detail)"
     + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
   const selectWelcomeSends = statement("SELECT * FROM welcome_sends WHERE tenant = ? ORDER BY id DESC LIMIT ?");
+  // ONBOARD-5. The sign-in links. Fourteen columns, none of which is the token: see the DDL.
+  const insertSignInLink = statement(
+    "INSERT INTO sign_in_links (id, tenant, account_id, email, minted_by, purpose, minted_at, expires_at, single_use)"
+    + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  // THE WHOLE OF SINGLE USE IS THIS ONE STATEMENT, and that is deliberate. Two clicks that arrive at
+  // the same instant are two UPDATEs on one row in one SQLite connection: the second one finds
+  // used_at already set, matches nothing and changes nothing. A read-then-write would let both
+  // through, which on a link that reached the wrong inbox is the entire bug wearing a revocation
+  // table as a disguise.
+  //
+  // used_at keeps the FIRST use and last_used_at moves, so a multi-use link's row says when it was
+  // first clicked as well as when it was last.
+  const claimSignInLinkRow = statement(
+    "UPDATE sign_in_links SET used_at = CASE WHEN used_at = 0 THEN ? ELSE used_at END,"
+    + " last_used_at = ?, used_from = ?, uses = uses + 1"
+    + " WHERE id = ? AND tenant = ? AND revoked_at = 0 AND expires_at > ? AND (single_use = 0 OR used_at = 0)");
+  const selectSignInLink = statement("SELECT * FROM sign_in_links WHERE id = ?");
+  // Revoking an already-revoked link leaves the first revocation's time and actor alone: who killed
+  // it and when is the fact worth keeping, and a second press must not rewrite it.
+  const revokeSignInLinkRow = statement("UPDATE sign_in_links SET revoked_at = ?, revoked_by = ? WHERE id = ? AND revoked_at = 0");
+  const selectSignInLinksByTenant = statement("SELECT * FROM sign_in_links WHERE tenant = ? ORDER BY minted_at DESC, id DESC LIMIT ?");
+  const selectOpenSignInLinks = statement(
+    "SELECT * FROM sign_in_links WHERE tenant = ? AND revoked_at = 0 AND expires_at > ?"
+    + " AND (single_use = 0 OR used_at = 0) ORDER BY minted_at DESC, id DESC LIMIT ?");
+  const deleteDeadSignInLinks = statement("DELETE FROM sign_in_links WHERE expires_at <= ?");
+  const signInLinkRow = (record) => (record == null ? null : {
+    id: String(record.id ?? ""),
+    tenant: String(record.tenant ?? ""),
+    accountId: String(record.account_id ?? ""),
+    email: String(record.email ?? ""),
+    mintedBy: String(record.minted_by ?? ""),
+    purpose: String(record.purpose ?? ""),
+    mintedAt: Number(record.minted_at ?? 0),
+    expiresAt: Number(record.expires_at ?? 0),
+    singleUse: Number(record.single_use ?? 1) !== 0,
+    usedAt: Number(record.used_at ?? 0),
+    lastUsedAt: Number(record.last_used_at ?? 0),
+    usedFrom: String(record.used_from ?? ""),
+    uses: Number(record.uses ?? 0),
+    revokedAt: Number(record.revoked_at ?? 0),
+    revokedBy: String(record.revoked_by ?? ""),
+  });
   const welcomeSendRow = (record) => (record == null ? null : {
     id: Number(record.id),
     tenant: String(record.tenant ?? ""),
@@ -1593,11 +1707,125 @@ export function openStore(options = {}) {
       return Number(answer?.lastInsertRowid ?? 0);
     },
 
-    /** One workspace's welcomes, newest first. The panel shows the first of these on the client row. */
+    /**
+     * One workspace's welcomes, newest first. The panel shows the first of these on the client row.
+     *
+     * TWO SHAPES FOR THE LIMIT, because cp/admin.mjs has always called this as
+     * `listWelcomeSends(slug, {limit})` while this signature has always been a bare number: the
+     * object became NaN, fell through to the default and the panel has been reading twenty rows
+     * wherever it asked for five since ONBOARD-2 shipped. Harmless and still wrong, and a caller
+     * passing a shape the callee ignores is how a cap stops being a cap.
+     */
     listWelcomeSends(tenant, limit = 20) {
+      const asked = Number(limit != null && typeof limit === "object" ? limit.limit : limit);
       return selectWelcomeSends
-        .all(String(tenant ?? ""), Math.max(1, Math.min(200, Number(limit) || 20)))
+        .all(String(tenant ?? ""), Math.max(1, Math.min(200, Number.isFinite(asked) && asked > 0 ? asked : 20)))
         .map(welcomeSendRow);
+    },
+
+    // ---- sign-in links (ONBOARD-5) ---------------------------------------------------------------
+
+    /**
+     * A link written down at the moment it is minted, and BEFORE it is handed to anybody.
+     *
+     * The order is the rule: a link this table does not hold is refused at the door, so a mint that
+     * answered a URL and then failed to write the row would hand a customer a link that can never
+     * work. Both minters (cp/onboard.mjs and cp/welcome.mjs) record first and let a write failure
+     * stop the mint.
+     *
+     * `id` is the token's own jti. It is rejected rather than defaulted: a row with an empty id would
+     * be claimable by every link that carries no jti at all.
+     */
+    recordSignInLink({
+      id, tenant, accountId = "", email = "", mintedBy = "", purpose = "",
+      at = now(), expiresAt = 0, singleUse = true,
+    } = {}) {
+      const key = String(id ?? "").trim();
+      if (key.length === 0) throw new Error("a sign-in link needs an id");
+      const slug = String(tenant ?? "").trim();
+      if (slug.length === 0) throw new Error("a sign-in link needs a workspace");
+      const expires = Number(expiresAt);
+      if (!Number.isFinite(expires) || expires <= 0) throw new Error("a sign-in link needs an expiry");
+      insertSignInLink.run(
+        key, slug, String(accountId ?? ""), normalizeEmail(email), String(mintedBy ?? "").slice(0, 200),
+        String(purpose ?? "").slice(0, 40), Number(at), expires, singleUse === false ? 0 : 1);
+      return signInLinkRow(selectSignInLink.get(key));
+    },
+
+    /** One link's row, or null. Never the token: this table has never held one. */
+    getSignInLink(id) { return signInLinkRow(selectSignInLink.get(String(id ?? "").trim())); },
+
+    /**
+     * A click, answered once: `{ok, verdict, link}`.
+     *
+     * `ok` true means this click is allowed AND the row has already been marked used, in the same
+     * statement, so the next click cannot also be allowed. Everything else is a refusal with the word
+     * for why, and the order the words are tried in matters:
+     *
+     *   revoked  first, because an operator cancelling a link is the fact they will look for.
+     *   used     next, because on a single-use link that is what the holder did.
+     *   expired  last, because the clock is the least informative of the three.
+     *
+     * `another_tenant` is a row that exists under a different workspace. It cannot happen through the
+     * relay, whose tenant comes off the verified token, and it is a separate word rather than folded
+     * into `unknown` so that a configuration mistake reads as one.
+     */
+    claimSignInLink({ id, tenant = "", at = now(), from = "" } = {}) {
+      const key = String(id ?? "").trim();
+      const slug = String(tenant ?? "").trim();
+      const when = Number(at);
+      if (key.length === 0 || slug.length === 0) return { ok: false, verdict: "unknown", link: null };
+      const answer = claimSignInLinkRow.run(when, when, String(from ?? "").slice(0, 60), key, slug, when);
+      if (Number(answer?.changes ?? 0) === 1) {
+        return { ok: true, verdict: "good", link: signInLinkRow(selectSignInLink.get(key)) };
+      }
+      const link = signInLinkRow(selectSignInLink.get(key));
+      if (link == null) return { ok: false, verdict: "unknown", link: null };
+      if (link.tenant !== slug) return { ok: false, verdict: "another_tenant", link };
+      if (link.revokedAt > 0) return { ok: false, verdict: "revoked", link };
+      if (link.singleUse && link.usedAt > 0) return { ok: false, verdict: "used", link };
+      if (link.expiresAt <= when) return { ok: false, verdict: "expired", link };
+      return { ok: false, verdict: "unknown", link };
+    },
+
+    /**
+     * Cancel one. Answers `{ok, verdict, link}` the way a claim does.
+     *
+     * `ok` true is this call having closed an open link. A second press answers ok false with
+     * `revoked` and the first revocation's own time and actor, because a panel pressing Revoke twice
+     * is not an error and the operator should not be told it is one.
+     */
+    revokeSignInLink(id, { at = now(), by = "" } = {}) {
+      const key = String(id ?? "").trim();
+      if (key.length === 0) return { ok: false, verdict: "unknown", link: null };
+      const answer = revokeSignInLinkRow.run(Number(at), String(by ?? "").slice(0, 200), key);
+      const link = signInLinkRow(selectSignInLink.get(key));
+      if (link == null) return { ok: false, verdict: "unknown", link: null };
+      if (Number(answer?.changes ?? 0) === 1) return { ok: true, verdict: "revoked", link };
+      return { ok: false, verdict: "revoked", link };
+    },
+
+    /**
+     * One workspace's links, newest first. `open` true is the set a Revoke button is for: not
+     * revoked, not expired, and not already spent.
+     */
+    listSignInLinks(tenant, { limit = 20, open = false, at = now() } = {}) {
+      const slug = String(tenant ?? "");
+      const cap = Math.max(1, Math.min(200, Number(limit) || 20));
+      const rows = open === true
+        ? selectOpenSignInLinks.all(slug, Number(at), cap)
+        : selectSignInLinksByTenant.all(slug, cap);
+      return rows.map(signInLinkRow);
+    },
+
+    /**
+     * Rows for links that died more than `keepMs` ago. Run from the claim route, the way
+     * pruneRevocations runs from a sign-in, so the table cannot grow without bound and nothing has to
+     * remember to schedule it.
+     */
+    pruneSignInLinks(at = now(), keepMs = SIGN_IN_LINK_KEEP_MS) {
+      const floor = Number(at) - Math.max(0, Number(keepMs) || 0);
+      return Number(deleteDeadSignInLinks.run(floor)?.changes ?? 0);
     },
 
     // ---- spoken sessions (VOICE-1) ---------------------------------------------------------------

@@ -87,9 +87,15 @@ There are two, and it is not redundancy.
 The **relay** writes `login-attempts.jsonl` into its own state directory, which is `/state` in the
 container and `/home/sem/titanbot/state` on the host. It rotates at 5 MB and keeps one previous
 file, so the ceiling on disk is 10 MB. A row is
-`{at, door, email, ip, userAgent, triedHash, outcome, tenant}`. It has to be the relay's own
+`{at, door, email, ip, userAgent, triedHash, outcome, tenant, reason}`. It has to be the relay's own
 directory and not a customer's, because a refused sign-in has no customer yet: somebody typing a
 wrong email at the login page belongs to nobody, and a per-tenant ledger would simply lose them.
+
+`reason` is written only where this console decides a refusal with real knowledge behind it, which
+today means one case: a sign-in link that verified and was turned away anyway because the control plane
+said it had been used, cancelled or expired (ONBOARD-5). The two password doors leave it empty on
+purpose -- the password check, the lockout and the disabled account are all decided on the control
+plane and the sentence is written there with them.
 
 **There are three doors, not two.** `instance` is the operator's own console password. `account` is a
 customer's email and password, which the control plane decides. `link` is a sign-in link: the control
@@ -467,18 +473,21 @@ clipboard as plain sentences.
 
 **The welcome email**, and the field beside it. It goes from the product's own address on the
 operator's domain, carries a sign-in link **and** the temporary password, and names Titan's own agent
-address. The link is **good for 24 hours, works every time it is clicked, and cannot be cancelled**
--- it is a stateless bearer credential in a URL and the relay checks no revocation list (measured on
-this Mac 2026-09-10: one link verified at +1 s, +2 s and +23 h, refused `expired` at +24 h 1 min, and
-minting a second left the first working). Call it one-time when ONBOARD-3/ONBOARD-5 land a link that
-is consumed once, and not before. Replies come back to `mail.welcome.replyTo`, which defaults to
-`support@titaniumcomputing.com`, a domain that already receives, because a reply address nobody reads is
-worse than one on the parent company's brand. **That reason expired on 2026-09-12, and the default has
-not:** `titanium.bot` now publishes MX (measured from this Mac on 2026-09-13: `dig MX titanium.bot`
-answers route1, route2 and route3 at `mx.cloudflare.net`), `support@titanium.bot` is routed to the
-operator's own Email Worker, and SUPPORT-1 gives it a desk. The R750's setting was moved to
-`support@titanium.bot` on 2026-09-12 21:30Z; the code default is still the parent company's address, so
-a fresh install gets the old one until somebody changes it. Change it in one line:
+address. The link is **good for 24 hours, works ONCE, and can be cancelled from the Clients panel**
+(ONBOARD-5, 2026-09-13). It is still a bearer credential in a URL, so whoever holds it is signed in as
+that person and it is sent the way a password is sent; what changed is that its id is written down
+before the URL exists, the console asks the control plane on every click, and the first click spends it.
+Before that it was stateless: measured on this Mac 2026-09-10, one link verified at +1 s, +2 s and
++23 h, refused `expired` at +24 h 1 min, and minting a second left the first working. **Any link mailed
+before ONBOARD-5 reached the R750 is refused after it**, because its id was never recorded. Replies
+come back to `mail.welcome.replyTo`, which defaults to `support@titaniumcomputing.com`, a domain that
+already receives, because a reply address nobody reads is worse than one on the parent company's
+brand. **That reason expired on 2026-09-12, and the default has not:** `titanium.bot` now publishes MX
+(measured from this Mac on 2026-09-13: `dig MX titanium.bot` answers route1, route2 and route3 at
+`mx.cloudflare.net`), `support@titanium.bot` is routed to the operator's own Email Worker, and
+SUPPORT-1 gives it a desk. The R750's setting was moved to `support@titanium.bot` on 2026-09-12
+21:30Z; the code default is still the parent company's address, so a fresh install gets the old one
+until somebody changes it. Change it in one line:
 
 ```sh
 node cp/cli.mjs settings set mail.welcome.replyTo help@titanium.bot
@@ -516,12 +525,32 @@ shapes went out. A double press inside the hour cannot mail a real human twice.
 Both of those go through the **link door**, so a customer who uses one now shows up as a sign-in on
 their own row and in the Sign-in attempts panel, named as a link.
 
-**Copy a sign-in link** is the recovery when a welcome bounced. Understand what it is: a stateless
-bearer credential in a URL. The relay verifies it with that workspace's own key and **never checks it
-for revocation**, so it works as many times as it is clicked until it expires and cannot be cancelled
-short of rotating `CP_SESSION_SECRET`, which signs the whole fleet out. Twenty-four hours is a
-ceiling and not a target. It is answered once, put on the clipboard, and written to no row, no log
-line and no screenshot. Send it the way you would send a password. **ONBOARD-5** is filed against it.
+**Copy a sign-in link** is the recovery when a welcome bounced. Understand what it is: a bearer
+credential in a URL, so whoever holds it is signed in as that person, and you send it the way you send
+a password. It is **single use** and **revocable** (ONBOARD-5). The relay verifies it with that
+workspace's own key and then asks the control plane, once per click, whether that link's id is still
+good; the first click spends it, and a console that cannot reach the control plane refuses the click in
+words rather than letting it through. Twenty-four hours is still a ceiling and not a target. The URL is
+answered once, put on the clipboard, and written to no row, no log line and no screenshot; what is
+written down is the **id**, which cancels a link and can never use one.
+
+**Sign-in links**, the row under the welcome row on each customer's card, lists every link to that
+workspace that a click would still open -- who it is for, when it expires, who minted it -- with a
+**Revoke** beside each one. It reads *none live* when there are none, and says so in words when this
+control plane keeps no record, because an empty list and "I cannot tell" must never look the same. A
+welcome and two presses of **Copy a sign-in link** leave three live links, and minting a replacement has
+never cancelled the previous one, so this row is the only place that fact is visible.
+
+A link is dead a moment after **Revoke**: there is no cache to wait out, because the question is asked
+on every click. A person who has **already** signed in on that link keeps the session they were given --
+that is a session and not a link, and it ends on the relay's own twelve-hour clock or when
+`CP_SESSION_SECRET` is rotated.
+
+Three sentences a customer can meet on a dead link, and each one says what to do next: *That sign-in
+link has already been used*, *That sign-in link was cancelled*, *That sign-in link has expired*. A link
+this service never recorded -- which is every link mailed before 2026-09-12 -- reads *That sign-in link
+is not on record here*. All four point at asking for a new one, and the Sign-in attempts panel carries
+the same reason beside the refusal so the operator sees a support call rather than an attack.
 
 #### Remove a client
 
@@ -1441,7 +1470,9 @@ What it proves, in order: the console opens; Add a client answers without waitin
 temporary password is on the card; all five steps reach done with a screenshot at every transition and
 the wall clock read off the ledger's own timestamps; the welcome is a send row with a provider id and
 **no password and no link in it**; one sign-in link is minted, opened in a **cookie-less** browser,
-and lands the customer signed in; the first-run dialog is on their screen and **Titan has said
+and lands the customer signed in; **that same link then signs nobody in a second time and says so, a
+fresh one is listed as live on the panel, Revoke kills it, and the cancelled link is refused in words**
+(ONBOARD-5); the first-run dialog is on their screen and **Titan has said
 something on it**, read off the screen rather than out of a gateway call; Titan holds a live address in
 the directory; and then Remove with the data switch on leaves the service, the container, the data and
 every address gone, the slug free, and every other workspace byte-identical to how it was found.

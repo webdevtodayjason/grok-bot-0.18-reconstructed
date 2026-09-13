@@ -22,6 +22,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 
 import { createApp, createHttpServer } from "../cp/server.mjs";
+import { mintSignInLink } from "../cp/onboard.mjs";
 import { ensureProxyKey, loadConfig, tenantPaths } from "../cp/provision.mjs";
 import { openStore } from "../cp/store.mjs";
 import { RELAY_PASSWORD, startRelay } from "./relay-tenant-support.mjs";
@@ -154,7 +155,7 @@ async function startPair({ extraTenant = null, withProxy = false, operator = fal
     { prefix: "pair-relay-", pathValue: dockerStub([BOX, "titanbot-box-operator"]) },
   );
   return {
-    cp, ask, relay, master, relayToken, adminToken, proxyKey, operatorBox,
+    cp, ask, relay, master, relayToken, adminToken, proxyKey, operatorBox, store, config,
     stop: () => {
       relay.stop();
       server.close();
@@ -386,5 +387,130 @@ test("the operator's own account signs in at the one console, and the box it lan
       body: new URLSearchParams({ email: ACCOUNT, password: PASSWORD }).toString(),
     });
     assert.equal(customer.status, 302, "the operator's key took the customer's sign-in with it");
+  } finally { pair.stop(); }
+});
+
+/**
+ * ONBOARD-5, and this is the test the wave is not finished without.
+ *
+ * docs/ONBOARDING.md 14.1: when a wave ships BOTH ENDS of a new HTTP contract, the joining test uses
+ * the REAL route. Everything else about sign-in links in this tree has a hand-written double on one
+ * side -- the relay suites answer a fake control plane, the control plane suites drive the store
+ * directly -- and that is precisely the arrangement in which two correct halves disagree about a field
+ * name and every suite stays green. ONBOARD-2 lost a welcome to exactly that, twice.
+ *
+ * So: the real cp/onboard.mjs mint writing the real store, the real POST /v1/relay/sign-in-links/claim
+ * out of cp/server.mjs, and the real ui/server.mjs handleSso reaching it over a real socket.
+ */
+test("a real sign-in link crosses the real claim route once, and the second click is refused", async () => {
+  const pair = await startPair();
+  try {
+    const tenant = { ...pair.store.getTenant(SLUG), host: "console.titanium.bot" };
+    const account = pair.store.getAccountByEmail(ACCOUNT);
+    const link = mintSignInLink({
+      account, tenant, config: pair.config, store: pair.store, mintedBy: "the pairing test",
+    });
+    const click = () => fetch(`${pair.relay.base}${new URL(link.url).pathname}${new URL(link.url).search}`,
+      { redirect: "manual", headers: { accept: "text/html" } });
+
+    // The row exists before the url is handed out, which is what makes the link answerable at all.
+    assert.equal(pair.store.getSignInLink(link.id).usedAt, 0);
+
+    const first = await click();
+    assert.equal(first.status, 302, `the real link did not sign in: ${await first.text()}`);
+    assert.ok(/gb_session=/.test(first.headers.get("set-cookie") ?? ""));
+
+    // THE CLAIM CROSSED AND THE ROW MOVED. This is the field-name seam: the relay sends {id, tenant,
+    // from}, the control plane reads those names, and the row it marks is this one.
+    const spent = pair.store.getSignInLink(link.id);
+    assert.ok(spent.usedAt > 0, "the control plane did not mark the link used, so it is still multi-use");
+    assert.equal(spent.uses, 1);
+    assert.ok(spent.usedFrom.length > 0, "the caller's address did not cross");
+
+    // And the same link again, still validly signed and still inside its 24 hours.
+    const second = await click();
+    assert.equal(second.status, 401);
+    assert.equal(/gb_session=/.test(second.headers.get("set-cookie") ?? ""), false);
+    assert.match(await second.text(), /That sign-in link has already been used\. Ask for a new one\./);
+    // The refused click did not move the row: who came in on this link and when is the fact it keeps.
+    assert.equal(pair.store.getSignInLink(link.id).uses, 1);
+  } finally { pair.stop(); }
+});
+
+test("a link the control plane has revoked is refused by the real relay, and one it never recorded too", async () => {
+  const pair = await startPair();
+  try {
+    const tenant = { ...pair.store.getTenant(SLUG), host: "console.titanium.bot" };
+    const account = pair.store.getAccountByEmail(ACCOUNT);
+    const mint = () => mintSignInLink({ account, tenant, config: pair.config, store: pair.store });
+    const click = (url) => fetch(`${pair.relay.base}${new URL(url).pathname}${new URL(url).search}`,
+      { redirect: "manual", headers: { accept: "text/html" } });
+
+    // Revoked on the control plane. The token is untouched and still verifies under the workspace's own
+    // derived key, which is the entire reason a signature cannot be the whole answer.
+    const killed = mint();
+    pair.store.revokeSignInLink(killed.id, { by: "jason@titaniumcomputing.test" });
+    const refused = await click(killed.url);
+    assert.equal(refused.status, 401);
+    assert.match(await refused.text(), /That sign-in link was cancelled\. Ask for a new one\./);
+
+    // A link minted the way ONE WAS BEFORE TONIGHT: a valid token for this workspace whose jti was
+    // never written down. This is every link mailed before ONBOARD-5 shipped, and it is refused.
+    const unrecorded = mintSignInLink({
+      account, tenant, config: pair.config,
+      // A store that signs nothing down, standing in for the code that used to be here.
+      store: { recordSignInLink: () => null },
+    });
+    const old = await click(unrecorded.url);
+    assert.equal(old.status, 401);
+    assert.match(await old.text(), /That sign-in link is not on record here, so it cannot be used\. Ask for a new one\./);
+
+    // A fresh one still works, so none of the above is the door being broken.
+    assert.equal((await click(mint().url)).status, 302);
+  } finally { pair.stop(); }
+});
+
+test("the claim route is opened by the relay credential and by nothing else", async () => {
+  const pair = await startPair();
+  try {
+    const tenant = { ...pair.store.getTenant(SLUG), host: "console.titanium.bot" };
+    const link = mintSignInLink({
+      account: pair.store.getAccountByEmail(ACCOUNT), tenant, config: pair.config, store: pair.store,
+    });
+    const body = { id: link.id, tenant: SLUG };
+
+    // No credential, and the ADMIN credential, which adds accounts and deletes services and must never
+    // be able to spend a sign-in link. Neither one touches the row.
+    assert.equal((await pair.ask("POST", "/v1/relay/sign-in-links/claim", { body })).status, 401);
+    assert.equal((await pair.ask("POST", "/v1/relay/sign-in-links/claim", { body, token: pair.adminToken })).status, 401);
+    assert.equal(pair.store.getSignInLink(link.id).usedAt, 0, "a refused claim spent the link anyway");
+
+    // A wrong method charges nobody and learns nothing, the same order every other relay route uses.
+    assert.equal((await pair.ask("GET", "/v1/relay/sign-in-links/claim", { token: pair.relayToken })).status, 405);
+    // And a body with nothing in it is a caller bug rather than a verdict, so it is the one 4xx here.
+    const empty = await pair.ask("POST", "/v1/relay/sign-in-links/claim", { body: {}, token: pair.relayToken });
+    assert.equal(empty.status, 400);
+    assert.equal((await empty.json()).error, "bad_request");
+
+    // The relay credential opens it, and the refusals come back as a 200 with a verdict: the question
+    // WAS answered, and the relay has to tell "the control plane said no" from "I could not ask".
+    const good = await pair.ask("POST", "/v1/relay/sign-in-links/claim", { body, token: pair.relayToken });
+    assert.equal(good.status, 200);
+    const verdict = await good.json();
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.verdict, "good");
+    assert.equal(verdict.email, ACCOUNT);
+    assert.equal(verdict.singleUse, true);
+
+    const again = await pair.ask("POST", "/v1/relay/sign-in-links/claim", { body, token: pair.relayToken });
+    assert.equal(again.status, 200, "a spent link is an answer and not an error");
+    assert.equal((await again.json()).verdict, "used");
+
+    // NO TOKEN IN EITHER DIRECTION. The answer carries the id's verdict and the person's address, and
+    // nothing anybody could sign in with.
+    const unknown = await pair.ask("POST", "/v1/relay/sign-in-links/claim",
+      { body: { id: "a-jti-nobody-recorded", tenant: SLUG }, token: pair.relayToken });
+    assert.equal((await unknown.json()).verdict, "unknown");
+    assert.equal(JSON.stringify(verdict).includes(new URL(link.url).searchParams.get("sso")), false);
   } finally { pair.stop(); }
 });

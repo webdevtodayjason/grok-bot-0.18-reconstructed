@@ -1139,6 +1139,55 @@ export function createApp(options = {}) {
       return json(response, 200, await relayRegistry());
     }
 
+    // ---- is this sign-in link still good (ONBOARD-5, docs/TENANCY.md section 7) -----------------
+    //
+    // Beside the registry above, behind the same one credential and for the same reason: what the one
+    // relay needs from this service to serve a customer. The relay asks this ONCE PER CLICK on a
+    // /login?sso= link, after it has verified the token's signature and expiry with that workspace's
+    // own derived key, and it signs nobody in until this answers.
+    //
+    // WHY IT IS A CLAIM AND NOT A READ. A read followed by the relay deciding would let two clicks
+    // one millisecond apart both be allowed, which on a link that reached the wrong inbox is the
+    // whole of ONBOARD-5 still in place wearing a revocation table as a disguise. So this route SPENDS
+    // the link: cp/store.mjs claimSignInLink marks it used in the same statement that checks whether
+    // it may be used, and a second call for the same id answers `used`.
+    //
+    // 200 WITH ok FALSE IS THE REFUSAL, not a 4xx. The question was answered: this service knows the
+    // link and knows it is spent. The relay has to tell three cases apart -- this service said no,
+    // this service could not be reached, and this service answered nonsense -- and they want three
+    // different sentences for the person standing at the login page. A 400 is reserved for a body with
+    // no id or no workspace in it, which is a caller bug and not a verdict.
+    //
+    // THE ID IS NOT A SECRET. It is the token's jti, it cannot be used to sign in, and a caller
+    // holding this credential already holds every workspace's session key. What is never in this
+    // answer, in either direction, is the token.
+    if (segments[1] === "relay" && segments[2] === "sign-in-links" && segments[3] === "claim" && segments.length === 4) {
+      if (method !== "POST") return json(response, 405, { error: "method_not_allowed" });
+      if (!requireRelay(request, response)) return undefined;
+      const id = String(body?.id ?? "").trim();
+      const slug = String(body?.tenant ?? "").trim();
+      if (id.length === 0 || slug.length === 0) {
+        return json(response, 400, { ok: false, error: "bad_request", message: "a claim needs an id and a workspace" });
+      }
+      const at = now();
+      // Pruned here, the way pruneRevocations is pruned from a sign-in: the table cannot grow without
+      // bound and nothing has to remember to schedule it. It keeps a dead link's row for seven days
+      // first, because "was that link ever clicked, and from where" is asked days later.
+      try { store.pruneSignInLinks(at); } catch { /* a prune that failed is not a reason to refuse a sign-in */ }
+      const verdict = store.claimSignInLink({ id, tenant: slug, at, from: String(body?.from ?? "") });
+      return json(response, 200, {
+        ok: verdict.ok === true,
+        verdict: String(verdict.verdict ?? "unknown"),
+        tenant: slug,
+        // Only off the row this service holds, never echoed back from the request: a relay comparing
+        // this with its own verified claim is comparing two facts and not one.
+        email: String(verdict.link?.email ?? ""),
+        singleUse: verdict.link?.singleUse !== false,
+        expiresAt: verdict.link == null ? "" : new Date(verdict.link.expiresAt).toISOString(),
+        uses: Number(verdict.link?.uses ?? 0),
+      });
+    }
+
     // A customer session may read only its own allowance. The relay credential may read any one
     // workspace so it can cache the decision at the model-call edge without holding an admin key.
     if (segments[1] === "tenants" && segments[3] === "allowance" && segments.length === 4) {

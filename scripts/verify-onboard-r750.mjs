@@ -313,6 +313,57 @@ try {
   check(theirErrors.length === 0, "their first screen threw nothing", theirErrors.slice(0, 2).join(" | "));
   await fresh.close();
 
+  // ---- 5b. ONBOARD-5: the link the customer just used is spent, and the console can cancel one ---
+  //
+  // This is the live half of ONBOARD-5. Until 2026-09-12 the link above was a stateless bearer: it
+  // worked as many times as it was clicked for a full day and the only cancel was rotating
+  // CP_SESSION_SECRET, which signs the whole fleet out. The customer has now clicked it once, so the
+  // first assertion is simply that clicking it again does not sign anybody in.
+  //
+  // NOTHING HERE PRINTS A LINK. The mint answers an ID beside the URL; the id cancels a link and can
+  // never use one, so it is the only half that reaches this output.
+  step("the sign-in link is spent, and a live one can be cancelled");
+  const again = await browser.newContext({ userAgent: GATE_AGENT, viewport: { width: 1440, height: 1000 } });
+  const replay = await again.newPage();
+  await replay.goto(signInUrl, { waitUntil: "domcontentloaded", timeout: 90_000 });
+  await replay.waitForTimeout(2_000);
+  const replayCookies = await again.cookies().catch(() => []);
+  const replayText = String(await replay.evaluate(() => document.body?.innerText ?? "").catch(() => ""));
+  check(!replayCookies.some((one) => String(one.name) === "gb_session"),
+    "the link the customer already used signs nobody in a second time",
+    replayCookies.some((one) => String(one.name) === "gb_session") ? "a second session was minted" : "no gb_session on a fresh browser");
+  check(/already been used/i.test(replayText),
+    "and it says so in words a customer can act on", replayText.replace(/\s+/g, " ").slice(0, 160));
+  await shoot("sign-in-link-already-used", replay);
+  await again.close();
+
+  // A fresh link, listed as live on the panel's own read, then cancelled, then clicked.
+  const second = await api("POST", `/v1/admin/clients/${encodeURIComponent(SLUG)}/sign-in-link`, {});
+  const secondUrl = String(second.body?.url ?? "");
+  const secondId = String(second.body?.id ?? "");
+  if (secondUrl.length > 0) SECRETS.add(secondUrl.split("sso=")[1] ?? "");
+  check(secondId.length > 0 && second.body?.singleUse === true, "a fresh link is minted single-use and carries an id", secondId);
+  const live = await api("GET", `/v1/admin/clients/${encodeURIComponent(SLUG)}/sign-in-links`);
+  check((live.body?.rows ?? []).some((one) => String(one.id) === secondId),
+    "the console lists it as a link a click would still open", `${(live.body?.rows ?? []).length} live link(s)`);
+  check(!JSON.stringify(live.body ?? {}).includes("sso="), "and that list holds no link, only ids");
+  const cancelled = await api("POST", `/v1/admin/clients/${encodeURIComponent(SLUG)}/sign-in-link/revoke`, { id: secondId });
+  check(cancelled.body?.revoked === true, "Revoke on the Clients panel cancels it", String(cancelled.body?.message ?? `HTTP ${cancelled.status}`));
+  const dead = await browser.newContext({ userAgent: GATE_AGENT, viewport: { width: 1440, height: 1000 } });
+  const deadPage = await dead.newPage();
+  await deadPage.goto(secondUrl, { waitUntil: "domcontentloaded", timeout: 90_000 });
+  await deadPage.waitForTimeout(2_000);
+  const deadCookies = await dead.cookies().catch(() => []);
+  const deadText = String(await deadPage.evaluate(() => document.body?.innerText ?? "").catch(() => ""));
+  check(!deadCookies.some((one) => String(one.name) === "gb_session"),
+    "a cancelled link signs nobody in", deadCookies.some((one) => String(one.name) === "gb_session") ? "it still worked" : "no gb_session");
+  check(/was cancelled/i.test(deadText), "and says it was cancelled", deadText.replace(/\s+/g, " ").slice(0, 160));
+  await shoot("sign-in-link-cancelled", deadPage);
+  await dead.close();
+  const afterwards = await api("GET", `/v1/admin/clients/${encodeURIComponent(SLUG)}/sign-in-links`);
+  check(!(afterwards.body?.rows ?? []).some((one) => String(one.id) === secondId),
+    "and it is off the live list afterwards", `${(afterwards.body?.rows ?? []).length} live link(s)`);
+
   // ---- 6. the agent address --------------------------------------------------------------------
   step("the bots' own addresses");
   const directory = await api("GET", `/v1/admin/mail?slug=${encodeURIComponent(SLUG)}`);

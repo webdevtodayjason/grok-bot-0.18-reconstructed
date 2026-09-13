@@ -24,8 +24,8 @@ import path from "node:path";
 import { createSession, newAuthRecord, readSession, writeAuthFile } from "../ui/auth.mjs";
 import { signSvix } from "../ui/mail-edge.mjs";
 import {
-  RELAY_TOKEN, cookieOf, form, keyFor, signInAsOperator, signInAsTenant, startRelay, tenantRow,
-  tenantsFile, tokenFor,
+  RELAY_TOKEN, cookieOf, form, keyFor, signInAsOperator, signInAsTenant, startRelay,
+  startRelayWithLinks, tenantRow, tenantsFile, tokenFor,
 } from "./relay-tenant-support.mjs";
 
 // A gateway that answers the handful of routes the relay forwards, and remembers every call it saw
@@ -72,11 +72,11 @@ async function startConsole() {
   ]);
   const alpha = tenantRow("alpha", { gateway: gwA.url, token: "alpha-gateway-token" });
   const beta = tenantRow("beta", { gateway: gwB.url, token: "beta-gateway-token" });
-  const relay = await startRelay({
+  // startRelayWithLinks and not startRelay: since ONBOARD-5 every /login?sso= click is checked with the
+  // control plane, so a console that cannot reach one refuses every link, and signInAsTenant is a link.
+  const relay = await startRelayWithLinks({
     SAND_HOST_GATEWAY_URL: gwOperator.url,
     SAND_HOST_GATEWAY_TOKEN: "operator-gateway-token",
-    CP_URL: "http://127.0.0.1:1",
-    CP_RELAY_TOKEN: RELAY_TOKEN,
     SAND_UI_TENANTS_FILE: tenantsFile([alpha.row, beta.row]),
   }, { prefix: "relay-one-console-", pathValue: "/nonexistent" });
   const stop = async () => {
@@ -317,9 +317,8 @@ test("a workspace whose box is not running answers the sentence rather than reac
   writeFileSync(path.join(stub, "docker"), "#!/bin/sh\ncase \"$1\" in\n  ps) echo somebody-elses-box ;;\n  version) echo 27.0.0 ;;\n  *) exit 1 ;;\nesac\n");
   chmodSync(path.join(stub, "docker"), 0o755);
 
-  const relay = await startRelay({
+  const relay = await startRelayWithLinks({
     SAND_HOST_GATEWAY_URL: gw.url, SAND_HOST_GATEWAY_TOKEN: "operator-gateway-token",
-    CP_URL: "http://127.0.0.1:1", CP_RELAY_TOKEN: RELAY_TOKEN,
     SAND_UI_TENANTS_FILE: tenantsFile([alpha.row]),
     PATH: `${stub}:/usr/bin:/bin`,
   }, { prefix: "relay-unreachable-" });

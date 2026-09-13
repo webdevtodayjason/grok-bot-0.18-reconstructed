@@ -30,6 +30,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { startLinkClaimCp } from "../link-claim-cp.mjs";
+
 export const name = "box";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -169,6 +171,14 @@ export async function run(reporter = {}) {
   const { newAuthRecord, writeAuthFile } = await import(path.join(relayDir, "auth.mjs"));
   writeAuthFile(path.join(relayDir, "auth.json"), newAuthRecord(INSTANCE_PASSWORD));
 
+  // ONBOARD-5. A sign-in link is checked with the control plane on every click, and a relay that
+  // cannot ask refuses the click. This leg signs a customer in by link, so it needs something on the
+  // other end of that one call: CP_URL pointed at port 1, which is what this was, is now a console
+  // that refuses every link. It answers nothing else, which keeps this leg's "no control plane"
+  // scope honest -- the registry still comes out of the override file.
+  const linkCp = await startLinkClaimCp({ relayToken: RELAY_TOKEN });
+  stoppers.push(() => linkCp.stop());
+
   let relay = null;
   for (let attempt = 0; attempt < 5 && relay == null; attempt += 1) {
     const port = 35000 + Math.floor(Math.random() * 8000);
@@ -179,7 +189,7 @@ export async function run(reporter = {}) {
         FAKE_BOX_ROOT: boxRoot,
         SAND_UI_PORT: String(port), SAND_UI_BIND_HOST: "127.0.0.1",
         SAND_HOST_GATEWAY_URL: "http://127.0.0.1:1", SAND_HOST_GATEWAY_TOKEN: randomBytes(16).toString("hex"),
-        CP_URL: "http://127.0.0.1:1", CP_RELAY_TOKEN: RELAY_TOKEN,
+        CP_URL: linkCp.base, CP_RELAY_TOKEN: RELAY_TOKEN,
         SAND_UI_TENANTS_FILE: tenantsFile,
         SAND_UI_STATE_DIR: "", SAND_UI_AUTH_FILE: "", SAND_UI_ENDPOINTS_FILE: "",
         SAND_PROFILE_DIRS: "", TITAN_JOB_TOKEN: "",
@@ -216,6 +226,15 @@ export async function run(reporter = {}) {
     const signIn = await fetch(`${relay.base}/login?sso=${encodeURIComponent(token)}`, { redirect: "manual", headers: { accept: "text/html" } });
     const cookie = /(?:^|,\s*)(gb_session=[^;]+)/.exec(signIn.headers.get("set-cookie") ?? "")?.[1] ?? "";
     record(cookie.length > 0, "a customer signs in to the one console", `HTTP ${signIn.status}`);
+    // ONBOARD-5, measured here because this leg already holds a link and a relay: the door asked the
+    // control plane once, and the same link a second time is refused rather than minting a second
+    // session.
+    record(linkCp.claims.length === 1 && linkCp.claims[0].tenant === SLUG,
+      "and the console asked the control plane once whether that link was still good",
+      `${linkCp.claims.length} claim(s)`);
+    const twice = await fetch(`${relay.base}/login?sso=${encodeURIComponent(token)}`, { redirect: "manual", headers: { accept: "text/html" } });
+    record(twice.status === 401 && !/gb_session=/.test(twice.headers.get("set-cookie") ?? ""),
+      "a second click on the same link signs nobody in", `HTTP ${twice.status}`);
     if (cookie.length === 0) { cleanup(); return state; }
 
     step("reaches: the plan's rows, and the key that gets them");

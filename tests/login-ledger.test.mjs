@@ -12,6 +12,7 @@ import {
   DOORS,
   LEDGER_MAX_BYTES,
   OUTCOMES,
+  REASON_LIMIT,
   USER_AGENT_LIMIT,
   createLoginLedger,
   filterAttempts,
@@ -70,6 +71,7 @@ test("a row is forced into shape, whatever a stranger typed", () => {
     triedHash: "not a hash",
     outcome: "banana",
     tenant: "acme",
+    reason: "  that sign-in link\n  had already been used  ",
   });
   assert.equal(row.at, new Date(1_700_000_000_000).toISOString());
   assert.equal(row.door, "instance", "an unknown door falls back to the one an empty email would take");
@@ -77,9 +79,24 @@ test("a row is forced into shape, whatever a stranger typed", () => {
   assert.equal(row.userAgent.length, USER_AGENT_LIMIT);
   assert.equal(row.triedHash, "", "anything that is not a 64 character hex digest is dropped, so a caller cannot write a password into this field");
   assert.equal(row.outcome, "refused", "an unknown outcome is a refusal, which is the safe reading");
-  assert.deepEqual(Object.keys(row).sort(), ["at", "door", "email", "ip", "outcome", "tenant", "triedHash", "userAgent"]);
-  assert.ok(DOORS.has("account") && DOORS.has("instance"));
+  // ONBOARD-5's field. Newlines squeezed, because the panel draws one row per attempt and a reason
+  // with a line break in it would become two.
+  assert.equal(row.reason, "that sign-in link had already been used");
+  assert.deepEqual(Object.keys(row).sort(),
+    ["at", "door", "email", "ip", "outcome", "reason", "tenant", "triedHash", "userAgent"]);
+  assert.ok(DOORS.has("account") && DOORS.has("instance") && DOORS.has("link"));
   assert.ok(OUTCOMES.has("ok") && OUTCOMES.has("refused") && OUTCOMES.has("locked"));
+});
+
+test("a reason is capped and a row without one says nothing rather than something", () => {
+  // The cap is the control plane's own ATTEMPT_REASON_LIMIT, because the Sign-in attempts panel merges
+  // the two ledgers into one list and two rows about one attempt must not differ on the tail of a
+  // sentence.
+  assert.equal(loginAttemptRow({ reason: "r".repeat(500) }).reason.length, REASON_LIMIT);
+  // The two password doors write no reason at all: the password check, the lockout and the disabled
+  // account are decided on the control plane and the sentence is written there with them.
+  assert.equal(loginAttemptRow({ door: "account", outcome: "refused" }).reason, "");
+  assert.equal(loginAttemptRow({ door: "instance", outcome: "locked" }).reason, "");
 });
 
 test("a refusal is written with a hash and a success is written without one", async () => {

@@ -79,6 +79,13 @@ test("no credential a customer can hold opens the add or the remove, and the row
 
     const add = { email: "someone@new.test", company: "Someone New", name: "Someone" };
     const remove = { confirm: "acme-roofing", deleteData: true };
+    // ONBOARD-5. A live sign-in link to aim the two new routes at, minted with the operator's own
+    // bearer. Cancelling somebody else's customer's sign-in link is a small act with a real effect --
+    // it is the difference between a customer getting into their console this morning and not -- so it
+    // belongs in this net like every other route that changes something.
+    const minted = await plane.admin("POST", "/v1/admin/clients/acme-roofing/sign-in-link", {});
+    assert.equal(minted.status, 200, minted.text);
+    const liveLink = minted.body.id;
     const probes = [
       ["a customer's own valid session", janeToken],
       ["a forged session on the customer's own tenant", forgedOwnTenant],
@@ -99,12 +106,17 @@ test("no credential a customer can hold opens the add or the remove, and the row
       assert.equal(link.status, 401, `${what} minted a sign-in link: ${link.text}`);
       const welcome = await plane.request("POST", "/v1/admin/clients/acme-roofing/welcome", { token, body: {} });
       assert.equal(welcome.status, 401, `${what} sent a welcome: ${welcome.text}`);
+      const links = await plane.request("GET", "/v1/admin/clients/acme-roofing/sign-in-links", { token });
+      assert.equal(links.status, 401, `${what} listed the sign-in links: ${links.text}`);
+      const killed = await plane.request("POST", "/v1/admin/clients/acme-roofing/sign-in-link/revoke", { token, body: { id: liveLink } });
+      assert.equal(killed.status, 401, `${what} cancelled a sign-in link: ${killed.text}`);
 
       // AFTER EVERY PROBE, not once at the end. A door that refuses the answer and does the work
       // first is the failure this is looking for.
       assert.notEqual(plane.store.getTenant("acme-roofing"), null, `${what} removed the tenant row`);
       assert.equal(plane.store.getAccountById(jane.id)?.disabled === true, false, `${what} disabled the customer`);
       assert.equal(plane.store.getAccountByEmail?.("someone@new.test") ?? null, null, `${what} created an account`);
+      assert.equal(plane.store.getSignInLink(liveLink)?.revokedAt, 0, `${what} cancelled the sign-in link anyway`);
     }
 
     // AND THE DOOR IS NOT SHUT FOR EVERYBODY, which is the other half of a guard test: the same
