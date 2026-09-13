@@ -1004,6 +1004,74 @@ in a window **narrower than 690 px or shorter than 500 px** that press now opens
 than toggling a strip. A second press of the hotkey while a call is up does nothing on purpose: the way
 out is the End control on the screen, or Escape, which the page already honours.
 
+The call screen also carries **two new controls and one line when the shell owns the audio** (8d): a
+speaker/earpiece toggle and, while a refused or dropped line is up, a Try again button. Neither carries
+`data-talk-button` either, so the one-element count still holds.
+
+---
+
+## 8d. What the shell must give native audio (VOICE-15)
+
+Forcing the speaker never worked in the app. While a `WKWebView` holds a `getUserMedia` capture, WebKit
+owns the `AVAudioSession` and routes a live capture's playback to the receiver, and an app-level
+`overrideOutputAudioPort(.speaker)` is re-applied under it and loses (bugs.webkit.org 196539, 230902,
+and the six silent captures on 2026-09-12). So the app stops using WebKit for audio. The page keeps the
+socket, the orb, the caption, the barge-in and the whole call screen; the microphone frames come from
+the shell and the PCM to play goes back to it, and `AVAudioSession` is then the app's alone.
+
+The shell turns this on by announcing it about itself, once, in the injected script beside `platform`:
+
+```js
+window.__titanbotShell = { platform: "ios", build: "17", canOpenAppSettings: true, nativeAudio: true };
+```
+
+A page without `nativeAudio === true` — every browser, an old app build — opens its own microphone and
+plays through Web Audio, byte for byte what it did before. Nothing here is a guess about a user agent.
+
+**Page to shell**, through the bridge `TitaniumVoice.swift` already installs
+(`window.webkit.messageHandlers.titaniumVoice.postMessage`), every message an object with an `action`:
+
+| action | fields | meaning |
+|---|---|---|
+| `audioStart` | `sampleRate: 24000` | open the mic natively, mono PCM16 at that rate, and start posting frames |
+| `audioStop` | | close the mic, stop playback |
+| `audioPlay` | `pcm: <base64 PCM16 24 kHz mono>` | queue this audio for playback, in order |
+| `audioFlush` | | drop everything queued and playing (barge-in) |
+| `audioOutput` | `value: "speaker" \| "earpiece"` | the person's choice for this call, remembered for the next |
+
+`audioStop` tears down both the mic and playback, so the page sends it once on hang-up and the player
+does not send a second teardown. The base64 is a plain string field, so there is no JSON-escaping
+problem with the bytes.
+
+**Shell to page**, through `webView.evaluateJavaScript` (the path `stop()` already uses), into
+`window.__titanbotAudio`, which the console installs at load and which no-ops until a call is up:
+
+| call | meaning |
+|---|---|
+| `__titanbotAudio.frame("<base64>")` | one 100 ms mic frame, PCM16 24 kHz mono (4800 bytes) |
+| `__titanbotAudio.route({category, mode, outputs, output, error})` | the session as it really is, on start and on every route change |
+| `__titanbotAudio.playedMs(n)` | cumulative milliseconds of audio that have left the speaker, so the page's playsUntil booking stays honest |
+
+`output` is one of `"speaker"`, `"earpiece"`, `"headphones"`, `"bluetooth"`, `"other"`; the page shows
+it as one plain word under the toggle, with the `error` string after it if there is one. The page books
+how long sound is still in the room from `playedMs`, not from the bytes it handed over, because it is
+not the thing scheduling the audio any more. Report `playedMs` at least every 250 ms while anything
+plays.
+
+**The session the shell should set**, from the root cause above: `.playAndRecord`, mode `.videoChat`
+(voice-chat echo cancellation, speaker by default), options
+`[.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP]`, then `overrideOutputAudioPort` per the
+person's `audioOutput` choice, re-applied on a route change only when the route is the built-in receiver
+or speaker — headphones, Bluetooth, CarPlay and AirPlay win the route on their own. The choice persists
+in `UserDefaults`, which is why the contract says "remembered for the next".
+
+**The relay-down state is the page's, not the shell's (VOICE-15c).** When the voice socket fails to
+open, errors, or drops without the person pressing End, the call screen stays up, turns the orb off, and
+reads a plain sentence — "Voice is unavailable: the relay did not answer" or "…the line dropped" — with
+the Mute control swapped for Try again. The shell does nothing for this beyond keeping the audio
+messages above honest; it exists because a full-screen app has no shelf behind it for a note to land on,
+and sitting on "Listening" with a dead mic is the bug the feedback named.
+
 ---
 
 ## 9. What the shells do NOT get, and why

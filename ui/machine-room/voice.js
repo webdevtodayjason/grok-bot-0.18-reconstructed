@@ -180,6 +180,20 @@
   // six seconds because this note is read AFTER an interruption, not during one.
   const CALL_ENDED_MS = 10_000;
 
+  // ---------------------------------------------------------------- VOICE-15: the phone owns its audio
+  //
+  // VOICE-15c. The two plain sentences a refused or dropped voice line puts ON the call screen, where a
+  // person on a phone is actually looking. VOICE-13 sends every refusal to the shelf and takes the
+  // screen away; that is right for a named refusal (no key, a cap, a box that is off) which has a home
+  // and a way forward, but a relay that never answered or a line that dropped would leave a phone on a
+  // full-screen surface with a dead microphone and nothing said. These two keep the screen, turn the orb
+  // off, and read Try again, so the person is never sitting on "Listening" talking to no one.
+  const CALL_DOWN_NO_ANSWER = "Voice is unavailable: the relay did not answer";
+  const CALL_DOWN_DROPPED = "Voice is unavailable: the line dropped";
+  // The output a call is really on, as one plain word under the speaker/earpiece toggle. "other" is a
+  // route with no word of its own (CarPlay, AirPlay), where the error line, if any, carries the why.
+  const ROUTE_WORDS = { speaker: "Speaker", earpiece: "Earpiece", headphones: "Headphones", bluetooth: "Bluetooth", other: "" };
+
   // ---------------------------------------------------------------- VOICE-7: the speech panel
   //
   // Jason, 2026-09-10 11:09: "a semi-transparent modal over the current chat window where that is
@@ -308,6 +322,18 @@
   // out of the speakers. Read LIVE on every press rather than once at load, the way callWanted is,
   // because the shell publishes itself before first paint but a test loads the module either way.
   const bargeInWanted = () => shellHost()?.platform === "ios";
+  // VOICE-15. Whether this page hands its audio to the shell rather than owning it through WebKit. The
+  // shell states this about itself, the same way it states platform: a page without the flag (every
+  // browser, an old app build) opens its own microphone and plays through Web Audio, byte for byte what
+  // it did before this wave.
+  const nativeAudioWanted = () => shellHost()?.nativeAudio === true;
+  // VOICE-15. Page to shell, through the one bridge TitaniumVoice.swift installs on every console page.
+  // Absent in every browser, which is why the send is a try: a shell that is not there is not an error,
+  // it is just not an app. docs/APPS.md names the five actions and their fields.
+  function postToShell(message) {
+    try { global.webkit?.messageHandlers?.titaniumVoice?.postMessage?.(message); }
+    catch { /* the shell decides for itself what to do with a message it does not know */ }
+  }
   const sentenceFor = (condition) =>
     (shellOpensSettings() ? SHELL_NOTES[condition] : null) ?? NOTES[condition] ?? NOTES["line-dropped"];
   const orbStateFor = (value) => (ORB_STATES.includes(String(value)) ? String(value) : null);
@@ -346,6 +372,10 @@
         return playsUntilMs;
       },
       playsUntilMs: () => playsUntilMs,
+      // VOICE-15. Booked from the shell's own report of how much audio has left the speaker, not from
+      // bytes the page handed over and cannot see play: `ms` is how much sound is still to come, and
+      // playsUntilMs is set to that far ahead of now.
+      remaining(ms) { playsUntilMs = now() + Math.max(0, Number(ms) || 0); return playsUntilMs; },
       holdUntilMs: () => Math.max(playsUntilMs, endedAtMs) + ECHO_TAIL_MS,
       holding() { return speaking || now() < gate.holdUntilMs(); },
       // The DROPS are counted by the capture that did the dropping, not here: MEETING-1 hands one
@@ -370,6 +400,69 @@
     const view = new Int16Array(buffer.buffer ?? buffer, buffer.byteOffset ?? 0, Math.floor((buffer.byteLength ?? buffer.length) / 2));
     const out = new Float32Array(view.length);
     for (let i = 0; i < view.length; i += 1) out[i] = view[i] / 0x8000;
+    return out;
+  }
+
+  // ------------------------------------------------------------------ base64
+  //
+  // VOICE-15. The shell's bridge carries bytes as base64 strings, in both directions, because a base64
+  // string has no JSON-escaping problem and no ambiguity about how a byte array survives the bridge. A
+  // pure-JS pair rather than atob/btoa: the module runs under a bare window in its tests and under
+  // WebKit in the app, and a codec of its own cannot be present in one and missing in the other.
+  const B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const B64_LOOKUP = (() => {
+    const table = new Int16Array(128).fill(-1);
+    for (let i = 0; i < B64_CHARS.length; i += 1) table[B64_CHARS.charCodeAt(i)] = i;
+    return table;
+  })();
+  function base64FromBytes(input) {
+    const view = input instanceof Uint8Array
+      ? input
+      : new Uint8Array(input.buffer ?? input, input.byteOffset ?? 0, input.byteLength ?? input.length);
+    const len = view.length;
+    let out = "";
+    for (let i = 0; i < len; i += 3) {
+      const a = view[i];
+      const hasB = i + 1 < len;
+      const hasC = i + 2 < len;
+      const b = hasB ? view[i + 1] : 0;
+      const c = hasC ? view[i + 2] : 0;
+      out += B64_CHARS[a >> 2];
+      out += B64_CHARS[((a & 3) << 4) | (b >> 4)];
+      out += hasB ? B64_CHARS[((b & 15) << 2) | (c >> 6)] : "=";
+      out += hasC ? B64_CHARS[c & 63] : "=";
+    }
+    return out;
+  }
+  function bytesFromBase64(input) {
+    // Padding and any stray whitespace are dropped, so the tail length is 0, 2 or 3 six-bit groups.
+    const str = String(input).replace(/[^A-Za-z0-9+/]/g, "");
+    const groups = Math.floor(str.length / 4);
+    const rem = str.length - groups * 4;
+    let outLen = groups * 3;
+    if (rem === 2) outLen += 1; else if (rem === 3) outLen += 2;
+    const out = new Uint8Array(outLen);
+    let o = 0;
+    let i = 0;
+    for (let g = 0; g < groups; g += 1, i += 4) {
+      const n = (B64_LOOKUP[str.charCodeAt(i)] << 18)
+        | (B64_LOOKUP[str.charCodeAt(i + 1)] << 12)
+        | (B64_LOOKUP[str.charCodeAt(i + 2)] << 6)
+        | B64_LOOKUP[str.charCodeAt(i + 3)];
+      out[o++] = (n >> 16) & 0xff;
+      out[o++] = (n >> 8) & 0xff;
+      out[o++] = n & 0xff;
+    }
+    if (rem === 2) {
+      const n = (B64_LOOKUP[str.charCodeAt(i)] << 18) | (B64_LOOKUP[str.charCodeAt(i + 1)] << 12);
+      out[o++] = (n >> 16) & 0xff;
+    } else if (rem === 3) {
+      const n = (B64_LOOKUP[str.charCodeAt(i)] << 18)
+        | (B64_LOOKUP[str.charCodeAt(i + 1)] << 12)
+        | (B64_LOOKUP[str.charCodeAt(i + 2)] << 6);
+      out[o++] = (n >> 16) & 0xff;
+      out[o++] = (n >> 8) & 0xff;
+    }
     return out;
   }
 
@@ -642,6 +735,118 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
         live.clear();
         context = null; analyser = null; nextAt = 0;
       },
+    };
+  }
+
+  // ------------------------------------------------------------------ VOICE-15: native audio
+  //
+  // Inside the phone app WebKit owns the AVAudioSession while a getUserMedia capture runs, and it routes
+  // a live capture's playback to the receiver no matter what the app asks for -- bugs.webkit.org 196539
+  // and 230902, and the six silent captures on 2026-09-12. So the app stops using WebKit for audio: the
+  // microphone frames come from the shell and the PCM to play goes back to it, leaving AVAudioSession
+  // the app's alone. The page keeps the socket, the orb, the caption, the barge-in and the whole call
+  // screen; only where the samples come from and go changes.
+  //
+  // There is at most one native capture at a time, and the shell's frame() finds it here. A browser
+  // never reaches this code: nativeAudioWanted() is false without the shell's own flag.
+  let nativeCaptureSink = null;
+
+  // The capture's shape, so state.capture reads the same stats whichever path opened it. No
+  // AudioContext and no getUserMedia: the shell is asked to open the mic, and each frame it hands back
+  // becomes one 100 ms socket frame, through the same gate and mute the worklet path uses.
+  function startNativeCapture(options = {}) {
+    const held = typeof options.held === "function" ? options.held : () => false;
+    const muted = typeof options.muted === "function" ? options.muted : () => false;
+    const onChunk = typeof options.onChunk === "function" ? options.onChunk : () => {};
+    const sampleRate = options.sampleRate ?? SAMPLE_RATE;
+    const stats = { sent: 0, heldFrames: 0, heldMs: 0, mutedFrames: 0, bytes: 0, blocks: 0, micLevel: 0, micFrames: 0 };
+    let stopped = false;
+    postToShell({ action: "audioStart", sampleRate });
+    const capture = {
+      stats,
+      native: true,
+      // One shell frame. `blocks` counts it before any gate, the way the worklet path counts what it
+      // posted, because the one question it answers is whether the microphone is producing anything.
+      feed(frameBytes) {
+        if (stopped || frameBytes == null) return;
+        const length = frameBytes.byteLength ?? frameBytes.length ?? 0;
+        if (length === 0) return;
+        stats.blocks += 1;
+        if (muted()) { stats.mutedFrames += 1; stats.micLevel = 0; return; }
+        if (held()) {
+          stats.heldFrames += 1;
+          stats.heldMs += (length / 2 / sampleRate) * 1000;
+          stats.micLevel = 0;
+          return;
+        }
+        const view = new Int16Array(frameBytes.buffer ?? frameBytes, frameBytes.byteOffset ?? 0, Math.floor(length / 2));
+        let sum = 0;
+        for (let i = 0; i < view.length; i += 1) { const v = view[i] / 0x8000; sum += v * v; }
+        stats.micLevel = view.length > 0 ? Math.sqrt(sum / view.length) : 0;
+        stats.micFrames += 1;
+        stats.sent += 1;
+        stats.bytes += length;
+        const base = frameBytes.buffer ?? frameBytes;
+        const start = frameBytes.byteOffset ?? 0;
+        onChunk(base.slice(start, start + length), { at: Date.now(), bytes: length });
+      },
+      stop() {
+        if (stopped) return;
+        stopped = true;
+        if (nativeCaptureSink === capture) nativeCaptureSink = null;
+        // The contract's audioStop closes the mic AND stops playback, so the player does not send a
+        // second teardown on hang-up.
+        postToShell({ action: "audioStop" });
+      },
+    };
+    nativeCaptureSink = capture;
+    return capture;
+  }
+
+  // The player's shape, talking to the shell instead of Web Audio. Each PCM delta is handed over as one
+  // audioPlay; a barge-in flush empties the shell's queue; and playsUntilMs is booked from the shell's
+  // own playedMs report, never from the bytes, because the page is not the thing scheduling this sound.
+  function nativePlayer(options = {}) {
+    const gate = options.gate;
+    const sampleRate = options.sampleRate ?? SAMPLE_RATE;
+    const stats = { bytes: 0, buffers: 0, flushes: 0, stopped: 0, live: 0 };
+    let queuedMs = 0;
+    let lastPlayedMs = 0;
+    let closed = false;
+    return {
+      push(bytes) {
+        if (closed || bytes == null) return gate?.playsUntilMs?.() ?? 0;
+        const view = bytes instanceof Uint8Array
+          ? bytes
+          : new Uint8Array(bytes.buffer ?? bytes, bytes.byteOffset ?? 0, bytes.byteLength ?? bytes.length);
+        const length = view.byteLength;
+        if (length === 0) return gate?.playsUntilMs?.() ?? 0;
+        queuedMs += (length / (sampleRate * 2)) * 1000;
+        stats.bytes += length;
+        stats.buffers += 1;
+        postToShell({ action: "audioPlay", pcm: base64FromBytes(view) });
+        return gate?.playsUntilMs?.() ?? 0;
+      },
+      // From the shell, every 250 ms while anything plays: cumulative ms that have left the speaker. The
+      // room is loud for as long as the page has queued more than that, and playsUntilMs says so.
+      onPlayed(playedMs) {
+        lastPlayedMs = Math.max(0, Number(playedMs) || 0);
+        return gate?.remaining?.(Math.max(0, queuedMs - lastPlayedMs)) ?? 0;
+      },
+      flush() {
+        postToShell({ action: "audioFlush" });
+        // The shell drops everything past what has already played, so the booking is honest again at
+        // once: what is left to play is nothing until the next delta.
+        queuedMs = lastPlayedMs;
+        stats.flushes += 1;
+        return 0;
+      },
+      // The page never hears this audio, so it has no output RMS to give the avatar; the orb's word
+      // still drives his mood.
+      level() { return 0; },
+      currentTime() { return 0; },
+      stats() { return { ...stats }; },
+      close() { closed = true; },
     };
   }
 
@@ -1157,6 +1362,19 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     levels: null,
     /** The screen-awake request, where the browser or the shell has one to give. */
     awake: null,
+    /**
+     * VOICE-15c. The relay-down sentence on the screen, "" when the line is fine. Set when a dial is
+     * refused or a live line drops and the person did not press End, so the screen stays with a plain
+     * sentence and a Try again instead of vanishing and hiding the reason on a shelf a phone covers.
+     */
+    down: "",
+    /**
+     * VOICE-15. The person's speaker/earpiece choice for native audio, remembered across calls here and
+     * in the shell's own UserDefaults. Speaker is the default, which is what a hands-free call wants.
+     */
+    output: "speaker",
+    /** VOICE-15. The last route the shell reported for this call, drawn as one quiet line. */
+    route: null,
   };
   let callEndedTimer = null;
 
@@ -1197,13 +1415,24 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       + `</div>`
       + `<p class="voice-call-status" data-voice-call-status aria-live="polite"></p>`
       + `<p class="voice-call-state" data-voice-call-state aria-live="polite">${CALL_WORDS[0]}</p>`
+      // VOICE-15. One quiet line saying where the audio really is, under the speaker/earpiece toggle.
+      // Hidden until the shell reports a route, and absent entirely in a browser.
+      + `<p class="voice-call-route" data-voice-call-route aria-live="polite" hidden></p>`
       + `<div class="voice-call-controls">`
       + `<form class="voice-call-typed" data-voice-call-form>`
       + `<label class="sr-only" for="voice-call-input">Type to Titan</label>`
       + `<input id="voice-call-input" data-voice-call-input type="text" autocomplete="off" placeholder="Type instead" />`
       + `</form>`
+      // VOICE-15. Speaker or earpiece, native audio only. Hidden in a browser, where WebKit owns the
+      // route and this choice would do nothing.
+      + `<button class="voice-call-output" type="button" data-voice-call-output aria-pressed="true" hidden>`
+      + `<span class="voice-call-glyph" aria-hidden="true">&#128266;</span><span data-voice-call-output-label>Speaker</span></button>`
       + `<button class="voice-call-mute" type="button" data-voice-call-mute aria-pressed="false">`
       + `<span class="voice-call-glyph" aria-hidden="true">&#9423;</span><span>Mute</span></button>`
+      // VOICE-15c. Shown only while the line is down, in the mute's place: a dead line has no mic to
+      // mute, and the one thing to offer is another try.
+      + `<button class="voice-call-retry" type="button" data-voice-call-retry hidden>`
+      + `<span class="voice-call-glyph" aria-hidden="true">&#8635;</span><span>Try again</span></button>`
       + `<button class="voice-call-end" type="button" data-voice-call-end>`
       + `<span class="voice-call-glyph" aria-hidden="true">&#10005;</span><span>End</span></button>`
       + `</div></div>`;
@@ -1232,6 +1461,16 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
         event.preventDefault();
         call.endedByPerson = true;
         stop();
+        return;
+      }
+      if (event.target?.closest?.("[data-voice-call-output]") != null) {
+        event.preventDefault();
+        toggleOutput();
+        return;
+      }
+      if (event.target?.closest?.("[data-voice-call-retry]") != null) {
+        event.preventDefault();
+        retryCall();
         return;
       }
       if (event.target?.closest?.("[data-voice-call-mute]") != null) {
@@ -1289,6 +1528,53 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // echo hold and the microphone could hear Titan through the speaker for the 350 ms tail.
     state.talking = !call.muted;
     paint();
+  }
+
+  // VOICE-15. The quiet line under the toggle: the output as one plain word, and the error if the shell
+  // reported one. No word for a route that has none of its own (CarPlay, AirPlay) -- the error, if any,
+  // is the whole of the line there.
+  function routeLineText(route) {
+    if (route == null || typeof route !== "object") return "";
+    const word = ROUTE_WORDS[String(route.output ?? "")] ?? "";
+    const error = String(route.error ?? "").trim();
+    if (word && error) return `${word}. ${error}`;
+    return error || word;
+  }
+
+  // VOICE-15. The shell's route report, verbatim, on start and on every route change. It only moves the
+  // toggle's own state when the real output is one the toggle can pick; headphones and Bluetooth win the
+  // route on their own and the line says so, but the person's speaker/earpiece choice is left as it was.
+  function applyRoute(info) {
+    if (!call.up || info == null || typeof info !== "object") return;
+    call.route = info;
+    const out = String(info.output ?? "");
+    if (out === "speaker" || out === "earpiece") call.output = out;
+    paintCall();
+  }
+
+  // VOICE-15. The person's speaker/earpiece choice. The shell applies it and remembers it; the page
+  // reflects it at once, and the route line corrects it if the hardware had other ideas.
+  function toggleOutput() {
+    call.output = call.output === "speaker" ? "earpiece" : "speaker";
+    postToShell({ action: "audioOutput", value: call.output });
+    paintCall();
+  }
+
+  // VOICE-15c. Show the line is down, keep the screen. The orb goes off because there is nothing live to
+  // animate, and paintCall reads call.down to draw the sentence and swap Mute for Try again.
+  function enterCallDown(sentence) {
+    call.down = String(sentence || "");
+    try { global.__voiceCallAvatar?.setState?.("off"); } catch { /* the screen still reads the sentence */ }
+    paintCall();
+  }
+
+  // VOICE-15c. Try again, from the button the down state shows. The screen stays up the whole time;
+  // start() dials a fresh line and paint() repaints it back to Connecting.
+  function retryCall() {
+    if (!call.down) return;
+    call.down = "";
+    paintCall();
+    void start({ handsFree: true });
   }
 
   /** Which of the five words is true right now. Muted outranks the other four. */
@@ -1369,6 +1655,29 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     if (node == null) return;
     hide(node, !call.up);
     if (!call.up) return;
+    const retry = node.querySelector("[data-voice-call-retry]");
+    const mute = node.querySelector("[data-voice-call-mute]");
+    const outputBtn = node.querySelector("[data-voice-call-output]");
+    const routeNode = node.querySelector("[data-voice-call-route]");
+    // VOICE-15c. The line is down: the sentence takes the prominent line, the orb is off, and the mic
+    // control becomes Try again. The toggle, the route line and the card have nothing to say on a dead
+    // line, so they go; End stays, because leaving must always be one press away.
+    if (call.down) {
+      call.word = "";
+      const downLine = node.querySelector("[data-voice-call-state]");
+      if (downLine != null && downLine.textContent !== call.down) downLine.textContent = call.down;
+      if (node.getAttribute("data-voice-call-word") !== "Down") node.setAttribute("data-voice-call-word", "Down");
+      const downStatus = node.querySelector("[data-voice-call-status]");
+      if (downStatus != null && downStatus.textContent !== "") downStatus.textContent = "";
+      if (mute != null) hide(mute, true);
+      if (outputBtn != null) hide(outputBtn, true);
+      if (routeNode != null) hide(routeNode, true);
+      if (retry != null) hide(retry, false);
+      try { global.__voiceCallAvatar?.setState?.("off"); } catch { /* the screen still reads the sentence */ }
+      return;
+    }
+    if (retry != null) hide(retry, true);
+    if (mute != null) hide(mute, false);
     const word = callWord();
     call.word = word;
     const line = node.querySelector("[data-voice-call-state]");
@@ -1381,9 +1690,26 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     call.status = status;
     const statusNode = node.querySelector("[data-voice-call-status]");
     if (statusNode != null && statusNode.textContent !== status) statusNode.textContent = status;
-    const mute = node.querySelector("[data-voice-call-mute]");
     const pressed = call.muted ? "true" : "false";
     if (mute != null && mute.getAttribute("aria-pressed") !== pressed) mute.setAttribute("aria-pressed", pressed);
+    // VOICE-15. The speaker/earpiece toggle and its route line, shown only where the shell owns the
+    // audio. A browser keeps WebKit's own route and neither control, so its call screen is unchanged.
+    const native = nativeAudioWanted();
+    if (outputBtn != null) {
+      hide(outputBtn, !native);
+      if (native) {
+        const outPressed = call.output === "speaker" ? "true" : "false";
+        if (outputBtn.getAttribute("aria-pressed") !== outPressed) outputBtn.setAttribute("aria-pressed", outPressed);
+        const label = outputBtn.querySelector("[data-voice-call-output-label]");
+        const outWord = call.output === "earpiece" ? "Earpiece" : "Speaker";
+        if (label != null && label.textContent !== outWord) label.textContent = outWord;
+      }
+    }
+    if (routeNode != null) {
+      const routeText = native ? routeLineText(call.route) : "";
+      if (routeNode.textContent !== routeText) routeNode.textContent = routeText;
+      hide(routeNode, !native || routeText.length === 0);
+    }
     paintCallCard(node);
     try { global.__voiceCallAvatar?.setState?.(word); } catch { /* the screen still reads the word */ }
   }
@@ -1425,6 +1751,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     call.endedByPerson = false;
     call.card = "";
     call.levels = null;
+    // VOICE-15. A fresh screen is not down, and no route has been reported yet; call.output is the
+    // remembered choice and is deliberately not reset, so a person who chose the earpiece keeps it.
+    call.down = "";
+    call.route = null;
     const systemRows = document_.querySelectorAll?.("#transcript .message-row.is-system") ?? [];
     call.fromSystem = String(systemRows[systemRows.length - 1]?.getAttribute?.("data-message-id") ?? "");
     call.fromCard = String(callCardRow()?.getAttribute?.("data-message-id") ?? "");
@@ -1460,6 +1790,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     call.status = "";
     call.card = "";
     call.levels = null;
+    // VOICE-15. The down state and the route belong to a line; closing the screen clears both. The
+    // output choice persists, to be remembered for the next call the way the shell remembers it.
+    call.down = "";
+    call.route = null;
     keepAwake(false);
     try { global.__voiceCallAvatar?.release?.(); } catch { /* the node goes with the screen anyway */ }
     if (document_ != null) {
@@ -1594,7 +1928,9 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // and "thinking" is the honest one of the four for a line that is being dialled.
     orb("thinking");
     state.gate = echoGate({ sampleRate: SAMPLE_RATE });
-    state.sound = player({ gate: state.gate });
+    // VOICE-15. In the phone app the shell plays the audio, so the player hands each delta over rather
+    // than scheduling a Web Audio node. Every browser keeps the scheduled player, unchanged.
+    state.sound = nativeAudioWanted() ? nativePlayer({ gate: state.gate }) : player({ gate: state.gate });
     state.tailFrames = 0;
     state.flushes = 0;
     // VOICE-14. Asked ONCE, here, for the life of this line. The relay is told the same thing on the
@@ -1623,7 +1959,7 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // VOICE-11. The release sends through this same door, so its silence queues behind whatever the
     // hold captured before the line was up and arrives in the order it was made.
     state.sendAudio = sendFrame;
-    const beginCapture = () => captureAudio({
+    const captureConfig = {
       source: "microphone",
       deviceId: state.micDeviceId,
       sampleRate: SAMPLE_RATE,
@@ -1641,7 +1977,13 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
         // only just long enough pays nothing at all for the rule that catches a tap.
         if (graceOpen()) finishHold();
       },
-    });
+    };
+    // VOICE-15. In the phone app the microphone is the shell's: no getUserMedia, no AudioContext, just
+    // audioStart and a frame() sink. The same gate and mute callbacks ride along, so a muted call drops
+    // frames on the page the way a browser call does. Every browser opens its own microphone, unchanged.
+    const beginCapture = () => (nativeAudioWanted()
+      ? startNativeCapture(captureConfig)
+      : captureAudio(captureConfig));
 
     if (captureFirst) {
       try { state.capture = await beginCapture(); watchForSound(); }
@@ -1650,6 +1992,12 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     try {
       await openSocket();
     } catch {
+      // VOICE-15c. In the phone app a failed dial keeps the call screen and says, in words, that the
+      // relay did not answer, with a Try again: the app is a full-screen surface with no shelf behind
+      // it to read, and sitting on "Listening" with a dead mic is the bug the feedback rows named. A
+      // phone in a plain browser keeps VOICE-13's behaviour -- the screen goes and the shelf carries
+      // the no-key sentence with its Open settings -- so nothing without the shell's flag changes.
+      if (call.up && !call.endedByPerson && nativeAudioWanted()) { relayDown(CALL_DOWN_NO_ANSWER); return; }
       // A socket that never opened is the void answer this console has been burned by before: a
       // relay that is down and a workspace that was never set up look identical from here. So the
       // page says the sentence that covers both and offers the card that fixes one of them.
@@ -1696,6 +2044,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     try { state.socket.send(JSON.stringify(message)); } catch { /* the close handler has it */ }
   }
 
+  // VOICE-15c. The line is down and the person did not leave. Tear the line down through the one close
+  // funnel, but keep the screen: stop() reads options.relayDown and swaps closeCall for enterCallDown.
+  function relayDown(sentence) { stop(undefined, undefined, { relayDown: sentence }); }
+
   function stop(condition, text, options = {}) {
     clearDismiss();
     if (heldTimer != null) { global.clearInterval(heldTimer); heldTimer = null; }
@@ -1726,15 +2078,27 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // rather than fading, and the hold goes with it: a button drawn as held after the line has
     // dropped is a microphone a person believes is open.
     closeOverlay();
-    // VOICE-13. THE CALL SCREEN GOES HERE, beside the panel, and this is the only place it is closed
-    // from. Seven exits reach this function already, so one insertion point catches all of them --
-    // including every refusal, which is what makes opening the screen optimistically safe: a refusal
-    // takes the screen away and the sentence lands in its one existing home on the shelf, where the
-    // person is looking. The screen never carries a second copy of that sentence.
-    closeCall();
+    // VOICE-15c. A relay that never answered or a line that dropped while the person was on the call
+    // screen KEEPS the screen, with a plain sentence and a Try again, rather than vanishing it and
+    // leaving the reason on a shelf a full-screen phone covers. Captured before the teardown below so
+    // call.up is still true. Every named refusal, and an ordinary press to leave, still takes the
+    // screen away the way VOICE-13 decided.
+    const enteringDown = options.relayDown != null && call.up && !call.endedByPerson;
+    if (enteringDown) {
+      // VOICE-13. THE CALL SCREEN GOES HERE, beside the panel, and this is the only place it is closed
+      // from -- except a relay-down line, which the screen survives so the person reads why.
+      enterCallDown(String(options.relayDown));
+    } else {
+      closeCall();
+    }
     clearIdleClose();
     state.held = false;
     state.talking = false;
+    if (enteringDown) {
+      // The sentence is on the screen, so the shelf stays clean and nothing is armed to take it away.
+      clearNotes();
+      return;
+    }
     const reason = condition || state.byeReason;
     // stop() is also called with no argument at all, for an ordinary press of the button.
     const relaySaidIt = String(condition ?? "").length === 0 && state.byeReason.length > 0;
@@ -2222,7 +2586,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // is what keeps the sentence it just wrote from being cleared as though a person had pressed the
     // button to leave.
     if (code === 1000) { stop(undefined, undefined, { fromWire: true }); return; }
-    // 1006 and friends: the line went away without saying why, which is its own sentence.
+    // 1006 and friends: the line went away without saying why, which is its own sentence. VOICE-15c: in
+    // the phone app that sentence goes ON the call screen with a Try again rather than onto a shelf the
+    // full-screen surface covers; a browser, phone or not, keeps the shelf note it has always had.
+    if (call.up && !call.endedByPerson && nativeAudioWanted()) { relayDown(CALL_DOWN_DROPPED); return; }
     stop(state.byeReason || "line-dropped");
   }
 
@@ -2799,6 +3166,26 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     probe();
   }
 
+  // VOICE-15. The shell-to-page object, installed at load and no-ops until a call is up. frame() feeds
+  // the native capture, if one is running; route() moves the toggle and the line, if a call is up;
+  // playedMs() books the gate through the native player, if one is in use. In a browser none of the
+  // three ever has anything to act on, so each is a quiet no-op there.
+  const titanbotAudio = {
+    frame(base64) {
+      if (nativeCaptureSink == null) return;
+      let bytes;
+      try { bytes = bytesFromBase64(base64); } catch { return; }
+      nativeCaptureSink.feed(bytes);
+    },
+    route(info) { applyRoute(info); },
+    playedMs(ms) {
+      const value = Number(ms);
+      if (!Number.isFinite(value)) return;
+      state.sound?.onPlayed?.(value);
+    },
+  };
+  global.__titanbotAudio = titanbotAudio;
+
   global.__voice = {
     start,
     stop,
@@ -2868,7 +3255,12 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       micFrames: state.capture?.stats.micFrames ?? 0,
       // And the call screen, as a person would describe it: up or not, which word is on it, whether it
       // is muted, the status line under him, and whether a card has taken the middle.
-      call: { up: call.up, word: call.word, muted: call.muted, status: call.status, card: call.card },
+      // VOICE-15 adds three: whether the line is down and what it says, the speaker/earpiece choice,
+      // and the route the shell last reported, so a test reads all of it without the DOM.
+      call: {
+        up: call.up, word: call.word, muted: call.muted, status: call.status, card: call.card,
+        down: call.down, output: call.output, route: call.route,
+      },
     }),
     // Exposed so a test can pin the words and the arithmetic without a browser, which is the
     // contract marketplace-bots.js and cloud-browser.js already keep.
@@ -2933,6 +3325,22 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     _SHELL_NOTES: SHELL_NOTES,
     // VOICE-14. The one reader that decides barge-in, so a test can pin which hosts get it.
     _bargeInWanted: bargeInWanted,
+    // VOICE-15. The phone's own audio path, pinned without a phone.
+    _nativeAudioWanted: nativeAudioWanted,
+    _postToShell: postToShell,
+    _startNativeCapture: startNativeCapture,
+    _nativePlayer: nativePlayer,
+    _base64FromBytes: base64FromBytes,
+    _bytesFromBase64: bytesFromBase64,
+    _titanbotAudio: titanbotAudio,
+    _applyRoute: applyRoute,
+    _routeLineText: routeLineText,
+    _toggleOutput: toggleOutput,
+    _retryCall: retryCall,
+    _relayDown: relayDown,
+    _CALL_DOWN_NO_ANSWER: CALL_DOWN_NO_ANSWER,
+    _CALL_DOWN_DROPPED: CALL_DOWN_DROPPED,
+    _ROUTE_WORDS: ROUTE_WORDS,
     _micConditionFor: micConditionFor,
     _OVERLAY_ID: OVERLAY_ID,
     _DISSOLVE_MS: DISSOLVE_MS,

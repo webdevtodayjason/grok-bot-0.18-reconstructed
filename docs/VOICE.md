@@ -1452,3 +1452,66 @@ and dial one line, because `openCall()` is idempotent and `pressSpent` guards on
 Section 13's 390x844 table was taken when a press at that width was a hold. Those numbers still
 describe the refusal line's own shelf home, which has not changed; what a press does there is this
 section.
+
+---
+
+## 15. The phone owns its own audio (VOICE-15)
+
+Forcing the speaker in the iPhone app never worked: it was always the earpiece. The cause is not the
+app's code. While a `WKWebView` holds a `getUserMedia` capture, WebKit owns the `AVAudioSession` and
+routes a live capture's playback to the receiver, and an app-level speaker override is re-applied under
+it and loses (bugs.webkit.org 196539 and 230902, the Cordova and Zoom threads, and the six calls on
+2026-09-12 that opened with a live capture carrying no speech at all). There is no reliable way to win
+the route from outside while WebKit's capture runs.
+
+So in the app the page stops using WebKit for audio. It keeps the socket, the orb, the caption, the
+barge-in and the whole call screen. What changes is where the samples come from and go: the microphone
+frames come from the shell and the PCM to play goes back to the shell, and `AVAudioSession` is then the
+app's alone, on the loudspeaker by default with an earpiece choice for the person.
+
+### Which page does this, and which does not
+
+The shell says so about itself, once, in the script it injects before first paint:
+`window.__titanbotShell.nativeAudio = true`, beside the `platform` it already states. A page without
+that flag — every browser, an old app build — opens its own microphone and plays through Web Audio,
+byte for byte what it did before this wave. Nothing here reads a user agent. The full wire contract the
+shell and the page both build to is in `docs/APPS.md` section 8d.
+
+### What the page sends, and what it is handed
+
+The page sends the shell `audioStart` when the line is up, turns each 100 ms frame the shell hands back
+into the same socket frame the browser path sends, hands each PCM delta over as `audioPlay`, empties
+the shell's queue with `audioFlush` on a barge-in, and sends `audioStop` on hang-up, which closes the
+mic and the playback together. The shell hands the page each mic frame, the real audio route on start
+and on every change, and a running count of how many milliseconds have actually left the speaker. The
+page books how long sound is still in the room from that count, not from the bytes it handed over,
+because it is no longer the thing scheduling the audio.
+
+### The toggle, and the line under it
+
+On a native call the bottom row carries a speaker/earpiece toggle, speaker by default because a
+hands-free call wants the loudspeaker. Pressing it tells the shell, which applies the choice and
+remembers it for the next call. Under it one quiet line says where the audio really is, as a plain word
+— Speaker, Earpiece, Headphones, Bluetooth — with the shell's error after it if there is one. Headphones
+and Bluetooth win the route on their own; the line says so, and the person's speaker/earpiece choice is
+left as it was. In a browser neither the toggle nor the line is there, because WebKit owns the route and
+the choice would do nothing.
+
+### When the relay does not answer (VOICE-15c)
+
+VOICE-13 sends every refusal to the shelf and takes the call screen away, which is right for a refusal
+that has a home and a way forward — no key, a cap, a box that is off. A relay that never answered, or a
+line that dropped, has neither, and taking the screen away would leave a phone on a full-screen surface
+with a dead microphone and nothing said. So in the app those two keep the screen: the orb goes off, the
+Mute control becomes Try again, and the screen reads, in plain words,
+**"Voice is unavailable: the relay did not answer"** or **"Voice is unavailable: the line dropped"**. A
+phone in a plain browser keeps VOICE-13's behaviour, the sentence on the shelf and the screen gone, so
+nothing without the shell's flag changes.
+
+### What is not proven here
+
+No phone. That iOS really keeps the call on the loudspeaker at full volume, and that a person can cut
+Titan off by talking over the shell's own echo-cancelled microphone, is Jason's call on the TestFlight
+build. These cases prove the switch between the two audio paths, the five shell messages, the toggle
+and the two relay-down sentences, against a fake shell bridge on this Mac. They cannot prove the route
+the shell actually gets from `AVAudioSession`.
