@@ -5037,9 +5037,13 @@ export function createAdminApi({
    * why a refusal is a refusal, which is the difference between a panel an operator can act on and
    * one that says "refused" about four different things.
    */
-  function recordAttempt({ email, ip, outcome, password = "", tenant = "", at = now(), via = "", reason = "" }) {
+  function recordAttempt({ email, ip, outcome, password = "", tenant = "", at = now(), via = "", reason = "", userAgent = "" }) {
     store.recordLoginAttempt({
       at, email, ip, outcome, tenant, via,
+      // SIGNIN-1b. What the caller called itself, so markGateRows can label a row posted straight at
+      // api.titanium.bot. The value is a stranger's header; the store clips it and nothing here
+      // decides anything on it except the gate LABEL, which is ink and never a subtraction.
+      userAgent,
       triedHash: outcome === "ok" ? "" : hashTried(password, saltOf()),
       // CP-FIX 3. The sentence the sign-in route decided, passed through as words. The store caps it
       // and takes its newlines out; nothing derived from a password is ever in it, and the one field

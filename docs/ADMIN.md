@@ -121,6 +121,10 @@ the route that decided it. Five of them exist today:
 | the sign-in is turned off | the password was right and this sign-in has been turned off, so nobody is guessing: somebody closed this door |
 | the workspace is gone | the password was right and the workspace acme is not registered on this control plane, so there is nothing to sign in to |
 
+Every one of those rows also carries **what the caller called itself** (SIGNIN-1b), clipped at 120
+characters, which is what lets a gate's own refusals be told from a stranger's on the path that never
+touches a customer's console.
+
 **None of those ever reaches the caller.** A wrong email and a wrong password still answer with the
 identical 401 body, because telling them apart tells a guesser who has an account here. The reason is
 what you read; it is not what the visitor is told. A reason is capped at 200 characters with its
@@ -281,18 +285,23 @@ name; and **ATTACKS still reads 1** on that same address, with its row carrying 
 like our own gates, and are counted above" beside 131 attempts and 28 different passwords. That last
 part is the point: the label is now visible and free.
 
-### The rows this can never label, and why that is right
+### The rows this could not label until 2026-09-13 (SIGNIN-1b, closed)
 
-**Rows written by the control plane's own door carry no user agent at all, so they are never
-labelled as a gate and can never be silenced by one.** That service's `login_attempts` table has no
-column for it: it is not recorded on the way in and the panel is handed a hardcoded empty string on
-the way out. `scripts/verify-control-plane.mjs` sends the header anyway, because the line costs
-nothing and is right the day the column lands, and the migration is filed as **SIGNIN-1b** rather
-than left as a comment.
+**Rows written by the control plane's own door used to carry no user agent at all, so they could
+never be labelled as a gate.** That service's `login_attempts` table had no column for it: nothing
+was recorded on the way in and the panel was handed a hardcoded empty string on the way out. Every
+gate has sent the header since SIGNIN-1 anyway, on the strength of the line costing nothing and being
+right the day the column landed.
 
-Read plainly, that is a gap in the labelling and a floor under it. A sign-in posted straight at
-`api.titanium.bot`, which is the path that never touches a customer's console, is the one an
-attacker is most likely to use, and it is exactly the path where this label does not apply at all.
+**The column landed with the CP-FIX batch**, which is the wave that next opened `cp/store.mjs`, as
+that row said its owner would be. A sign-in posted straight at `api.titanium.bot` now carries what the
+caller called itself, clipped at the same 120 characters the relay's ledger clips to, and a
+`verify-control-plane` run's own refusals come back labelled with that script's name. It was the path
+that never touches a customer's console, which is the path an attacker is most likely to use, and it
+was exactly the path the label could not reach.
+
+A row written before the column existed still reads empty, which is the truth about it, and the rule
+that an empty agent is **never on its own enough to label anything** is unchanged.
 
 ---
 

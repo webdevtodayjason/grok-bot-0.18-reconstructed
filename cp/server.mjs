@@ -783,6 +783,13 @@ export function createApp(options = {}) {
     // attempt with the visitor's real address on it; this one is marked so the merge can drop it
     // and so the by-address table can leave the phantom address out. ADMIN-1.
     const via = viaRelay ? "relay" : "";
+    // SIGNIN-1b. What the caller called itself, written onto every row this route makes. Until this
+    // wave the column did not exist and listLoginAttempts handed the panel a hardcoded empty string,
+    // so a sign-in posted STRAIGHT at api.titanium.bot could never be labelled as one of our own
+    // gates: the path that never touches a customer's console is exactly the path the label could
+    // not reach. scripts/gate-agent.mjs has been sending the header since SIGNIN-1 on the strength of
+    // the line costing nothing and being right the day the column landed. This is that day.
+    const userAgent = String(request.headers["user-agent"] ?? "");
     const at = now();
     store.pruneLoginFailures(at);
     const lock = store.loginLock({ email, ip, at, countIp: !viaRelay });
@@ -790,7 +797,7 @@ export function createApp(options = {}) {
       // ADMIN-1. Written down before the answer goes out. No hash: this branch never reached the
       // password check, so there is nothing that was tried, only somebody who kept knocking.
       admin.recordAttempt({
-        email, ip, outcome: "locked", at, via,
+        email, ip, outcome: "locked", at, via, userAgent,
         reason: `too many failed tries on ${lock.which.join(" and ") || "this account"} in the last ten minutes, so the door is shut for ${lock.retryAfter} more seconds`,
       });
       return json(response, 429, { error: "locked", retryAfter: lock.retryAfter }, { "retry-after": String(lock.retryAfter) });
@@ -803,7 +810,7 @@ export function createApp(options = {}) {
       // so: it never reaches the password check, so it is not a refusal of anybody's password, and
       // a customer meeting it twice would otherwise be a silent 429 on a panel showing nothing.
       admin.recordAttempt({
-        email, ip, outcome: "refused", at, via,
+        email, ip, outcome: "refused", at, via, userAgent,
         reason: `${MAX_CONCURRENT_DERIVATIONS} sign-ins were already being checked on this service, so this one was refused before the password was looked at`,
       });
       return json(response, 429, {
@@ -829,7 +836,7 @@ export function createApp(options = {}) {
       // The reason says whether the password on file has been changed, and when, which is the fact
       // that explains a customer who was signing in fine yesterday.
       admin.recordAttempt({
-        email, ip, outcome: "refused", password, at, via,
+        email, ip, outcome: "refused", password, at, via, userAgent,
         reason: passwordReason(store.getAccountByEmail(email), at),
       });
       return json(response, 401, { error: "invalid_login" });
@@ -840,7 +847,7 @@ export function createApp(options = {}) {
     // their sign-in is off. ADMIN-1.
     if (attempt.account.disabled === true) {
       admin.recordAttempt({
-        email, ip, outcome: "refused", password, tenant: attempt.account.tenant, at, via,
+        email, ip, outcome: "refused", password, tenant: attempt.account.tenant, at, via, userAgent,
         reason: "the password was right and this sign-in has been turned off, so nobody is guessing: somebody closed this door",
       });
       return json(response, 403, {
@@ -855,7 +862,7 @@ export function createApp(options = {}) {
       // It is written down all the same: this is the answer a customer meets for ever after their
       // workspace is removed from under their account, and until this wave no panel could show it.
       admin.recordAttempt({
-        email, ip, outcome: "refused", tenant: attempt.account.tenant, at, via,
+        email, ip, outcome: "refused", tenant: attempt.account.tenant, at, via, userAgent,
         reason: `the password was right and the workspace ${attempt.account.tenant} is not registered on this control plane, so there is nothing to sign in to`,
       });
       return json(response, 409, {
@@ -868,7 +875,7 @@ export function createApp(options = {}) {
     // Successes are recorded too, and with no hash: there is no reason to hold anything derived
     // from a password that worked, and a file of keyed hashes where one is known-good is a worse
     // file than one where none is. This is also what fills the "last sign-in" column.
-    admin.recordAttempt({ email, ip, outcome: "ok", tenant: attempt.account.tenant, at, via });
+    admin.recordAttempt({ email, ip, outcome: "ok", tenant: attempt.account.tenant, at, via, userAgent });
     store.pruneRevocations(at);
     const host = tenant.host || consoleHost(config);
     const { token, payload } = mintSessionToken({

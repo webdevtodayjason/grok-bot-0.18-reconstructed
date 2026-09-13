@@ -8,7 +8,9 @@ import { readFileSync } from "node:fs";
 
 import { readProxyKey, tenantPaths } from "../cp/provision.mjs";
 import { CP_VERSION } from "../cp/server.mjs";
-import { LOCKOUT_MAX_FAILURES } from "../cp/store.mjs";
+import { ATTEMPT_USER_AGENT_LIMIT, LOCKOUT_MAX_FAILURES } from "../cp/store.mjs";
+// SIGNIN-1b asserts the label as well as the column, because a column nothing reads is not the fix.
+import { GATE_AGENT_PREFIX, markGateRows } from "../cp/admin.mjs";
 import { tenantSessionSecret, verifySessionToken } from "../cp/session.mjs";
 import { startControlPlane, startFakeCoolify } from "./cp-support.mjs";
 import { startFakeProxy } from "./cp-proxy-support.mjs";
@@ -251,6 +253,48 @@ test("a refusal after a password change says so, and a lockout says how long", a
     assert.match(locked.reason, /too many/);
     assert.match(locked.reason, /\d+ more seconds/, "a lockout with no duration in it is a dead end for whoever reads it");
     assert.equal(locked.triedHash, "", "a lockout still answers before the password check, so there is nothing to hash");
+  });
+});
+
+/**
+ * SIGNIN-1b, the row that has been waiting for a wave to open cp/store.mjs. Filed 2026-09-09.
+ *
+ * The control plane's login_attempts table had no user_agent column: the insert never sent one and
+ * listLoginAttempts handed the panel a hardcoded empty string. So a sign-in posted STRAIGHT at
+ * api.titanium.bot could never be labelled as one of our own gates, and that is the path that never
+ * touches a customer's console, which is the path an attacker is most likely to use. Every gate has
+ * been sending the header since SIGNIN-1 on the strength of the line being right the day the column
+ * landed.
+ */
+test("a sign-in posted straight at this service carries the agent it called itself, clipped", async () => {
+  await withPlane(async (plane) => {
+    await seedTenantAndAccount(plane);
+    const agent = `${GATE_AGENT_PREFIX}verify-control-plane`;
+    await plane.request("POST", "/v1/sessions", {
+      body: { email: "owner@example.com", password: "not-the-password" },
+      headers: { "user-agent": agent },
+    });
+    const refused = plane.store.listLoginAttempts({ since: 0 })[0];
+    assert.equal(refused.userAgent, agent, "the hardcoded empty string is gone");
+
+    // And it is labelled, which is the whole point of the column. The gate's own successful sign-in
+    // is what proves the address is ours, the same rule SIGNIN-1 built for the relay's rows.
+    await plane.request("POST", "/v1/sessions", {
+      body: { email: "owner@example.com", password: PASSWORD },
+      headers: { "user-agent": agent },
+    });
+    const rows = plane.store.listLoginAttempts({ since: 0 });
+    const gates = markGateRows(rows, { isOperatorAccount: () => true });
+    assert.equal(gates.rows, 1, "the refusal is ours and says so");
+    assert.deepEqual([...gates.scripts], ["verify-control-plane"]);
+    assert.equal(rows.find((row) => row.outcome === "refused").gate, true);
+
+    // A header is a string a stranger writes, so it is clipped and never trusted.
+    await plane.request("POST", "/v1/sessions", {
+      body: { email: "owner@example.com", password: "not-the-password" },
+      headers: { "user-agent": "z".repeat(400) },
+    });
+    assert.equal(plane.store.listLoginAttempts({ since: 0 })[0].userAgent.length, ATTEMPT_USER_AGENT_LIMIT);
   });
 });
 

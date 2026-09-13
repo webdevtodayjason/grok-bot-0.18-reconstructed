@@ -16,6 +16,8 @@ on the R750: a worker does not touch it. What that leaves unproven has its own s
 | `ffa8016` | a login by sign-in link is a login, and the panel names the kind of the last one |
 | `3b7a6b9` | a failed sign-in says why, in words, and a password change is one of the reasons |
 | `215bf2c` | DEVICE-1: removing an account takes its device bearers with it |
+| `d868a6d` | docs/ADMIN.md carries all four, and this report |
+| (below) | SIGNIN-1b, the owned row whose stated owner is the wave that next opens cp/store.mjs |
 
 ## 1. The boot error nobody could act on
 
@@ -144,19 +146,44 @@ A tenant teardown needs nothing here: `cp/decommission.mjs` deletes a slug's acc
 step, by which point the container is gone and the workspace is out of the relay's registry, so a
 bearer for it has nothing left to open.
 
+## 5. SIGNIN-1b, rolled in because this is the wave its row named
+
+That row (filed 2026-09-09) says: *"Owner: the wave that next opens cp/store.mjs. Next action: an
+ALTER TABLE login_attempts ADD COLUMN user_agent ... the column carried through insert and returned by
+listLoginAttempts in place of the hardcoded empty string, and a request threaded through
+recordLoginAttempt in cp/admin.mjs and its call sites in cp/server.mjs."* This batch is that wave: it
+added a migration beside the `via` one and touched the insert, the list, `recordAttempt` and every one
+of those call sites already.
+
+**Why it mattered here and not only there.** The control plane's rows had no agent, so a sign-in
+posted STRAIGHT at `api.titanium.bot` could never be labelled as one of our own gates, and that is the
+path that never touches a customer's console. Every gate has sent the header since SIGNIN-1 on the
+strength of the line being right the day the column landed.
+
+**Measured after:** a refusal posted at the real route with `titanbot-gate/verify-control-plane` comes
+back carrying that agent, `markGateRows` labels it and names the script, and a 400 character header is
+stored clipped to 120, the same ceiling the relay's own ledger uses. No existing assertion was
+weakened: the rule that a blank agent is never on its own enough to label a row is untouched, and its
+test still passes.
+
+**The cost was small and contained**, which is why it was rolled in rather than surfaced: one
+migration line, one column on the insert, one field on two functions, one expression at six call
+sites inside `handleSessionCreate`, and one new test. `docs/ADMIN.md`'s section describing that gap now
+describes it as closed.
+
 ## What was run
 
 On this Mac, `node --test`:
 
 | suites | result |
 |---|---|
-| every `tests/cp-*.test.mjs` (25 files) | 516 pass, 0 fail |
+| every `tests/cp-*.test.mjs` (25 files) | 517 pass, 0 fail |
 | `login-ledger`, `relay-tenant-login`, `relay-device-bearer`, `relay-admin-routes`, `auth-device` | 82 pass, 0 fail |
 
 `node --check` on every touched file: `cp/server.mjs`, `cp/admin.mjs`, `cp/store.mjs`, `cp/proxy.mjs`,
 `cp/admin/admin.js`, `ui/server.mjs`, `ui/login-ledger.mjs` and the six test files.
 
-Fourteen new cases. One existing assertion changed: the exact-key-set pin on the store's own account
+Fifteen new cases. One existing assertion changed: the exact-key-set pin on the store's own account
 row in `tests/cp-store.test.mjs` gained `passwordChangedAt` by name, with the reason written into the
 test. That pin exists to prove nothing derived from a password joins the row, and a timestamp is not
 one; the new case beside it asserts a fresh account reads 0.
@@ -183,7 +210,9 @@ one; the new case beside it asserts a fresh account reads 0.
 6. **The Clients panel was not opened in a browser.** `cp/admin/admin.js` changes are covered by the
    answer shape they render and by the source greps in `cp-admin`, not by a rendered page. Per the
    memory note on verifying UI, a passing test is not evidence a human can read the cell.
-7. **The concurrency-cap refusal now writes a row per refused request.** That branch only fires when
+7. **SIGNIN-1b's proof is a test, not a gate run.** `scripts/verify-control-plane.mjs` posting at a
+   live control plane and its rows coming back labelled on the real panel has not been run from here.
+8. **The concurrency-cap refusal now writes a row per refused request.** That branch only fires when
    four scrypt derivations are already running. It is the same order of writes the wrong-password path
    already does, and the table is pruned at 30 days, but it has not been measured under a flood.
 
@@ -194,3 +223,9 @@ one; the new case beside it asserts a fresh account reads 0.
   Providers panel.
 - `cp account remove` on a throwaway account that holds a device bearer, to see the revoke land on a
   real `devices.json`.
+- A `verify-control-plane` run against the live console, so SIGNIN-1b's label can be seen on the
+  Sign-in attempts panel rather than only in a test.
+- Three GAP-ANALYSIS rows want updating and that file is not this batch's to edit tonight. DEVICE-1 is
+  landed here, SIGNIN-1b is closed here, and the three defects in the `beta-36-token-burst` note are
+  two closed (the link count, the refusal reasons) and one still open (SPEND-3, a per-workspace token
+  ceiling, which nothing in this batch touches).
