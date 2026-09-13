@@ -81,7 +81,8 @@ test("Router settings use the trusted backend and display recorded inference usa
   assert.match(inference, /recordInferenceUsage\(provider/);
   assert.match(inference, /routerSettings\.getInferenceProvider\(\)/);
   assert.match(inference, /typeof extendedUsage\.then === "function"/);
-  assert.match(inference, /createProviderPromptSession\(provider\)/);
+  // ROUTER-1 hands the session options (workspace pin, Think harder) to the same trusted backend.
+  assert.match(inference, /createProviderPromptSession\(provider, undefined, sessionOptions\)/);
   assert.match(providers, /https:\/\/chatgpt\.com\/backend-api\/codex/);
   assert.match(providers, /headers\.set\("ChatGPT-Account-Id", credentials\.accountId\)/);
   assert.match(providers, /streamCodexDirectResponses/);
@@ -108,7 +109,7 @@ test("Router settings use the trusted backend and display recorded inference usa
   assert.match(turnShell, /inferenceProvider === "cursor"/);
   // The conversation id travels with the session so the [sand][wire] trace can be paired with
   // the [sand][toolset] line for the same turn (SUB-2b/toolset gate).
-  assert.match(turnShell, /createProviderPromptSession\(inferenceProvider, input\.conversationId\)/);
+  assert.match(turnShell, /createProviderPromptSession\(inferenceProvider, input\.conversationId, sessionOptions\)/);
   assert.match(coordinator, /method !== "sendPrompt" \|\| provider === "cursor"/);
   assert.match(coordinator, /executeTool: async \(definition, toolArgs, toolCallId\)/);
   assert.match(coordinatorMain, /command\(commands, "listRoutedMcpTools", args\)/);
