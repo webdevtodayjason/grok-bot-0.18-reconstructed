@@ -297,6 +297,7 @@ Measured on `grok-bot-local-vm`, September 2026, against the real host:
 | T2→T3 | **your team lead thinks** | **5.5–9.0 s** for a short question, **15–25 s** when it touches a shell, **50.6 s** on the first turn of a cold box |
 | T3 | the reply is noticed | ours, ≤450 ms at a 400 ms poll |
 | T3→T4 | the first sentence goes back to the vendor | **ours, ≤20 ms** |
+| TD | a sentence of the reply is read out while he is still writing (VOICE-3) | ours, ≤450 ms behind the sentence becoming whole. **Not yet measured on a real box** |
 | T5→T6 | the first sample is audible | **not measured** — see below |
 
 **T5→T6 is not on this ledger and cannot be**, and it carried a number (≤120 ms) until 2026-09-10
@@ -306,23 +307,50 @@ The evidence for that hop is what the gate really collects: the audio clock adva
 of 0.18 on real energy rather than a silent buffer, and the bytes queued. Every other number in this
 table names the machine it was measured on; that one was borrowing the caption's authority.
 
-**T2→T3 is the whole of it, and it is not ours.** The host emits the reply as one complete message:
-there is no partial text, no growing message, nothing to speak early. It deliberately drops the
-reply-sending step from every surface a console can read (`roster-projection.ts:420` projects fifteen
-other cases and not that one), so "speaks the reply as it streams" is not a thing this product can do
-today, and nothing in this release claims it.
+**T2→T3 WAS the whole of it, and VOICE-3 cut into it.** Until 2026-09-12 the host emitted the reply as
+one complete message: no partial text, no growing message, nothing to speak early. It deliberately
+dropped the reply-sending step from every surface a console could read (`roster-projection.ts:420`
+projects fifteen other cases and not that one), so "speaks the reply as it streams" was not a thing
+this product could do, and the release said so rather than claiming otherwise.
 
-What covers that silence is the realtime model's own acknowledgement — "on it" — and, past twenty
-seconds, at most two "still going" nudges driven off the roster actually saying the turn is running
-rather than off a bare timer. The relay then splits the finished reply into sentences and hands back
-the first one immediately, so speech starts on a sentence rather than on a paragraph.
+That surface now exists. The host projects the message your team lead is part way through writing as a
+small object behind one new gateway command, `getTurnDraft`
+(`source/host/extensions/transcript/turn-draft.ts`), and the relay reads it on the same 400 ms tick it
+already polls the conversation on. As each sentence of the reply becomes whole, it is read out. So on a
+box carrying this host bundle you hear sentence one while he is still writing sentence four, and the
+`TD` hop, the first sentence actually spoken, lands before `T3`, the finished message being noticed.
 
-**VOICE-3** is the one host-side change that would make it real streaming: project that one step the
-way the other fifteen are projected. It is filed, with its line number.
+Two things about that draft are worth knowing, because they are design and not accident:
+
+- **It is the message he sends you, never what he types to himself.** This product has two streams of
+  model output and only one of them ever reaches a person: plain assistant text is not a reply here and
+  is never shown to you. A draft built out of it would have the voice read his scratch notes out loud
+  and then read the real answer a second time, so that stream is ignored on purpose.
+- **A draft is not the answer.** It is the first message of the turn, it is capped at 20,000
+  characters by the projection it comes from, and the finished message read out of the conversation is
+  still the truth. What the relay hands back to the voice at the end is only the part of the answer you
+  have not heard, which is what stops the front of it being read twice.
+
+**It costs one billed text item per sentence on xAI**, because that is how a realtime model is made to
+say an exact string, and section 7 prices it. That is the trade: the first sentence arrives seconds
+rather than tens of seconds after you stop talking, and a four-sentence answer bills four flat item
+fees instead of none. Nothing about it is a price claim, and nothing about it is free.
+
+**A box whose host predates this loses the first sentence and nothing else.** The command answers
+"unknown gateway method", the relay stops asking for the rest of the call, and the turn behaves exactly
+as it did in VOICE-1: wait, then split, then read the whole thing. That path is still tested beside the
+new one, because it is also every turn where the draft belongs to somebody else's prompt.
+
+What covers the silence before the first sentence is the realtime model's own acknowledgement, "on
+it", and past twenty seconds at most two "still going" nudges driven off the roster actually saying
+the turn is running rather than off a bare timer. A nudge is DROPPED rather than delayed once a sentence
+of the answer has been read out: the silence it exists to fill is no longer there, and "he is still on
+it" over his own third sentence is the relay talking across him.
 
 One more measured oddity, because it shapes the design: one prompt produced **two** replies seven
 seconds apart under a single attempt id. So later messages of the same attempt go on an announcement
-queue and are spoken between turns, never on top of one.
+queue and are spoken between turns, never on top of one. The draft follows the first message only, for
+the same reason.
 
 ---
 
@@ -409,6 +437,13 @@ code:
 
 - Your team lead's reply goes back as tool-result messages, which are **free** on xAI. Nudges are
   bounded because each one is a billed message rather than just a word.
+- **VOICE-3's sentences are the one deliberate exception, and they are not free.** Reading a sentence
+  out while he is still writing the rest means sending it to the voice model as a message, so a
+  four-sentence answer costs four flat item fees on xAI where the old wait-then-read path cost none.
+  That is the price of hearing the first sentence seconds rather than tens of seconds after you stop
+  talking, it is counted on the session's Spend line like every other billed item, and the tool output
+  at the end of such a turn carries only what you have not heard so nothing is paid for twice. On a box
+  whose host has no draft to read, nothing changes and nothing extra is billed.
 - On OpenAI the base instructions are written **once** when the socket opens and are byte-identical
   for its whole life. Rewriting them invalidates the cached prefix and re-bills the entire
   conversation every turn. That was the single most expensive thing the reference implementation did.

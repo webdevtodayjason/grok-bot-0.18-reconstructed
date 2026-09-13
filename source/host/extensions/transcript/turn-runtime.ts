@@ -41,6 +41,8 @@ import {
   type SendMessage,
 } from "./send-message-shaping.js";
 import { nextEntryId } from "./transcript-entry-ids.js";
+import { TurnDraftStore, type TurnDraft } from "./turn-draft.js";
+import { evidenceRegistry } from "../evidence/evidence-registry.js";
 import { buildTurnFailedEntry } from "./turn-failed-entry.js";
 import type {
   TranscriptEntry,
@@ -358,6 +360,12 @@ export class TurnRuntime {
   readonly toolCallTicks = new Map<string, number>();
   readonly lastWorkToolTick = new Map<string, number>();
   readonly lastDeliveryToolTick = new Map<string, number>();
+  /**
+   * VOICE-3. The reply the agent is still writing, for a caller that has to start speaking before the
+   * turn ends. Opened in runTurn, fed from handleAgentUpdate, dropped in runTurn's `finally` beside
+   * every other per-turn map above it, and read by the gateway through `getTurnDraft`.
+   */
+  readonly turnDrafts = new TurnDraftStore();
   /** Consecutive work-owed turns per session; survives the turn, unlike the counts. */
   readonly workRedriveStreaks = new Map<string, number>();
   /**
@@ -378,6 +386,18 @@ export class TurnRuntime {
    */
   isAgentBusy(agentId: string): boolean {
     return this.activeTurns.has(agentId);
+  }
+
+  /**
+   * VOICE-3. The reply this agent is part way through writing, or null when no turn is open.
+   *
+   * The gateway's one door onto the draft, reached as the `getTurnDraft` command. It is a READ and it
+   * costs a map lookup: a caller polling it beside a 400 ms tail poll adds no work to the turn. A host
+   * that predates this answers "unknown gateway method", which is the signal a caller degrades on
+   * rather than a condition it has to probe for.
+   */
+  getTurnDraft(agentId: string): TurnDraft | null {
+    return this.turnDrafts.read(String(agentId ?? ""));
   }
 
   settleCardStatus(args: {
@@ -559,6 +579,17 @@ export class TurnRuntime {
       if (options.isFork === true) this.forkTurnSessions.add(session);
       else this.forkTurnSessions.delete(session);
       this.activeTurnEpochs.set(session.id, epoch);
+      // VOICE-3. The draft opens with the turn, so a reader that arrives before the model has written
+      // a character gets "this turn exists and has said nothing yet" rather than nothing at all --
+      // which is what tells a voice caller its prompt is running from a draft that is not its own.
+      // The attempt id is the id the finished send-message entry carries as `evidence.attemptId`, so
+      // the draft and the entry are provably one turn; the epoch is the fallback when none is open.
+      this.turnDrafts.openTurn({
+        conversationId: session.id,
+        turnId: evidenceRegistry.current(session.id)?.attemptId ?? `epoch-${epoch}`,
+        turnEpoch: epoch,
+        ...(options.clientNonce == null ? {} : { clientNonce: options.clientNonce }),
+      });
       const startedAtMs = Date.now();
       const turn = this.tm.telemetry.startTurn({
         conversationId: session.id,
@@ -693,6 +724,7 @@ export class TurnRuntime {
         ])
           map.delete(session.id);
         this.tm.runLifecycle.lastRequestIdBySession.delete(session.id);
+        this.turnDrafts.closeTurn(session.id);
         this.replyThreadTargets.delete(session);
         this.forkTurnSessions.delete(session);
         if (this.activeTurnEpochs.get(session.id) === epoch)
@@ -916,6 +948,10 @@ export class TurnRuntime {
       runSession.id === this.tm.sessions.activeSession?.id;
     if (isForActiveAgent) this.tm.roster.applyAgentUpdateToOutline(update);
     if (runSession != null) {
+      // VOICE-3, and NOT behind `isForActiveAgent`. The outline above it only tracks the host's one
+      // globally open agent, which is exactly why ui/voice-edge.mjs refuses to read the SSE and polls
+      // instead; a draft gated the same way would be empty for every agent a person is not looking at.
+      this.turnDrafts.applyUpdate(runSession.id, update);
       this.tm.runLifecycle.trackComposingFromUpdate(update, runSession.id);
       this.tm.runLifecycle.trackRetryingFromUpdate(update, runSession);
       this.tm.runLifecycle.trackActivityFromUpdate(update, runSession.id);

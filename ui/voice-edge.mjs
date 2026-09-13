@@ -27,13 +27,18 @@
  *      `turn_detection`, no `session.type`); OpenAI's GA refuses exactly that and wants
  *      `session.type:"realtime"` with the voice at `audio.output.voice` and NO OpenAI-Beta header.
  *      One transport, TWO session builders, one event-name map.
- *   2. Titan's reply does NOT stream. Measured on grok-bot-local-vm: it lands as ONE complete
- *      `send-message` entry 5.5 to 25 s after sendPrompt (50.6 s on a cold box), with no partial
- *      text and no in-place growth -- the host drops the SendMessage tool call from every gateway
- *      surface. So titan() is a WAIT-THEN-SPLIT seam: the model's own acknowledgement carries the
- *      real silence, and the finished reply is split into sentences here. Nothing in this file,
- *      its copy or its doc claims streaming. True sentence streaming is one host-side projection
- *      and is filed as VOICE-3.
+ *   2. Titan's reply did NOT stream, and VOICE-3 built the surface that makes it. Measured on
+ *      grok-bot-local-vm: the reply landed as ONE complete `send-message` entry 5.5 to 25 s after
+ *      sendPrompt (50.6 s on a cold box), with no partial text and no in-place growth, because the
+ *      host dropped the SendMessage tool call from every gateway surface. As of 2026-09-12 the host
+ *      projects the message it is part way through writing behind one new command, `getTurnDraft`
+ *      (source/host/extensions/transcript/turn-draft.ts), and the turn runner below reads it on the
+ *      same 400 ms tick it already polls the tail on, handing each sentence over as it becomes
+ *      whole. BOTH PATHS ARE LIVE AND BOTH ARE TESTED: a box whose host predates that command
+ *      answers 404, the reader stops asking, and the turn is the original WAIT-THEN-SPLIT seam with
+ *      the acknowledgement carrying the silence. What this file still does not do is claim the
+ *      vendor streams: the sentences are cut here, from the host's draft, and the finished entry
+ *      read out of the transcript is still the truth about what he said.
  *   3. The key is the OPERATOR's, and KEYS-1 moved it. It used to be a per-workspace secret a
  *      customer typed into their own Voice card; Jason, 2026-09-10, over that panel: "A user is
  *      never going to put a resend key in. That's on the backend." So the super admin pastes it once
@@ -608,6 +613,75 @@ export function splitSentences(text, { max = 320 } = {}) {
   return pieces;
 }
 
+// ---- VOICE-3: sentences out of a reply that is still being written ------------------------------
+//
+// THE SEAM THIS IS. The host now projects the message Titan is part way through writing as one small
+// object behind the `getTurnDraft` gateway command (source/host/extensions/transcript/turn-draft.ts).
+// The turn runner below reads it on the same 400 ms tick it already polls the tail on, cuts whole
+// sentences off the front, and hands each one to the voice model the moment it is complete, so the
+// person hears sentence one while Titan is still typing sentence four. The two functions here are the
+// whole of the arithmetic, kept pure and exported so a test can drive a growing string through them
+// without a socket.
+//
+// WHAT A DRAFT IS NOT. It is not the answer. It is the FIRST delivered message of the turn, it is
+// capped at 20,000 characters by the projection it comes from, and a reply long enough to hit that cap
+// loses its tail there. The finished entry read out of the transcript is still the truth, and
+// remainderOf is what stops the person hearing the first half of it twice.
+
+/**
+ * Whole sentences off the front of a draft, once each.
+ *
+ * The LAST piece of an unfinished draft is never handed out: splitSentences cannot know whether a
+ * trailing fragment is a short sentence or the first four words of a long one, so it waits for text
+ * to arrive behind it. A draft the host has marked finished has no such doubt and every piece goes.
+ *
+ * A draft that was REWRITTEN rather than extended -- the model revising what it already wrote -- is
+ * not repaired here. Words already spoken cannot be unsaid, so only genuinely new tail pieces are
+ * handed out, and the divergence is settled once, against the finished reply, by remainderOf.
+ */
+export function makeSentenceCutter({ max = 320 } = {}) {
+  const spoken = [];
+  return {
+    /** Everything handed out so far, in the order it was said. */
+    get spoken() { return spoken.slice(); },
+    get count() { return spoken.length; },
+    cut(draftText, { complete = false } = {}) {
+      const pieces = splitSentences(draftText, { max });
+      const ready = complete ? pieces : pieces.slice(0, -1);
+      if (ready.length <= spoken.length) return [];
+      const fresh = ready.slice(spoken.length);
+      for (const piece of fresh) spoken.push(piece);
+      return fresh;
+    },
+  };
+}
+
+/**
+ * What is left to say once the finished reply lands, given what was already said.
+ *
+ * Both lists come out of the same splitSentences, so a draft that was a clean prefix of the reply
+ * produces identical leading pieces and the match is exact. The first piece that does not match is
+ * where the remainder begins, which is also the right repair when the model revised itself: the
+ * person hears the corrected text from the point it changed rather than nothing at all.
+ */
+export function remainderOf(allPieces, spokenPieces) {
+  const all = Array.isArray(allPieces) ? allPieces : [];
+  const said = Array.isArray(spokenPieces) ? spokenPieces : [];
+  let same = 0;
+  while (same < said.length && same < all.length && said[same] === all[same]) same += 1;
+  return { pieces: all.slice(same), diverged: same < said.length };
+}
+
+/**
+ * Whether a gateway error means "this host has never heard of that command" rather than "that call
+ * did not get through". Only the first kind turns streaming off for the rest of the session: a box
+ * under load answering one 504 must not cost every later turn its first sentence.
+ */
+export function isUnknownGatewayMethod(error) {
+  const message = String(error?.message ?? error ?? "");
+  return message.includes("unknown gateway method") || message.includes("HTTP 404");
+}
+
 // ---- the settings door: voice.json --------------------------------------------------------------
 //
 // Custody, as KEYS-1 left it: the realtime key is the OPERATOR's. It is pasted once at the super
@@ -1136,6 +1210,12 @@ export function matchYesNo(text) {
  * reloadActive (four extra reads), not openAgent (it would change what every other surface on the
  * box sees, which is why the console avoids it on purpose).
  *
+ * VOICE-3 RIDES THE SAME TICK. Beside each tail poll it reads `getTurnDraft`, the host's projection
+ * of the message Titan is part way through writing, and hands whole sentences to `onDraftSentence` as
+ * they complete. A host that does not have the command answers 404, the runner stops asking for the
+ * rest of the session, and the turn behaves exactly as it did before: wait, then split. So an old host
+ * bundle on a box costs the first sentence and nothing else.
+ *
  * EVERY failure RETURNS A SENTENCE and never throws. A dead socket instead of a spoken fallback is
  * the failure AmpCortex's own reference wrote a comment about, and on a microphone it is a phone
  * line that died mid-question.
@@ -1154,10 +1234,41 @@ export function makeTurnRunner({
 }) {
   let rounds = 0;
   let nudges = 0;
+  /**
+   * Whether this box's host carries `getTurnDraft` at all. Starts hopeful, goes false on the one error
+   * that means "never heard of it", and is never asked again for the life of the session.
+   */
+  let draftsAvailable = true;
 
   const tailOf = (agentId) => call("getAgentTranscriptTail", { id: agentId, limit: tailLimit })
     .then((answer) => (Array.isArray(answer?.entries) ? answer.entries : []))
     .catch(() => null);
+
+  /**
+   * The draft of THIS turn, or null.
+   *
+   * The nonce match is the whole of the safety here. A box has one conversation per agent and the
+   * console can start a turn in it while a call is open; a draft whose `clientNonce` is not the one
+   * this run sent belongs to somebody else's prompt, and reading it out would have Titan answer a
+   * question the person never asked. No nonce on the draft (a console prompt carries none) is also
+   * not ours. A transient failure answers null and the next tick tries again.
+   */
+  const draftOf = async (agentId, nonce) => {
+    if (!draftsAvailable) return null;
+    let answer;
+    try {
+      answer = await call("getTurnDraft", { id: agentId });
+    } catch (error) {
+      if (isUnknownGatewayMethod(error)) {
+        draftsAvailable = false;
+        log("voice getTurnDraft is not on this box's host; the reply will be read whole");
+      }
+      return null;
+    }
+    const draft = answer?.draft ?? null;
+    if (draft == null || typeof draft.text !== "string") return null;
+    return String(draft.clientNonce ?? "") === nonce ? draft : null;
+  };
 
   /** The reply is at message.content. Reading `.text` returns empty and looks like a stall. */
   const replyOf = (entry) => {
@@ -1185,13 +1296,25 @@ export function makeTurnRunner({
      * user entry will be stamped with. `accepted` says whether anything reached Titan at all, which
      * is what tells "he has not answered yet" from "this never went in".
      *
-     * @returns {Promise<{ok:boolean, accepted:boolean, text:string, pieces:string[], attemptId:string,
-     *          afterId:string, afterMs:number, card:object|null, hops:object, nonce?:string}>}
+     * `onDraftSentence` is VOICE-3: one whole sentence of Titan's reply, handed over while he is still
+     * writing the rest. It is awaited, so the caller can pace itself against the voice model's own
+     * playback and the runner never runs ahead of what has actually been said. `spoken` on the result
+     * is every sentence that went through it and `remaining` is what is left to read out, which is
+     * what the tool output must carry so nothing is read twice.
+     *
+     * @returns {Promise<{ok:boolean, accepted:boolean, text:string, pieces:string[], spoken:string[],
+     *          remaining:string[], diverged:boolean, attemptId:string, afterId:string, afterMs:number,
+     *          card:object|null, hops:object, nonce?:string}>}
      */
-    async run({ agentId, message, nonce: given = "", onNudge = () => {}, onSent = () => {} }) {
-      const hops = { t1: now(), t2: 0, t3: 0, t4: 0 };
+    async run({ agentId, message, nonce: given = "", onNudge = () => {}, onSent = () => {}, onDraftSentence = null }) {
+      // `td` is VOICE-3's hop: when the FIRST sentence of the answer was handed to the voice model,
+      // which on a streaming turn lands well before t3 (the finished entry) and is the whole of the win.
+      const hops = { t1: now(), t2: 0, t3: 0, t4: 0, td: 0 };
+      const cutter = makeSentenceCutter();
+      /** Whichever is true first stops the draft reader: the caller does not want it, or the box has no command. */
+      let streaming = typeof onDraftSentence === "function";
       if (rounds >= maxRounds) {
-        return { ok: false, refused: true, accepted: false, text: "I have already asked him twice about that. Say it again and I will take it to him fresh.", pieces: [], attemptId: "", afterId: "", afterMs: 0, card: null, hops };
+        return { ok: false, refused: true, accepted: false, text: "I have already asked him twice about that. Say it again and I will take it to him fresh.", pieces: [], spoken: [], remaining: [], diverged: false, attemptId: "", afterId: "", afterMs: 0, card: null, hops };
       }
       rounds += 1;
       const before = await tailOf(agentId);
@@ -1214,7 +1337,7 @@ export function makeTurnRunner({
       // to dissolve when the PERSON stops talking, so what the page needs -- the bytes that went into
       // Titan's conversation and the nonce his durable row will carry -- is handed out here.
       if (!accepted) {
-        return { ok: false, accepted: false, text: "I could not get that to him just now. His box did not take it.", pieces: [], attemptId: "", afterId: beforeId, afterMs: beforeMs, card: null, hops, nonce };
+        return { ok: false, accepted: false, text: "I could not get that to him just now. His box did not take it.", pieces: [], spoken: [], remaining: [], diverged: false, attemptId: "", afterId: beforeId, afterMs: beforeMs, card: null, hops, nonce };
       }
       try { onSent({ nonce, message, agentId }); } catch (error) { log(`voice onSent failed: ${error?.message ?? error}`); }
       const deadline = now() + waitCapS * 1000;
@@ -1229,9 +1352,15 @@ export function makeTurnRunner({
             hops.t3 = now();
             const text = replyOf(landed);
             const pieces = splitSentences(text);
+            // VOICE-3 settles here, ONCE, against the finished entry. Whatever the draft said, this is
+            // the reply; `remaining` is the part of it nobody has heard yet and is what the tool output
+            // carries, so a reply the person already heard the front half of is not read out twice.
+            const rest = remainderOf(pieces, cutter.spoken);
+            if (rest.diverged) log("voice draft diverged from the finished reply; reading it from the change");
             hops.t4 = now();
             return {
               ok: landed.kind !== "turn-failed", text, pieces,
+              spoken: cutter.spoken, remaining: rest.pieces, diverged: rest.diverged,
               attemptId: String(landed.evidence?.attemptId ?? ""),
               afterId: String(landed.id ?? beforeId),
               afterMs: Number(landed.timestampMs ?? landed.createdAt) || now(),
@@ -1244,25 +1373,47 @@ export function makeTurnRunner({
           if (card != null) {
             hops.t3 = now();
             hops.t4 = now();
-            return { ok: true, accepted: true, text: "", pieces: [], attemptId: "", afterId: String(fresh.at(-1)?.id ?? beforeId), afterMs: Number(fresh.at(-1)?.timestampMs ?? now()), card, hops, nonce, cards: pendingCardsOf(fresh) };
+            return { ok: true, accepted: true, text: "", pieces: [], spoken: cutter.spoken, remaining: [], diverged: false, attemptId: "", afterId: String(fresh.at(-1)?.id ?? beforeId), afterMs: Number(fresh.at(-1)?.timestampMs ?? now()), card, hops, nonce, cards: pendingCardsOf(fresh) };
+          }
+        }
+        // VOICE-3. The draft, on the same tick. It is read AFTER the tail on purpose: an entry that has
+        // already landed is the answer and there is nothing left to stream, so the branch above returns
+        // first and a finished turn never pays for this call.
+        if (streaming) {
+          const draft = await draftOf(agentId, nonce);
+          if (!draftsAvailable) streaming = false;
+          if (draft != null) {
+            const fresh = cutter.cut(draft.text, { complete: draft.complete === true });
+            for (const sentence of fresh) {
+              if (hops.td === 0) hops.td = now();
+              try { await onDraftSentence(sentence); } catch (error) { log(`voice draft sentence failed: ${error?.message ?? error}`); }
+            }
           }
         }
         // A nudge is driven off the roster's own working flag, never a bare timer, and each one is
         // a billed event on xAI so it is bounded rather than a heartbeat.
+        //
+        // Once a sentence of the answer has been read out the nudge is DROPPED rather than delayed:
+        // "He is still on it" on top of Titan's own third sentence is the relay talking over him, and
+        // the silence the nudge exists to fill is no longer there.
         if (nudged < maxNudges && now() - hops.t2 > firstNudgeMs * (nudged + 1)) {
           const working = await stillWorking(call, agentId);
           nudged += 1;
           nudges += 1;
-          if (working) onNudge(nudged === 1 ? "He is still on it." : "Still going.");
-          else break;
+          if (working && cutter.count === 0) onNudge(nudged === 1 ? "He is still on it." : "Still going.");
+          else if (!working) break;
         }
       }
+      // A turn that read sentences out and then ran out of time still owes the person this sentence:
+      // it was never in the draft, so it is what is LEFT to say even on a turn that streamed. Leaving
+      // `remaining` empty here would have the relay fall silent on the one turn that needs words most.
+      const gaveUp = now() < deadline
+        ? "He stopped working without answering that one. Ask again and I will take it back to him."
+        : `He has not come back in ${waitCapS} seconds. It is still in his conversation on screen.`;
       return {
-        ok: false,
-        text: now() < deadline
-          ? "He stopped working without answering that one. Ask again and I will take it back to him."
-          : `He has not come back in ${waitCapS} seconds. It is still in his conversation on screen.`,
-        pieces: [], attemptId: "", afterId: beforeId, afterMs: beforeMs, card: null, hops, nonce, accepted: true,
+        ok: false, text: gaveUp,
+        pieces: [], spoken: cutter.spoken, remaining: splitSentences(gaveUp), diverged: false,
+        attemptId: "", afterId: beforeId, afterMs: beforeMs, card: null, hops, nonce, accepted: true,
       };
     },
 
@@ -1732,9 +1883,45 @@ export function makeVoiceSession({
     sendProvider({ type: "response.create" });
   };
 
-  const answerTool = (callId, payload) => {
-    sendProvider({ type: "conversation.item.create", item: { type: "function_call_output", call_id: callId, output: JSON.stringify(payload) } });
+  /**
+   * VOICE-3. One whole sentence of Titan's answer, read out while he is still writing the rest.
+   *
+   * IT IS `say`'S WIRE SHAPE AND NOT AN ASSISTANT ITEM. An assistant `conversation.item.create` puts
+   * the words into the history as though the model had already said them, which produces no audio at
+   * all -- the person hears nothing and the model then carries on from text it never spoke. The one
+   * shape PROVEN on both vendors in this file is the user item carrying "read this out, word for
+   * word", which is what every nudge and announcement already uses, so that is what a sentence uses.
+   * The session instructions are not touched: rewriting them per turn re-bills the whole conversation.
+   *
+   * THE GATE IS NARROWER THAN `say`'S. A sentence waits for the response in flight to finish, because
+   * two overlapping responses is the provider error nobody can hear, and for NOTHING else: `say`'s
+   * eight-second floor between announcements is right for a nudge and would make streaming slower than
+   * waiting. Waiting on playback is also the pacing -- the queue drains at the speed the words are
+   * spoken, which is exactly the rate the person can hear them.
+   */
+  const sayDraftSentence = async (text) => {
+    const clean = String(text ?? "").trim();
+    if (clean.length === 0) return;
+    for (let i = 0; i < 40 && !stopping && responseInFlight; i += 1) await sleep(400);
+    if (stopping) return;
+    // A nudge must not land between two sentences of the answer, so the announcement clock moves here
+    // too. The turn runner already drops the nudge once a sentence has been read; this is the belt.
+    lastAnnounceMs = now();
+    sendProvider({ type: "conversation.item.create", item: { type: "message", role: "user", content: [{ type: "input_text", text: `Read this out to the person, word for word, nothing added: ${clean}` }] } });
     sendProvider({ type: "response.create" });
+  };
+
+  /**
+   * The tool's answer.
+   *
+   * `respond` is VOICE-3's one subtraction: when every sentence of the reply has ALREADY been read out
+   * while Titan was writing it, the output still has to be sent -- the model is waiting on it and a
+   * call left open wedges the conversation -- but there must be no `response.create` behind it, or the
+   * model generates a fresh turn over an answer that is already finished and says something of its own.
+   */
+  const answerTool = (callId, payload, { respond = true } = {}) => {
+    sendProvider({ type: "conversation.item.create", item: { type: "function_call_output", call_id: callId, output: JSON.stringify(payload) } });
+    if (respond) sendProvider({ type: "response.create" });
   };
 
   /** The one tool, dispatched once per call_id, on whichever surface carried it first. */
@@ -1799,11 +1986,22 @@ export function makeVoiceSession({
         browser?.sendJson({ t: "heard-confirmed", turn, text: message, nonce, landed: true });
         hearEnd("sent", turn);
       },
+      // VOICE-3. Each whole sentence of his answer, the moment it is whole. Awaited, so the runner
+      // paces itself against playback rather than queueing four responses at the provider.
+      onDraftSentence: (sentence) => sayDraftSentence(sentence),
     });
     // Nothing reached his box: a refused send, or a third round inside one user turn. Either way no
     // durable row will ever appear, so the panel is closed here instead of hanging over the chat.
     if (result.accepted !== true) hearEnd("not-accepted", turn);
     const pieces = result.pieces.length > 0 ? result.pieces : (result.text.length > 0 ? [result.text] : []);
+    // TWO REPLIES, AND THEY ARE NOT THE SAME THING. `reply` is the WHOLE answer and it is what the
+    // panel draws and what the conversation on screen already holds. `unsaid` is the part of it the
+    // person has not heard: on a turn with no streaming that is all of it, and on a streaming turn it
+    // is whatever arrived after the last sentence the draft reader handed over. Sending the whole
+    // answer back as tool output on a streaming turn is the one way to make the person hear the front
+    // of it twice, which is the failure VOICE-3 is supposed to remove rather than introduce.
+    const spoken = Array.isArray(result.spoken) ? result.spoken : [];
+    const unsaid = Array.isArray(result.remaining) ? result.remaining.slice() : [];
     let reply = pieces.join(" ");
     if (result.card != null) {
       session.heldCard = { ...result.card, offeredTurn: session.userTurn };
@@ -1811,17 +2009,37 @@ export function makeVoiceSession({
         ? `There are ${result.card.count} things waiting on you: ${result.card.cards.map((c) => c.title).join("; ")}. Say which one.`
         : `${result.card.title}. ${result.card.detail ?? ""}`.trim();
       reply = `${reply} ${question}`.trim();
+      // The card's question was never in the draft, so it is always still owed to the person.
+      unsaid.push(question);
     }
     if (reply.length === 0) reply = "He did not say anything back.";
     browser?.sendJson({ t: "said", text: reply });
     // The latency ledger, so a gate can print every hop with the machine it was measured on. T0 is
     // the provider's own VAD stop, T1 the tool call dispatched, T2 sendPrompt accepted, T3 the first
-    // entry seen in the tail, T4 sentence one handed back. T2 to T3 is TITAN'S time, not ours: it is
-    // reported and never asserted, and what is ours is that the person hears something during it.
+    // entry seen in the tail, T4 sentence one handed back, TD the first sentence read out OF THE DRAFT
+    // while he was still writing -- on a streaming turn TD is the number that matters and it lands
+    // before T3. T2 to T3 is TITAN'S time, not ours: it is reported and never asserted, and what is
+    // ours is that the person hears something during it.
     browser?.sendJson({ t: "hops", t0: session.hops.t0, ...result.hops });
     // FREE on xAI, and what the design wanted anyway: the reply goes back as the tool's output
     // rather than as a chat item, in sentence-sized pieces so speech starts on the first one.
-    answerTool(toolCall.callId, { reply, sentences: pieces });
+    //
+    // An answer already read out in full goes back with NO response behind it: the call is closed so
+    // the conversation is not wedged, and the model is not asked to speak over a finished answer.
+    //
+    // A turn that streamed nothing takes the path VOICE-1 always took, unchanged: the whole reply and
+    // its sentences, one response behind it. That is every desktop call and every call to a box whose
+    // host does not carry getTurnDraft.
+    if (spoken.length === 0) {
+      answerTool(toolCall.callId, { reply, sentences: pieces });
+    } else if (unsaid.length === 0) {
+      answerTool(toolCall.callId, { reply: "", sentences: [], alreadyRead: true }, { respond: false });
+    } else {
+      // The last streamed sentence may still be playing. Two overlapping responses is the provider
+      // error nobody can hear, so the rest of the answer waits for it exactly as a sentence would.
+      for (let i = 0; i < 40 && !stopping && responseInFlight; i += 1) await sleep(400);
+      answerTool(toolCall.callId, { reply: unsaid.join(" "), sentences: unsaid, alreadyRead: true });
+    }
     if (result.attemptId.length > 0) {
       void runner.follow({
         agentId: agent.agentId, attemptId: result.attemptId, afterId: result.afterId, afterMs: result.afterMs,

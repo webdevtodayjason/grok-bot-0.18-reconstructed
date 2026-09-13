@@ -630,6 +630,8 @@ const delegations: ReadonlyArray<[string, keyof TranscriptManager]> = [
   ["subscribeAutomations", "automationRuntime"],
   ["getAgentAutomations", "automationRuntime"],
   ["isAgentBusy", "turnRuntime"],
+  // VOICE-3. The in-progress reply, for a caller that has to start speaking before the turn ends.
+  ["getTurnDraft", "turnRuntime"],
   ["listAllAutomations", "automationRuntime"],
   ["listAllAutomationDefinitions", "automationRuntime"],
   ["setAgentAutomationEnabled", "automationRuntime"],

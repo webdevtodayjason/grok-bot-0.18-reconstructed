@@ -1,14 +1,18 @@
 /**
- * VOICE-1 item A3 and A6: the turn, and the spoken yes.
+ * VOICE-1 item A3 and A6: the turn, and the spoken yes. VOICE-3: the reply arriving in sentences.
  *
- * THE SEAM THIS PINS. The brief said the bridge "speaks the reply as it streams" and that speech
- * "starts on the first sentence". Measured on grok-bot-local-vm, that is not reachable on this host:
- * Titan's reply lands as ONE complete `send-message` entry 5.5 to 25 s after sendPrompt (50.6 s on
- * a cold box), with no partial text, no isStreaming flag and no in-place growth, because the host
- * deliberately drops the SendMessage tool call from every gateway surface. So titan() is a
- * WAIT-THEN-SPLIT seam and these tests assert exactly that: the FIRST entry closes the tool call so
- * speech can start, and every later entry of the same attempt becomes an announcement rather than
- * part of the tool result. Nothing here asserts streaming, because nothing here streams.
+ * THE SEAM THIS PINS, AND HOW IT MOVED. VOICE-1 measured that Titan's reply lands as ONE complete
+ * `send-message` entry 5.5 to 25 s after sendPrompt (50.6 s on a cold box), with no partial text and
+ * no in-place growth on ANY gateway surface, so titan() was a WAIT-THEN-SPLIT seam and this file said
+ * in writing that nothing here streams. VOICE-3 built the missing surface: the host now projects the
+ * message the agent is part way through writing behind the `getTurnDraft` command
+ * (source/host/extensions/transcript/turn-draft.ts), and the runner reads it on the same 400 ms tick
+ * it already polls the tail on.
+ *
+ * So BOTH shapes are pinned here now. The wait-then-split path is unchanged and still proved, because
+ * it is what every box without that host bundle does and what every desktop call with no draft does;
+ * and the streaming path is proved beside it -- sentences handed out in order as the draft grows, and
+ * a tool output that carries only what is LEFT so the front of the answer is never read twice.
  *
  * Everything runs on a FAKE CLOCK. A real 400 ms poll loop against a real 120 s cap would make this
  * file the slowest in the suite for no extra confidence.
@@ -23,8 +27,9 @@ import path from "node:path";
 import { startStubRealtime } from "./helpers/stub-realtime.mjs";
 import {
   MAX_TITAN_ROUNDS, TURN_WAIT_CAP_S,
-  makeCallDedupe, makeTurnRunner, makeVoiceEdge, makeVoicePolicy, matchYesNo,
-  pendingCardsOf, resolveHeldCard, resolveVoiceAgent, splitSentences, toolCallsOf, writeVoiceSettings,
+  isUnknownGatewayMethod, makeCallDedupe, makeSentenceCutter, makeTurnRunner, makeVoiceEdge,
+  makeVoicePolicy, matchYesNo, pendingCardsOf, remainderOf, resolveHeldCard, resolveVoiceAgent,
+  splitSentences, toolCallsOf, writeVoiceSettings,
 } from "../ui/voice-edge.mjs";
 
 // ---- a clock and a gateway nobody has to wait for -------------------------------------------------
@@ -41,10 +46,15 @@ function fakeClock() {
 /**
  * A gateway that answers the five commands this wave touches, out of a scripted tail. `script` is
  * consulted on every getAgentTranscriptTail so a test can make an entry land on the Nth poll.
+ *
+ * VOICE-3 adds `draft`, consulted on every getTurnDraft the same way: `draft(nthDraftRead, nonce)`
+ * answers the projection the host would hand out, or null for "no turn open". A box whose host does
+ * not carry the command is spelled `draft: "unknown"`, which throws the 404 the real gateway throws.
  */
-function fakeGateway({ agents = [{ id: "a1", name: "Chief of Staff", isRunning: true }], tail = () => [], fail = null } = {}) {
+function fakeGateway({ agents = [{ id: "a1", name: "Chief of Staff", isRunning: true }], tail = () => [], fail = null, draft = null } = {}) {
   const calls = [];
   let polls = 0;
+  let draftReads = 0;
   const call = async (command, args = {}) => {
     calls.push({ command, args });
     if (typeof fail === "function") {
@@ -54,6 +64,11 @@ function fakeGateway({ agents = [{ id: "a1", name: "Chief of Staff", isRunning: 
     if (command === "listAgents") return { agents };
     if (command === "sendPrompt") return { accepted: true };
     if (command === "getAgentTranscriptTail") { polls += 1; return { entries: tail(polls) }; }
+    if (command === "getTurnDraft") {
+      draftReads += 1;
+      if (draft === "unknown") throw new Error("getTurnDraft answered HTTP 404: unknown gateway method: getTurnDraft");
+      return { draft: typeof draft === "function" ? draft(draftReads, args) : null };
+    }
     if (command === "resolveAutoReviewApproval" || command === "resolveLocalToolPermission" || command === "respondToWidget") return { ok: true };
     return {};
   };
@@ -61,8 +76,15 @@ function fakeGateway({ agents = [{ id: "a1", name: "Chief of Staff", isRunning: 
     call, calls,
     of: (command) => calls.filter((row) => row.command === command),
     get polls() { return polls; },
+    get draftReads() { return draftReads; },
   };
 }
+
+/** The shape source/host/extensions/transcript/turn-draft.ts projects. */
+const draftRow = (text, { nonce = "", complete = false, turnId = "att1", turnEpoch = 1 } = {}) => ({
+  conversationId: "a1", turnId, turnEpoch, clientNonce: nonce.length > 0 ? nonce : null,
+  text, complete, sends: complete ? 1 : 0, updatedAtMs: 1_700_000_000_200,
+});
 
 /**
  * The same gateway, with `sendPrompt` held open until the test lets it go. That is the only way to
@@ -303,6 +325,201 @@ test("a reply is split into sentences, and a fenced block is named rather than r
   assert.ok(long.length > 1);
   for (const piece of long) assert.ok(piece.length <= 100, `a piece was ${piece.length} long`);
   assert.ok(!long.some((piece) => /\bwor$|\bor\b$/.test(piece)), "no piece ends mid-word");
+});
+
+// ---- VOICE-3: the reply arriving in sentences -----------------------------------------------------
+
+test("the cutter hands out whole sentences only, once each, and holds the trailing fragment back", () => {
+  const cutter = makeSentenceCutter();
+  // Nothing yet: one fragment with nothing behind it could be a short sentence or the first four
+  // words of a long one, and reading it out is how a voice says half a thought.
+  assert.deepEqual(cutter.cut("The gate is"), []);
+  assert.deepEqual(cutter.cut("The gate is green."), [], "a terminator with nothing behind it still waits");
+  assert.deepEqual(cutter.cut("The gate is green. Two legs"), ["The gate is green."]);
+  assert.deepEqual(cutter.cut("The gate is green. Two legs failed."), [], "nothing new is whole yet");
+  assert.deepEqual(cutter.cut("The gate is green. Two legs failed. I re-ran"), ["Two legs failed."]);
+  // The host says the message is finished, so the last piece has no doubt left in it.
+  assert.deepEqual(cutter.cut("The gate is green. Two legs failed. I re-ran them.", { complete: true }), ["I re-ran them."]);
+  assert.deepEqual(cutter.spoken, ["The gate is green.", "Two legs failed.", "I re-ran them."]);
+  assert.equal(cutter.count, 3);
+  // And a repeat read of the same draft says nothing twice.
+  assert.deepEqual(cutter.cut("The gate is green. Two legs failed. I re-ran them.", { complete: true }), []);
+});
+
+test("the remainder is what is LEFT of the finished reply, and a revised draft is repaired from the change", () => {
+  const all = ["One.", "Two.", "Three."];
+  assert.deepEqual(remainderOf(all, []), { pieces: all, diverged: false });
+  assert.deepEqual(remainderOf(all, ["One."]), { pieces: ["Two.", "Three."], diverged: false });
+  assert.deepEqual(remainderOf(all, all), { pieces: [], diverged: false });
+  // The model rewrote sentence two while it was still writing. Sentence one was said and is right;
+  // everything from the change onwards is still owed, and the caller is told it diverged.
+  assert.deepEqual(
+    remainderOf(all, ["One.", "Twwo."]),
+    { pieces: ["Two.", "Three."], diverged: true },
+  );
+  assert.deepEqual(remainderOf([], ["One."]), { pieces: [], diverged: true });
+});
+
+test("only a 404 turns the draft reader off; a timeout does not", () => {
+  assert.equal(isUnknownGatewayMethod(new Error("getTurnDraft answered HTTP 404: unknown gateway method: getTurnDraft")), true);
+  assert.equal(isUnknownGatewayMethod(new Error("unknown gateway method: getTurnDraft")), true);
+  assert.equal(isUnknownGatewayMethod(new Error("The operation was aborted due to timeout")), false);
+  assert.equal(isUnknownGatewayMethod(new Error("getTurnDraft answered HTTP 503: upstream busy")), false);
+  assert.equal(isUnknownGatewayMethod(null), false);
+});
+
+test("a growing draft is spoken sentence by sentence, and the tool result carries only what is left", async () => {
+  const clock = fakeClock();
+  const whole = "The gate is green. Two legs failed earlier. I re-ran both of them.";
+  // The draft grows over three reads and the finished entry lands on the fourth tail poll, which is
+  // the real ordering: the host writes the partial tool call long before the entry is persisted.
+  const steps = ["The gate is green. Two", "The gate is green. Two legs failed earlier. I", whole];
+  let nonceSeen = "";
+  const gw = fakeGateway({
+    tail: (n) => (n >= 5 ? [reply("e1", whole)] : []),
+    draft: (n, args) => {
+      nonceSeen = String(args.id ?? "");
+      const text = steps[Math.min(n, steps.length) - 1];
+      return draftRow(text, { nonce: draftNonce, complete: n >= steps.length });
+    },
+  });
+  let draftNonce = "";
+  const runner = makeTurnRunner({ call: gw.call, now: clock.now, sleep: clock.sleep });
+  // The runner mints the nonce itself, so the fixture is told it the way the host would learn it.
+  const spoken = [];
+  const result = await runner.run({
+    agentId: "a1", message: "how did the gate go",
+    onSent: ({ nonce }) => { draftNonce = nonce; },
+    onDraftSentence: (sentence) => { spoken.push(sentence); },
+  });
+  assert.equal(nonceSeen, "a1", "the draft is asked for by agent id");
+  assert.deepEqual(spoken, ["The gate is green.", "Two legs failed earlier.", "I re-ran both of them."],
+    `spoken was ${JSON.stringify(spoken)}; the relay said nothing else`);
+  assert.deepEqual(result.spoken, spoken);
+  assert.deepEqual(result.remaining, [], "every sentence was already read out, so nothing is owed");
+  assert.equal(result.diverged, false);
+  // The whole reply is still the result, because the panel and the conversation hold the whole reply.
+  assert.equal(result.text, whole);
+  assert.deepEqual(result.pieces, splitSentences(whole));
+  // THE WIN, and the only number in this file that is about latency: the first sentence was handed
+  // over BEFORE the finished entry was ever seen.
+  assert.ok(result.hops.td > 0, "td was never stamped");
+  assert.ok(result.hops.td < result.hops.t3, `td ${result.hops.td} was not before t3 ${result.hops.t3}`);
+});
+
+test("a draft the person is half way through hearing leaves the rest of the reply to the tool output", async () => {
+  const clock = fakeClock();
+  const whole = "The gate is green. Two legs failed earlier. I re-ran both of them.";
+  let draftNonce = "";
+  const gw = fakeGateway({
+    // The entry lands while the draft is still only one sentence old.
+    tail: (n) => (n >= 3 ? [reply("e1", whole)] : []),
+    draft: () => draftRow("The gate is green. Two legs", { nonce: draftNonce }),
+  });
+  const runner = makeTurnRunner({ call: gw.call, now: clock.now, sleep: clock.sleep });
+  const spoken = [];
+  const result = await runner.run({
+    agentId: "a1", message: "how did the gate go",
+    onSent: ({ nonce }) => { draftNonce = nonce; },
+    onDraftSentence: (sentence) => { spoken.push(sentence); },
+  });
+  assert.deepEqual(spoken, ["The gate is green."]);
+  assert.deepEqual(result.remaining, ["Two legs failed earlier.", "I re-ran both of them."]);
+  assert.equal(result.diverged, false);
+});
+
+test("a draft carrying somebody else's nonce is never read out", async () => {
+  const clock = fakeClock();
+  const whole = "That one is yours, not his.";
+  const gw = fakeGateway({
+    tail: (n) => (n >= 4 ? [reply("e1", whole)] : []),
+    // A turn the CONSOLE started in the same conversation while the call was open. Reading this out
+    // would have Titan answer a question the person on the phone never asked.
+    draft: () => draftRow("Richard's invoice went out this morning. It was", { nonce: "voice:someone-else:9" }),
+  });
+  const runner = makeTurnRunner({ call: gw.call, now: clock.now, sleep: clock.sleep });
+  const spoken = [];
+  const result = await runner.run({ agentId: "a1", message: "anything from richard", onDraftSentence: (s) => spoken.push(s) });
+  assert.deepEqual(spoken, [], "a draft with another turn's nonce is not ours");
+  assert.deepEqual(result.spoken, []);
+  assert.equal(result.text, whole);
+  // And the whole-reply path is what answers, exactly as it did before VOICE-3.
+  assert.deepEqual(result.pieces, [whole]);
+});
+
+test("a console prompt's draft carries no nonce at all, and is not read out either", async () => {
+  const clock = fakeClock();
+  const gw = fakeGateway({
+    tail: (n) => (n >= 3 ? [reply("e1", "Done.")] : []),
+    draft: () => draftRow("Typing something for the person at the keyboard. And", { nonce: "" }),
+  });
+  const runner = makeTurnRunner({ call: gw.call, now: clock.now, sleep: clock.sleep });
+  const spoken = [];
+  await runner.run({ agentId: "a1", message: "anything", onDraftSentence: (s) => spoken.push(s) });
+  assert.deepEqual(spoken, []);
+});
+
+test("a host with no getTurnDraft is asked ONCE and the turn behaves exactly as it did before", async () => {
+  const clock = fakeClock();
+  const whole = "Still the old bundle on this box.";
+  const gw = fakeGateway({ tail: (n) => (n >= 6 ? [reply("e1", whole)] : []), draft: "unknown" });
+  const runner = makeTurnRunner({ call: gw.call, now: clock.now, sleep: clock.sleep });
+  const spoken = [];
+  const result = await runner.run({ agentId: "a1", message: "how did the gate go", onDraftSentence: (s) => spoken.push(s) });
+  assert.equal(gw.draftReads, 1, `getTurnDraft was called ${gw.draftReads} times after a 404`);
+  assert.deepEqual(spoken, []);
+  assert.equal(result.text, whole);
+  assert.deepEqual(result.pieces, [whole]);
+  // `remaining` is always what is LEFT to say, so with nothing streamed it is the whole reply. The
+  // dispatch path does not read it on this turn: a turn that streamed nothing takes the VOICE-1 path
+  // and sends `pieces`, which is why the two are asserted to be the same thing here.
+  assert.deepEqual(result.remaining, result.pieces);
+  assert.equal(result.hops.td, 0, "nothing was streamed, so there is no td to report");
+});
+
+test("a draft that has started does NOT get a nudge on top of it", async () => {
+  const clock = fakeClock();
+  let draftNonce = "";
+  const gw = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    // Nothing ever lands, so the wait runs long enough for both nudges to come due.
+    tail: () => [],
+    draft: (n) => draftRow(n >= 2 ? "He is reading the log now. Then" : "He is", { nonce: draftNonce }),
+  });
+  const runner = makeTurnRunner({ call: gw.call, now: clock.now, sleep: clock.sleep, waitCapS: 70 });
+  const nudged = [];
+  const spoken = [];
+  await runner.run({
+    agentId: "a1", message: "what is he doing",
+    onSent: ({ nonce }) => { draftNonce = nonce; },
+    onNudge: (text) => nudged.push(text),
+    onDraftSentence: (s) => spoken.push(s),
+  });
+  assert.deepEqual(spoken, ["He is reading the log now."]);
+  assert.deepEqual(nudged, [], "the silence the nudge fills was not there");
+});
+
+test("a streamed turn that runs out of time still owes the person the sentence saying so", async () => {
+  const clock = fakeClock();
+  let draftNonce = "";
+  const gw = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    tail: () => [],
+    draft: () => draftRow("He is reading the log now. Then", { nonce: draftNonce }),
+  });
+  const runner = makeTurnRunner({ call: gw.call, now: clock.now, sleep: clock.sleep, waitCapS: 5 });
+  const spoken = [];
+  const result = await runner.run({
+    agentId: "a1", message: "what is he doing",
+    onSent: ({ nonce }) => { draftNonce = nonce; },
+    onDraftSentence: (s) => spoken.push(s),
+  });
+  assert.equal(result.ok, false);
+  assert.deepEqual(spoken, ["He is reading the log now."]);
+  // The giving-up sentence was never in the draft, so it is still owed however much was streamed.
+  // An empty `remaining` here would have the relay fall silent on the turn that needs words most.
+  assert.ok(result.text.includes("5 seconds"), result.text);
+  assert.deepEqual(result.remaining, splitSentences(result.text));
 });
 
 // ---- held actions (A6) ---------------------------------------------------------------------------
@@ -608,6 +825,95 @@ test("\"don't confirm\" spoken at a pending card closes nothing as approved", as
 // handed to Titan -- with nothing to tell them apart. A one-line caption strip could paint all three
 // the same way; a panel that has to open, follow the words and then DISSOLVE cannot. These run end to
 // end against the real bridge so the labels are measured on the wire rather than read off a diff.
+
+test("VOICE-3 end to end: each sentence is read out as it lands and the tool output adds nothing", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai", audioFrames: 1 });
+  const whole = "The gate is green. Two legs failed earlier. I re-ran both of them.";
+  const steps = ["The gate is green. Two", "The gate is green. Two legs failed earlier. I", whole];
+  let nonce = "";
+  const gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    // The finished entry does not land until the draft has been read out in full, which is the
+    // ordering VOICE-3 exists for: the host persists the entry after the tool call completes.
+    tail: (n) => (n >= 8 ? [reply("e1", whole)] : []),
+    draft: (n, args) => {
+      nonce = String(gateway.of("sendPrompt")[0]?.args?.clientNonce ?? "");
+      void args;
+      const text = steps[Math.min(n, steps.length) - 1];
+      return draftRow(text, { nonce, complete: n >= steps.length });
+    },
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0001" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    stub.emitToolCall({ name: "titan", args: { message: "how did the gate go" }, triple: true });
+    await session.settle(() => stub.events.toolOutputs.length > 0, "the tool output going back", 900);
+
+    // THREE sentences went out as text items, in order, each one a "read this out" the model speaks.
+    // On xAI each of these is a billed flat fee, which is the price of the first sentence arriving
+    // twenty seconds early and is why docs/VOICE.md says so out loud.
+    const spokenItems = stub.events.inbound
+      .filter((event) => event.type === "conversation.item.create" && event.item?.type === "message")
+      .map((event) => String(event.item.content?.[0]?.text ?? ""));
+    assert.equal(spokenItems.length, 3, `the relay sent ${spokenItems.length} text items: ${JSON.stringify(spokenItems)}`);
+    assert.ok(spokenItems[0].endsWith("The gate is green."), spokenItems[0]);
+    assert.ok(spokenItems[1].endsWith("Two legs failed earlier."), spokenItems[1]);
+    assert.ok(spokenItems[2].endsWith("I re-ran both of them."), spokenItems[2]);
+    assert.equal(stub.events.billableItems, 3, "one billed item per sentence, counted on the Spend line");
+
+    // And the tool output adds NOTHING, because there is nothing left the person has not heard. The
+    // call is still closed -- a function_call_output the model never gets wedges the conversation --
+    // and there is no response.create behind it, so the model is not asked to talk over a finished
+    // answer. Three response.create, one per sentence, and not a fourth.
+    assert.equal(stub.events.toolOutputs.length, 1);
+    const output = JSON.parse(stub.events.toolOutputs[0].output);
+    assert.deepEqual(output, { reply: "", sentences: [], alreadyRead: true });
+    assert.equal(stub.events.responseCreates, 3, `there were ${stub.events.responseCreates} response.create`);
+
+    // The page still gets the WHOLE answer: the panel and the conversation hold all of it, and only
+    // the provider's copy is trimmed.
+    assert.equal(session.of("said").at(-1).text, whole);
+    const hops = session.of("hops").at(-1);
+    assert.ok(hops.td > 0 && hops.td < hops.t3, `td ${hops.td} t3 ${hops.t3}`);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-3 is OFF on a box whose host has no draft, and that turn is byte for byte the old one", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai", audioFrames: 1 });
+  const gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    // Late enough that the draft reader gets its one turn to ask and be refused.
+    tail: (n) => (n >= 4 ? [reply("e1", "The gate is green. I re-ran both legs.")] : []),
+    draft: "unknown",
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0001" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    stub.emitToolCall({ name: "titan", args: { message: "how did the gate go" }, triple: true });
+    await session.settle(() => stub.events.toolOutputs.length > 0, "the tool output going back");
+    const output = JSON.parse(stub.events.toolOutputs[0].output);
+    assert.equal(output.reply, "The gate is green. I re-ran both legs.");
+    assert.deepEqual(output.sentences, ["The gate is green.", "I re-ran both legs."]);
+    assert.equal(output.alreadyRead, undefined, "nothing was read out early, so nothing says it was");
+    assert.equal(stub.events.billableItems, 0, "the old path costs no billed text items at all");
+    assert.equal(stub.events.responseCreates, 1, "one response, behind the one tool output");
+    assert.equal(gateway.draftReads, 1, "the 404 was taken as an answer and never asked again");
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("VOICE-7: a turn reaches the page as open, partials, then ONE final carrying the row's own id", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
