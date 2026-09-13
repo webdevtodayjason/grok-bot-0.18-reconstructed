@@ -118,3 +118,10 @@ shapes are wrong and they kind of overlap on the text." Plus the earlier build 1
 blue checkmark in the text box and I have no idea what that is." Portrait lock is the app's
 Info.plist (UISupportedInterfaceOrientations, iPhone only); the other three are the console's call
 screen at phone width, measured in WebKit at 390x844 before they ship.
+Two more from the 22:36 CDT call on build 17: "the speaker button doesn't work" (the earpiece
+choice is overrideOutputAudioPort(.none) with .defaultToSpeaker still set; the shell worker
+predicted it might not hold, and the fix is to drop .defaultToSpeaker while earpiece is chosen),
+and "when it was done, it said that the call ended and only one word was said: them. Nobody said
+that": the call-ended card showed a one-word transcript for a call with 0 s of audio in, so the
+word came from the provider's own transcription of its greeting or of silence, and the card must
+not show provider text as the person's words.

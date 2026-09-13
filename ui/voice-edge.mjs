@@ -2733,6 +2733,9 @@ export function makeVoiceSession({
             meter.phoneRoute = { output: String(message.output ?? ""), error: String(message.error ?? "").slice(0, 200) };
             log(`voice ${t.slug} phone route: output ${meter.phoneRoute.output || "?"}, category ${String(message.category ?? "?")}, `
               + `mode ${String(message.mode ?? "?")}, outputs ${JSON.stringify(Array.isArray(message.outputs) ? message.outputs.slice(0, 6) : [])}`
+              + `, inputs ${JSON.stringify(Array.isArray(message.inputs) ? message.inputs.slice(0, 6) : [])}`
+              + (message.permission ? `, mic permission ${String(message.permission)}` : "")
+              + (message.capture ? `, capture: ${String(message.capture).slice(0, 200)}` : "")
               + (meter.phoneRoute.error ? `, error "${meter.phoneRoute.error}"` : ""));
             return undefined;
           }

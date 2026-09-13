@@ -1547,7 +1547,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   const routeFrame = (info) => {
     const out = String(info?.output ?? "");
     return { t: "route", output: out, category: String(info?.category ?? ""), mode: String(info?.mode ?? ""),
-      outputs: Array.isArray(info?.outputs) ? info.outputs.map(String).slice(0, 6) : [], error: String(info?.error ?? "").slice(0, 200) };
+      outputs: Array.isArray(info?.outputs) ? info.outputs.map(String).slice(0, 6) : [],
+      inputs: Array.isArray(info?.inputs) ? info.inputs.map(String).slice(0, 6) : [],
+      permission: String(info?.permission ?? ""), capture: String(info?.capture ?? "").slice(0, 200),
+      error: String(info?.error ?? "").slice(0, 200) };
   };
   function applyRoute(info) {
     if (info == null || typeof info !== "object") return;
