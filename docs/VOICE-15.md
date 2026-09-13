@@ -108,3 +108,13 @@ Relay first (page half is inert without the flag), then push the app repo for Te
 Measured on Jason's phone: the route line reads Speaker, a call completes turns, a barge-in cuts
 Titan off, the toggle moves the audio to the earpiece and back, and the relay-down sentence shows
 when the relay is restarted mid-call.
+
+## VOICE-15b, filed 2026-09-12 22:30 CDT from Jason's TestFlight note on build 17
+
+Owner: the next app build. Three call-screen faults on the phone, in his words: "there's no reason to
+have a text box there for chatting in this view", "if you turn your phone sideways by accident, it
+should not go into landscape mode. It should stay upright", "The buttons do not look so great ... the
+shapes are wrong and they kind of overlap on the text." Plus the earlier build 15 note: "There's a
+blue checkmark in the text box and I have no idea what that is." Portrait lock is the app's
+Info.plist (UISupportedInterfaceOrientations, iPhone only); the other three are the console's call
+screen at phone width, measured in WebKit at 390x844 before they ship.
