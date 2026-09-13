@@ -325,6 +325,33 @@ test("VOICE-1 playback: it schedules ahead, books the gate from bytes, and never
   sound.close();
 });
 
+test("VOICE-15 base64: PCM survives the shell bridge in both directions, padding and all", async () => {
+  // The phone's shell carries bytes as base64, so a codec error would be audible on the phone and
+  // invisible in a diff, exactly like the PCM sign error the next case pins. A pure-JS pair, because
+  // the module runs under a bare window in these tests and under WebKit in the app.
+  const voice = await loadVoice();
+  for (const len of [0, 1, 2, 3, 4, 5, 6, 7, 4800]) {
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i += 1) bytes[i] = (i * 37 + 11) & 0xff;
+    const encoded = voice._base64FromBytes(bytes);
+    // No byte past the b64 alphabet and its padding: the bridge is a JSON string field.
+    assert.match(encoded, /^[A-Za-z0-9+/]*={0,2}$/, `${len} encoded outside the alphabet: ${encoded}`);
+    const back = voice._bytesFromBase64(encoded);
+    assert.equal(back.length, len, `length ${len}`);
+    for (let i = 0; i < len; i += 1) assert.equal(back[i], bytes[i], `byte ${i} of ${len}`);
+  }
+  // Known vectors, so a lookup-table slip is caught rather than a round-trip that is merely
+  // self-consistent. "Man" / "Ma" / "M" are the canonical RFC 4648 examples.
+  assert.equal(voice._base64FromBytes(new Uint8Array([77, 97, 110])), "TWFu");
+  assert.equal(voice._base64FromBytes(new Uint8Array([77, 97])), "TWE=");
+  assert.equal(voice._base64FromBytes(new Uint8Array([77])), "TQ==");
+  assert.deepEqual([...voice._bytesFromBase64("TWFu")], [77, 97, 110]);
+  assert.deepEqual([...voice._bytesFromBase64("TWE=")], [77, 97]);
+  assert.deepEqual([...voice._bytesFromBase64("TQ==")], [77]);
+  // Whitespace a bridge might insert is dropped rather than decoded to a stray byte.
+  assert.deepEqual([...voice._bytesFromBase64("TW Fu\n")], [77, 97, 110]);
+});
+
 test("VOICE-1: PCM16 round-trips, because a sign error here is audible and silent in a diff", async () => {
   const voice = await loadVoice();
   const input = new Float32Array([0, 0.5, -0.5, 1, -1]);

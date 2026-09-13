@@ -2552,9 +2552,11 @@ function callDom(options = {}) {
   };
   const byId = new Map();
   const screen = made({ id: "voice-call" });
-  for (const part of ["face", "halo", "status", "state", "mute", "card-slot", "input"]) {
+  for (const part of ["face", "halo", "status", "state", "mute", "card-slot", "input", "output", "route", "retry"]) {
     screen._find[`[data-voice-call-${part}]`] = made();
   }
+  // VOICE-15. The toggle's label lives inside the toggle; the module reads it by its own attribute.
+  screen._find["[data-voice-call-output]"]._find["[data-voice-call-output-label]"] = made();
   screen._find["[data-voice-call-card-slot]"] = made();
   const shell = made();
   const space = made();
@@ -3036,5 +3038,246 @@ test("VOICE-14 barge-in: a flush stops every buffer that was queued and puts the
   voice._onMessage({ data: new Uint8Array(voice._FRAME_BYTES).buffer });
   assert.equal(started.length, 4, "the sentence after the interruption is scheduled like any other");
   assert.equal(voice.stats().liveBuffers, 1);
+  voice.stop();
+});
+
+// ================================================================== VOICE-15
+//
+// Jason, 2026-09-12 21:23: "the forcing of the speaker has never worked. It's always been the
+// earpiece." While a WKWebView holds a getUserMedia capture, WebKit owns the AVAudioSession and routes
+// the playback to the receiver; an app-level override loses under it. So the phone app stops using
+// WebKit for audio: the microphone frames come from the shell and the PCM to play goes back to it, and
+// AVAudioSession is then the app's alone. The page keeps the socket, the orb, the caption, the barge-in
+// and the whole call screen.
+//
+// What these cases pin is the switch between the two audio paths, the five shell messages, the toggle,
+// and the relay-down sentence. What only a phone can answer -- that iOS really puts the call on the
+// loudspeaker and keeps the agent out of the microphone -- is Jason's own call on the build, and the
+// report says so.
+
+// A native-audio shell: its own flag, and a bridge that records every message the page posts to it.
+// getUserMedia is wrapped so a test can prove the native path never asks for it.
+async function loadNativeCall(over = {}) {
+  const shellMessages = [];
+  let getUserMediaCalls = 0;
+  const audio = fakeAudioWindow();
+  audio.navigator = { mediaDevices: { getUserMedia: async () => { getUserMediaCalls += 1; return { getTracks: () => [] }; } } };
+  const loaded = await loadTalking({
+    ...audio,
+    __titanbotShell: { platform: "ios", build: "17", canOpenAppSettings: true, nativeAudio: true },
+    webkit: { messageHandlers: { titaniumVoice: { postMessage: (message) => shellMessages.push(message) } } },
+    ...over,
+  });
+  return { ...loaded, shellMessages, getUserMediaCalls: () => getUserMediaCalls };
+}
+
+const actionsOf = (messages, action) => messages.filter((one) => one && one.action === action);
+
+test("VOICE-15 native capture: the app opens the shell's mic, never getUserMedia, and a shell frame becomes one socket frame", async () => {
+  const call = await loadNativeCall();
+  await call.voice.start({ handsFree: true });
+  await settle(10);
+  // audioStart, with the 24 kHz the contract names, and no browser capture opened at all.
+  assert.deepEqual(actionsOf(call.shellMessages, "audioStart"), [{ action: "audioStart", sampleRate: 24000 }],
+    `the app did not ask the shell to open its mic: ${JSON.stringify(call.shellMessages)}`);
+  assert.equal(call.getUserMediaCalls(), 0, "the native path never touches getUserMedia");
+
+  // One 100 ms frame from the shell, base64, becomes one socket frame with the same sound in it.
+  const loud = new Uint8Array(call.voice._FRAME_BYTES);
+  for (let i = 0; i < loud.length; i += 2) { loud[i] = 0x00; loud[i + 1] = 0x40; } // 0x4000, real sound
+  const before = call.sent.audio.length;
+  call.fake.__titanbotAudio.frame(call.voice._base64FromBytes(loud));
+  assert.equal(call.sent.audio.length, before + 1, "the shell's frame reached the relay as one socket frame");
+  assert.equal(call.sent.audio.at(-1).byteLength, call.voice._FRAME_BYTES, "4800 bytes, the frame both sides count in");
+  assert.equal(isSilent(call.sent.audio.at(-1)), false, "with the sound the shell captured still in it");
+  assert.equal(call.voice._state.capture.stats.sent, 1, "and the capture counted it");
+  assert.equal(call.voice._state.capture.stats.micFrames, 1, "with a mic level, which is the call avatar's reason to exist");
+
+  // Muted: the page drops the frame the way the browser path drops a muted one, and does not send it.
+  call.voice._call.mute(true);
+  const beforeMute = call.sent.audio.length;
+  call.fake.__titanbotAudio.frame(call.voice._base64FromBytes(loud));
+  assert.equal(call.sent.audio.length, beforeMute, "a muted call sends nothing");
+  assert.equal(call.voice._state.capture.stats.mutedFrames, 1, "and counts the drop as a mute, not as the echo gate");
+
+  // A frame that arrives when no native capture is running is a no-op, not a throw.
+  call.voice.stop();
+  assert.deepEqual(actionsOf(call.shellMessages, "audioStop"), [{ action: "audioStop" }], "hang-up closes the shell's mic");
+  const afterStop = call.sent.audio.length;
+  call.fake.__titanbotAudio.frame(call.voice._base64FromBytes(loud));
+  assert.equal(call.sent.audio.length, afterStop, "a frame after hang-up reaches nobody");
+});
+
+test("VOICE-15 native playback: each delta is an audioPlay, a flush is an audioFlush, and playedMs books the room", async () => {
+  const call = await loadNativeCall();
+  await call.voice.start({ handsFree: true });
+  await settle(10);
+
+  // Three deltas of the agent's voice become three audioPlay messages with base64 PCM on them.
+  call.voice._onMessage({ data: JSON.stringify({ t: "speak-begin", id: 1 }) });
+  for (let i = 0; i < 3; i += 1) call.voice._onMessage({ data: new Uint8Array(call.voice._FRAME_BYTES).buffer });
+  const plays = actionsOf(call.shellMessages, "audioPlay");
+  assert.equal(plays.length, 3, "three deltas, three audioPlay messages handed to the shell");
+  assert.equal(call.voice._bytesFromBase64(plays[0].pcm).length, call.voice._FRAME_BYTES, "each carries its PCM as base64");
+  assert.equal(call.voice.stats().playedBuffers, 3, "the player counted them");
+
+  // playsUntilMs is booked from the shell's own playedMs, not from the bytes: nothing is booked until
+  // the shell reports, and then the room is loud for as long as more was queued than has played.
+  assert.equal(call.voice.stats().playsUntilMs, 0, "the page does not guess the clock from bytes it cannot see play");
+  call.fake.__titanbotAudio.playedMs(100); // 100 ms of 300 ms queued has left the speaker
+  assert.ok(call.voice.stats().playsUntilMs > Date.now(), "200 ms is still to come, so the room is still loud");
+  assert.equal(call.voice._state.gate.holding(), true);
+  call.fake.__titanbotAudio.playedMs(300); // all of it has played
+  assert.ok(call.voice.stats().playsUntilMs <= Date.now() + 1, "and once it has all played the room is quiet");
+
+  // A barge-in flush tells the shell to drop its queue and puts the booking honestly back to nothing.
+  call.voice._onMessage({ data: JSON.stringify({ t: "speak-begin", id: 2 }) });
+  call.voice._onMessage({ data: new Uint8Array(call.voice._FRAME_BYTES).buffer });
+  call.voice._onMessage({ data: JSON.stringify({ t: "flush" }) });
+  assert.deepEqual(actionsOf(call.shellMessages, "audioFlush"), [{ action: "audioFlush" }], "the shell is told to empty its queue");
+  assert.equal(call.voice.stats().flushes, 1);
+  assert.equal(call.voice.stats().playsUntilMs, 0, "and nothing reads the room as loud after a barge-in");
+  assert.equal(call.voice._state.gate.holding(), false, "which is what lets the person's own words through");
+  call.voice.stop();
+});
+
+test("VOICE-15 toggle: the speaker/earpiece control sends audioOutput, shows only in the app, and the route line reads the shell's truth", async () => {
+  const dom = callDom();
+  const call = await loadNativeCall({ document: dom.document });
+  await call.voice._call.open();
+  await settle(10);
+  const toggle = dom.screen._find["[data-voice-call-output]"];
+  const routeNode = dom.screen._find["[data-voice-call-route]"];
+  assert.equal(toggle.hidden, false, "the toggle is shown when the shell owns the audio");
+  assert.equal(toggle.getAttribute("aria-pressed"), "true", "speaker is the default, which is what a hands-free call wants");
+
+  // A press flips the choice and tells the shell, which is the side that applies and remembers it.
+  call.voice._toggleOutput();
+  assert.deepEqual(actionsOf(call.shellMessages, "audioOutput").at(-1), { action: "audioOutput", value: "earpiece" });
+  assert.equal(call.voice.stats().call.output, "earpiece");
+  assert.equal(toggle.getAttribute("aria-pressed"), "false", "and the control shows the new state at once");
+
+  // The shell's route report is the truth under the toggle, as one plain word and any error.
+  call.fake.__titanbotAudio.route({ category: "playAndRecord", mode: "videoChat", outputs: ["Speaker"], output: "speaker", error: "" });
+  assert.equal(call.voice.stats().call.output, "speaker", "the route corrected the choice to what the hardware settled on");
+  assert.equal(routeNode.hidden, false);
+  assert.equal(routeNode.textContent, "Speaker");
+  call.fake.__titanbotAudio.route({ category: "playAndRecord", mode: "videoChat", outputs: ["BluetoothHFP"], output: "bluetooth", error: "headset battery low" });
+  assert.equal(routeNode.textContent, "Bluetooth. headset battery low", "a route with an error says both, in plain words with no stack-trace dress");
+  call.voice.stop();
+});
+
+test("VOICE-15 toggle: a browser keeps WebKit's own route, so neither the toggle nor the route line is there", async () => {
+  const dom = callDom();
+  // A phone-sized browser: a call screen, but no shell flag, so the audio path is unchanged.
+  const { voice } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });
+  await voice._call.open();
+  await settle(10);
+  assert.equal(dom.screen._find["[data-voice-call-output]"].hidden, true, "no speaker/earpiece toggle in a browser");
+  assert.equal(dom.screen._find["[data-voice-call-route]"].hidden, true, "and no route line");
+  assert.equal(voice._nativeAudioWanted(), false);
+  voice.stop();
+});
+
+test("VOICE-15c relay-down: a refused upgrade keeps the call screen, says why, and Try again dials again", async () => {
+  const dom = callDom();
+  // Refused the first time, open the second: Try again has to actually recover, not just re-draw.
+  let attempts = 0;
+  class RetrySocket {
+    constructor() {
+      attempts += 1;
+      const willOpen = attempts >= 2;
+      this.readyState = 0;
+      this.handlers = {};
+      setTimeout(() => {
+        if (willOpen) { this.readyState = 1; this.handlers.open?.({}); return; }
+        // The browser's real order against a refused upgrade: error, then close 1006.
+        this.handlers.error?.({});
+        this.handlers.close?.({ code: 1006, reason: "" });
+      }, 0);
+    }
+    addEventListener(name, fn) { this.handlers[name] = fn; }
+    send() {}
+    close() { this.readyState = 3; }
+  }
+  const call = await loadNativeCall({ document: dom.document, __voiceSocketClass: RetrySocket });
+  await call.voice._call.open();
+  await settle(20);
+  assert.equal(call.voice._call.isUp(), true, "the screen stays up instead of vanishing and hiding the reason");
+  assert.equal(call.voice.stats().call.down, call.voice._CALL_DOWN_NO_ANSWER, "it says, in plain words, that the relay did not answer");
+  assert.equal(dom.screen._find["[data-voice-call-state]"].textContent, call.voice._CALL_DOWN_NO_ANSWER, "and the sentence is on the prominent line");
+  assert.equal(call.voice._state.orb, "off", "the orb is off: there is nothing live to animate");
+  assert.equal(dom.screen._find["[data-voice-call-retry]"].hidden, false, "the Try again button is shown");
+  assert.equal(dom.screen._find["[data-voice-call-mute]"].hidden, true, "and the mute control is gone, because a dead line has no mic to mute");
+  assert.deepEqual(call.voice.stats().notes, [], "nothing lands on the shelf the full-screen surface would cover");
+
+  // Try again dials a fresh line, and this one opens, so the call is live again on the screen that never went.
+  call.voice._retryCall();
+  await settle(20);
+  assert.equal(call.voice.stats().call.down, "", "Try again cleared the down state");
+  assert.equal(call.voice._call.isUp(), true, "the screen never went, so the person stayed in the call");
+  assert.equal(call.voice._state.on, true, "and the second dial opened, so the line is live again");
+  call.voice.stop();
+});
+
+test("VOICE-15c relay-down: a live line that drops mid-call says the line dropped, on the screen", async () => {
+  const dom = callDom();
+  const call = await loadNativeCall({ document: dom.document });
+  await call.voice._call.open();
+  await settle(10);
+  assert.equal(call.voice._state.on, true, "the line is up");
+  // The relay drops it without the person pressing End.
+  call.voice._onClose({ code: 1006, reason: "" });
+  assert.equal(call.voice._call.isUp(), true, "the screen stays up");
+  assert.equal(call.voice.stats().call.down, call.voice._CALL_DOWN_DROPPED, "and it says the line dropped");
+  assert.equal(dom.screen._find["[data-voice-call-state]"].textContent, call.voice._CALL_DOWN_DROPPED);
+  assert.deepEqual(call.voice.stats().notes, [], "again nothing on the shelf");
+  call.voice.stop();
+});
+
+test("VOICE-15c relay-down: a phone in a plain browser keeps VOICE-13's shelf behaviour, so nothing without the flag changes", async () => {
+  const dom = callDom();
+  class DeadSocket {
+    constructor() {
+      this.readyState = 0;
+      this.handlers = {};
+      setTimeout(() => { this.handlers.error?.({}); this.handlers.close?.({ code: 1006, reason: "" }); }, 0);
+    }
+    addEventListener(name, fn) { this.handlers[name] = fn; }
+    send() {} close() {}
+  }
+  // A phone-width browser, no shell flag: the call screen goes and the no-key sentence lands on the
+  // shelf with its Open settings, exactly as VOICE-13 shipped. This is the case the native gate keeps.
+  const { voice } = await loadVoice({ window: {
+    ...fakeAudioWindow(),
+    innerWidth: 390, innerHeight: 844,
+    document: dom.document,
+    __voiceSocketClass: DeadSocket,
+  } });
+  await voice._call.open();
+  await settle(20);
+  assert.equal(voice._call.isUp(), false, "the screen went away, the way a browser's refusal always has");
+  assert.equal(voice.stats().call.down, "", "there is no relay-down state in a browser");
+  assert.deepEqual(voice.stats().notes, ["no-key"], "and the sentence stands in its one home on the shelf");
+  voice.stop();
+});
+
+test("VOICE-15 a browser line sends no shell audio messages and opens its own microphone", async () => {
+  // The whole claim of this wave is that one host changed and the others did not.
+  const shellMessages = [];
+  let getUserMediaCalls = 0;
+  const audio = fakeAudioWindow();
+  audio.navigator = { mediaDevices: { getUserMedia: async () => { getUserMediaCalls += 1; return { getTracks: () => [] }; } } };
+  const { voice } = await loadTalking({
+    ...audio,
+    // A shell that is iOS but an OLD build with no nativeAudio flag keeps the browser audio path.
+    __titanbotShell: { platform: "ios", build: "16" },
+    webkit: { messageHandlers: { titaniumVoice: { postMessage: (message) => shellMessages.push(message) } } },
+  });
+  await voice.start({ handsFree: true });
+  await settle(10);
+  assert.equal(voice._nativeAudioWanted(), false, "no flag, no native audio");
+  assert.equal(getUserMediaCalls, 1, "the browser path opened its own microphone");
+  assert.deepEqual(shellMessages, [], "and posted nothing to the shell's audio bridge");
   voice.stop();
 });
