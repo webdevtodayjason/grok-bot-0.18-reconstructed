@@ -1231,6 +1231,13 @@ and a hash. It is never an argument, for the same reason a provider key never is
 command today and a timer later, deliberately: a digest nobody has read once is not a thing to put on
 a schedule.
 
+The Feedback panel also reads TestFlight feedback for `bot.titanium.app` once at boot and hourly.
+Set `testflight.keyId` and `testflight.issuerId` with `node cp/cli.mjs setting set <name> <value>`, put
+the App Store Connect private key at `<CP_DATA_DIR>/testflight.p8`, and make that file mode `0600`.
+Each Apple submission is stored once, appears beside in-app feedback with a source chip, and can be
+marked `seen`. Every new row from either source prompts Titan in the first enabled super admin's
+workspace; `node cp/cli.mjs setting set feedback.notify 0` turns those prompts off.
+
 **The size of a report is a contract with three minters** (the agent's tool, the console's automatic
 offer, and the self-test) and with the intake, which for this one route reads up to
 `cp/feedback.mjs`'s `INTAKE_BYTES` (96 KB) because a report carries its evidence twice: as the block

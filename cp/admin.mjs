@@ -3096,6 +3096,18 @@ export function createAdminApi({
 
     if (rest.length === 2 && rest[0] === "settings" && method === "POST") {
       const name = decodeURIComponent(rest[1]);
+      const scalarSettings = ["testflight.keyId", "testflight.issuerId", "feedback.notify"];
+      if (scalarSettings.includes(name)) {
+        const value = String(body?.value ?? "").trim();
+        if ((name === "feedback.notify" && !["0", "1"].includes(value))
+          || (name !== "feedback.notify" && (value.length === 0 || value.length > 200 || /[\r\n\t]/.test(value)))) {
+          json(response, 400, { error: "bad_value", message: name === "feedback.notify" ? "feedback.notify has to be 0 or 1." : `${name} has to be one line of at most 200 characters.` });
+          return true;
+        }
+        store.setSetting(name, value, guard.account?.email ?? "the operator token");
+        json(response, 200, { name, value });
+        return true;
+      }
       if (!["allowance.levels", "spend.prices"].includes(name)) {
         json(response, 400, { error: "bad_setting", message: "That setting is not editable through this route." });
         return true;
@@ -4972,6 +4984,37 @@ export function createAdminApi({
       return true;
     }
 
+    // ---- FEEDBACK-3: TestFlight is the second source on the Feedback panel ----------------------
+    if (rest[0] === "testflight") {
+      if (deps.testflight == null) {
+        json(response, 503, { error: "not_configured", message: "This control plane has no TestFlight feedback reader." });
+        return true;
+      }
+      if (rest.length === 1 && method === "GET") {
+        const sinceParam = url.searchParams.get("since");
+        const sinceMs = sinceParam
+          ? (Number.isFinite(Number(sinceParam)) ? Number(sinceParam) : Date.parse(sinceParam))
+          : 0;
+        json(response, 200, deps.testflight.panel({
+          state: String(url.searchParams.get("state") ?? ""),
+          sinceMs: Number.isFinite(sinceMs) ? sinceMs : 0,
+          limit: Number(url.searchParams.get("limit") ?? 200),
+        }));
+        return true;
+      }
+      if (rest.length === 3 && rest[2] === "seen" && method === "POST") {
+        const id = decodeURIComponent(rest[1]);
+        const row = deps.testflight.markSeen(id);
+        if (row == null) { json(response, 404, { error: "not_found", message: "There is no TestFlight feedback row by that id." }); return true; }
+        const ledger = beginAction(guard, request, { action: "feedback.testflight.seen", target: id, detail: `TestFlight feedback ${id} marked seen` });
+        ledger.done();
+        json(response, 200, { row: { ...row, receivedAt: new Date(row.receivedAt).toISOString() }, message: "That TestFlight feedback is marked seen." });
+        return true;
+      }
+      json(response, 405, { error: "method_not_allowed" });
+      return true;
+    }
+
     // ---- MARKET-26 / CLOUD-BROWSER-1: the marketplace panel ------------------------------------
     //
     // Appended here, at the end, deliberately: everything above it belongs to another wave's
@@ -5324,5 +5367,5 @@ export function createAdminApi({
   // DEVICE-1. revokeDevicesForAccount is on here for the same reason recordAttempt is: the account
   // door lives in cp/server.mjs and the relay client lives in this file, and a second relay client
   // in that one is how one of the two ends up without the bearer or without the timeout.
-  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system, spend, providers: providersAnswer, feedback, onboarding, revokeDevicesForAccount, keptData };
+  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system, spend, providers: providersAnswer, feedback, testflight: deps.testflight, onboarding, revokeDevicesForAccount, keptData };
 }

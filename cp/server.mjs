@@ -61,6 +61,7 @@ import { INTAKE_BYTES as FEEDBACK_BODY_BYTES, normalizeReport } from "./feedback
 // Its own file for the reason cp/feedback.mjs and cp/push.mjs are: everything in it is a pure
 // function over a body a stranger wrote, plus one desk that closes over the store.
 import { createSupport } from "./support.mjs";
+import { createFeedbackNotifier, createTestFlight, startTestFlightTimer } from "./testflight.mjs";
 import { createProxyClient, includedModelRows, visionFallbackTarget } from "./proxy.mjs";
 import { createAllowanceService } from "./allowance.mjs";
 import {
@@ -213,6 +214,17 @@ export function createApp(options = {}) {
   // sentence saying the feature is off.
   const proxy = options.proxy ?? createProxyClient({ config, fetchImpl });
   const allowance = options.allowance ?? createAllowanceService({ store, proxy, now });
+  const notifyFeedback = options.notifyFeedback ?? createFeedbackNotifier({ store, config, probeImpl });
+  const testflight = options.testflight ?? createTestFlight({
+    store,
+    config,
+    now,
+    fetchImpl: options.testflightFetchImpl ?? fetchImpl,
+    ...(options.testflightBaseUrl === undefined ? {} : { baseUrl: options.testflightBaseUrl }),
+    ...(options.testflightKeyFile === undefined ? {} : { keyFile: options.testflightKeyFile }),
+    notify: notifyFeedback,
+    log: options.log ?? (() => {}),
+  });
 
   // The address the lockout counts against, decided by the relay's own code (ui/auth.mjs) with the
   // relay's own two settings.
@@ -678,6 +690,7 @@ export function createApp(options = {}) {
     // 403 about the provider token. Handed in rather than imported inside admin.mjs so a test can
     // drive every branch of that verdict table with no Apple account and no network.
     http2Impl,
+    deps: { testflight },
   });
 
   /**
@@ -933,7 +946,7 @@ export function createApp(options = {}) {
   // The relay is what knows: it resolves the tenant from its own registry before it forwards, so
   // the name here was never in a request body anywhere on the path.
   const FEEDBACK_TENANT_HEADER = "x-titanbot-tenant";
-  function handleFeedbackIntake(request, response, body) {
+  async function handleFeedbackIntake(request, response, body) {
     const slug = String(request.headers[FEEDBACK_TENANT_HEADER] ?? "").trim().toLowerCase();
     if (slug.length === 0) {
       return json(response, 400, { error: "bad_request", message: "the console did not say which workspace this report came from, so nothing was stored" });
@@ -979,6 +992,7 @@ export function createApp(options = {}) {
       const code = error?.code === "too_large" ? 413 : 400;
       return json(response, code, { error: error?.code ?? "bad_request", message: String(error?.message ?? "that report could not be stored") });
     }
+    await notifyFeedback({ source: "in-app", id: row.id, tenant: row.tenant, title: row.title });
     return json(response, 201, { id: row.id, tier: row.tier, state: row.state });
   }
 
@@ -1484,7 +1498,7 @@ export function createApp(options = {}) {
     if (segments[1] === "feedback" && segments.length === 2) {
       if (method !== "POST") return json(response, 405, { error: "method_not_allowed" });
       if (!requireRelay(request, response)) return undefined;
-      return handleFeedbackIntake(request, response, body);
+      return await handleFeedbackIntake(request, response, body);
     }
 
     // ---- support mail, forwarded by the operator's own email worker (SUPPORT-1, docs/SUPPORT.md) --
@@ -1945,7 +1959,7 @@ export function createApp(options = {}) {
   // closing the store under it writes into a finalized statement, which reaches an operator as
   // "statement has been finalized" on stderr with nothing to act on, and costs the job its last
   // ledger row, which is the row that says where it got to.
-  return { config, store, client, handle: guarded, refreshBoxPeers, boxPeers, reconcileFallbacks, marketplaceVerificationState, voice, onboarding: admin.onboarding, keptData: admin.keptData };
+  return { config, store, client, handle: guarded, refreshBoxPeers, boxPeers, reconcileFallbacks, marketplaceVerificationState, voice, testflight, onboarding: admin.onboarding, keptData: admin.keptData };
 }
 
 export function createHttpServer(app) {
@@ -2003,6 +2017,10 @@ async function main() {
   // screenshot outage rather than a slow page. It reads first and writes only what is missing, so
   // on an ordinary boot it writes nothing and prints one line saying so.
   void reconcileFallbacksAtBoot(app);
+  startTestFlightTimer({
+    testflight: app.testflight,
+    log: (line) => process.stdout.write(`${line}\n`),
+  });
   // VOICE-1, once at boot and never on a timer. A relay that was restarted mid-call leaves a claimed
   // row nobody will ever close, and an open row counts toward that workspace's day: unsettled, one
   // such row refuses that customer's voice for the rest of the day and inflates the Spend line for

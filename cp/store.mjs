@@ -367,6 +367,22 @@ CREATE TABLE IF NOT EXISTS feedback (
 );
 CREATE INDEX IF NOT EXISTS feedback_at ON feedback (at);
 CREATE INDEX IF NOT EXISTS feedback_state ON feedback (state);
+-- FEEDBACK-3. Feedback Apple holds for TestFlight testers. The Apple submission id is the primary
+-- key, so an hourly poll can read the same page forever and each submission is stored once.
+-- This is not a tenant table: the app belongs to the operator, as do the two-state decisions here.
+CREATE TABLE IF NOT EXISTS testflight_feedback (
+  id          TEXT PRIMARY KEY,
+  received_at INTEGER NOT NULL,
+  build       TEXT NOT NULL DEFAULT '',
+  device      TEXT NOT NULL DEFAULT '',
+  os          TEXT NOT NULL DEFAULT '',
+  tester      TEXT NOT NULL DEFAULT '',
+  comment     TEXT NOT NULL DEFAULT '',
+  kind        TEXT NOT NULL DEFAULT '',
+  state       TEXT NOT NULL DEFAULT 'new'
+);
+CREATE INDEX IF NOT EXISTS testflight_feedback_at ON testflight_feedback (received_at);
+CREATE INDEX IF NOT EXISTS testflight_feedback_state ON testflight_feedback (state);
 -- VOICE-1. One row per spoken session, claimed when the session is authorised and BEFORE the relay
 -- dials a provider, settled when it ends.
 --
@@ -579,6 +595,9 @@ export const FEEDBACK_FIELD_LIMIT = 256 * 1024;
  */
 export const SUPPORT_STATES = ["new", "replied", "closed"];
 
+/** The only two states Apple feedback needs: it has arrived, or an operator has seen it. */
+export const TESTFLIGHT_FEEDBACK_STATES = ["new", "seen"];
+
 /**
  * 256 KB for the text of one support message, the same ceiling FEEDBACK_FIELD_LIMIT is.
  *
@@ -713,6 +732,18 @@ const feedbackRow = (row) => {
     decidedBy: row.decidedBy ?? "",
   };
 };
+
+const testflightFeedbackRow = (row) => (row == null ? null : {
+  id: String(row.id),
+  receivedAt: Number(row.received_at),
+  build: row.build ?? "",
+  device: row.device ?? "",
+  os: row.os ?? "",
+  tester: row.tester ?? "",
+  comment: row.comment ?? "",
+  kind: row.kind ?? "",
+  state: row.state ?? "new",
+});
 
 // SUPPORT-1. One support message, as everything outside this file reads it.
 //
@@ -1019,6 +1050,10 @@ export function openStore(options = {}) {
   const insertFeedback = statement("INSERT INTO feedback (at, tenant, agent, agentName, tier, category, title, body, payload, state, issueUrl, decidedAt, decidedBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, '')");
   const selectFeedbackRow = statement("SELECT * FROM feedback WHERE id = ?");
   const countFeedbackRow = statement("SELECT COUNT(*) AS n FROM feedback");
+  const insertTestflightFeedback = statement("INSERT OR IGNORE INTO testflight_feedback (id, received_at, build, device, os, tester, comment, kind, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new')");
+  const selectTestflightFeedback = statement("SELECT * FROM testflight_feedback WHERE id = ?");
+  const countTestflightFeedback = statement("SELECT COUNT(*) AS n FROM testflight_feedback");
+  const countNewTestflightFeedback = statement("SELECT COUNT(*) AS n FROM testflight_feedback WHERE state = 'new'");
   const tableNamesRow = statement("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name");
 
   const insertFailure = statement("INSERT INTO login_failures (email, ip, at) VALUES (?, ?, ?)");
@@ -1347,6 +1382,49 @@ export function openStore(options = {}) {
       values.push(Number(id));
       db.prepare(`UPDATE feedback SET ${sets.join(", ")} WHERE id = ?`).run(...values);
       return feedbackRow(selectFeedbackRow.get(Number(id)));
+    },
+
+    // ---- TestFlight feedback (FEEDBACK-3) -------------------------------------------------------
+
+    recordTestflightFeedback(row = {}) {
+      const id = String(row.id ?? "").trim();
+      if (id.length === 0) {
+        const error = new Error("a TestFlight feedback row needs Apple's submission id");
+        error.code = "bad_id";
+        throw error;
+      }
+      const inserted = insertTestflightFeedback.run(
+        id, Number(row.receivedAt) || now(), String(row.build ?? ""), String(row.device ?? ""),
+        String(row.os ?? ""), String(row.tester ?? ""), String(row.comment ?? ""), String(row.kind ?? ""),
+      );
+      return { row: testflightFeedbackRow(selectTestflightFeedback.get(id)), stored: Number(inserted.changes ?? 0) > 0 };
+    },
+
+    getTestflightFeedback(id) { return testflightFeedbackRow(selectTestflightFeedback.get(String(id ?? ""))); },
+
+    listTestflightFeedback({ state = "", sinceMs = 0, limit = 200 } = {}) {
+      const where = ["received_at >= ?"];
+      const values = [Number(sinceMs) || 0];
+      if (String(state ?? "").length > 0) { where.push("state = ?"); values.push(String(state)); }
+      const cap = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Math.min(Number(limit), 2000) : 200;
+      values.push(cap);
+      return db.prepare(`SELECT * FROM testflight_feedback WHERE ${where.join(" AND ")} ORDER BY received_at DESC, id DESC LIMIT ?`)
+        .all(...values).map(testflightFeedbackRow);
+    },
+
+    countTestflightFeedback() { return Number(countTestflightFeedback.get()?.n ?? 0); },
+
+    countNewTestflightFeedback() { return Number(countNewTestflightFeedback.get()?.n ?? 0); },
+
+    setTestflightFeedbackState(id, state) {
+      if (!TESTFLIGHT_FEEDBACK_STATES.includes(String(state))) {
+        const error = new Error(`a TestFlight feedback row's state has to be one of ${TESTFLIGHT_FEEDBACK_STATES.join(", ")}`);
+        error.code = "bad_state";
+        throw error;
+      }
+      if (selectTestflightFeedback.get(String(id ?? "")) == null) return null;
+      db.prepare("UPDATE testflight_feedback SET state = ? WHERE id = ?").run(String(state), String(id));
+      return testflightFeedbackRow(selectTestflightFeedback.get(String(id)));
     },
 
     /**

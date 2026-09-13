@@ -498,6 +498,8 @@ form.stack .controls { margin: 0; }
   white-space: pre-wrap;
 }
 .feedbackBody { width: 100%; }
+.feedbackCard .sourceChip { border-color: #31566F; color: var(--cyan); }
+.testflightCard .testflightComment { margin: 9px 0 0; white-space: pre-wrap; word-break: break-word; }
 #panel-feedback details { margin-top: 8px; }
 #panel-feedback summary { cursor: pointer; }
 /* MARKET-26. The marketplace panel's one visual idea: a fact that has moved is a card that quotes

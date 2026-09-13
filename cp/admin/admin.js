@@ -3545,6 +3545,7 @@
     const card = el("div", "feedbackCard");
     const head = el("div", "head");
     head.appendChild(el("strong", null, report.title || "(no title)"));
+    head.appendChild(el("span", "chip sourceChip", "In-app"));
     head.appendChild(el("span", "quiet", report.tenant || "no workspace"));
     // Critical is the only chip on this panel that is ever red, because it is the only tier that
     // means somebody is stopped right now.
@@ -3622,6 +3623,41 @@
     return card;
   }
 
+  function renderTestflightCard(report) {
+    const card = el("div", "feedbackCard testflightCard");
+    const head = el("div", "head");
+    head.appendChild(el("strong", null, report.comment || `${report.kind} feedback`));
+    head.appendChild(el("span", "chip sourceChip", "TestFlight"));
+    head.appendChild(el("span", report.kind === "crash" ? "chip attack" : "chip", report.kind));
+    head.appendChild(el("span", report.state === "new" ? "chip" : "chip off", report.state));
+    const seen = el("span", "quiet", ago(report.receivedAt));
+    seen.title = when(report.receivedAt);
+    head.appendChild(seen);
+    card.appendChild(head);
+
+    const facts = [report.tester, report.build ? `build ${report.build}` : "", report.device, report.os ? `iOS ${report.os}` : ""]
+      .filter((one) => String(one).length > 0).join(" - ");
+    if (facts) card.appendChild(el("p", "quiet", facts));
+    if (report.comment) card.appendChild(el("p", "testflightComment", report.comment));
+    if (report.state === "new") {
+      const actions = el("div", "controls");
+      const button = el("button", "ghost small", "Mark seen");
+      button.type = "button";
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          const result = await api("POST", `/v1/admin/testflight/${encodeURIComponent(report.id)}/seen`, {});
+          banner(String(result.message ?? "That TestFlight feedback is marked seen."), true);
+          await loadFeedback();
+        } catch (error) { banner(String(error.message)); }
+        finally { button.disabled = false; }
+      });
+      actions.appendChild(button);
+      card.appendChild(actions);
+    }
+    return card;
+  }
+
   function feedbackChips(answer) {
     const counts = answer.counts ?? {};
     const unread = Number(counts.criticalNew ?? 0);
@@ -3648,14 +3684,18 @@
   async function loadFeedback() {
     const tier = $("feedbackTier").value;
     const state = $("feedbackState").value;
-    const answer = await api("GET", `/v1/admin/feedback?tier=${encodeURIComponent(tier)}&state=${encodeURIComponent(state)}&limit=200`);
+    const [answer, testflight] = await Promise.all([
+      api("GET", `/v1/admin/feedback?tier=${encodeURIComponent(tier)}&state=${encodeURIComponent(state)}&limit=200`),
+      api("GET", `/v1/admin/testflight?state=${encodeURIComponent(state === "new" ? "new" : "")}&limit=200`),
+    ]);
     summarise("panel-feedback", feedbackChips(answer), feedbackHeadline(answer));
-    $("feedbackGates").textContent = String(answer.gates ?? "");
+    $("feedbackGates").textContent = `${String(answer.gates ?? "")} TestFlight feedback is read from Apple and marked seen here.`;
     const note = [
       `${answer.total} report${answer.total === 1 ? "" : "s"} on record`,
       `${answer.counts.new} new`,
       `${answer.counts.criticalNew} critical and unread`,
       `${answer.counts.filed} filed`,
+      `${testflight.total} from TestFlight (${testflight.counts.new} new)`,
       `measured ${when(answer.measuredAt)}`,
     ];
     // Wave B's hook. The filter appears when the table behind it exists and is absent, rather than
@@ -3672,12 +3712,15 @@
 
     const host = $("feedbackRows");
     clear(host);
-    const rows = answer.rows ?? [];
+    const rows = [
+      ...(answer.rows ?? []).map((row) => ({ source: "in-app", at: row.at, row })),
+      ...(testflight.rows ?? []).map((row) => ({ source: "testflight", at: row.receivedAt, row })),
+    ].sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
     if (rows.length === 0) {
-      host.appendChild(el("p", "empty", "Nothing reported in this filter. That is a real answer: no workspace has sent anything of this kind."));
+      host.appendChild(el("p", "empty", "Nothing reported in this filter from the app or TestFlight."));
       return;
     }
-    for (const report of rows) host.appendChild(renderFeedbackCard(report));
+    for (const item of rows) host.appendChild(item.source === "testflight" ? renderTestflightCard(item.row) : renderFeedbackCard(item.row));
   }
 
   for (const id of ["feedbackTier", "feedbackState"]) {
