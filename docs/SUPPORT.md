@@ -450,9 +450,9 @@ Still not proven:
 
 - What the notification looks like inside Titan's conversation for a person (the turn ran; nobody
   has read it on the console yet).
-- An adopted tenant's row needs `box_container` and the profile token file by hand today; the
-  product fix (derive the container from the Coolify uuid, mint or copy the token at adopt) is
-  filed as SUPPORT-1d, owner the next wave that opens `cp/onboard.mjs`.
+- An adopted tenant no longer needs its row filled by hand: since SUPPORT-1d (2026-09-13, cp/provision.mjs
+  `boxContainerFor`, `tenant adopt --gateway-token-stdin`) the container name derives from the Coolify
+  uuid and the token file is written at adopt time. See docs/TENANCY.md section 10.
 
 ## 9. Where everything is
 
