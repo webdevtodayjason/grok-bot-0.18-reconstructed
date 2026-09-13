@@ -1184,7 +1184,7 @@ async function legBrowser() {
     args: [
       "--use-fake-ui-for-media-stream",
       "--use-fake-device-for-media-stream",
-      `--use-file-for-fake-audio-capture=${wav}%noloop`,
+      `--use-file-for-fake-audio-capture=${wav}`,
       "--autoplay-policy=no-user-gesture-required",
     ],
   });
@@ -1447,7 +1447,7 @@ async function legFrames() {
     args: [
       "--use-fake-ui-for-media-stream",
       "--use-fake-device-for-media-stream",
-      `--use-file-for-fake-audio-capture=${wav}%noloop`,
+      `--use-file-for-fake-audio-capture=${wav}`,
       "--autoplay-policy=no-user-gesture-required",
     ],
   });
@@ -1630,7 +1630,7 @@ async function legOverlay() {
     args: [
       "--use-fake-ui-for-media-stream",
       "--use-fake-device-for-media-stream",
-      `--use-file-for-fake-audio-capture=${wav}%noloop`,
+      `--use-file-for-fake-audio-capture=${wav}`,
       "--autoplay-policy=no-user-gesture-required",
     ],
   });

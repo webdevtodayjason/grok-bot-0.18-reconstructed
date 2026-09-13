@@ -268,7 +268,8 @@ test("VOICE-1 capture: a MediaStream source is accepted whole, so a meeting need
   // echo gate dropped. The four numbers above it are untouched, which is asserted in
   // tests/machine-room-voice.test.mjs across a muted frame.
   assert.deepEqual(Object.keys(capture.stats).sort(),
-    ["blocks", "bytes", "heldFrames", "heldMs", "micFrames", "micLevel", "mutedFrames", "sent"]);
+    // micPeak since VOICE-15b: the ended card and the relay's heard gate read the loudest sample.
+    ["blocks", "bytes", "heldFrames", "heldMs", "micFrames", "micLevel", "micPeak", "mutedFrames", "sent"]);
   assert.equal(typeof capture.stop, "function");
 });
 
