@@ -1449,6 +1449,36 @@ export const DIAL_WATCHDOG_MS = 8000;
 export const AUDIO_LEAD_SECONDS = 3;
 
 /**
+ * VOICE-15c. The floor a frame has to clear before this relay will call it sound, as a PCM16
+ * magnitude out of 32767 full scale. 64 is -54 dBFS.
+ *
+ * WHY A FLOOR AND NOT "ABOVE ZERO". The failure this number exists for has two measured shapes and
+ * only one of them is an empty socket. On TestFlight build 17, 2026-09-12, a call delivered 0 s of
+ * audio in and the provider still produced a transcript; and on the five calls of VOICE-14b the phone
+ * sent 18 to 35 s of audio that the provider heard no speech in at all, which is what a capture path
+ * handing over digital zeros looks like from here. Zeros with one bit of resampling noise in them are
+ * not an empty socket, so the test is a level rather than a byte count.
+ *
+ * WHY 64 AND NOT HIGHER. It is three orders of magnitude below what a microphone really sends -- the
+ * phone's own trimmed capture peaked at 0.0 dBFS on build 20, and tests/voice-turn.test.mjs's frame
+ * is 3000 -- and far enough above resampling noise that silence cannot clear it. A higher floor would
+ * start deciding how loud somebody has to talk, which is the provider's turn detection's job and not
+ * this relay's.
+ */
+export const HEARD_PEAK_FLOOR = 64;
+/**
+ * How long after the last frame with sound in it a provider transcript still counts as the person's.
+ *
+ * The window a transcript is measured against opens when the previous utterance closed, and on push to
+ * talk the microphone SHUTS on the release: the settled transcript for what was just said then arrives
+ * with the line already quiet. OpenAI's own transcription guide says those `.completed` events are
+ * late and unordered, so a window with no tail would throw away the corrected final of a sentence the
+ * person really did say. Three seconds is that tail. It costs nothing against the measured fault,
+ * where no frame on the whole call ever had sound in it.
+ */
+export const HEARD_GRACE_MS = 3000;
+
+/**
  * One session's row. No transcript, no audio, no secret -- ui/mail-edge.mjs:513's rule for its own
  * ledger, and the same reason: this file is a spend record and the cap's own truth, not an archive
  * of what somebody said in their kitchen.
@@ -2273,7 +2303,32 @@ export function makeVoiceSession({
   const exchange = makeSpokenExchange();
   const runner = makeTurnRunner({ call, now, sleep, log });
   const startedMs = now();
-  const meter = { audioInBytes: 0, audioOutBytes: 0, billedItemEvents: 0, toolCalls: 0, browserHeld: 0, audioInPeak: 0, audioInSumSq: 0, audioInSamples: 0, phoneRoute: null, captureBlocks: 0, captureSent: 0, captureNative: false, bargeIns: 0 };
+  const meter = { audioInBytes: 0, audioOutBytes: 0, billedItemEvents: 0, toolCalls: 0, browserHeld: 0, audioInPeak: 0, audioInSumSq: 0, audioInSamples: 0, phoneRoute: null, captureBlocks: 0, captureSent: 0, captureNative: false, bargeIns: 0, heardDropped: 0 };
+  /**
+   * VOICE-15c. WHETHER A MICROPHONE HAS ACTUALLY CARRIED SOUND INTO THE UTTERANCE BEING TRANSCRIBED.
+   *
+   * THE MEASURED FAULT. On TestFlight build 17, 2026-09-12, Jason made a call that delivered 0 s of
+   * audio in, and the provider transcribed one word out of its own greeting or out of silence: "them."
+   * That string left this relay as a `heard-confirmed` frame, reached the live panel, and went into the
+   * agent's conversation as a user turn through sendPrompt. His words: "it said that the call ended and
+   * only one word was said: them. Nobody said that." Nothing on this side asked whether anybody had
+   * said anything, because a provider transcript was taken as proof on its own.
+   *
+   * It is not proof. The only thing on this line that can say a person spoke is the audio the page put
+   * on the socket, and the meter beside this already counts it: `bytes` is what was admitted, `peak`
+   * is the loudest sample in it. Both are required -- zeros are bytes too (VOICE-14b's five calls) and
+   * a level with no bytes behind it cannot happen.
+   *
+   * THE WINDOW OPENS WHEN THE PREVIOUS UTTERANCE CLOSED, not when the provider says speech started.
+   * Server VAD fires a few hundred milliseconds into a sentence and the frames that triggered it have
+   * already been admitted, so a window opened at `speech_started` would throw away exactly the audio
+   * the transcript is made of. A close is the honest boundary, and in always-listening it is the right
+   * one: utterance one's `hear-end` goes out while the person is already talking on utterance two, so
+   * the audio after it belongs to utterance two and the audio before it does not.
+   *
+   * `soundMs` is the grace, and HEARD_GRACE_MS says why a window needs a tail.
+   */
+  const heardWindow = { bytes: 0, peak: 0, soundMs: 0, loggedKey: null };
   const announcements = [];
   let browser = null;
   let provider = null;
@@ -2381,6 +2436,34 @@ export function makeVoiceSession({
    */
   const machineTalking = () => orbState === "speaking" || gate.holding();
 
+  /**
+   * VOICE-15c. Whether the words about to be handled can be the person's at all: bytes admitted since
+   * this utterance's window opened AND a peak in them above the silence floor, or sound inside the
+   * grace tail for a transcript that settles after the microphone shut. heardWindow says why.
+   */
+  const heardSound = () => (heardWindow.bytes > 0 && heardWindow.peak >= HEARD_PEAK_FLOOR)
+    || (heardWindow.soundMs > 0 && now() - heardWindow.soundMs <= HEARD_GRACE_MS);
+  /**
+   * Provider text with nothing heard behind it, dropped and said so.
+   *
+   * ONE LINE PER UTTERANCE, not one per event: a broken capture path produces a transcript update every
+   * couple of hundred milliseconds and a relay log nobody can read is the same as no log. `key` is the
+   * item the events belong to; the tool call passes null because there is one of those per turn and it
+   * is the one that would have reached somebody's conversation.
+   */
+  const logHeardDrop = (what, key = null) => {
+    meter.heardDropped += 1;
+    if (key != null && key === heardWindow.loggedKey) return undefined;
+    heardWindow.loggedKey = key;
+    log(`voice provider text with nothing heard, dropped: ${what}; `
+      + `${heardWindow.bytes} byte(s) admitted since this utterance began, peak ${dbfs(heardWindow.peak)}, `
+      + `floor ${dbfs(HEARD_PEAK_FLOOR)}, ${bytesToSeconds(meter.audioInBytes)} s of audio on this line, `
+      + `${meter.browserHeld + gate.heldFrames} frame(s) held`
+      + (meter.captureNative ? `, the phone handed the page ${meter.captureBlocks} block(s) and it sent ${meter.captureSent}` : "")
+      + (meter.phoneRoute != null ? `, phone output ${meter.phoneRoute.output || "?"}` : ""));
+    return undefined;
+  };
+
   const hearBegin = (itemId = "") => {
     if (machineTalking()) return undefined;
     hearTurn = Math.max(session.userTurn, 1);
@@ -2429,6 +2512,12 @@ export function makeVoiceSession({
     if (turn === 0 || turn !== hearTurn) return undefined;
     hearClosedTurn = turn;
     hearTurn = 0;
+    // VOICE-15c. A closed turn is where the next utterance's audio window opens, so the audio this
+    // one was made of cannot vouch for the next one's words. `soundMs` is deliberately kept: it is
+    // the grace tail for this utterance's own late transcript.
+    heardWindow.bytes = 0;
+    heardWindow.peak = 0;
+    heardWindow.loggedKey = null;
     browser?.sendJson({ t: "hear-end", turn, reason: String(reason ?? "") });
     return undefined;
   };
@@ -2520,6 +2609,17 @@ export function makeVoiceSession({
     if (message.length === 0) {
       hearEnd("empty", turn);
       return answerTool(toolCall.callId, { reply: "I did not catch that. Say it again." });
+    }
+    // VOICE-15c. THE ONE THAT PUT "them." IN SOMEBODY'S CONVERSATION. This argument is the realtime
+    // model's own string, and on a line that has carried no sound it is the model reading its own
+    // greeting back or inventing a word out of silence. Nothing goes to the box, no `heard` frame and
+    // no `heard-confirmed` leave here, and the tool is still answered, because a call left open wedges
+    // the conversation. The person hears that their microphone is not arriving, which is the one fact
+    // this relay actually knows.
+    if (!heardSound()) {
+      logHeardDrop(`a titan tool call carrying ${JSON.stringify(message.slice(0, 80))}`);
+      hearEnd("empty", turn);
+      return answerTool(toolCall.callId, { reply: "I am not hearing your microphone. Check it and say that again." });
     }
     browser?.sendJson({ t: "heard", text: message });
     // A whole-utterance yes or no while a card is on the table is an ANSWER to that card, and it
@@ -2688,6 +2788,13 @@ export function makeVoiceSession({
     }
     if (type === "input_audio_buffer.speech_stopped") { session.hops.t0 = now(); setState("thinking"); return undefined; }
     if (type === "conversation.item.input_audio_transcription.updated" || type === "conversation.item.input_audio_transcription.delta") {
+      // VOICE-15c. NOTHING HEARD, SO THESE ARE NOT THE PERSON'S WORDS. Dropped before the accumulator
+      // as well as before the wire: a sentence nobody said must not be sitting in the caption waiting
+      // for the next frame of real audio to carry it onto the screen.
+      if (!heardSound()) {
+        const id = String(event?.item_id ?? caption.itemId ?? "");
+        return logHeardDrop(`a transcript update for ${id.length > 0 ? id : "an unnamed item"}`, id.length > 0 ? id : `turn:${hearTurn}`);
+      }
       // REPLACE-WHOLE on both vendors. Append-the-delta writes the sentence N times on xAI.
       const text = caption.apply(event);
       browser?.sendJson({ t: "heard", text });
@@ -2700,6 +2807,13 @@ export function makeVoiceSession({
       return undefined;
     }
     if (type === "conversation.item.input_audio_transcription.completed") {
+      // VOICE-15c. The settled transcript of an utterance no microphone carried. This is the event that
+      // produced "them." on build 17, and HEARD_GRACE_MS is why a push-to-talk release does not land
+      // here: the window keeps a tail for exactly this event's lateness.
+      if (!heardSound()) {
+        const id = String(event?.item_id ?? caption.itemId ?? "");
+        return logHeardDrop(`a settled transcript for ${id.length > 0 ? id : "an unnamed item"}`, id.length > 0 ? id : `turn:${hearTurn}`);
+      }
       const text = caption.complete(event);
       const itemId = event?.item_id ?? caption.itemId;
       caption.reset();
@@ -2846,6 +2960,9 @@ export function makeVoiceSession({
     log(`voice ${t.slug} settled this line: ${settled.wallSeconds} s, ${settled.audioInSeconds} s of audio in, `
       + `${settled.audioOutSeconds} s out, ${settled.toolCalls} turn(s) to the agent, ${settled.heldFrames} held frame(s), `
       + `${meter.bargeIns} barge-in(s), mic peak ${dbfs(meter.audioInPeak)} rms ${dbfs(meter.audioInSamples > 0 ? Math.sqrt(meter.audioInSumSq / meter.audioInSamples) : 0)}, `
+      // VOICE-15c. A line where the provider wrote words nobody said looks IDENTICAL to a quiet call
+      // everywhere else on this row, and it is the one number that says the microphone never arrived.
+      + (meter.heardDropped > 0 ? `${meter.heardDropped} provider text(s) dropped with nothing heard, ` : "")
       + (meter.captureNative ? `phone mic frames ${meter.captureBlocks} seen ${meter.captureSent} sent, route ${meter.phoneRoute?.output || "never reported"}${meter.phoneRoute?.error ? ` error "${meter.phoneRoute.error}"` : ""}, ` : "")
       + `and it ended because ${reason}`);
     // VOICE-16. ONE MEMORY FOR THE WHOLE CALL, and it is written AFTER the ledger row is settled on
@@ -2882,6 +2999,11 @@ export function makeVoiceSession({
     hops: { t0: 0 },
     get meter() { return meter; },
     get gate() { return gate; },
+    /**
+     * VOICE-15c. What this line has actually heard in the utterance it is on, so a gate can read the
+     * two numbers the drop decision is made of rather than inferring them from a log line.
+     */
+    get heard() { return { bytes: heardWindow.bytes, peak: heardWindow.peak, soundMs: heardWindow.soundMs, sound: heardSound() }; },
     /** VOICE-14. Whether this line is running with barge-in, so a test can read it off the session. */
     get bargeIn() { return bargeIn; },
     get announcements() { return announcements; },
@@ -2922,13 +3044,22 @@ export function makeVoiceSession({
           // 2026-09-12 sent 18 to 35 s of audio each and the provider heard no speech in any of
           // them; nothing on this side could say whether that audio was a voice or 24 kHz of
           // zeros. PCM16 little-endian, so the peak and the running sum of squares cost one loop.
+          let framePeak = 0;
           for (let at = 0; at + 1 < payload.byteLength; at += 2) {
             const sample = payload.readInt16LE(at);
             const magnitude = sample < 0 ? -sample : sample;
-            if (magnitude > meter.audioInPeak) meter.audioInPeak = magnitude;
+            if (magnitude > framePeak) framePeak = magnitude;
             meter.audioInSumSq += sample * sample;
             meter.audioInSamples += 1;
           }
+          if (framePeak > meter.audioInPeak) meter.audioInPeak = framePeak;
+          // VOICE-15c. The same two numbers for THIS UTTERANCE, which is what decides whether a
+          // provider transcript is allowed to be the person's words. The frame's own peak rather than
+          // the window's is what moves the clock, so a single loud frame does not make the line count
+          // as live for the rest of the call.
+          heardWindow.bytes += payload.byteLength;
+          if (framePeak > heardWindow.peak) heardWindow.peak = framePeak;
+          if (framePeak >= HEARD_PEAK_FLOOR) heardWindow.soundMs = now();
           sendProvider({ type: "input_audio_buffer.append", audio: payload.toString("base64") });
         },
         onJson: (message) => {

@@ -101,12 +101,26 @@ const reply = (id, content, { attemptId = "att1", at = 1_700_000_000_500 } = {})
 /** Wall time, for the one thing that is a real clock: the echo gate's tail after spoken audio. */
 const waitMs = (ms) => new Promise((resolve) => { const timer = setTimeout(resolve, ms); timer.unref?.(); });
 
+/**
+ * VOICE-15c. One 100 ms frame of something that is not silence, which is what a microphone sends.
+ *
+ * EVERY UTTERANCE IN THIS FILE NOW HAS TO CARRY AUDIO, because the relay will not treat a provider
+ * transcript as the person's words unless the line has carried sound since the utterance's window
+ * opened. A transcript with no frames behind it is the measured fault this suite also pins, two cases
+ * down: build 17 on 2026-09-12 sent 0 s of audio and the provider still produced the word "them."
+ */
+const micFrame = (sample = 3000) => {
+  const out = Buffer.alloc(4800);
+  for (let i = 0; i < out.length; i += 2) out.writeInt16LE(sample, i);
+  return out;
+};
+
 const approvalEntry = (id, requestId, { at = 1_700_000_000_400, summary = "Send the email to Richard" } = {}) => ({
   id, kind: "send-message", timestampMs: at,
   message: { type: "auto-review-approval", approval: { requestId, status: "pending", summary, reason: "it sends mail", command: "mail send" } },
 });
 
-async function openSession({ stub, settings, gateway, dir }) {
+async function openSession({ stub, settings, gateway, dir, greet = false }) {
   await writeVoiceSettings(settings, { file: path.join(dir, "voice.json") });
   const t = {
     slug: "acme", name: "Acme", operator: false,
@@ -117,7 +131,7 @@ async function openSession({ stub, settings, gateway, dir }) {
     voiceLedgerFile: path.join(dir, "voice-minutes.jsonl"),
   };
   const logLines = [];
-  const edge = makeVoiceEdge({ greet: false,
+  const edge = makeVoiceEdge({ greet,
     t, call: gateway.call, policy: makeVoicePolicy({}), providerUrl: stub.url,
     log: (line) => logLines.push(String(line)),
   });
@@ -165,6 +179,20 @@ async function openSession({ stub, settings, gateway, dir }) {
   const session = {
     client, frames, edge, settle,
     of: (kind) => frames.json.filter((f) => f.t === kind),
+    /**
+     * The person's microphone carrying real sound into the utterance that is about to be transcribed,
+     * settled against the PROVIDER'S own append count rather than a sleep: the bytes have to be
+     * metered before the transcript that leans on them arrives, or the test is a race.
+     */
+    mic: async (count = 4, { sample = 3000 } = {}) => {
+      // A frame that arrives inside the echo window is dropped by the gate and never reaches the
+      // provider, so the microphone waits for the room to be quiet first. The page does the same.
+      const holdUntil = Number(frames.json.filter((f) => f.t === "speak-end").at(-1)?.holdUntilMs ?? 0);
+      if (holdUntil > Date.now()) await waitMs(holdUntil - Date.now() + 60);
+      const before = stub.events.appendFrames;
+      for (let i = 0; i < count; i += 1) client.send(micFrame(sample));
+      await settle(() => stub.events.appendFrames >= before + count, `${count} microphone frame(s) reaching the provider`);
+    },
     close: async () => { client.terminate(); await new Promise((resolve) => server.close(resolve)); },
   };
   await session.settle(() => session.of("ready").length > 0, "the ready frame");
@@ -175,12 +203,12 @@ async function openSession({ stub, settings, gateway, dir }) {
 }
 
 /** One session, one stub, one temp dir, cleaned up whatever the body does. */
-async function withSession(body, { vendor = "xai", gateway = fakeGateway(), audioFrames = 3, key = "xai-test-key-voice7" } = {}) {
+async function withSession(body, { vendor = "xai", gateway = fakeGateway(), audioFrames = 3, key = "xai-test-key-voice7", greet = false } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "voice-transcription-"));
   const stub = await startStubRealtime({ vendor, audioFrames });
   let session = null;
   try {
-    session = await openSession({ stub, settings: { enabled: true, vendor, apiKey: key }, gateway, dir });
+    session = await openSession({ stub, settings: { enabled: true, vendor, apiKey: key }, gateway, dir, greet });
     await body({ stub, session, gateway });
   } finally {
     await session?.close();
@@ -193,6 +221,9 @@ async function withSession(body, { vendor = "xai", gateway = fakeGateway(), audi
 
 test("a growing utterance arrives as hear frames the page can tell apart, and `heard` still ships", async () => {
   await withSession(async ({ stub, session }) => {
+    // The microphone first, every time: since VOICE-15c a transcript with no sound behind it is
+    // dropped rather than painted, which is its own case further down this file.
+    await session.mic();
     stub.emitSpeechStarted({ itemId: "item_1" });
     await session.settle(() => session.of("hear-begin").length > 0, "the panel being opened");
     await stub.emitUserTranscript(
@@ -225,6 +256,7 @@ test("a growing utterance arrives as hear frames the page can tell apart, and `h
 
 test("the cumulative vendor's correction reaches the page as a replacement, not an append", async () => {
   await withSession(async ({ stub, session }) => {
+    await session.mic();
     stub.emitSpeechStarted({ itemId: "item_c" });
     await stub.emitUserTranscript(["what is the teen", "what is the team"], { itemId: "item_c" });
     await session.settle(() => session.of("hear").length >= 2, "both updates");
@@ -238,11 +270,13 @@ test("on the incremental vendor a new utterance does not carry the last one's wo
   // The measured defect, end to end. Two utterances, no `.completed` between them: before this wave
   // the second one read "open the boxwhat time is it".
   await withSession(async ({ stub, session }) => {
+    await session.mic();
     stub.emitSpeechStarted({ itemId: "item_1" });
     await stub.emitUserTranscript(["open ", "open the box"], { itemId: "item_1" });
     await session.settle(() => session.of("hear").length >= 2, "the first utterance");
     // No `.completed` at all: a failed transcription, a dropped event, or two utterances close
     // together. The next speech_started is what clears it.
+    await session.mic();
     stub.emitSpeechStarted({ itemId: "item_2" });
     await stub.emitUserTranscript(["what ", "what time is it"], { itemId: "item_2" });
     await session.settle(() => session.of("hear").length >= 4, "the second utterance");
@@ -257,6 +291,7 @@ test("on the incremental vendor a new utterance does not carry the last one's wo
 
 test("a transcription that failed closes the turn instead of leaving words over the conversation", async () => {
   await withSession(async ({ stub, session }) => {
+    await session.mic();
     stub.emitSpeechStarted({ itemId: "item_f" });
     await stub.emitUserTranscript(["mm"], { itemId: "item_f" });
     await session.settle(() => session.of("hear").length > 0, "the partial");
@@ -272,6 +307,7 @@ test("a transcription that failed closes the turn instead of leaving words over 
 test("heard-confirmed carries the bytes sendPrompt was called with and the nonce the row is stamped with", async () => {
   const gateway = fakeGateway({ tail: (n) => (n >= 2 ? [reply("e1", "We are on the deploy gate.")] : []) });
   await withSession(async ({ stub, session }) => {
+    await session.mic();
     stub.emitSpeechStarted({ itemId: "item_1" });
     // The transcription model's words and the realtime model's tool argument are DIFFERENT strings,
     // which is the whole reason the confirmation exists.
@@ -305,6 +341,7 @@ test("the confirmation is sent when the box TAKES it, not when Titan finishes an
   let released = false;
   const gateway = fakeGateway({ tail: () => (released ? [reply("e1", "Done.")] : []) });
   await withSession(async ({ stub, session }) => {
+    await session.mic();
     stub.emitSpeechStarted({ itemId: "item_1" });
     stub.emitToolCall({ name: "titan", args: { message: "run the gate" }, callId: "c1", triple: false });
     await session.settle(() => session.of("hear-end").length > 0, "the panel dissolving before the reply");
@@ -323,6 +360,7 @@ test("a spoken yes that closes a held card ends the turn on its own terms", asyn
   const gateway = fakeGateway({ tail: (n) => (n >= 2 ? [approvalEntry("e1", "req1")] : []) });
   await withSession(async ({ stub, session }) => {
     // Turn one: the card is read out as a question, and that turn DOES become a row.
+    await session.mic();
     stub.emitSpeechStopped();
     stub.emitToolCall({ name: "titan", args: { message: "anything pending" }, callId: "c1", triple: false });
     await session.settle(() => stub.events.toolOutputs.length >= 1, "the card spoken back");
@@ -331,6 +369,7 @@ test("a spoken yes that closes a held card ends the turn on its own terms", asyn
     // speaker plus the 350 ms tail, which is three hundred milliseconds of tone here, so this waits
     // it out rather than pretending a person could talk over it.
     await waitMs(900);
+    await session.mic();
     stub.emitSpeechStopped();
     await session.settle(() => session.of("hear-begin").length >= 2, "the second panel");
     stub.emitToolCall({ name: "titan", args: { message: "yes" }, callId: "c2", triple: false });
@@ -345,6 +384,8 @@ test("a spoken yes that closes a held card ends the turn on its own terms", asyn
 test("an utterance the model made nothing of ends the turn rather than hanging over the chat", async () => {
   const gateway = fakeGateway();
   await withSession(async ({ stub, session }) => {
+    // Sound on the line, so what this pins is the EMPTY ARGUMENT and not the nothing-heard guard.
+    await session.mic();
     stub.emitSpeechStopped();
     await session.settle(() => session.of("hear-begin").length > 0, "the panel");
     stub.emitToolCall({ name: "titan", args: { message: "   " }, callId: "c1", triple: false });
@@ -358,6 +399,7 @@ test("an utterance the model made nothing of ends the turn rather than hanging o
 test("a send his box refused ends the turn, because no row will ever arrive", async () => {
   const gateway = fakeGateway({ fail: (command) => (command === "sendPrompt" ? new Error("HTTP 503") : null) });
   await withSession(async ({ stub, session }) => {
+    await session.mic();
     stub.emitSpeechStopped();
     await session.settle(() => session.of("hear-begin").length > 0, "the panel");
     stub.emitToolCall({ name: "titan", args: { message: "start the gate" }, callId: "c1", triple: false });
@@ -371,6 +413,7 @@ test("a finished response that asked Titan nothing still ends the turn", async (
   // The instructions forbid the model answering out of its own head. They cannot prevent it, and a
   // panel that waits for a row would sit over the conversation for the rest of the call.
   await withSession(async ({ stub, session }) => {
+    await session.mic();
     stub.emitSpeechStarted({ itemId: "item_1" });
     await stub.emitUserTranscript(["never mind"], { itemId: "item_1" });
     await session.settle(() => session.of("hear").length > 0, "the words");
@@ -384,6 +427,7 @@ test("a finished response that asked Titan nothing still ends the turn", async (
 test("every open turn is closed exactly once, whatever ends it", async () => {
   const gateway = fakeGateway({ tail: (n) => (n >= 2 ? [reply("e1", "Right.")] : []) });
   await withSession(async ({ stub, session }) => {
+    await session.mic();
     stub.emitSpeechStopped();
     stub.emitToolCall({ name: "titan", args: { message: "one thing" }, callId: "c1", triple: true });
     await session.settle(() => session.of("hear-end").length > 0, "the turn closing");
@@ -403,6 +447,9 @@ test("no words are painted while Titan is the one talking", async () => {
   // ever slips, the panel must not render the machine's sentence as the person's.
   const gateway = fakeGateway({ tail: (n) => (n >= 2 ? [reply("e1", "Right.")] : []) });
   await withSession(async ({ stub, session }) => {
+    // Sound BEFORE the machine starts talking, so the guard this case proves is the echo one: the
+    // frames that arrive while Titan speaks are held and never counted as anything the person said.
+    await session.mic();
     stub.emitSpeechStopped();
     stub.emitToolCall({ name: "titan", args: { message: "say something" }, callId: "c1", triple: false });
     await session.settle(() => session.of("speak-begin").length > 0, "Titan speaking");
@@ -417,4 +464,155 @@ test("no words are painted while Titan is the one talking", async () => {
     // The shipped strip is unchanged, so this wave is not a behaviour change for the old page.
     assert.ok(session.of("heard").length > 0);
   }, { gateway, audioFrames: 30 });
+});
+
+// ---- VOICE-15c: provider text with nothing heard --------------------------------------------------
+//
+// Jason, on TestFlight build 17, 2026-09-12: "when it was done, it said that the call ended and only
+// one word was said: them. Nobody said that." That call delivered 0 s of audio in. The provider
+// transcribed its own greeting, or silence, as one word, and this relay passed it on as his: a `heard`
+// frame, a `heard-confirmed` frame into the live panel, and a sendPrompt that put "them." into Titan's
+// conversation as a user turn. Nothing asked whether a microphone had carried anything, because a
+// provider transcript was taken as proof on its own.
+//
+// It is not proof. The only thing on this line that knows somebody spoke is the audio the page put on
+// the socket, and the relay was already counting it. These cases are that question being asked.
+
+test("VOICE-15c: a transcript on a line that carried no audio is dropped, and the log says so", async () => {
+  const gateway = fakeGateway();
+  await withSession(async ({ stub, session }) => {
+    // NO `session.mic()` ANYWHERE IN THIS CASE. That is build 17: 0 s of audio in, and a provider
+    // producing words regardless.
+    stub.emitSpeechStarted({ itemId: "item_silent" });
+    await session.settle(() => session.of("hear-begin").length > 0, "the provider's own turn detection");
+    await stub.emitUserTranscript(["them", "them."], { itemId: "item_silent" });
+    stub.emitUserTranscriptDone("them.", { itemId: "item_silent" });
+    stub.emitToolCall({ name: "titan", args: { message: "them." }, callId: "c1", triple: false });
+    await session.settle(() => stub.events.toolOutputs.length > 0, "the tool call being answered anyway");
+
+    assert.deepEqual(session.of("hear"), [], "not one word was painted as the person's");
+    assert.deepEqual(session.of("heard"), [], "and the shipped strip got nothing either");
+    assert.deepEqual(session.of("heard-confirmed"), [], "nothing was confirmed, because nothing was said");
+    assert.equal(gateway.of("sendPrompt").length, 0, "and NOTHING reached Titan's conversation");
+    // The tool is still answered: a call left open wedges the conversation, and the person is told the
+    // one thing this relay actually knows.
+    assert.match(JSON.parse(stub.events.toolOutputs[0].output).reply, /not hearing your microphone/);
+    // The panel does not hang waiting for a row that is never coming.
+    assert.equal(session.of("hear-end").at(-1).reason, "empty");
+
+    const drops = session.frames.log.filter((line) => line.includes("provider text with nothing heard, dropped"));
+    assert.equal(drops.length, 2, `one line for the utterance and one for the tool call: ${JSON.stringify(drops)}`);
+    assert.match(drops[0], /0 byte\(s\) admitted since this utterance began, peak -inf dBFS/);
+    assert.match(drops[1], /a titan tool call carrying "them\."/);
+    const live = session.edge.sessions[0];
+    assert.equal(live.meter.heardDropped, 4, "two updates, one settled transcript and one tool call");
+    assert.equal(live.heard.sound, false);
+    assert.equal(live.heard.bytes, 0);
+  }, { gateway });
+});
+
+test("VOICE-15c: digital silence is bytes with no sound in them, and those words are dropped too", async () => {
+  // VOICE-14b's five calls from the phone on 2026-09-12 sent 18 to 35 s of audio each and the provider
+  // heard no speech in any of them, which is what a capture path handing over zeros looks like from
+  // here. A byte count on its own would have called that line live.
+  const gateway = fakeGateway();
+  await withSession(async ({ stub, session }) => {
+    await session.mic(4, { sample: 0 });
+    const live = session.edge.sessions[0];
+    assert.equal(live.heard.bytes, 19200, "the bytes really did arrive and really were admitted");
+    assert.equal(live.heard.peak, 0, "and there is nothing in them");
+    assert.equal(live.heard.sound, false);
+
+    stub.emitSpeechStarted({ itemId: "item_zeros" });
+    await stub.emitUserTranscript(["them."], { itemId: "item_zeros" });
+    stub.emitToolCall({ name: "titan", args: { message: "them." }, callId: "c1", triple: false });
+    await session.settle(() => stub.events.toolOutputs.length > 0, "the tool call being answered");
+    assert.deepEqual(session.of("hear"), []);
+    assert.equal(gateway.of("sendPrompt").length, 0);
+    const drops = session.frames.log.filter((line) => line.includes("provider text with nothing heard, dropped"));
+    assert.match(drops[0], /19200 byte\(s\) admitted since this utterance began, peak -inf dBFS, floor -54\.2 dBFS/);
+  }, { gateway });
+});
+
+test("VOICE-15c: the same words after real audio land exactly as they did before", async () => {
+  // The other half of the claim, and the one that matters more: a person who really did speak is not
+  // made to say it twice. Same vendor, same events, same order as the case above.
+  const gateway = fakeGateway({ tail: (n) => (n >= 2 ? [reply("e1", "We are on the deploy gate.")] : []) });
+  await withSession(async ({ stub, session }) => {
+    await session.mic();
+    const live = session.edge.sessions[0];
+    assert.equal(live.heard.bytes, 19200, "0.4 s of audio, four 100 ms frames");
+    assert.equal(live.heard.peak, 3000, "and it has sound in it");
+    assert.equal(live.heard.sound, true);
+
+    stub.emitSpeechStarted({ itemId: "item_heard" });
+    await stub.emitUserTranscript(["what is the team working on"], { itemId: "item_heard" });
+    stub.emitUserTranscriptDone("what is the team working on", { itemId: "item_heard" });
+    stub.emitToolCall({ name: "titan", args: { message: "What is the team working on?" }, callId: "c1", triple: false });
+    await session.settle(() => session.of("heard-confirmed").length > 0, "the confirmation");
+
+    assert.equal(session.of("hear").filter((f) => f.final === false).length, 1);
+    assert.equal(session.of("hear").filter((f) => f.final === true).length, 1);
+    assert.equal(session.of("heard").length, 3, "two transcription events and the tool call's own string");
+    assert.equal(gateway.of("sendPrompt")[0].args.prompt, "What is the team working on?");
+    assert.equal(session.of("heard-confirmed").at(-1).text, "What is the team working on?");
+    assert.equal(session.of("hear-end").at(-1).reason, "sent");
+    assert.equal(session.edge.sessions[0].meter.heardDropped, 0, "nothing was dropped on a line somebody spoke on");
+  }, { gateway });
+});
+
+test("VOICE-15c: a transcript that settles after the microphone shut is still the person's", async () => {
+  // PUSH TO TALK SHUTS THE MICROPHONE ON THE RELEASE, and the settled transcript of what was just said
+  // arrives after that, on a line that is now quiet: OpenAI's own transcription guide says those
+  // `.completed` events are late and unordered. The window a transcript is measured against is reset by
+  // the send, so without the grace tail in HEARD_GRACE_MS this would throw away the corrected final of
+  // a sentence somebody really did say, and the closing note would keep the half-built one instead.
+  const gateway = fakeGateway({ tail: (n) => (n >= 2 ? [reply("e1", "Right.")] : []) });
+  await withSession(async ({ stub, session }) => {
+    await session.mic();
+    stub.emitSpeechStarted({ itemId: "item_late" });
+    await stub.emitUserTranscript(["open the bo"], { itemId: "item_late" });
+    stub.emitToolCall({ name: "titan", args: { message: "open the box" }, callId: "c1", triple: false });
+    await session.settle(() => session.of("hear-end").length > 0, "the send, which resets the audio window");
+    const live = session.edge.sessions[0];
+    assert.equal(live.heard.bytes, 0, "the window really is empty now");
+    assert.equal(live.heard.sound, true, "and the tail is what still vouches for these words");
+
+    const before = session.of("heard").length;
+    stub.emitUserTranscriptDone("Open the box.", { itemId: "item_late" });
+    await session.settle(() => session.of("heard").length > before, "the late settled transcript still being taken");
+    assert.equal(session.of("heard").at(-1).text, "Open the box.");
+    assert.equal(session.edge.sessions[0].meter.heardDropped, 0);
+  }, { gateway });
+});
+
+test("VOICE-15c: the greeting still goes out on a line nobody can be heard on", async () => {
+  // VOICE-14c says hello before the person has said a word, and VOICE-3 reads whole sentences of the
+  // answer out loud. Both are the MODEL'S OWN OUTPUT and neither is a heard event, so neither may be
+  // gated on a microphone. The greeting is also the thing the provider transcribed back as "them." on
+  // build 17, which is the second half of this case.
+  const gateway = fakeGateway();
+  await withSession(async ({ stub, session }) => {
+    await session.settle(() => stub.events.responseCreates > 0, "the greeting's own response");
+    const items = stub.events.inbound
+      .filter((event) => event.type === "conversation.item.create" && event.item?.type === "message")
+      .map((event) => String(event.item.content?.[0]?.text ?? ""));
+    assert.equal(items.length, 1, `one greeting and nothing else: ${JSON.stringify(items)}`);
+    assert.ok(items[0].includes("Read this out to the person"), items[0]);
+
+    // Now the provider reads its own greeting back as though somebody had said it. The echo gate holds
+    // the line while the greeting is still coming out of the speaker, so this waits that out FIRST:
+    // what has to be proved here is the audio guard, not the gate that was already there.
+    await session.settle(() => session.of("speak-end").length > 0, "the greeting finishing");
+    const holdUntil = Number(session.of("speak-end").at(-1).holdUntilMs ?? 0);
+    await waitMs(Math.max(0, holdUntil - Date.now()) + 60);
+    stub.emitSpeechStarted({ itemId: "item_greeting_echo" });
+    await stub.emitUserTranscript(["Hey there."], { itemId: "item_greeting_echo" });
+    await session.settle(
+      () => session.frames.log.some((line) => line.includes("provider text with nothing heard, dropped")),
+      "the greeting coming back being dropped",
+    );
+    assert.deepEqual(session.of("hear"), [], "the machine's own hello is never the person's words");
+    assert.equal(gateway.of("sendPrompt").length, 0);
+  }, { gateway, greet: true });
 });

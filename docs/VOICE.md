@@ -258,6 +258,21 @@ audio. So the panel's last paint is the confirmed text, and the `nonce` on it is
 that row, so the page can tie the panel to the line it turns into rather than drawing a line of its
 own.
 
+**Nothing on that list is sent for words the microphone never carried.** Measured on Jason's phone on
+build 17, 2026-09-12: a call that delivered 0 s of audio in still produced a transcript from the
+provider, one word, "them.", and this relay sent it on as his words and put it into the agent's
+conversation as a user turn. A provider transcript is not evidence that anybody spoke. The audio the
+page puts on the socket is the only thing here that is, and the relay was already counting it, so a
+transcript and the realtime model's own tool argument are now taken as the person's words only when
+the line has admitted bytes with sound in them since the previous utterance closed: a peak above
+-54 dBFS of full scale, with a three second tail for the settled transcript that lands after push to
+talk has already shut the microphone. Anything else is logged as provider text with nothing heard and
+dropped, which means no `hear`, no `heard`, no `heard-confirmed`, nothing in the caption and nothing
+sent to the box; the model's tool call is still answered, with the one fact the relay knows, so the
+line says out loud that the microphone is not arriving rather than going quiet. The greeting (section
+14c) and the sentences of his answer read out while he is still writing (VOICE-3) are the model's own
+output, never a heard event, and nothing about a microphone gates either of them.
+
 **It is sent when your box takes the words, not when your team lead answers.** That is 6 to 14
 milliseconds rather than 5.5 to 25 seconds, and a panel that waited for the answer would sit over the
 conversation for the whole of his thinking time.
