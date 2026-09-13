@@ -908,3 +908,145 @@ test("VOICE-7: a transcript for the utterance before this one never paints into 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---- VOICE-14: barge-in, and only for the phone app ----------------------------------------------
+//
+// Jason, 2026-09-12 on the iPhone call screen: "I can't barge in." The microphone was shut while the
+// agent spoke, on purpose, because on a laptop the interruption comes out of the speakers and the
+// thing being interrupted is the person. In the app iOS owns the audio session and takes the agent's
+// voice out of the microphone, so the page asks for barge-in on its opening frame and this relay
+// gives it a different line: no echo gate, and a reply that is cancelled the moment somebody talks
+// over it. Everything here is driven through the real stub provider and a real browser socket,
+// because the claim is about what leaves this relay in which direction.
+
+/** One 100 ms frame of something that is not silence, which is what a microphone really sends. */
+const micFrame = () => {
+  const out = Buffer.alloc(4800);
+  for (let i = 0; i < out.length; i += 2) out.writeInt16LE(3000, i);
+  return out;
+};
+
+test("VOICE-14: the app's line cancels the reply, flushes the page, and counts the barge-in", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-barge-"));
+  // SIX SECONDS OF REPLY IN ONE GO, so the booked time is still well in the future when the person
+  // starts talking. The stub's default is three frames, and 300 ms is a race rather than a test.
+  const stub = await startStubRealtime({ vendor: "xai", audioFrames: 60 });
+  const gateway = fakeGateway({ agents: [{ id: "a1", name: "Titan", isRunning: true }], tail: () => [] });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0014" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    session.client.send(JSON.stringify({ t: "hello", bargeIn: true }));
+    await session.settle(() => session.edge.sessions[0]?.bargeIn === true, "the relay taking the opening frame");
+    const live = session.edge.sessions[0];
+
+    await stub.speak("This is the long answer somebody is about to talk straight over.");
+    await session.settle(() => session.frames.binary.length >= 60, "the reply reaching the page");
+    assert.ok(live.gate.playsUntilMs > Date.now(), "there is sound still booked to come out of the speaker");
+
+    // THE MICROPHONE IS OPEN WHILE THAT SOUND IS STILL BOOKED, which is the half of barge-in this
+    // relay owns: a frame held here is a frame the provider's turn detection never sees, and then no
+    // interruption is possible whatever the app does with its audio session.
+    const appended = stub.events.appendFrames;
+    session.client.send(micFrame());
+    session.client.send(micFrame());
+    await session.settle(() => stub.events.appendFrames >= appended + 2, "the person's own frames reaching the provider mid-reply");
+    assert.equal(live.gate.heldFrames, 0, "a barge-in line holds nothing");
+
+    stub.emitSpeechStarted({ itemId: "item_barge" });
+    await session.settle(() => session.of("flush").length > 0, "the flush going to the page");
+    assert.ok(stub.events.inbound.some((one) => one.type === "response.cancel"),
+      `the provider was never told to stop: ${JSON.stringify(stub.events.inbound.map((one) => one.type))}`);
+    assert.equal(session.of("flush").length, 1, "one flush, not one per frame that was queued");
+    assert.equal(live.meter.bargeIns, 1, "and the session counted it");
+    assert.equal(live.gate.playsUntilMs, 0, "the room is quiet as far as this relay is concerned");
+    // AND THE PERSON'S OWN WORDS GET THEIR OWN PANEL. Without the release above, the gate still reads
+    // as holding, hear-begin is dropped as the machine's own noise, and somebody talks into nothing.
+    await session.settle(() => session.of("hear-begin").length > 0, "the person's panel opening on the interruption");
+
+    // THE CLOSE LINE. The settled row in one sentence, with the barge-in count in it, because a call
+    // where the person cut the agent off and one where the app never managed it look identical
+    // everywhere else.
+    await live.close("the gate closed this line");
+    const closeLine = session.frames.log.find((one) => one.includes("settled this line"));
+    assert.ok(closeLine != null, `no close line was printed: ${session.frames.log.join(" | ").slice(0, 400)}`);
+    assert.match(closeLine, /1 barge-in\(s\)/);
+    assert.match(closeLine, /ended because the gate closed this line/);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-14: a browser's line is byte for byte what it was -- frames held, nothing cancelled", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-barge-"));
+  const stub = await startStubRealtime({ vendor: "xai", audioFrames: 60 });
+  const gateway = fakeGateway({ agents: [{ id: "a1", name: "Titan", isRunning: true }], tail: () => [] });
+  let session = null;
+  try {
+    // NO OPENING FRAME AT ALL, which is what a browser sends: ui/machine-room/voice.js writes it only
+    // when window.__titanbotShell.platform is "ios".
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0015" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    const live = session.edge.sessions[0];
+    assert.equal(live.bargeIn, false, "a line nobody asked for barge-in on does not get it");
+
+    await stub.speak("The reply a browser is not allowed to talk over.");
+    await session.settle(() => session.frames.binary.length >= 60, "the reply reaching the page");
+    const appended = stub.events.appendFrames;
+    session.client.send(micFrame());
+    session.client.send(micFrame());
+    await session.settle(() => live.gate.heldFrames >= 2, "the relay dropping the frames the agent would be heard in");
+    assert.equal(stub.events.appendFrames, appended, "and not one of them reached the provider");
+
+    stub.emitSpeechStarted({ itemId: "item_desktop" });
+    await new Promise((resolve) => { const timer = setTimeout(resolve, 250); timer.unref(); });
+    assert.deepEqual(session.of("flush"), [], "a browser is never told to throw its playback away");
+    assert.ok(!stub.events.inbound.some((one) => one.type === "response.cancel"),
+      "and the provider is never told to stop mid-reply");
+    assert.equal(live.meter.bargeIns, 0);
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-14: an interruption with nothing playing cancels nothing, because there was nothing to interrupt", async () => {
+  // The test is BOOKED AUDIO and not the orb: a speech_started sets the orb back to listening before
+  // anything else runs, so a guard on the orb would cancel a response that had not made a sound yet,
+  // on the one utterance a person says into a silent room.
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-barge-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  const gateway = fakeGateway({ agents: [{ id: "a1", name: "Titan", isRunning: true }], tail: () => [] });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0016" }, gateway, dir });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    session.client.send(JSON.stringify({ t: "hello", bargeIn: true }));
+    await session.settle(() => session.edge.sessions[0]?.bargeIn === true, "the relay taking the opening frame");
+    const live = session.edge.sessions[0];
+    assert.equal(live.gate.playsUntilMs, 0, "nothing has been spoken on this line yet");
+
+    stub.emitSpeechStarted({ itemId: "item_quiet" });
+    await session.settle(() => session.of("hear-begin").length > 0, "the panel opening on an ordinary utterance");
+    assert.deepEqual(session.of("flush"), [], "there was nothing queued to flush");
+    assert.ok(!stub.events.inbound.some((one) => one.type === "response.cancel"), "and nothing to cancel");
+    assert.equal(live.meter.bargeIns, 0, "so this was not a barge-in and is not counted as one");
+
+    // AND A SECOND OPENING FRAME CANNOT CHANGE THE LINE MID-CALL. A page that could toggle this could
+    // switch the echo gate off and on at will, and nothing about which host a socket came from changes
+    // halfway through a call.
+    session.client.send(JSON.stringify({ t: "hello", bargeIn: false }));
+    await new Promise((resolve) => { const timer = setTimeout(resolve, 150); timer.unref(); });
+    assert.equal(live.bargeIn, true, "the first opening frame is the one that decides");
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

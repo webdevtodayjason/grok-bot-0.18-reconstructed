@@ -45,6 +45,17 @@
  *      live at LiteLLM as credentials and read back masked, and a realtime key is not a LiteLLM
  *      deployment. That is PROVIDERS-10, and the two cosmetic realtime rows there are now deleted.
  *
+ * BARGE-IN IS THE PHONE APP'S AND NOTHING ELSE'S (VOICE-14). The echo gate below is why a browser's
+ * microphone cannot hear the agent speak, and for a browser it is unchanged. A page inside the iPhone
+ * app says `bargeIn: true` on its opening frame and gets a different line: its frames are never held,
+ * and an `input_audio_buffer.speech_started` arriving while audio is STILL BOOKED to be playing
+ * cancels the reply at the provider and tells the page to throw away what it has queued. Why the
+ * phone and not a laptop: the app owns the audio session and iOS takes the agent's own voice out of
+ * the microphone, so the thing the gate defends against is not in the room. The relay takes the page's
+ * WORD for which host it is in -- there is nothing on a socket that proves an app -- so the first
+ * `hello` wins and what that word can buy is bounded by the two audio ceilings further down and by
+ * nothing else: it cannot raise a cap, spend another workspace's minutes or reach a key.
+ *
  * THE SILENT-SOCKET RULE, which the whole refusal path is built around. Measured: an unknown
  * upgrade path answers zero bytes with no status line, and real Chrome reports only `onerror` at
  * 16 ms with no close code -- indistinguishable from the relay being down, which is the
@@ -1541,7 +1552,7 @@ export function makeVoiceSession({
   const caption = makeCaption(vendor.transcription.mode);
   const runner = makeTurnRunner({ call, now, sleep, log });
   const startedMs = now();
-  const meter = { audioInBytes: 0, audioOutBytes: 0, billedItemEvents: 0, toolCalls: 0, browserHeld: 0 };
+  const meter = { audioInBytes: 0, audioOutBytes: 0, billedItemEvents: 0, toolCalls: 0, browserHeld: 0, bargeIns: 0 };
   const announcements = [];
   let browser = null;
   let provider = null;
@@ -1549,6 +1560,14 @@ export function makeVoiceSession({
   let lastAnnounceMs = 0;
   let speakId = 0;
   let stopping = false;
+  /**
+   * VOICE-14. Whether this line runs with barge-in, and whether the page has already said so. The page
+   * asks for it on its opening frame and the FIRST answer is kept: a page that could toggle this
+   * mid-call could switch the echo gate off and on at will, and nothing about which host a socket is
+   * coming from changes halfway through a call.
+   */
+  let bargeIn = false;
+  let helloSeen = false;
   let tick = null;
   let rateLimitWaits = 0;
   /** Whether the provider socket ever opened, which is what tells a refused dial from a dropped line. */
@@ -1826,6 +1845,23 @@ export function makeVoiceSession({
     }
     if (type === "session.updated") { setState("listening"); return undefined; }
     if (type === "input_audio_buffer.speech_started") {
+      // VOICE-14. THE PERSON TALKED OVER THE AGENT, which in the phone app is allowed and everywhere
+      // else cannot happen, because everywhere else the microphone was shut. BOOKED AUDIO IS THE TEST
+      // and the orb is not: the model hands a reply over far faster than it is spoken, so the only
+      // honest answer to "is there still sound in the room" is playsUntilMs in the future. Three things
+      // then happen in this order -- the provider is told to stop generating, the page is told to throw
+      // away what it has queued, and the gate is released so the words being said right now are not
+      // mistaken for the machine's own and dropped from the person's panel.
+      if (bargeIn && gate.playsUntilMs > now()) {
+        meter.bargeIns += 1;
+        sendProvider({ type: "response.cancel" });
+        browser?.sendJson({ t: "flush" });
+        gate.release();
+        // The response we just cancelled is not in flight any more, and say() waits on this: leaving it
+        // true would hold the next announcement for sixteen seconds over a reply nobody is hearing.
+        responseInFlight = false;
+        log(`voice barge-in ${meter.bargeIns} on this line: the person talked over the reply`);
+      }
       session.userTurn += 1;
       runner.newUserTurn();
       // THE RESET THAT WAS MISSING. Until 2026-09-10 the accumulator was cleared only by a
@@ -1925,7 +1961,15 @@ export function makeVoiceSession({
     setState("off");
     browser?.bye(reason, 1000, condition);
     try { provider?.close(1000, "done"); } catch { /* already gone */ }
-    await ledger.settle(rowNow("closed", reason)).catch((error) => log(`voice could not settle the ledger: ${error?.message ?? error}`));
+    const settled = rowNow("closed", reason);
+    await ledger.settle(settled).catch((error) => log(`voice could not settle the ledger: ${error?.message ?? error}`));
+    // THE CLOSE LINE. The settled row in one sentence, because the row itself is a file a person has to
+    // go and read and this is the thing a relay log already has in front of them. VOICE-14 adds the
+    // barge-in count to it: a call where the person cut the agent off four times and a call where the
+    // app never managed it once look identical everywhere else.
+    log(`voice ${t.slug} settled this line: ${settled.wallSeconds} s, ${settled.audioInSeconds} s of audio in, `
+      + `${settled.audioOutSeconds} s out, ${settled.toolCalls} turn(s) to the agent, ${settled.heldFrames} held frame(s), `
+      + `${meter.bargeIns} barge-in(s), and it ended because ${reason}`);
     // The edge forgets this session here, so "what is live right now" is a truthful answer and the
     // one-call-at-a-time check reads it. Every finished session used to be retained for the life of
     // the relay process, with its socket wrappers, its gate and its meter.
@@ -1953,6 +1997,8 @@ export function makeVoiceSession({
     hops: { t0: 0 },
     get meter() { return meter; },
     get gate() { return gate; },
+    /** VOICE-14. Whether this line is running with barge-in, so a test can read it off the session. */
+    get bargeIn() { return bargeIn; },
     get announcements() { return announcements; },
     get stopped() { return stopping; },
     row: (state, reason) => rowNow(state, reason),
@@ -1968,7 +2014,12 @@ export function makeVoiceSession({
           // The gate lives on BOTH sides: the page holds capture, and anything that arrives inside
           // the same window anyway is DROPPED here, so a patched page cannot make the model hear
           // itself and the held count is a server-side number with no browser in it.
-          if (!gate.admit(payload.byteLength)) return;
+          //
+          // VOICE-14. A BARGE-IN LINE NEVER HOLDS A FRAME. The app's own echo cancellation is what
+          // keeps the agent out of the microphone there, and holding here is the one thing that makes
+          // barge-in impossible: the provider's turn detection cannot fire on audio it never got. The
+          // two ceilings below still apply, because those are about spend and not about echo.
+          if (!bargeIn && !gate.admit(payload.byteLength)) return;
           // THE METER THE VENDOR BILLS ON IS AUDIO SECONDS, AND THE CAPS COUNT WALL SECONDS, so the
           // audio has its own ceiling beside the wall one and the page does not get to set the rate.
           // MEASURED on this Mac before this: 3000 frames, 14,400,000 bytes, five minutes of audio
@@ -1985,6 +2036,16 @@ export function makeVoiceSession({
           sendProvider({ type: "input_audio_buffer.append", audio: payload.toString("base64") });
         },
         onJson: (message) => {
+          // VOICE-14. The opening frame. One field on it, and a browser does not send the frame at all,
+          // so a desktop line carries exactly the bytes it carried before this wave.
+          if (message?.t === "hello") {
+            if (!helloSeen) {
+              helloSeen = true;
+              bargeIn = message.bargeIn === true;
+              if (bargeIn) log(`voice ${t.slug} is talking from the app, so this line can be interrupted`);
+            }
+            return undefined;
+          }
           if (message?.t === "stop") { void close("the person pressed the button"); return undefined; }
           if (message?.t === "ping") { browser?.sendJson({ t: "pong" }); return undefined; }
           if (message?.t === "held") { meter.browserHeld += Math.max(0, Number(message.frames) || 0); return undefined; }

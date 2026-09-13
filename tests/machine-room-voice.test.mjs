@@ -725,7 +725,18 @@ test("VOICE-1 source: styles.css gained only new selectors, under one banner", a
   //
   // THE LIST IS WIDENED IN THE COMMIT THAT NEEDS IT, deliberately, rather than discovered in CI by
   // whoever runs the suite next.
-  const allowed = new Set([".composer", ".composer[data-voice-line]"]);
+  //
+  // AND WIDENED HERE, LATE, BY SOMEBODY ELSE'S WAVE. ROUTER-1 (0679508) appended the Think harder
+  // switch's three rules into this same section and widened `.composer` to five tracks without
+  // touching this list, so the suite on this branch arrived at VOICE-14 with this case already red.
+  // The rules are an APPEND of new selectors, which is the thing this case exists to bless; what it
+  // could not do is tell "below the VOICE-1 banner" from "a voice selector" once a later wave put its
+  // own rules under that banner without one of its own. Declared rather than pattern-matched, so the
+  // next wave that does this is a failure here again and not a quietly growing exception.
+  const allowed = new Set([
+    ".composer", ".composer[data-voice-line]",
+    ".think-harder", ".think-harder input", ".think-harder span",
+  ]);
   for (const selector of selectors) {
     for (const part of selector.split(",").map((one) => one.trim()).filter(Boolean)) {
       if (allowed.has(part)) continue;
@@ -742,15 +753,18 @@ test("VOICE-1 source: styles.css gained only new selectors, under one banner", a
       `the .composer override carries more than the track it exists for: ${properties.join(", ")}`);
   }
   // The gated rule adds exactly one track to the ungated one, which is the whole of its job. An
-  // unconditional fifth track was MEASURED to take 4 px off the message box through .composer's own
-  // 4 px gap, so the base rule must stay four tracks and the gated one five.
+  // unconditional extra track was MEASURED to take 4 px off the message box through .composer's own
+  // 4 px gap, so what is asserted is the DIFFERENCE and not either number: the base rule carries one
+  // track per child the composer has of its own, which was four when VOICE-2 measured it and is five
+  // since ROUTER-1 (0679508) put the Think harder switch beside Send, and the gated rule carries one
+  // more than that for the line.
   const tracks = (selector) => {
     const rule = composerRules.find((one) => `.composer${one[1] ?? ""}` === selector);
     assert.ok(rule != null, `${selector} is not under the banner`);
     return rule[2].split(":")[1].trim().replace(/;$/, "").split(/\s+(?![^(]*\))/).length;
   };
-  assert.equal(tracks(".composer"), 4, "at rest the composer is the four-track form it has always been");
-  assert.equal(tracks(".composer[data-voice-line]"), 5, "and it grows a track only while the line is up");
+  assert.equal(tracks(".composer[data-voice-line]"), tracks(".composer") + 1,
+    "the line's track is the ONE thing the gated rule adds, and at rest the composer is the form it has always been");
   for (const keyframes of [...after.matchAll(/@keyframes\s+([\w-]+)/g)].map((m) => m[1])) {
     assert.match(keyframes, /^voice-/, `${keyframes} could collide with another wave's animation`);
   }
@@ -913,27 +927,50 @@ test("VOICE-1 in a real browser: the button is on screen, a mouse can press it, 
       [...document.querySelectorAll("script[src]")].some((tag) => /voice\.js/.test(tag.getAttribute("src") || "")));
     assert.equal(tagged, true, "a module the page never loads is 300 lines that never run");
 
+    // ALWAYS LISTENING, ASKED FOR OUT LOUD, because this leg measures a TOGGLE: one press opens the
+    // line and the next press leaves it. Push to talk became the DEFAULT in VOICE-7 and VOICE-11 then
+    // made a tap on a hold control a refusal in words, so the single click below quietly stopped
+    // dialling anything and this case arrived at VOICE-14 red with "the press opened no socket" on a
+    // branch where nothing about the toggle had changed. The hold gesture has its own cases above with
+    // no browser in them; what only a browser can answer is the geometry, and that is the same either
+    // way. The door the mode also travels on answers 404 here and is deliberately not waited for.
+    await page.evaluate(() => window.__voice.setTalkMode("always"));
+
     // The boot cover is opaque and on top until app.js paints or its 8 s ceiling expires. With no
     // gateway here it is the ceiling, so the box is POLLED rather than read once -- a control behind
     // a cover is not a control on the screen.
+    //
+    // AND POLLED UNTIL IT STOPS MOVING, which is new and is what made this case flaky rather than red.
+    // ROUTER-1 put the Think harder switch in the composer and it arrives on a later paint than the
+    // Talk button does, so the button slides along the row AFTER it is first reachable: MEASURED here
+    // at 1440x900, centre x 918 on the first reachable read and 981 once the composer had settled.
+    // page.mouse.click goes to the coordinates it is given, so a click taken from the first read landed
+    // 63 px away on whatever had taken that space, nothing happened, and the failure read "the press
+    // opened no socket". Clicking it by SELECTOR would have hidden that rather than fixed it: the whole
+    // point of this leg is a mouse at real coordinates, which is verify-ui-in-a-real-browser's rule. So
+    // the same rect has to come back twice before the mouse is told where to go.
     let box = null;
-    let reachable = false;
-    for (let n = 0; n < 60 && !reachable; n += 1) {
-      box = await page.evaluate(() => {
-        const node = document.querySelector("[data-voice-talk]");
-        if (node == null) return null;
-        const rect = node.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) return null;
-        const x = Math.round(rect.left + rect.width / 2);
-        const y = Math.round(rect.top + rect.height / 2);
-        const hit = document.elementFromPoint(x, y);
-        return { x, y, label: node.textContent.replace(/\s+/g, " ").trim(), reachable: node.contains(hit) || hit === node };
-      });
-      reachable = Boolean(box?.reachable);
-      if (!reachable) await page.waitForTimeout(500);
+    let steady = 0;
+    const readBox = () => page.evaluate(() => {
+      const node = document.querySelector("[data-voice-talk]");
+      if (node == null) return null;
+      const rect = node.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return null;
+      const x = Math.round(rect.left + rect.width / 2);
+      const y = Math.round(rect.top + rect.height / 2);
+      const hit = document.elementFromPoint(x, y);
+      return { x, y, label: node.textContent.replace(/\s+/g, " ").trim(), reachable: node.contains(hit) || hit === node };
+    });
+    for (let n = 0; n < 60 && steady < 2; n += 1) {
+      const seen = await readBox();
+      const same = seen != null && box != null && seen.x === box.x && seen.y === box.y;
+      steady = seen?.reachable === true ? (same ? steady + 1 : 1) : 0;
+      if (seen != null) box = seen;
+      if (steady < 2) await page.waitForTimeout(500);
     }
     assert.ok(box != null, "the talk button never got a size on the page");
-    assert.equal(reachable, true, `a mouse cannot reach the talk button; elementFromPoint landed elsewhere (${JSON.stringify(box)})`);
+    assert.equal(box.reachable, true, `a mouse cannot reach the talk button; elementFromPoint landed elsewhere (${JSON.stringify(box)})`);
+    assert.ok(steady >= 2, `the talk button never stopped moving, so there is nowhere to put a mouse: ${JSON.stringify(box)}`);
     assert.match(box.label, /Talk/, "the control says what it does in a word");
 
     // SIX RECTS BEFORE THE PRESS, read in one evaluate so they are one frame's truth. The whole of
@@ -959,7 +996,12 @@ test("VOICE-1 in a real browser: the button is on screen, a mouse can press it, 
 
     const atRest = await rects();
     assert.equal(atRest.lineHidden, true, "the line is mounted and hidden before anything happens");
-    assert.equal(atRest.tracks, 4, `the composer has its four tracks at rest: ${JSON.stringify(atRest)}`);
+    // FIVE AT REST SINCE ROUTER-1 (0679508) PUT THE THINK HARDER SWITCH IN THE COMPOSER, which is a
+    // fourth child and therefore a fifth track; it was four when VOICE-2 measured this and the number
+    // was never moved, so this case arrived at VOICE-14 red. What is being measured has not changed and
+    // is asserted below rather than here: the live line adds EXACTLY ONE track over whatever the
+    // composer's own children need, and at rest the form is to the pixel what it was before the press.
+    assert.equal(atRest.tracks, 5, `the composer has its five tracks at rest: ${JSON.stringify(atRest)}`);
     assert.equal(atRest.lineIn, "composer", `at this width the line lives in the composer: ${atRest.lineIn}`);
 
     // A real press at the real coordinates.
@@ -1022,7 +1064,7 @@ test("VOICE-1 in a real browser: the button is on screen, a mouse can press it, 
       assert.deepEqual(withLine[named], atRest[named],
         `${named} moved when the line came up: ${JSON.stringify(atRest[named])} -> ${JSON.stringify(withLine[named])}`);
     }
-    assert.equal(withLine.tracks, 5, "the fifth track is there while the line is up");
+    assert.equal(withLine.tracks, atRest.tracks + 1, "the line's own track is there while the line is up");
     assert.ok(withLine.box[0] < atRest.box[0], "the message box is where the line's width came from");
     assert.ok(withLine.box[0] >= 150,
       `the message box is too narrow to type in with the line up: ${withLine.box[0]} px (was ${atRest.box[0]})`);
@@ -2866,4 +2908,130 @@ test("VOICE-13 refusal: the relay's own sentence survives the close that follows
   assert.equal(second.voice.stats().notes.length, 1);
   second.voice.stop();
   assert.deepEqual(second.voice.stats().notes, [], "the press that leaves takes it with it");
+});
+
+// ================================================================== VOICE-14
+//
+// Jason, 2026-09-12 20:08, on the iPhone call screen: "why are we not doing real-time audio? I can't
+// barge in. This is me talking. It gets transcribed and then I hear audio back. That's not what this
+// is supposed to be."
+//
+// The line was always streamed audio both ways. What was missing is the interruption, and it was
+// missing ON PURPOSE: the microphone is shut while the agent speaks because on a laptop the thing
+// being interrupted was the person, through their own speakers. In the app that reason is gone, so
+// barge-in is switched on THERE and only there, keyed on the one fact the host states about itself.
+//
+// What these cases pin is the switch, the flush and the desktop's unchanged gate. What only a phone
+// can answer -- that iOS really does keep the agent out of the microphone at full speaker volume --
+// is Jason's own call on the build, and the report says so.
+
+test("VOICE-14 barge-in: the opening frame asks for it inside the phone app, and a browser sends no such frame", async () => {
+  const app = await loadTalking({ __titanbotShell: { platform: "ios", build: "36", canOpenAppSettings: true } });
+  await app.voice.start();
+  await settle(10);
+  assert.deepEqual(app.sent.json.filter((one) => one.t === "hello"), [{ t: "hello", bargeIn: true }],
+    `the app's line did not ask for barge-in: ${JSON.stringify(app.sent.json)}`);
+  assert.equal(app.voice.stats().bargeIn, true, "and the page knows which kind of line it is holding");
+  app.voice.stop();
+  assert.equal(app.voice.stats().bargeIn, false, "the flag does not outlive its own line");
+
+  // EVERY OTHER HOST, and the list is the point: a shell that is not iOS, a shell that says nothing
+  // about its platform, and no shell at all. None of them sends the frame, so a browser's line carries
+  // exactly the bytes it carried before this wave.
+  for (const shell of [null, { platform: "macos", build: "1" }, { platform: "windows" }, { canOpenAppSettings: true }, { platform: "" }]) {
+    const other = await loadTalking(shell == null ? {} : { __titanbotShell: shell });
+    assert.equal(other.voice._bargeInWanted(), false, `${JSON.stringify(shell)} must not get barge-in`);
+    await other.voice.start();
+    await settle(10);
+    assert.deepEqual(other.voice.stats().bargeIn, false);
+    assert.deepEqual(other.sent.json.filter((one) => one.t === "hello"), [],
+      `${JSON.stringify(shell)} sent an opening frame: ${JSON.stringify(other.sent.json)}`);
+    other.voice.stop();
+  }
+});
+
+test("VOICE-14 barge-in: the desktop holds frames while the agent speaks and the app sends them", async () => {
+  // The desktop half of this is the SHIPPED gate, asserted here beside the new behaviour rather than
+  // taken on trust: the claim of this wave is that one host changed and the other did not.
+  const desktop = await loadTalking();
+  await desktop.voice.start({ handsFree: true });
+  await settle(10);
+  const before = desktop.sent.audio.length;
+  desktop.voice._state.gate.begin();
+  capturePort.onmessage({ data: loudBlock() });
+  assert.equal(desktop.voice._state.capture.stats.heldFrames, 1, "a browser still drops the frame the agent would be heard in");
+  assert.equal(desktop.sent.audio.length, before, "and nothing went to the relay");
+  desktop.voice.stop();
+
+  const app = await loadTalking({ __titanbotShell: { platform: "ios", build: "36" } });
+  await app.voice.start({ handsFree: true });
+  await settle(10);
+  const sentBefore = app.sent.audio.length;
+  app.voice._state.gate.begin();
+  capturePort.onmessage({ data: loudBlock() });
+  assert.equal(app.voice._state.capture.stats.heldFrames, 0, "in the app the microphone stays open while the agent speaks");
+  assert.equal(app.sent.audio.length, sentBefore + 1, "and the frame the person talked into really goes");
+  assert.equal(isSilent(app.sent.audio.at(-1)), false, "with sound in it, which is what the provider's turn detection fires on");
+  app.voice.stop();
+});
+
+test("VOICE-14 barge-in: a flush stops every buffer that was queued and puts the booked time back to zero", async () => {
+  // Web Audio has no queue to empty. Each delta is already scheduled on its own AudioBufferSourceNode
+  // at a time in the future, and it will play at that time whether or not anybody wants it any more --
+  // which is why the player has to hold them and stop each one by hand. The context is KEPT: it was
+  // opened under a gesture and WebKit will not resume one without another.
+  const stopped = [];
+  const started = [];
+  class PlayableContext {
+    constructor() {
+      this.audioWorklet = { addModule: async () => {} };
+      this.currentTime = 0;
+      this.state = "running";
+    }
+    createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+    createAnalyser() { return { fftSize: 2048, connect() {}, getFloatTimeDomainData() {} }; }
+    createBuffer(channels, length, rate) {
+      const data = new Float32Array(length);
+      return { duration: length / rate, length, copyToChannel: (samples) => data.set(samples), getChannelData: () => data };
+    }
+    createBufferSource() {
+      const node = {
+        buffer: null, onended: null,
+        connect() {}, disconnect() {},
+        start(at) { started.push(at); },
+        stop() { stopped.push(true); },
+      };
+      return node;
+    }
+    resume() { this.state = "running"; }
+    close() { this.state = "closed"; }
+  }
+  const { voice } = await loadTalking({ AudioContext: PlayableContext });
+  await voice.start({ handsFree: true });
+  await settle(10);
+
+  // Three frames of the agent's voice, which is 300 ms of sound booked from the BYTES rather than from
+  // whether the player is idle.
+  frame(voice, { t: "speak-begin", id: 1 });
+  for (let i = 0; i < 3; i += 1) voice._onMessage({ data: new Uint8Array(voice._FRAME_BYTES).buffer });
+  assert.equal(voice.stats().playedBuffers, 3, "three deltas became three buffers");
+  assert.equal(started.length, 3, "and all three were really scheduled");
+  assert.equal(voice.stats().liveBuffers, 3, "the player is holding them so they can be stopped");
+  assert.ok(voice.stats().playsUntilMs > Date.now(), "there is sound still to come out of the speaker");
+  assert.equal(voice._state.gate.holding(), true);
+
+  frame(voice, { t: "flush" });
+  assert.equal(stopped.length, 3, "every buffer that had been queued was stopped");
+  assert.equal(voice.stats().liveBuffers, 0, "and the player is holding none of them now");
+  assert.equal(voice.stats().stoppedBuffers, 3);
+  assert.equal(voice.stats().flushes, 1);
+  assert.equal(voice.stats().playsUntilMs, 0, "the booked time is back to zero, so nothing reads the room as loud");
+  assert.equal(voice._state.gate.holding(), false, "which is what lets the person's own words reach their own panel");
+
+  // AND THE NEXT SENTENCE STILL PLAYS. A flush that closed the context would cost the reply after the
+  // interruption its voice, on a phone, where only a gesture can open another one.
+  voice._onMessage({ data: new Uint8Array(voice._FRAME_BYTES).buffer });
+  assert.equal(started.length, 4, "the sentence after the interruption is scheduled like any other");
+  assert.equal(voice.stats().liveBuffers, 1);
+  voice.stop();
 });

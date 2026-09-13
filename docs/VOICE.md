@@ -44,11 +44,13 @@ What you get:
 - A **held action** is read out as a question. "Send it?" A yes closes it through the same approval
   you would have clicked, and never a second one.
 - **Your microphone is held shut while your team is speaking**, plus a third of a second for the room
-  to go quiet. Section 8 is why.
+  to go quiet, in every browser. In the iPhone app it stays open and you can talk over him. Section 8
+  is why each host gets the one it gets.
 
 What it is not, in this release: no hotkey in a desktop app, no wake word, nothing always-on, no
 meeting transcription (that is MEETING-1 and shares only the capture code), voice for your team lead
-and not for every bot you own, and no interrupting mid-sentence on speakers.
+and not for every bot you own, and no interrupting mid-sentence on speakers (in the iPhone app you
+can interrupt him; section 8 says why that one host is different).
 
 ---
 
@@ -443,6 +445,17 @@ ends up on the session's ledger row.
 The one thing it costs is interrupting mid-sentence, which on speakers never worked anyway, because
 the interruption was coming from the speakers. On headphones it is still off in this release, and
 turning it back on is not a setting: it is the defence described above.
+
+**Inside the iPhone app you CAN interrupt him.** There the reason for the gate is gone: the app owns
+the audio session, asks iOS for the speaker and for voice-chat echo cancellation, and the microphone
+it hands the console has already had your agent's own voice taken out of it. So in the app, and only
+in the app, the microphone stays open while he is speaking, the relay is told so on the line's opening
+frame, and the moment the service hears you start talking his reply is cancelled and everything still
+queued to come out of the speaker is thrown away. You talk over him and he stops, the way a phone call
+works. It is not a setting and there is nothing to switch on: the console knows it is inside the app
+because the app says so about itself, and every browser keeps the gate, because in a browser the
+interruption would still be coming out of your own speakers. The count of interruptions in a call is
+on the relay's own close line for that session, beside the dropped-frame count.
 
 When the audio is queued, "is the queue empty" is not the question. The model sends a reply far faster
 than it is spoken, so how long sound will still be in the room is booked from the **bytes** handed

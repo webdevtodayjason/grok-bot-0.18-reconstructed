@@ -40,9 +40,17 @@
  * faster than it is spoken; the question is whether sound is still in the room (realtime.py:278-282
  * says exactly this in its own comment).
  *
- * NO BARGE-IN. Speaking while your agent speaks interrupts nothing, because the microphone is shut.
- * On speakers that was never a feature: the thing being interrupted was the person. docs/VOICE.md
- * says so in one sentence, and so does the Settings row that switches talking on.
+ * NO BARGE-IN ON SPEAKERS, AND BARGE-IN IN THE PHONE APP (VOICE-14). In a browser, speaking while
+ * your agent speaks interrupts nothing, because the microphone is shut. On speakers that was never a
+ * feature: the thing being interrupted was the person. Inside the iPhone app that reason is gone --
+ * the app owns the audio session, asks iOS for the speaker and for voice-chat echo cancellation, and
+ * the microphone it hands this page has already had the agent's own voice taken out of it. Jason on
+ * build 15: "I can't barge in. That's not what this is supposed to be." So when the shell says it is
+ * iOS, and ONLY then, the microphone stays open through playback, the relay is told `bargeIn` on the
+ * opening frame, and a `flush` from the relay throws away every sample still queued here. Nothing
+ * reads a user agent: the switch is window.__titanbotShell.platform, a fact the host states about
+ * itself. docs/VOICE.md 8 says which host gets which, and so does the Settings row that switches
+ * talking on.
  *
  * PLAYBACK IS WEB AUDIO, which is a design decision with a cost. PCM16 deltas become AudioBuffers
  * on AudioBufferSourceNodes, scheduled OFF the socket's onmessage path -- draining the player inline
@@ -294,6 +302,12 @@
   // why every read of it is a `=== true` rather than a truthiness test.
   const shellHost = () => global.__titanbotShell ?? null;
   const shellOpensSettings = () => shellHost()?.canOpenAppSettings === true;
+  // VOICE-14. Whether this page may talk over its own agent. ONLY the iPhone app, because only there
+  // is the echo somebody else's problem -- see the header. Every other host (a laptop on speakers, the
+  // desktop app, a tablet in a browser) keeps the gate, because there the interruption would be coming
+  // out of the speakers. Read LIVE on every press rather than once at load, the way callWanted is,
+  // because the shell publishes itself before first paint but a test loads the module either way.
+  const bargeInWanted = () => shellHost()?.platform === "ios";
   const sentenceFor = (condition) =>
     (shellOpensSettings() ? SHELL_NOTES[condition] : null) ?? NOTES[condition] ?? NOTES["line-dropped"];
   const orbStateFor = (value) => (ORB_STATES.includes(String(value)) ? String(value) : null);
@@ -553,7 +567,12 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     let context = null;
     let analyser = null;
     let nextAt = 0;
-    const stats = { bytes: 0, buffers: 0 };
+    const stats = { bytes: 0, buffers: 0, flushes: 0, stopped: 0 };
+    // VOICE-14. The nodes that have been started and have not finished, so a barge-in can stop them.
+    // Web Audio has no queue to empty: a scheduled AudioBufferSourceNode will play at the time it was
+    // given whether or not anybody is still listening, so the only way to take the agent's voice out
+    // of the room is to hold every node and stop each one by hand.
+    const live = new Set();
 
     function ensure() {
       if (context != null) return context;
@@ -580,6 +599,8 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
         node.buffer = buffer;
         node.connect(analyser ?? ctx.destination);
         const at = Math.max(ctx.currentTime, nextAt);
+        node.onended = () => { live.delete(node); };
+        live.add(node);
         node.start(at);
         nextAt = at + buffer.duration;
         stats.bytes += bytes.byteLength ?? bytes.length ?? 0;
@@ -596,9 +617,29 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
         return Math.sqrt(sum / data.length);
       },
       currentTime: () => context?.currentTime ?? 0,
-      stats: () => ({ ...stats }),
+      stats: () => ({ ...stats, live: live.size }),
+      /**
+       * VOICE-14. Everything still to come out of the speaker, thrown away, because the person is
+       * talking and the relay has cancelled the rest of the reply. The context is KEPT: it was opened
+       * under a gesture and WebKit will not resume one without another, so closing it here would cost
+       * the next sentence its voice. Returns how many nodes were stopped, which is what a test reads.
+       */
+      flush() {
+        let stopped = 0;
+        for (const node of live) {
+          try { node.stop(); stopped += 1; } catch { /* already finished playing */ }
+          try { node.disconnect?.(); } catch { /* already disconnected */ }
+        }
+        live.clear();
+        stats.flushes += 1;
+        stats.stopped += stopped;
+        // The next delta starts NOW rather than at the end of what was just thrown away.
+        nextAt = context?.currentTime ?? 0;
+        return stopped;
+      },
       close() {
         try { context?.close?.(); } catch { /* already closed */ }
+        live.clear();
         context = null; analyser = null; nextAt = 0;
       },
     };
@@ -709,6 +750,15 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     sendAudio: null,
     /** Zero-filled frames sent after a release, counted apart from the microphone's own. */
     tailFrames: 0,
+    /**
+     * VOICE-14. Whether THIS line is running with barge-in: the microphone stays open while the agent
+     * speaks and the relay cancels him when the person starts talking. Taken once when the line opens
+     * and never re-read mid-call, so the relay's answer and this page's own gate cannot disagree about
+     * a call that is already up.
+     */
+    bargeIn: false,
+    /** How many times this page has been told to throw away what it had queued. */
+    flushes: 0,
   };
 
   function adapter() { return global.__machineRoomAdapter ?? null; }
@@ -1546,6 +1596,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     state.gate = echoGate({ sampleRate: SAMPLE_RATE });
     state.sound = player({ gate: state.gate });
     state.tailFrames = 0;
+    state.flushes = 0;
+    // VOICE-14. Asked ONCE, here, for the life of this line. The relay is told the same thing on the
+    // opening frame below, so one answer drives both halves of the gate.
+    state.bargeIn = bargeInWanted();
 
     // The queue is bounded at two seconds. The relay drops audio more than three seconds ahead of its
     // own wall clock and counts it as a held frame, so a queue that grew without a ceiling would arrive
@@ -1574,7 +1628,10 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       deviceId: state.micDeviceId,
       sampleRate: SAMPLE_RATE,
       frameBytes: FRAME_BYTES,
-      held: () => state.gate.holding(),
+      // VOICE-14. In the phone app nothing is ever held: the app's echo cancellation is what keeps the
+      // agent out of the microphone, and holding here is exactly what makes barge-in impossible. In
+      // every browser this is the shipped gate, unchanged.
+      held: () => (state.bargeIn ? false : state.gate.holding()),
       // Push to talk between holds. In always listening nothing is ever muted this way and the echo
       // gate is the only thing that drops a frame.
       muted: () => !state.talking,
@@ -1599,6 +1656,11 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       stop("no-key");
       return;
     }
+    // VOICE-14. THE OPENING FRAME, and the only thing on it: that this page is inside the phone app
+    // and wants to be able to talk over its agent. Sent only in that case, so a browser's line carries
+    // the same bytes it carried before this wave, and sent BEFORE the queued audio below so the relay
+    // knows which kind of line it is holding before the first frame reaches it.
+    if (state.bargeIn) send({ t: "hello", bargeIn: true });
     // WHATEVER WAS CAPTURED WHILE THE LINE WAS STILL OPENING GOES NOW, in order, and whether or not the
     // button is still down. Flushing it only on the next frame that is allowed through would lose a
     // hold SHORTER than the dial entirely: every frame after the release is muted, so the queue would
@@ -1657,6 +1719,9 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     state.ready = null;
     state.hops = null;
     state.orb = "off";
+    // The next line asks the shell again: this page can be in a browser on one press and in the app on
+    // the next only by being reloaded, but a flag left true would outlive its own line either way.
+    state.bargeIn = false;
     // The line is down, so nothing more is coming for whatever is on the panel. It goes at once
     // rather than fading, and the hold goes with it: a button drawn as held after the line has
     // dropped is a microphone a person believes is open.
@@ -2229,6 +2294,15 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       case "speak-begin":
         state.gate?.begin();
         break;
+      // VOICE-14. The person talked over the agent and the relay has cancelled the rest of his reply,
+      // so everything still booked to come out of the speaker is thrown away here. Web Audio has no
+      // queue to drop: each delta is already scheduled on its own node, so the player stops them one
+      // by one. The gate is reset with them, because the sound that was booked is not coming.
+      case "flush":
+        state.flushes += 1;
+        state.sound?.flush();
+        state.gate?.reset();
+        break;
       case "speak-end":
         state.gate?.end();
         break;
@@ -2767,6 +2841,14 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       // honest answer to "is this microphone producing anything at all".
       tailFrames: state.tailFrames,
       blocks: state.capture?.stats.blocks ?? 0,
+      // VOICE-14. Whether this line is running with barge-in, how much sound is still booked to come
+      // out of the speaker, and how many times the relay has told this page to throw that away. The
+      // three numbers a barge-in is proved with, on the page's own side of the wire.
+      bargeIn: state.bargeIn,
+      playsUntilMs: state.gate?.playsUntilMs() ?? 0,
+      flushes: state.flushes,
+      stoppedBuffers: state.sound?.stats().stopped ?? 0,
+      liveBuffers: state.sound?.stats().live ?? 0,
       // VOICE-7. What the panel is showing right now, the words it last confirmed, and the id of the
       // row those words became -- which is what lets a gate prove the panel's last words and the chat
       // line are the same bytes without reading the DOM twice.
@@ -2849,6 +2931,8 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     _GESTURE_MS: GESTURE_MS,
     _SOUND_WATCH_MS: SOUND_WATCH_MS,
     _SHELL_NOTES: SHELL_NOTES,
+    // VOICE-14. The one reader that decides barge-in, so a test can pin which hosts get it.
+    _bargeInWanted: bargeInWanted,
     _micConditionFor: micConditionFor,
     _OVERLAY_ID: OVERLAY_ID,
     _DISSOLVE_MS: DISSOLVE_MS,
