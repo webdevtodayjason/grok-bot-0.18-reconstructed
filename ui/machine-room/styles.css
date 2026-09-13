@@ -5701,57 +5701,38 @@ body[data-composer-drop="1"] .composer {
 
 /* VOICE-15: the phone owns its own audio =============================================
  *
- * Two new call-screen controls and one quiet line. The call screen itself is voice-call.css, another
- * wave's file; these live here under the VOICE banner, the way VOICE-14's composer rules do, and they
- * are global so they reach the screen whichever sheet it is in. All .voice- selectors, no marketing
- * hex, the console's own teal token -- the same named deviation styles.css uses for the talk control.
+ * Two new call-screen controls and one quiet line LIVED HERE, and they have gone home. VOICE-15 put
+ * them in this sheet because voice-call.css belonged to another wave at the time; the result was one
+ * shape written in two files, and the copy here set `display: grid` unconditionally, so `[hidden]`
+ * could not hide either control -- MEASURED in Chrome at 390x844, the speaker toggle painted in a
+ * plain browser and Try again painted on a live line, both of them "hidden" in the module's state and
+ * on the screen in front of a person.
  *
- * The speaker/earpiece toggle and the Try again button match voice-call.css's Mute and End: a 44 px
- * floor, the teal rim, a word under the glyph so no control is an icon alone. The route line matches
- * the status line under Titan: centred, teal, quiet. */
-.voice-call-output,
-.voice-call-retry {
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  gap: 2px;
-  width: 56px;
-  min-width: 44px;
-  min-height: 44px;
-  padding: 4px 0;
-  border-radius: 28px;
-  border: 1px solid rgb(127 227 220 / 28%);
-  background: rgb(255 255 255 / 6%);
-  color: var(--paper, #e8eef2);
-  font: inherit;
-  font-size: 11px;
-  cursor: pointer;
-}
+ * VOICE-15b moved .voice-call-output, .voice-call-retry, their glyph rule, the pressed fill and
+ * .voice-call-route into ui/machine-room/voice-call.css, beside the Mute and End they are meant to
+ * match, where the four controls are now ONE rule. Nothing about the call screen is styled from this
+ * file any more. The banner stays because the rules below it are this wave's composer rules.
+ *
+ * VOICE-15b: the + menu's Think harder row (ROUTER-1d) ================================
+ *
+ * ROUTER-1 put the switch in the composer and :5549 hides it at 690 px, because a 358 px row with a
+ * message box, an attach button, Talk and Send has nowhere to put a fifth control. So a phone had no
+ * way at all to pin a conversation to the work model. It comes back as a row of the composer's +
+ * menu, which is PHONE-CONSOLE-1's own pattern for a control that exists only there.
+ *
+ * IT IS THE DOCK'S OWN MARKUP AND THE DOCK'S OWN ROW STYLE (:5157), so there is nothing new to keep
+ * in step: all this adds is where it is drawn. Above the breakpoint the dock is a strip on the window
+ * bar with no room for a sixth entry and the composer's own switch is right there, so the row is not
+ * drawn at all. voice.js presses the one checkbox the adapter reads, so the two can never disagree. */
+.voice-think { display: none; }
 
-.voice-call-output .voice-call-glyph,
-.voice-call-retry .voice-call-glyph { font-size: 18px; line-height: 1; }
+@media (max-width: 690px) {
+  .voice-think {
+    display: grid;
+  }
 
-/* The toggle pressed is the loudspeaker: the teal fill the Mute control uses for its own on-state. */
-.voice-call-output[aria-pressed="true"] {
-  border-color: var(--teal-300);
-  background: rgb(127 227 220 / 18%);
-}
-
-/* Try again is the one thing to offer on a dead line, so it carries the teal fill rather than sitting
- * flat beside the red End. */
-.voice-call-retry {
-  border-color: var(--teal-300);
-  background: rgb(127 227 220 / 18%);
-}
-
-/* The route line under the toggle: where the audio really is, in one plain word. Quieter than the
- * status line, because it is a reassurance and not a thing Titan is doing. */
-.voice-call-route {
-  margin: 0;
-  max-width: min(560px, 92vw);
-  font-size: 12px;
-  line-height: 1.3;
-  text-align: center;
-  color: var(--teal-300);
-  opacity: .7;
+  /* The switch's own state, in the language a menu row speaks. The base rule at :293 already fills
+   * [aria-pressed="true"], which is the same on-state the dock's other buttons use; the icon takes
+   * the teal on top of it so the row reads as on at a glance rather than only as pressed. */
+  .voice-think[aria-pressed="true"] .capability-icon { color: var(--teal-300); }
 }

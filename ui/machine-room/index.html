@@ -106,6 +106,16 @@
           <button class="capability-button is-contextual" type="button" data-capability="skills" data-capability-scope="context" aria-label="Manage skills for the current agent">
             <span class="capability-icon">✎</span><span>Skills</span>
           </button>
+          <!-- ROUTER-1d: the second entry that exists only in the menu. Above the breakpoint the
+               switch sits in the composer beside Send (:253) and styles.css hides this row; at
+               690 px and below that switch is hidden and this is the only way to pin a conversation
+               to the work model. It carries NO data-capability, deliberately: app.js closes the sheet
+               on any press that has one, and a switch a person has just flipped should show its new
+               state rather than take the menu away. voice.js presses the one checkbox the adapter
+               reads, so the phone and the laptop cannot hold two different answers. -->
+          <button class="capability-button voice-think is-contextual" type="button" data-voice-think aria-pressed="false" aria-label="Think harder: keep this conversation on the work model">
+            <span class="capability-icon">◈</span><span>Think harder</span>
+          </button>
           <span class="capability-divider" aria-hidden="true"></span>
           <button class="capability-button is-global" type="button" data-capability="marketplace" data-capability-scope="global" aria-label="Open the marketplace">
             <span class="capability-icon">✦</span><span>Marketplace</span>
