@@ -132,6 +132,9 @@ import "./cp-server.test.mjs";
 // KEYS-1. The key door: the paste is proved before it is stored, nothing reads a value back, and the
 // relay's own read refuses a wrong method before it looks at a credential.
 import "./cp-secrets-door.test.mjs";
+// SUPPORT-1. Mail to the support address: the intake's own credential, which is deliberately not the
+// relay's, the field named in every refusal, and one notification per message and no more.
+import "./cp-support.test.mjs";
 // ADMIN-2. Adding a client from the console, and the rule that holds it to the same refusals the
 // customer's own sign-up door gives.
 import "./cp-signup.test.mjs";

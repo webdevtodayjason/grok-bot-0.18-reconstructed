@@ -272,26 +272,27 @@ Jason, 2026-09-09 12:13: "I think we're going to have to turn that into more of 
 left-hand nav, your standard dashboard, because stuff is all jumbled and there is a lot of
 scrolling." It was one long page with eight panels stacked down it.
 
-So there is a **left-hand rail with ten entries and one panel on screen at a time**. The URL hash
+So there is a **left-hand rail with eleven entries and one panel on screen at a time**. The URL hash
 names the panel, so a link opens the panel it points at and the browser's own back button walks
 where you have been. Each panel carries its own summary strip and scrolls inside itself rather than
 scrolling the page. The rail entries are ordinary links, so Tab and Enter reach every one of them
 with no keyboard handling of our own.
 
-The ten, in rail order, are **Overview**, Sign-in attempts, Clients and users, Box health, System
-health, **Keys**, Spend, Providers, Feedback and Marketplace. Overview is a summary of the others;
-the eight that were there before the rail are the same panels with the same buttons on the same
-routes, moved into a rail rather than rewritten.
+The eleven, in rail order, are **Overview**, Sign-in attempts, Clients and users, Box health, System
+health, **Keys**, Spend, Providers, Feedback, **Support** and Marketplace. Overview is a summary of
+the others; the eight that were there before the rail are the same panels with the same buttons on
+the same routes, moved into a rail rather than rewritten.
 
 **Keys is the tenth and it was added by KEYS-2 on 2026-09-10.** Jason, 16:34, on this console looking
 for the place to paste the keys the product dials with: *"I didn't see a section to put it in."* The
 block was there and it drew, 1,381 px down inside System health's own scroller, under the two phone
 credential forms. Giving it a rail entry is not a new surface: no route, no loader and no request
 moved, and the two blocks are still drawn by the System health loader out of the two answers it
-already fetched. **So the numbers on this console are ten panels and eight loaders**, and they are
-different on purpose: the Overview is drawn from a registry the eight write to, and Keys is drawn by
-a loader on another panel. The readiness flag a gate waits on counts loaders, so it still reads
-eight.
+already fetched. **Support is the eleventh and was added by SUPPORT-1 on 2026-09-13**, and unlike
+Keys it brought a route and a loader of its own, which is the ordinary case. **So the numbers on this
+console are eleven panels and nine loaders**, and they are different on purpose: the Overview is
+drawn from a registry the nine write to, and Keys is drawn by a loader on another panel. The
+readiness flag a gate waits on counts loaders, so it reads nine.
 
 Every number carries the moment it was measured. Anything that could not be measured says **"not
 measured"** and why, and never a zero, a dash, or a green tick. That rule is the reason the Overview
@@ -688,7 +689,7 @@ order is paint order and the keys are what an operator opens this panel for.
 
 Nothing else changed: no route, no loader, no request. Both blocks are still drawn by the System
 health loader out of the two answers it already had, which is why this panel costs nothing and why
-the readiness flag still counts eight loaders against ten panels.
+the readiness flag counts nine loaders against eleven panels.
 
 **And they are drawn whatever that loader's own read does** (KEYS-2b, found in review 2026-09-11).
 Because the blocks come out of `loadSystem`, a 503 on `/v1/admin/system` -- a route with nothing to do
@@ -786,10 +787,13 @@ leaving three accounts):
 - **System health carries the pointer and no longer carries the forms.** The last line on that panel is a
   link reading *Keys*, `href="#panel-keys"`, painted `rgb(0, 200, 240)` rather than the browser's default
   blue, on that panel's first screen; `#productKeys` and `#pushDoors` are both absent from it.
-- **The rail is ten entries** in the order Overview, Sign-in attempts, Clients and users, Box health,
-  System health, **Keys**, Spend, Providers, Feedback, Marketplace, and the page carries ten `.panel`
-  sections. `window.__adminLive` still reads `{panels: 8}`, which counts loaders and not panels. Nothing
-  threw on either panel.
+- **The rail was ten entries when this was measured** (2026-09-11), in the order Overview, Sign-in
+  attempts, Clients and users, Box health, System health, **Keys**, Spend, Providers, Feedback,
+  Marketplace, and the page carried ten `.panel` sections, with `window.__adminLive` reading
+  `{panels: 8}`, which counts loaders and not panels. Nothing threw on either panel. **SUPPORT-1 made
+  it eleven entries and nine loaders on 2026-09-13**, which is not a re-measurement of the figures
+  above: those are what this gate run saw on the day, and the panel walk in
+  `scripts/verify-admin.mjs` carries the eleventh.
 - **At 390x844 the keys are first on the panel but not all of them are on the first screen**, and that is
   reported rather than claimed: the xAI field is `fields[0]` of the block, at **615 px** into a 595 px
   window over 2,039 px of content, so it is one short scroll down at that width. The page itself does not
@@ -1087,9 +1091,28 @@ and are also the only ones this service can recognise. The card the person sees 
 Send says what will and will not be sent, in its own words, rather than making a promise the product
 cannot keep.
 
+### Support
+
+Mail that arrived at `support@titanium.bot`, forwarded in by the operator's own Cloudflare Email
+Worker, with one notification into the operator's own workspace when a message lands.
+**`docs/SUPPORT.md` is its contract** and carries the payload, the routes, the three states, the
+notification path and the worker the operator deploys. It is summarised here rather than repeated.
+
+**Controls: a state filter, two state buttons and a note per message, and one mint button.** The
+thing it deliberately has no control for is a reply: there is no support mailbox to send from and no
+thread to send into, so the panel says *"Nothing is ever sent from here"* and `replied` is the
+operator's own record that they answered from their mail client.
+
+**The one credential it holds** is `support.inboundToken`, which the panel mints and shows once. It
+is deliberately **not** `CP_RELAY_TOKEN`: the caller is a Worker in Cloudflare's datacentre, and the
+relay token opens the route that hands out every customer's gateway token.
+
+**Not measured:** the worker has never run and no message has ever arrived through it. Everything
+behind the intake is measured in `tests/cp-support.test.mjs` against a stub box.
+
 ### Marketplace
 
-The last rail entry, tenth since KEYS-2, and the one this document never had a section for: the
+The last rail entry, eleventh since SUPPORT-1, and the one this document never had a section for: the
 heading above it used to say eight panels and the numbered subsections stopped at seven. That was not only a counting
 mistake in prose. The page's own markup had the same hole: the Feedback section was never closed,
 so Marketplace was parsed as a child of it, which is a thing you cannot see until something tries to
