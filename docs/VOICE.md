@@ -21,14 +21,34 @@ is a second assistant with its own ideas.
 
 ## 1. What it is
 
-The realtime model is a **mouth and ears, and not a second brain.** It has exactly one tool, which
-puts what you said into your team lead's conversation and hands back the reply. It cannot search, it
-cannot read a file, it cannot reach another workspace, and it has no memory of its own. Everything it
-appears to know, it got by asking your team lead.
+**The voice IS your team lead, for talking. The box is still what does the work.** (VOICE-16, 2026-09-12.)
 
-That is a decision and not a limitation we have not got round to. A realtime model that could search
-would answer from outside your team's memory, in your team lead's voice, and you would have no way to
-tell which answers were which.
+That sentence replaced the opposite one, and the old one is worth reading because it explains the
+shape: *"The realtime model is a mouth and ears, and not a second brain. It has exactly one tool, which
+puts what you said into your team lead's conversation and hands back the reply… Everything it appears to
+know, it got by asking your team lead."* All true, and it meant **every single thing you said cost a
+whole turn of your team lead's thinking**, 5.5 to 25 seconds of it, for "thanks" as much as for "run
+the gate". A conversation was a sequence of pauses. Jason, over that: *"Why can't the voice just be
+Titan?"*
+
+So now, **once, before the line is dialled**, the relay reads one thing off the box: your team lead's
+own persona, his remembered facts, and the last twenty turns of the conversation you are already having
+with him. Those become the voice's own instructions for the life of the call and are never rewritten
+during it. Ask him something he already knows and you get an answer in under two seconds with nothing
+going anywhere.
+
+**The one tool did not go away, it changed meaning.** Anything that has to be DONE, LOOKED UP or
+CHECKED, be it a file, a machine, a log, the mail, a number he does not already have, anything that
+happened since you last spoke, or anything he is not sure of, still goes to the box exactly as it always did, and comes
+back exactly as it always did. And **your answer to a question he asked you always goes to the box**,
+even when it is only "yes": a held action is closed by the approval path and never in the voice's own
+head.
+
+What did NOT change, and is still a decision rather than a thing we have not got round to: the voice
+still cannot search, cannot read a file, cannot reach another workspace, and has no memory it writes
+itself. Everything it knows, it was handed off your own box at the start of the call. A realtime model
+that could search would answer from outside your team's memory, in your team lead's voice, and you
+would have no way to tell which answers were which.
 
 What you get:
 
@@ -40,7 +60,9 @@ What you get:
   When you stop, it dissolves and those words are the next line of the conversation. Section 13.
 - There is no wake word and nothing is ever listening on its own.
 - Everything spoken lands in the **same conversation you type in**, marked as spoken, and it is there
-  on your phone afterwards.
+  on your phone afterwards. **When the call ends, the whole spoken exchange is written into that
+  conversation as one note**, both sides of it, so the part he answered himself is on the record too.
+  Section 9.
 - A **held action** is read out as a question. "Send it?" A yes closes it through the same approval
   you would have clicked, and never a second one.
 - **Your microphone is held shut while your team is speaking**, plus a third of a second for the room
@@ -282,7 +304,15 @@ Settings; an agent whose email localpart is `titan`; the first worker on the ros
 those exists, a refusal in one plain sentence.
 
 **The model never says which workspace or which agent.** Both come from your signed-in session. A
-model-supplied agent id would be a cross-tenant read through an open microphone.
+model-supplied agent id would be a cross-tenant read through an open microphone. VOICE-16 does not
+loosen that by one inch: the brief the voice is built from is read for **the id the relay resolved
+above**, by the relay, out of its own authenticated session, and the model has no way to ask for
+another one.
+
+**Nothing in the brief is a secret.** It goes out through the box's own redactor, the same one the
+conversation outline, the action audit and the evidence ledger run their text through, so a value out of
+the box's secret stores cannot travel in it. Names can and should: "the mail connector is Anvil" is
+exactly the kind of thing he is supposed to know out loud. Values cannot.
 
 ---
 
@@ -300,6 +330,7 @@ Measured on `grok-bot-local-vm`, September 2026, against the real host:
 
 | hop | what | measured |
 |---|---|---|
+| T0→TB | you stop talking → he answers out of the brief, with no tool call and nothing reaching the box (VOICE-16) | vendor's, and **not yet measured on a real box**. The relay's own part of it is zero: there is no hop |
 | T0→T1 | you stop talking → the vendor decides it was a turn and calls the tool | vendor's |
 | T1→T2 | the tool call reaches the host | **ours, 6–14 ms** |
 | T2→T3 | **your team lead thinks** | **5.5–9.0 s** for a short question, **15–25 s** when it touches a shell, **50.6 s** on the first turn of a cold box |
@@ -314,6 +345,27 @@ and a Web Audio path has no `.played` to read a time off — section 11 says so 
 The evidence for that hop is what the gate really collects: the audio clock advancing, an analyser RMS
 of 0.18 on real energy rather than a silent buffer, and the bytes queued. Every other number in this
 table names the machine it was measured on; that one was borrowing the caption's authority.
+
+**VOICE-16 REMOVED THE WHOLE ROUND TRIP FOR CONVERSATION, which is a different fix from VOICE-3's.**
+VOICE-3 below makes a long answer start arriving sooner. VOICE-16 means a question he already knows the
+answer to never costs a round trip at all: the voice carries his persona, his facts and the last twenty
+turns, so "did the gate go green" is answered out of the instructions while "run the gate again" goes to
+the box. Nothing about the box's half is faster; there is simply no box in that turn.
+
+**The brief is read ONCE, before the dial, with its own budget of 2.5 seconds.** A wedged box answers a
+gateway read in 20 seconds, which is `makeGatewayCall`'s own timeout, and nobody pressing a talk button
+should wait 20 seconds for a microphone. A brief that does not arrive inside the budget is no brief, and
+the line is the phone line it was before this wave, which is also what an older host bundle, or an
+agent this box no longer holds, gets. The relay's log says which of those four it was, every time,
+because "the voice does not know anything today" otherwise looks the same for all of them.
+
+**What is in it, and what is capped.** The persona is the agent's own profile description, which is the
+one identity field this host has. The facts are the same list the console's own memory panel shows. The
+conversation is the last twenty turns of it, being the person's own messages and the messages he
+actually sent, never what he typed to himself, for the same reason the draft below ignores that stream.
+The whole thing is capped at **12 KB on the wire**, and when it does not fit the oldest turn goes first,
+then the least important fact, and the persona never goes at all: a voice without the persona is not him,
+which is the entire point.
 
 **T2→T3 WAS the whole of it, and VOICE-3 cut into it.** Until 2026-09-12 the host emitted the reply as
 one complete message: no partial text, no growing message, nothing to speak early. It deliberately
@@ -455,6 +507,13 @@ code:
 - On OpenAI the base instructions are written **once** when the socket opens and are byte-identical
   for its whole life. Rewriting them invalidates the cached prefix and re-bills the entire
   conversation every turn. That was the single most expensive thing the reference implementation did.
+- **VOICE-16's brief makes those instructions bigger, and that is why it is capped at 12 KB and why it
+  is written once.** A bigger prefix costs more on a vendor that bills tokens, once per call and then
+  cached; on xAI, which bills a flat minute, it costs nothing extra at all. What it buys back is whole
+  turns that never happen: an answer out of the brief spends no agent-runtime tokens on the box, no
+  sendPrompt, and no 5.5 to 25 seconds of a minute that is being billed by the minute. **Neither side of
+  that trade has been measured against a real invoice**, and nothing here should be read as a claim that
+  it is cheaper, only that it is capped, written once, and bounded by a number you can see.
 
 ---
 
@@ -513,9 +572,31 @@ the operator's Spend panel. A row holds: the session, the workspace, the agent, 
 when it started and ended, wall seconds, audio seconds in and out, billable messages, how many turns
 went to your team, how many microphone frames the echo gate dropped, and why it ended.
 
-**No transcript, no audio, no key, nothing anybody said.** The readable record of what was said is
-your conversation, on your own volume, in your own console. A count of dropped frames is not a
-recording of them.
+**No transcript, no audio, no key, nothing anybody said, IN THE LEDGER ROW.** That sentence used to
+stand on its own and it no longer can, because VOICE-16 changed where the record is and not whether
+there is one.
+
+**The ledger row still holds none of it.** No transcript, no audio, no key, nothing anybody said. A
+count of dropped frames is not a recording of them, and the operator's Spend panel sees numbers only.
+
+**Your own conversation now holds the whole spoken exchange.** When a call ends, the relay writes one
+note into it: when the call ran, and both sides of what was said out loud, your words and his. That is
+deliberate and it is the point. Before VOICE-16 every spoken turn became a row in the conversation
+because every turn went through the box, and now the turns he answers himself do not, so without the
+note half of a call would have happened nowhere. It is **one note for the whole call, not one row per
+turn**, it is capped (the end of the call survives and the note says how many early lines it dropped),
+and a call where nothing was said writes nothing at all. It is stamped `voice:` like every other spoken
+row, so the console marks it spoken.
+
+It lives where your conversation lives: **your own volume, your own console, nowhere else.** Nothing
+about it reaches the control plane, and the relay keeps no copy once the note is written.
+
+**The note asks to be filed and not answered, and asking is all it can do.** There is no flag on the
+host's `sendPrompt` that means "remember this, do not reply". The options are agent, acceptance,
+attachments, rich text, reply-to, nonce, think-harder, fork, trace, two clocks and await-turn, and not
+one of them suppresses a reply. So the note says so in its own first lines. Whether your team lead
+honours that is the model's call and is **not proven**; if he does answer it, the answer lands in your
+conversation like any other and nothing is lost.
 
 **The row is claimed before the socket is dialled**, not written when it closes. A row written on
 close does not exist for a relay that crashed or a tab closed mid-sentence — and the daily cap is read
