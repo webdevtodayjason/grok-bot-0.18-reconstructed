@@ -40,7 +40,14 @@ import {
   type LiveTranscriptSession,
 } from "./session-runtime.js";
 import { SharedRooms } from "./shared-rooms.js";
-import { RUNNER_UNATTACHED_MESSAGE } from "./transcript-hub.js";
+import { entryRaisesUserActivitySignal } from "../../../shared/transcript.js";
+import { SandSendNotPersistedError } from "./send-not-persisted-error.js";
+import { getTranscript } from "./transcript-store.js";
+import { planTranscriptNote } from "./transcript-note.js";
+import {
+  RUNNER_UNATTACHED_MESSAGE,
+  type TranscriptEntry,
+} from "./transcript-hub.js";
 import { TurnRuntime } from "./turn-runtime.js";
 import { UpgradeRecreateResume } from "./upgrade-recreate-resume.js";
 import {
@@ -444,6 +451,83 @@ export class TranscriptManager {
       ...(options.redact == null ? {} : { redact: options.redact }),
     });
   }
+
+  /**
+   * VOICE-16c. File a note into an agent's conversation as the person's own entry, WITHOUT running a
+   * turn: no model call, no reply, no bill.
+   *
+   * WHAT IT IS FOR. VOICE-16's closing note -- the whole spoken exchange of a voice call, both sides,
+   * written once when the line goes down -- had only `sendPrompt` to travel on, and there is no flag
+   * on `sendPrompt` that suppresses the reply (see transcript-note.ts, which carries the measurement).
+   * So the note asked in writing not to be answered and the agent was free to answer it anyway. Five
+   * of them went out on the night of 2026-09-12. This is the write path that does not ask.
+   *
+   * IT IS THE SAME ROW THE SEND PIPELINE WRITES, deliberately. `planTranscriptNote` mints it with the
+   * pipeline's own `createUserMessage` and `nextEntryId`, so the console draws it as the "You" bubble
+   * with no page change, and `send-turn-dispatch.ts`'s `recentUserMessages` filter picks it up --
+   * which is what puts it in the agent's context on its next real turn, prepended by
+   * `collectPrependUserMessages` as an unconfirmed user message.
+   *
+   * THE ON-SCREEN GUARD IS THE SEND PIPELINE'S, not the automation path's. `sessions.appendEntry`
+   * writes through the module-global in-memory transcript and persists to `activeSession.db`, so it
+   * is only correct for the agent whose conversation is BOTH active and in memory. automation-run-path
+   * checks `activeSession` alone; `send-pipeline`'s own `isOnScreen` checks both, and that is the one
+   * copied here. Getting it wrong writes one agent's note into another agent's open transcript.
+   *
+   * A MISSING AGENT THROWS, and that is the difference from getVoiceBrief. A read answers null and the
+   * relay degrades to a phone line; a write that silently did nothing would let a caller believe a
+   * person's words were recorded when they were not. `resolveBackgroundSession` throws AgentGoneError
+   * for an id this box does not hold, and the gateway hands that back as the error it is.
+   */
+  async appendTranscriptNote(
+    agentId: string,
+    options: {
+      readonly text?: string;
+      readonly at?: number;
+      readonly clientNonce?: string;
+    } = {},
+  ): Promise<{
+    readonly filed: boolean;
+    readonly entryId: string | null;
+    readonly duplicate: boolean;
+  }> {
+    const id = String(agentId ?? "").trim();
+    if (id.length === 0) throw new Error("a note needs an agent to file it in");
+    const session = await this.sessions.resolveBackgroundSession(id);
+    const isOnScreen =
+      this.sessions.activeSession?.id === session.id &&
+      this.sessions.inMemoryTranscriptAgentId === session.id;
+    const entries = isOnScreen
+      ? getTranscript()
+      : (session.db.getTranscriptEntries() as TranscriptEntry[]);
+    const plan = planTranscriptNote({
+      entries,
+      text: options.text ?? "",
+      at: options.at ?? 0,
+      clientNonce: options.clientNonce ?? "",
+    });
+    if (plan.duplicateOf != null)
+      return { filed: false, entryId: plan.duplicateOf, duplicate: true };
+    // Nothing was said, so nothing is filed. An empty row in somebody's conversation is worse than no
+    // row: it reads as a call where the person was ignored.
+    if (plan.entry == null)
+      return { filed: false, entryId: null, duplicate: false };
+    const entry = plan.entry;
+    if (isOnScreen) this.appendEntry(entry);
+    else {
+      const durable = session.db.appendTranscriptEntry(entry);
+      if (durable !== true) throw new SandSendNotPersistedError();
+      if (entryRaisesUserActivitySignal(entry))
+        this.sessionStore.markSessionActivity(session);
+      // The console may be showing this conversation without it being the in-memory one, which is the
+      // whole reason emitAcceptedSendEchoes addresses the entry to its owning agent rather than
+      // trusting the active transcript. A roster update alone would show a changed preview and no row.
+      this.roster.emit({ type: "appended", entry }, session.id);
+      void this.roster.emitAgentUpdate(session.id);
+    }
+    return { filed: true, entryId: String(entry.id ?? ""), duplicate: false };
+  }
+
   /**
    * BOTS-4. Seed an agent's own remembered facts. The catalog's Add button is the only caller: a
    * community bot's operating rules belong where the agent's own facts live, and until this there

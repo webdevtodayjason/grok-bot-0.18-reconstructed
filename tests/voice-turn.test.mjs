@@ -34,7 +34,7 @@ import path from "node:path";
 import { startStubRealtime } from "./helpers/stub-realtime.mjs";
 import {
   GREETINGS, MAX_TITAN_ROUNDS, SPOKEN_LEAD_SENTENCES, SPOKEN_REMAINDER_HINT, TURN_WAIT_CAP_S,
-  VOICE_NOTE_MAX_CHARS, pickGreeting,
+  VOICE_NOTE_MAX_CHARS, VOICE_NOTE_WRITE_MS, fileCallNote, pickGreeting,
   isUnknownGatewayMethod, makeCallDedupe, makeSentenceCutter, makeSpokenExchange, makeTurnRunner,
   makeVoiceEdge, makeVoicePolicy, matchYesNo, pendingCardsOf, phoneLineInstructions, readVoiceBrief,
   remainderOf, resolveHeldCard, resolveVoiceAgent, splitSentences, titanTool, toolCallsOf,
@@ -60,11 +60,12 @@ function fakeClock() {
  * answers the projection the host would hand out, or null for "no turn open". A box whose host does
  * not carry the command is spelled `draft: "unknown"`, which throws the 404 the real gateway throws.
  */
-function fakeGateway({ agents = [{ id: "a1", name: "Chief of Staff", isRunning: true }], tail = () => [], fail = null, draft = null, brief = null } = {}) {
+function fakeGateway({ agents = [{ id: "a1", name: "Chief of Staff", isRunning: true }], tail = () => [], fail = null, draft = null, brief = null, note = null } = {}) {
   const calls = [];
   let polls = 0;
   let draftReads = 0;
   let briefReads = 0;
+  let noteWrites = 0;
   const call = async (command, args = {}) => {
     calls.push({ command, args });
     if (typeof fail === "function") {
@@ -88,6 +89,16 @@ function fakeGateway({ agents = [{ id: "a1", name: "Chief of Staff", isRunning: 
       if (brief === "unknown") throw new Error("getVoiceBrief answered HTTP 404: unknown gateway method: getVoiceBrief");
       return { brief: typeof brief === "function" ? brief(args, briefReads) : brief };
     }
+    // VOICE-16c. The write that files a note and runs no turn. `"unknown"` is a host that predates the
+    // command and throws the 404 the real gateway throws, which is the ONLY condition the relay falls
+    // back to sendPrompt on. The DEFAULT is the host's own success shape, so a test that does not care
+    // how the note travelled still gets the new path.
+    if (command === "appendTranscriptNote") {
+      noteWrites += 1;
+      if (note === "unknown") throw new Error("appendTranscriptNote answered HTTP 404: unknown gateway method: appendTranscriptNote");
+      if (typeof note === "function") return note(args, noteWrites);
+      return note ?? { filed: true, entryId: `t${noteWrites}u`, duplicate: false };
+    }
     if (command === "resolveAutoReviewApproval" || command === "resolveLocalToolPermission" || command === "respondToWidget") return { ok: true };
     return {};
   };
@@ -97,6 +108,7 @@ function fakeGateway({ agents = [{ id: "a1", name: "Chief of Staff", isRunning: 
     get polls() { return polls; },
     get draftReads() { return draftReads; },
     get briefReads() { return briefReads; },
+    get noteWrites() { return noteWrites; },
   };
 }
 
@@ -833,6 +845,130 @@ test("a long call keeps the END of itself and says how many lines it dropped", (
   assert.ok(note.includes("line 399"), "the end of the call survived");
   assert.ok(!note.includes("line 0 "), "and the start of it did not");
   assert.match(note, /\(the first \d+ lines of the call are not in this note\)/);
+});
+
+// ---- VOICE-16c: the note is FILED, and only an older host gets asked to answer one ----------------
+//
+// WHAT IS ACTUALLY AT RISK HERE. Until this, the closing note was a `sendPrompt`, which is the host's
+// run-a-turn verb, and "do not reply to this" was a sentence inside the prompt rather than a property
+// of the call. Five notes went out on the night of 2026-09-12 with nothing but that politeness between
+// the person and a message nobody asked for. So the load-bearing assertions below are which command
+// went, and which did NOT: a host that can file one must never also be sent a prompt, and a host that
+// cannot must still end up with the note in the conversation.
+//
+// The second risk is the retry. A note that may have landed must not be written a second way, so only
+// a 404 falls back; a timeout and a refusal do not. That is three tests, not one.
+
+/** A `call` that records every command and answers from a script keyed by command name. */
+function noteGateway(answers = {}) {
+  const calls = [];
+  const call = async (command, args = {}) => {
+    calls.push({ command, args });
+    const scripted = answers[command];
+    if (typeof scripted === "function") return scripted(args, calls);
+    if (scripted instanceof Error) throw scripted;
+    return scripted ?? {};
+  };
+  return { call, calls, of: (command) => calls.filter((row) => row.command === command) };
+}
+
+const unknownMethod = (command) => new Error(`${command} answered HTTP 404: unknown gateway method: ${command}`);
+
+test("the note is filed as a row, and a host that can file one is never sent a prompt as well", async () => {
+  const gw = noteGateway({ appendTranscriptNote: { filed: true, entryId: "t4u", duplicate: false } });
+  const lines = [];
+  const outcome = await fileCallNote(gw.call, {
+    agentId: "a1", note: "Voice call. Them: hello. Titan: hello.", clientNonce: "voice:s1:note", at: 1_700_000_000_000,
+    log: (line) => lines.push(line),
+  });
+  assert.equal(outcome.how, "filed");
+  assert.equal(outcome.filed, true);
+  assert.equal(outcome.entryId, "t4u");
+  assert.equal(gw.of("appendTranscriptNote").length, 1);
+  assert.equal(gw.of("sendPrompt").length, 0, "a filed note must not also be asked as a question");
+  const sent = gw.of("appendTranscriptNote")[0].args;
+  assert.equal(sent.agentId, "a1");
+  assert.equal(sent.text, "Voice call. Them: hello. Titan: hello.");
+  assert.equal(sent.clientNonce, "voice:s1:note");
+  assert.equal(sent.at, 1_700_000_000_000);
+  assert.deepEqual(lines, [], "a note that filed cleanly says nothing in the log on its own behalf");
+});
+
+test("a host with no appendTranscriptNote gets the note as the prompt VOICE-16 sent, unchanged", async () => {
+  const gw = noteGateway({ appendTranscriptNote: unknownMethod("appendTranscriptNote"), sendPrompt: { accepted: true } });
+  const lines = [];
+  const outcome = await fileCallNote(gw.call, {
+    agentId: "a1", note: "Voice call. Them: hello.", clientNonce: "voice:s1:note", log: (line) => lines.push(line),
+  });
+  assert.equal(outcome.how, "sent");
+  assert.equal(outcome.filed, true);
+  assert.equal(gw.of("sendPrompt").length, 1);
+  const sent = gw.of("sendPrompt")[0].args;
+  assert.equal(sent.agentId, "a1");
+  // The PROMPT field, not `text`, and the same nonce, so the fallback is the call VOICE-16 made.
+  assert.equal(sent.prompt, "Voice call. Them: hello.");
+  assert.equal(sent.clientNonce, "voice:s1:note");
+  assert.ok(
+    lines.some((line) => line.includes("cannot file a note") && line.includes("may get a reply")),
+    `the log has to say the reply is back on this box: ${JSON.stringify(lines)}`,
+  );
+});
+
+test("a note the host REFUSED is not asked a second way, because a refusal is an answer", async () => {
+  const gw = noteGateway({ appendTranscriptNote: new Error("Agent a1 no longer exists") });
+  const lines = [];
+  const outcome = await fileCallNote(gw.call, { agentId: "a1", note: "Voice call.", log: (line) => lines.push(line) });
+  assert.equal(outcome.how, "failed");
+  assert.equal(outcome.filed, false);
+  assert.equal(gw.of("sendPrompt").length, 0, "talking a box into a write it declined is not a fallback");
+  assert.ok(lines.some((line) => line.includes("could not file the call's note")), JSON.stringify(lines));
+});
+
+test("a note that TIMED OUT is not written a second way, because it may already have landed", async () => {
+  // A box that never answers. The budget is what ends this call, not the box.
+  const gw = noteGateway({ appendTranscriptNote: () => new Promise(() => {}) });
+  const lines = [];
+  const outcome = await fileCallNote(gw.call, {
+    agentId: "a1", note: "Voice call.", timeoutMs: 30, log: (line) => lines.push(line),
+  });
+  assert.equal(outcome.how, "late");
+  assert.equal(outcome.filed, false);
+  assert.equal(gw.of("sendPrompt").length, 0, "one call transcript must not land twice in one conversation");
+  assert.ok(lines.some((line) => line.includes("gave up waiting") && line.includes("it may still land")), JSON.stringify(lines));
+});
+
+test("the two attempts share ONE budget, so a slow box cannot hold the line shut twice over", async () => {
+  // The 404 is instant; what is slow is the fallback. The whole call still settles inside the budget,
+  // which is what lets the next press in: the session is released behind this await.
+  const gw = noteGateway({
+    appendTranscriptNote: unknownMethod("appendTranscriptNote"),
+    sendPrompt: () => new Promise(() => {}),
+  });
+  const started = Date.now();
+  const outcome = await fileCallNote(gw.call, { agentId: "a1", note: "Voice call.", timeoutMs: 40 });
+  assert.equal(outcome.how, "late");
+  assert.ok(Date.now() - started < 40 * 4, `the shared budget was spent twice over: ${Date.now() - started} ms`);
+});
+
+test("a note already filed under this nonce is a SUCCESS, so nothing retries it into the transcript twice", async () => {
+  const gw = noteGateway({ appendTranscriptNote: { filed: false, entryId: "t4u", duplicate: true } });
+  const outcome = await fileCallNote(gw.call, { agentId: "a1", note: "Voice call.", clientNonce: "voice:s1:note" });
+  assert.equal(outcome.how, "filed");
+  assert.equal(outcome.filed, true);
+  assert.equal(outcome.duplicate, true);
+  assert.equal(outcome.entryId, "t4u");
+  assert.equal(gw.of("sendPrompt").length, 0);
+});
+
+test("nothing to file writes nothing, and that includes an agent the edge never resolved", async () => {
+  const gw = noteGateway();
+  assert.equal((await fileCallNote(gw.call, { agentId: "a1", note: "" })).how, "nothing");
+  assert.equal((await fileCallNote(gw.call, { agentId: "", note: "Voice call." })).how, "nothing");
+  assert.equal(gw.calls.length, 0, "no gateway call at all, on either");
+});
+
+test("the note write budget is the one VOICE-16 measured, so the session release is not held longer", () => {
+  assert.equal(VOICE_NOTE_WRITE_MS, 5000);
 });
 
 // ---- held actions (A6) ---------------------------------------------------------------------------
@@ -1755,10 +1891,10 @@ test("VOICE-16 end to end: the call leaves ONE note carrying both sides of what 
 
     // The person hangs up.
     session.client.send(JSON.stringify({ t: "stop" }));
-    await session.settle(() => gateway.of("sendPrompt").length > 0, "the call's note reaching the conversation");
-    const notes = gateway.of("sendPrompt");
+    await session.settle(() => gateway.of("appendTranscriptNote").length > 0, "the call's note reaching the conversation");
+    const notes = gateway.of("appendTranscriptNote");
     assert.equal(notes.length, 1, "one note for the whole call and not one per turn");
-    const note = String(notes[0].args.prompt ?? "");
+    const note = String(notes[0].args.text ?? "");
     assert.ok(note.startsWith("Voice call, "), note.slice(0, 120));
     assert.ok(note.includes("Them: did the mail ever come through"), `the person's side is missing: ${note}`);
     assert.ok(note.includes("Titan: Nothing new in the mail."), `the voice's side is missing: ${note}`);
@@ -1766,6 +1902,9 @@ test("VOICE-16 end to end: the call leaves ONE note carrying both sides of what 
     // It is stamped the way every other voice row is, so the console marks it spoken.
     assert.equal(notes[0].args.clientNonce, `voice:${sessionId}:note`);
     assert.equal(notes[0].args.agentId, "a1");
+    // VOICE-16c. THE WHOLE POINT: the note is a row and not a turn. The only sendPrompt on this line
+    // was the one the action took, and there was no action, so there is none at all.
+    assert.equal(gateway.of("sendPrompt").length, 0, "the note ran no turn, so it asked for no reply");
   } finally {
     await session?.close();
     await stub.close();
@@ -1783,7 +1922,47 @@ test("VOICE-16 end to end: a line that said nothing leaves no note behind", asyn
     await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
     session.client.send(JSON.stringify({ t: "stop" }));
     await session.settle(() => session.of("bye").length > 0, "the line going down");
-    assert.equal(gateway.of("sendPrompt").length, 0, "nothing was said, so nothing was written");
+    assert.equal(gateway.of("appendTranscriptNote").length, 0, "nothing was said, so nothing was written");
+    assert.equal(gateway.of("sendPrompt").length, 0, "and nothing fell back to a prompt either");
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("VOICE-16c end to end: a box whose host cannot file a note still gets it, as the old prompt", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  // The host predates the command. Everything else about this line is the line above.
+  const gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    brief: briefRow(),
+    note: "unknown",
+    tail: () => [],
+  });
+  let session = null;
+  try {
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0031" }, gateway, dir });
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    const sessionId = String(session.of("ready")[0].sessionId ?? "");
+
+    stub.emitSpeechStarted({ itemId: "item_1" });
+    await stub.emitUserTranscript("did the mail ever come through", { itemId: "item_1" });
+    stub.emitUserTranscriptDone("did the mail ever come through", { itemId: "item_1" });
+    await session.settle(() => session.of("hear").some((frame) => frame.final === true), "the person's settled words");
+
+    session.client.send(JSON.stringify({ t: "stop" }));
+    await session.settle(() => gateway.of("sendPrompt").length > 0, "the note falling back to a prompt");
+    // It was TRIED the new way first, once, and then sent the old way, once.
+    assert.equal(gateway.of("appendTranscriptNote").length, 1);
+    const notes = gateway.of("sendPrompt");
+    assert.equal(notes.length, 1, "one note, and the fallback did not double it");
+    const note = String(notes[0].args.prompt ?? "");
+    assert.ok(note.includes("Them: did the mail ever come through"), `the person's side is missing: ${note}`);
+    // On this path the sentence asking not to be answered is the ONLY defence there is, so it is here.
+    assert.ok(note.includes("do not reply to it"), note.slice(0, 200));
+    assert.equal(notes[0].args.clientNonce, `voice:${sessionId}:note`);
   } finally {
     await session?.close();
     await stub.close();

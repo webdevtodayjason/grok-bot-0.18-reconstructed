@@ -22,7 +22,8 @@
  * voice's own head. Tools, files, machines, mail, the team and every approval stay the agent's, the
  * thread stays one thread, and a spoken turn is still an ordinary prompt carrying a `voice:`
  * clientNonce. At close the whole spoken exchange goes back as ONE note, so the conversation on
- * screen holds what was said out loud.
+ * screen holds what was said out loud -- and VOICE-16c FILES that note as a row instead of asking it
+ * as a prompt, so the agent has nothing to answer and nobody gets a message they did not ask for.
  *
  * AND A BOX WHOSE HOST HAS NO `getVoiceBrief` IS UNCHANGED. It answers 404, the reader says so in the
  * log, and the line dials with `phoneLineInstructions` -- the words above, byte for byte, which a
@@ -1053,15 +1054,20 @@ const noteStamp = (ms) => (Number(ms) > 0 ? new Date(Number(ms)).toISOString().r
 /**
  * The ONE memory a call leaves behind: the whole spoken exchange, as a single prompt.
  *
- * WHY IT ASKS RATHER THAN FLAGS, and this is the deviation to argue with. The brief said to tag it so
- * the box files it and does not answer, "if none exists, the note asks Titan in one line". MEASURED:
- * no such flag exists. The host's sendPrompt takes agentId, directAddressedAcceptance, attachments,
- * richText, replyToId, clientNonce, thinkHarder, isFork, traceparent, enterEpochMs, composedAtMs and
- * awaitTurn (host-gateway-api.ts sendPrompt) and not one of them suppresses the reply. The hidden
- * prompt that box hand-offs, MCP authorizations and widget answers ride
+ * WHY IT STILL ASKS, though on a current host nobody is listening. The brief said to tag it so the box
+ * files it and does not answer, "if none exists, the note asks Titan in one line". MEASURED at the
+ * time: no such flag existed. The host's sendPrompt takes agentId, directAddressedAcceptance,
+ * attachments, richText, replyToId, clientNonce, thinkHarder, isFork, traceparent, enterEpochMs,
+ * composedAtMs and awaitTurn (host-gateway-api.ts sendPrompt) and not one of them suppresses the
+ * reply. The hidden prompt that box hand-offs, MCP authorizations and widget answers ride
  * (`boxHandoff.resumeWithHiddenPrompt`) is not on the gateway protocol at all, and it RESUMES a turn
- * rather than silencing one, so it is the wrong mechanism even if it were reachable. So the note asks,
- * in its own first lines, and whether the agent honours that is not proven here.
+ * rather than silencing one, so it is the wrong mechanism even if it were reachable.
+ *
+ * VOICE-16c answered that by adding the verb rather than a flag: `appendTranscriptNote` writes this
+ * text as the person's own row and runs no turn, so on a current host the sentences below are read by
+ * nobody and cost nothing. They STAY because `fileCallNote` falls back to sendPrompt on a box whose
+ * host predates the command, and there they are the only defence there is. Changing the words would
+ * weaken the old path to tidy up the new one.
  *
  * IT IS ONE PROMPT AND IT CARRIES BOTH SIDES. Two prompts would be two turns and two answers. The
  * oldest lines go first when it is too long, because the end of a call is the part worth remembering,
@@ -1112,6 +1118,108 @@ export function voiceCallNote({
     note = render(kept, dropped);
   }
   return note;
+}
+
+/** The budget ran out before either side answered. */
+const NOTE_LATE = Symbol("late");
+
+/**
+ * One gateway call under a shared deadline, answering NOTE_LATE rather than hanging.
+ *
+ * The timer is not unref'd, for the reason readVoiceBrief's is not: an unref'd timer cannot fire when
+ * nothing else holds the event loop open, so the await would never settle and the budget would be no
+ * budget at all. It is cleared the instant either side answers.
+ */
+async function noteCallWithin(work, budgetMs) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      Promise.resolve(work()).finally(() => { if (timer != null) clearTimeout(timer); }),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(NOTE_LATE), Math.max(1, Number(budgetMs) || 1)); }),
+    ]);
+  } finally {
+    if (timer != null) clearTimeout(timer);
+  }
+}
+
+/**
+ * VOICE-16c. Put the call's note in the conversation, and do not make Titan answer it.
+ *
+ * WHAT THIS FIXES, measured rather than suspected. VOICE-16 wrote the closing note with `sendPrompt`,
+ * which is the host's run-a-turn verb, because nothing else could write a row. docs/VOICE-16-REPORT.md
+ * records that there is NO flag on it meaning "remember this, do not answer it", so the note asked in
+ * its own first two sentences and the agent was free to answer anyway -- one message nobody asked for
+ * after every call. Five went out on the night of 2026-09-12. `appendTranscriptNote` writes the same
+ * row the send pipeline writes and runs no turn at all, so there is nothing to honour.
+ *
+ * THE FALLBACK IS THE OLD PATH, BYTE FOR BYTE, and ONLY for a host that has never heard of the new
+ * command. `isUnknownGatewayMethod` is the existing reader for that, the same one the brief degrades
+ * on. Every OTHER failure does not fall back, on purpose:
+ *   - a TIMEOUT may still land on the box (this path already logs that it may), and a fallback after
+ *     one would put the same call transcript in the person's conversation twice, once as a note and
+ *     once as a prompt with a reply under it;
+ *   - a REFUSAL is the box saying no to this write, and asking it a second way is how a relay talks a
+ *     box into something it declined.
+ *
+ * THE DEADLINE IS SHARED. Both attempts come out of one budget, because what waits behind this call
+ * is the session being released, which is what lets the next press in. A person who hangs up and
+ * presses again must not be told the workspace is busy because a box was slow twice.
+ *
+ * A DUPLICATE IS A SUCCESS. The host answers `{duplicate:true}` when a note under this nonce is
+ * already in the conversation, which means the row a caller wanted is there. Reporting that as a
+ * failure would invite the retry that wrote it twice.
+ */
+export async function fileCallNote(call, {
+  agentId = "",
+  note = "",
+  clientNonce = "",
+  at = 0,
+  timeoutMs = VOICE_NOTE_WRITE_MS,
+  now = () => Date.now(),
+  log = () => {},
+} = {}) {
+  const id = String(agentId ?? "");
+  const text = String(note ?? "");
+  if (id.length === 0 || text.length === 0) return { how: "nothing", filed: false, duplicate: false };
+  const nonce = String(clientNonce ?? "");
+  const deadline = now() + Math.max(1, Number(timeoutMs) || VOICE_NOTE_WRITE_MS);
+  const left = () => Math.max(1, deadline - now());
+  try {
+    const answer = await noteCallWithin(
+      () => call("appendTranscriptNote", { agentId: id, text, at: Number(at) || 0, clientNonce: nonce }),
+      left(),
+    );
+    if (answer === NOTE_LATE) {
+      log(`voice gave up waiting ${timeoutMs} ms for the box to file this call's note; it may still land`);
+      return { how: "late", filed: false, duplicate: false };
+    }
+    return {
+      how: "filed",
+      filed: true,
+      duplicate: answer?.duplicate === true,
+      entryId: String(answer?.entryId ?? ""),
+    };
+  } catch (error) {
+    if (!isUnknownGatewayMethod(error)) {
+      log(`voice could not file the call's note in the conversation: ${error?.message ?? error}`);
+      return { how: "failed", filed: false, duplicate: false };
+    }
+    log("voice this box's host cannot file a note without answering it, so the note goes as a prompt and may get a reply");
+  }
+  try {
+    const answer = await noteCallWithin(
+      () => call("sendPrompt", { agentId: id, prompt: text, clientNonce: nonce }),
+      left(),
+    );
+    if (answer === NOTE_LATE) {
+      log(`voice gave up waiting ${timeoutMs} ms for the box to take this call's note; it may still land`);
+      return { how: "late", filed: false, duplicate: false };
+    }
+    return { how: "sent", filed: true, duplicate: false };
+  } catch (error) {
+    log(`voice could not leave the call's note in the conversation: ${error?.message ?? error}`);
+    return { how: "failed", filed: false, duplicate: false };
+  }
 }
 
 // ---- the settings door: voice.json --------------------------------------------------------------
@@ -2671,10 +2779,16 @@ export function makeVoiceSession({
   /**
    * VOICE-16. The call's one memory, written once.
    *
-   * `noted` is what makes it once: close() already guards against re-entry, but a future caller that
-   * settles a row twice must not put the same transcript into somebody's conversation twice. A failure
-   * is LOGGED AND SWALLOWED -- a box that would not take the note must not stop the ledger row being
-   * settled, because the row is what the day cap is read from.
+   * `noted` is what makes it once in THIS process: close() already guards against re-entry, but a
+   * future caller that settles a row twice must not put the same transcript into somebody's
+   * conversation twice. The nonce is what makes it once on the BOX, which is the half this flag cannot
+   * reach: a gateway write that timed out here may have landed there. A failure is LOGGED AND SWALLOWED
+   * -- a box that would not take the note must not stop the ledger row being settled, because the row
+   * is what the day cap is read from.
+   *
+   * VOICE-16c. Which verb carried it is `fileCallNote`'s decision and its log line says which, because
+   * "filed" and "sent" are two different outcomes for the person: one leaves a row, the other leaves a
+   * row and may leave a reply under it.
    */
   let noted = false;
   async function writeCallNote() {
@@ -2688,21 +2802,27 @@ export function makeVoiceSession({
       endedAtMs: now(),
     });
     if (note.length === 0) return undefined;
-    const LATE = Symbol("late");
-    let timer = null;
-    try {
-      const answer = await Promise.race([
-        Promise.resolve(call("sendPrompt", { agentId: agent.agentId, prompt: note, clientNonce: `voice:${sessionId}:note` }))
-          .finally(() => { if (timer != null) clearTimeout(timer); }),
-        new Promise((resolve) => { timer = setTimeout(() => resolve(LATE), VOICE_NOTE_WRITE_MS); }),
-      ]);
-      if (answer === LATE) log(`voice gave up waiting ${VOICE_NOTE_WRITE_MS} ms for the box to take this call's note; it may still land`);
-      else log(`voice ${t.slug} left ${agent.agentName || agent.agentId} one note for this call: ${exchange.size} line(s), ${note.length} characters`);
-    } catch (error) {
-      log(`voice could not leave the call's note in the conversation: ${error?.message ?? error}`);
-    } finally {
-      if (timer != null) clearTimeout(timer);
-    }
+    const who = agent.agentName || agent.agentId;
+    const size = `${exchange.size} line(s), ${note.length} characters`;
+    // VOICE-16c. `filed` is the new command, which writes the row and runs no turn; `sent` is VOICE-16's
+    // own sendPrompt, kept for a box whose host predates the command, where the note may still get an
+    // answer nobody asked for. The word in the log is how an operator reading a relay log tells one
+    // call from the other without going to look at the box's version.
+    const outcome = await fileCallNote(call, {
+      agentId: agent.agentId,
+      note,
+      clientNonce: `voice:${sessionId}:note`,
+      at: now(),
+      timeoutMs: VOICE_NOTE_WRITE_MS,
+      now,
+      log,
+    });
+    if (outcome.how === "filed" && outcome.duplicate)
+      log(`voice ${t.slug} found this call's note already filed for ${who}, so it wrote nothing twice: ${size}`);
+    else if (outcome.how === "filed")
+      log(`voice ${t.slug} filed ${who} one note for this call and ran no turn for it: ${size}`);
+    else if (outcome.how === "sent")
+      log(`voice ${t.slug} sent ${who} one note for this call as a prompt, because this host cannot file one: ${size}`);
     return undefined;
   }
 
