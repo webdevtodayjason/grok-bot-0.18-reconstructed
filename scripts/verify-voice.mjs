@@ -2756,6 +2756,27 @@ const writeBoxSetting = async (name, value) => {
     + "fs.writeFileSync(p,JSON.stringify(d,null,2));"]);
 };
 
+/**
+ * VOICE-20. WAIT FOR THE CARD TO STOP MOVING BEFORE A THUMB IS AIMED AT IT.
+ *
+ * A rect is not reachability, and a rect read while the screen is still settling is not even a rect.
+ * MEASURED on this Mac 2026-09-13: the same check passed on four runs with the copy's buttons at
+ * y=233 and failed on the fifth with them at y=249, `elementFromPoint` at their own centres answering
+ * `div.voice-call`. The card takes the middle, the avatar shrinks for it, and the spoken question
+ * moves him again; a hit-test fired inside that is measuring a frame nobody presses in.
+ *
+ * Two consecutive equal reads 200 ms apart is the whole of it. It NARROWS nothing: every run still
+ * asserts that a thumb at each button's own centre lands on the button, at 44 px, on screen.
+ */
+const cardStopsMoving = async (page, ms = 6000) => page.waitForFunction(() => {
+  const button = document.querySelector("[data-voice-call-card-slot] [data-decide]");
+  if (button == null) return false;
+  const y = Math.round(button.getBoundingClientRect().top);
+  const before = window.__voiceGateCardY;
+  window.__voiceGateCardY = y;
+  return before === y;
+}, null, { timeout: ms, polling: 200 }).then(() => true).catch(() => false);
+
 async function legCall() {
   console.log(`verify-voice --leg call on ${MACHINE} (engine: webkit)`);
   requireTheOtherItems(true);
@@ -3572,6 +3593,8 @@ async function legCall() {
               null, { timeout: 20_000 },
             ).then(() => true).catch(() => false);
             check(onCall, "the pending approval is the card in the middle of the call screen");
+            const stopped = await cardStopsMoving(page);
+            if (!stopped) info("the card was still moving after 6 s, so the hit-test below is reading a frame that may not be the settled one");
             const copied = await page.evaluate(() => {
               const slot = document.querySelector("[data-voice-call-card-slot]");
               const card = slot?.querySelector("[data-approval-card]") ?? null;
@@ -3743,6 +3766,8 @@ async function legCall() {
                   });
                   check(middle, "THE NEW QUESTION TAKES THE MIDDLE OF THE CALL SCREEN, replacing the one that is already answered",
                     middle ? `row ${secondRow}` : JSON.stringify(whatIsUp));
+                  const secondStopped = await cardStopsMoving(page);
+                  if (!secondStopped) info("the second card was still moving after 6 s, so its hit-test is reading a frame that may not be the settled one");
                   const secondCopy = await page.evaluate(() => {
                     const slot = document.querySelector("[data-voice-call-card-slot]");
                     const card = slot?.querySelector("[data-approval-card]") ?? null;

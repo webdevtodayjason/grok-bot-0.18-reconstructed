@@ -2701,6 +2701,11 @@ export function makeVoiceSession({
     // Never while a response is in flight, and never closer than eight seconds: each one is a
     // billed event on xAI, and two overlapping responses is the provider error nobody can hear.
     for (let i = 0; i < 40 && !stopping && (responseInFlight || now() - lastAnnounceMs < ANNOUNCE_GAP_MS); i += 1) await sleep(400);
+    // VOICE-20. And not over a sentence still coming out of the speaker. The eight second floor above
+    // is about BILLING and about two responses at once; it is not a reading of the room, and since
+    // VOICE-20a the card question follows the turn's own answer directly, which is exactly the moment
+    // an announcement can talk over one.
+    await waitForQuiet("an announcement");
     if (stopping) return;
     lastAnnounceMs = now();
     sendProvider({ type: "conversation.item.create", item: { type: "message", role: "user", content: [{ type: "input_text", text: `Read this out to the person, word for word, nothing added: ${clean}` }] } });
@@ -2787,8 +2792,11 @@ export function makeVoiceSession({
    * the mid-turn path speaks, and a spoken answer to it goes through `resolveHeldCard` exactly as it
    * did before -- the console's own approval commands.
    */
-  const watchCards = async () => {
-    if (stopping || cardWatching || turnsInFlight > 0) return undefined;
+  const watchCards = async ({ force = false } = {}) => {
+    // `force` is the END OF A TOOL TURN asking the same question the tick asks, from inside the turn
+    // it is ending. Everything else about this function is identical on both paths, which is the
+    // point: one wording, one memory of what has been asked, one held card.
+    if (stopping || cardWatching || (!force && turnsInFlight > 0)) return undefined;
     if (String(agent.agentId ?? "").length === 0) return undefined;
     cardWatching = true;
     try {
@@ -2810,8 +2818,8 @@ export function makeVoiceSession({
         return undefined;
       }
       // A spoken turn may have started while this read was in flight, and the runner's own poll is
-      // the one that should find the card then.
-      if (turnsInFlight > 0) return undefined;
+      // the one that should find the card then. The end-of-turn caller IS that turn, so it goes on.
+      if (!force && turnsInFlight > 0) return undefined;
       const fresh = pending.filter((row) => !cardsAsked.has(row.entryId));
       if (fresh.length === 0) return undefined;
       for (const row of fresh) cardsAsked.add(row.entryId);
@@ -2820,7 +2828,7 @@ export function makeVoiceSession({
       // in a LATER user turn than the question, or the model can talk itself into a confirmation.
       session.heldCard = { ...card, offeredTurn: session.userTurn };
       const question = cardQuestion(card);
-      log(`voice ${t.slug} is asking about a card the box raised on its own: ${JSON.stringify(question.slice(0, 120))}`);
+      log(`voice ${t.slug} is asking about a card the box raised on its own${force ? ", found as the tool turn ended" : ""}: ${JSON.stringify(question.slice(0, 120))}`);
       // The page paints NOTHING for this frame (voice.js reads `said` for the gate and for VOICE-15b's
       // own-speech guard); the card itself is already on screen, drawn from the transcript.
       browser?.sendJson({ t: "said", text: question });
@@ -2989,6 +2997,17 @@ export function makeVoiceSession({
         onAnnounce: (text) => { announcements.push(text); void say(text); },
       }).catch(() => {});
     }
+    // VOICE-20a. A CARD THAT IS WAITING WHEN THE TOOL TURN ENDS IS ASKED, exactly as one found between
+    // turns is. MEASURED on the R750, Jason's 15:21 CDT call: a `report_problem` inside the turn made
+    // the host raise an approval, and the relay never asked about it out loud. The runner returns the
+    // instant a reply entry lands, so a card raised in the same turn but a moment AFTER that reply is
+    // not in the `fresh` it read -- and the between-turns watcher then stands aside for the whole of
+    // `dispatch`, which is this function. Between those two the card fell through the floor.
+    //
+    // It is the same call the tick makes, with the one guard that would refuse it lifted, so there is
+    // still ONE wording, one `cardsAsked` memory and one held card. A card the turn already came back
+    // holding sets `session.heldCard` above, and this call sees it and returns rather than asking twice.
+    await watchCards({ force: true });
     return undefined;
   };
 

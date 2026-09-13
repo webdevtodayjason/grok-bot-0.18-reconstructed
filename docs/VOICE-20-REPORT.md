@@ -83,12 +83,45 @@ there is nowhere else to answer it: the chat behind the screen is `inert`.
 one, and the newest card otherwise. A question jumps the queue; with nothing waiting the rule is
 exactly what VOICE-13 wrote.
 
+## VOICE-20a: a card waiting when the tool turn ends
+
+Live data from the team lead, off the R750 relay log: Jason's call of 2026-09-13 15:21 CDT, 133 s, 2
+turns to the agent, 2 barge-ins, and **no "asking about a card" line anywhere in it**. The approval was
+raised by Titan's own `report_problem` INSIDE a `titan` tool turn. *"while the agent was filing a
+report, the approval box popped up ... no approve or reject buttons."*
+
+**Why the turn did not hold it.** `makeTurnRunner.run` returns the instant a reply entry lands, and its
+`card` is `pickOneCard(pendingCardsOf(fresh))` against the tail it had read at THAT moment. A card the
+same turn raises a beat after the reply is not in that read. The between-turns watcher would be the
+other reader, and it returns early while `turnsInFlight > 0`, which is the whole of `dispatch`. So the
+card belonged to neither.
+
+**The fix.** The end of a tool turn calls `watchCards({ force: true })`: the same function, with the one
+guard that would refuse it lifted. One wording, one `cardsAsked` memory, one held card, and a turn that
+already came back holding a card short-circuits it. `say` also waits for booked playback now, because
+the question follows the turn's own answer directly.
+
+**The honest caveat, and it matters.** With the tick left on its production three seconds, a
+reproduction of that ordering IS asked about, one tick late. So the hole alone does not explain a call
+with **no** asked line at all, and there is a second candidate that does: `pendingCardsOf` knows three
+kinds only (auto-review, local-tool, widget), and the problem-report offer is neither. It is not even a
+transcript entry: the console builds it from `adapter.listProblemReports()`, the box's own pending file
+(`drainPendingProblemReports` in app.js). Nothing on the voice path can see one. If that is the card
+Jason saw, this change does not reach it, and extending the voice to report and secret cards is its own
+decision (a secret card cannot be answered by voice at all). Which of the two it was cannot be settled
+from outside his own conversation, and this wave did not read it.
+
+**The test is decisive rather than merely green.** `tests/voice-turn.test.mjs` disarms the tick at ten
+minutes for that case, so the end of the turn is the only thing left that can ask. With the fix removed,
+nothing asks at all and the case fails on the wait; with the production tick left armed it would pass
+against a relay that still had the hole, which is the shape of a test that proves nothing.
+
 ## The counts
 
 | Suite or gate | Result |
 | --- | --- |
-| all twelve voice suites, `node --test` on this Mac | **382 of 382, 0 skipped** (376 before this wave) |
-| `tests/voice-turn.test.mjs` | 93 of 93 |
+| all twelve voice suites, `node --test` on this Mac | **383 of 383, 0 skipped** (376 before this wave) |
+| `tests/voice-turn.test.mjs` | 94 of 94 |
 | `tests/machine-room-voice.test.mjs` | 108 of 108 |
 | `node scripts/verify-voice.mjs --leg call` | **97 of 98**, up from 90 checks before this wave, and the one red row is the pre-existing VOICE-19a browser notice |
 | `node scripts/verify-voice-r750.mjs` | **65 pass, 2 fail**, and both failures are pre-existing and named below |
@@ -135,7 +168,7 @@ his own head never reaches the box and never reaches the moment this wave is abo
    console's composer layout.** Next action: read both rects in the same frame after the reload and
    find which element the reflow puts over the button.
 2. **`--leg call`, section F: an intermittent ended note after Escape.** The row *"and gets no note
-   either, because a person pressed a key to leave"* was RED on 1 of 4 runs of this leg, with the note
+   either, because a person pressed a key to leave"* was RED on 2 of 7 runs of this leg, with the note
    standing and reading "The call ended. Nothing was heard.", which is the note a call that ended NOT
    by a person raises. It cannot be this wave's: section F runs before any approval is armed, so
    neither `callCardRow` nor `answerTool` is reached on that path. The likeliest cause is the one VOICE-19 already wrote down: the relay
@@ -143,3 +176,27 @@ his own head never reaches the box and never reaches the moment this wave is abo
    refused. It is the section before this one ending a call and this one dialling immediately.
    **Owner: whoever next holds `scripts/verify-voice.mjs`.** Next action: wait on the relay having
    released the previous line before section F presses, the way section H's own leaving step does.
+
+## One gate flake this wave DID fix, because it was measuring a frame nobody presses in
+
+The row *"a thumb at each button's own centre really lands on it"* went red on one run with the copy's
+buttons at **y=249** and `elementFromPoint` answering `div.voice-call`, against **y=233** and a clean
+hit on the runs either side. The card takes the middle, the avatar shrinks to make room for it, and the
+spoken question moves him again; a hit-test fired inside that is reading a frame that is still moving.
+The leg now waits for two consecutive equal reads of the button's own top, 200 ms apart, before it
+measures and hit-tests. **It narrows nothing**: every run still asserts that a thumb at each button's
+own centre lands on the button, at 44 px, on screen. Green on both runs since.
+
+## One hand operation, and it was mine to undo
+
+A run of `--leg call` was killed part way through by this session, so its `finally` never ran and the
+local box was left armed: `SAND_AUTO_REVIEW_MODE` at `enforce`, the gate's block instruction stored,
+and one scratch agent on the roster. All three were put back through the product's own shapes rather
+than around them. `autoReviewInstructions` was DELETED from `settings.json`, which is exactly what
+`setAutoReviewInstructions` does with that value itself: `sand-settings-store.ts` drops the key when the
+instructions are enabled with both lists empty, and `getAutoReviewInstructions` then answers
+`DEFAULT_SAND_AUTO_REVIEW_INSTRUCTIONS`, which is `{ isEnabled: true, allowInstructions: [],
+blockInstructions: [] }` and is the baseline every clean run of this leg restored. `SAND_AUTO_REVIEW_MODE`
+was removed from the host settings file the way the leg's own `writeBoxSetting` removes it, and the
+scratch agent was removed with the gateway's own `deleteAgents`. The roster is back to **21**, which is
+the number every clean run of this leg reports.

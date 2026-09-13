@@ -2116,18 +2116,53 @@ and the newest question outranks an older one.** With nothing waiting the rule i
 VOICE-13 wrote. That is the whole of the change: a question jumps the queue, and nothing else about
 the middle of the screen moves.
 
+### A card waiting when the tool turn ends is asked, the same as one between turns (VOICE-20a)
+
+MEASURED on the R750, Jason's call of 2026-09-13 15:21 CDT: 133 s, 2 turns to the agent, 2 barge-ins,
+and **no "asking about a card" line anywhere in it**. His words: *"while the agent was filing a report,
+the approval box popped up ... no approve or reject buttons."*
+
+**There was a hole between two correct readers.** `makeTurnRunner.run` returns the INSTANT a reply entry
+lands, carrying whatever cards were in the tail it had read at that moment, so a card the same turn
+raises a beat AFTER that reply is not in it. And VOICE-19's between-turns watcher stands aside for the
+whole of `dispatch`, which is the function still running. A card raised in that gap belonged to neither.
+
+The end of a tool turn now asks the same question the tick asks, through the same function with its one
+guard lifted: one wording, one `cardsAsked` memory, one held card. A turn that already came back holding
+a card sets `session.heldCard`, and this call sees it and returns rather than asking twice.
+
+**And `say` waits for the room too**, because since this change the card's question follows the turn's
+own answer directly, which is precisely the moment an announcement can talk over one. Its eight second
+floor is about billing and about two responses at once; it was never a reading of the room.
+
+**What this does NOT explain, and it is written down rather than assumed.** In a reproduction with the
+tick left on its production three seconds, the tick DOES find that card and ask about it, one tick late.
+So a live call with no asked line at all needs a second reason, and there is one available:
+`pendingCardsOf` knows **three** kinds, auto-review, local-tool and widget. The problem-report offer is
+not one of them and is not a transcript entry at all: the console builds it from
+`adapter.listProblemReports()`, the box's own pending file (app.js `drainPendingProblemReports`). Nothing
+on the voice path can see one, on either path, so if that is the card that popped up, this change does
+not reach it. Which of the two it was is not known from outside Jason's own conversation.
+
 ### Measured
 
 `node --test` on **MacBook-Pro.local (darwin arm64, node v22.23.1)**: all twelve voice suites
-**382 of 382, 0 skipped**, up from 376 before this wave.
+**383 of 383, 0 skipped**, up from 376 before this wave.
 
 `node scripts/verify-voice.mjs --leg call`, WebKit 390x844 device scale 3 with touch, against
 grok-bot-local-vm behind this leg's own relay and the stub vendor: **97 of 98**, up from 90 checks
 before this wave, and the one red row is the pre-existing VOICE-19a browser notice. The leg now forces
 a **second** real approval while the call is still up, with no reload and no second call: the host
-raised it in **24 to 30 s**, the console drew it in the transcript under the first one, and it took the
-middle of the call screen with its own Allow and Refuse at **84x44 and 89x44**, each naming the second
-row.
+raised it in **21 to 30 s** across four runs, the console drew it in the transcript under the first one,
+and it took the middle of the call screen with its own Allow and Refuse at **84x44 and 89x44**, each
+naming the second row.
+
+**And it waits for the card to stop moving before it aims a thumb at it.** The hit-test row went red on
+one run with the copy's buttons at y=249 and `elementFromPoint` answering `div.voice-call`, against
+y=233 and a clean hit on the runs either side: the card takes the middle, the avatar shrinks for it, and
+the spoken question moves him again. Two consecutive equal reads of the button's own top, 200 ms apart,
+and then the measurement. The claim is unchanged: a thumb at each button's own centre lands on the
+button, at 44 px, on screen.
 
 `node scripts/verify-voice-r750.mjs` through **console.titanium.bot**, as a throwaway customer on the
 demo tenant minted and removed for the run: one real spoken hand-off through the real vendor, in

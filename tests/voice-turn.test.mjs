@@ -2573,3 +2573,75 @@ test("VOICE-20: the lead sentence of a streamed reply waits for the room too", a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ============ VOICE-20a: a card waiting when the tool turn ends is asked, the same as one between them
+//
+// MEASURED on the R750, Jason's call of 2026-09-13 15:21 CDT (the relay's own settled line: 133 s, 2
+// turns to the agent, 2 barge-ins). Titan's `report_problem` ran INSIDE a spoken turn, the host raised
+// an approval for it, and the relay never asked about it out loud: there is no "asking about a card"
+// line anywhere in that call. His words: "while the agent was filing a report, the approval box popped
+// up ... no approve or reject buttons."
+//
+// THE HOLE BETWEEN TWO CORRECT THINGS. `makeTurnRunner.run` returns the INSTANT a reply entry lands,
+// with whatever cards were in the tail it had read at that moment; a card the same turn raises a beat
+// AFTER that reply is not in it. And VOICE-19's between-turns watcher stands aside for the whole of
+// `dispatch`, which is the function that is still running. So the card belonged to neither reader.
+const askedAboutCard = (stub) => stub.events.inbound.filter((one) => one.type === "conversation.item.create"
+  && String(one.item?.content?.[0]?.text ?? "").includes("Allow it?"));
+
+test("VOICE-20a: a card that lands after the reply in the same turn is still asked, once", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "voice-turn-"));
+  const stub = await startStubRealtime({ vendor: "xai" });
+  // Poll 1 is the baseline before the prompt. Poll 2 is the reply, which is what makes the runner
+  // return. The approval only exists from poll 3, which is the ordering that produced the live fault.
+  const gateway = fakeGateway({
+    agents: [{ id: "a1", name: "Titan", isRunning: true }],
+    tail: (n) => {
+      if (n < 2) return [];
+      const rows = [reply("e1", "I am filing that report now.")];
+      if (n >= 3) rows.push(approvalEntry("e2", "req9", { at: 1_700_000_000_900, summary: "Send the problem report to the developers" }));
+      return rows;
+    },
+  });
+  let session = null;
+  try {
+    // THE BETWEEN-TURNS TICK IS DISARMED FOR THIS CASE, at ten minutes, and that is the whole
+    // experiment. Left on its production three seconds the tick WOULD find this card a moment later
+    // and the case would pass against a relay that still had the hole in it, which is exactly the
+    // shape of a test that proves nothing. With the tick out of reach, the only thing left that can
+    // ask is the end of the turn.
+    session = await openSession({ stub, settings: { enabled: true, vendor: "xai", apiKey: "xai-test-key-0023" }, gateway, dir, cardWatchMs: 600_000 });
+    await session.settle(() => session.of("ready").length > 0, "the ready frame");
+    await session.settle(() => stub.events.sessions.length > 0, "the session.update reaching the provider");
+    await session.mic();
+    stub.emitSpeechStopped();
+    stub.emitToolCall({ name: "titan", args: { message: "file a report about the browser" }, callId: "c_report", triple: false });
+    await session.settle(() => stub.events.toolOutputs.length > 0, "the reply going back as tool output");
+    // The reply came back with NO card on it, which is the live shape: nothing was waiting yet.
+    assert.equal(JSON.parse(stub.events.toolOutputs[0].output).reply, "I am filing that report now.");
+    assert.ok(!String(stub.events.toolOutputs[0].output).includes("Allow it?"),
+      "this case only means something if the turn itself did not come back holding the card");
+    await session.settle(() => askedAboutCard(stub).length > 0, "the card being asked about as the turn ended", 400);
+    const asked = askedAboutCard(stub);
+    assert.equal(asked.length, 1, `the card was asked about ${asked.length} times`);
+    const said = String(asked[0].item.content[0].text);
+    assert.match(said, /^Read this out to the person, word for word/, "in the one shape that makes a model say an exact string");
+    assert.match(said, /Send the problem report to the developers/, "and it names the action rather than gisting it");
+    const line = session.frames.log.find((one) => one.includes("found as the tool turn ended"));
+    assert.ok(line != null, `the log does not say where the card was found: ${session.frames.log.join(" | ").slice(0, 400)}`);
+    // And it is held for a spoken answer exactly as the between-turns one is, so "yes" a moment later
+    // goes through resolveHeldCard rather than into the conversation as prose.
+    await session.mic();
+    stub.emitSpeechStopped();
+    stub.emitToolCall({ name: "titan", args: { message: "yes" }, callId: "c_yes", triple: false });
+    await session.settle(() => gateway.of("resolveAutoReviewApproval").length > 0, "the spoken yes closing it");
+    assert.equal(gateway.of("resolveAutoReviewApproval")[0].args.requestId, "req9");
+    assert.equal(gateway.of("resolveAutoReviewApproval")[0].args.resolution, "approved");
+    // One prompt only: the yes never became a second thing for Titan to answer.
+    assert.equal(gateway.of("sendPrompt").length, 1, "the yes was an answer to the card, not a new turn for Titan");
+  } finally {
+    await session?.close();
+    await stub.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
