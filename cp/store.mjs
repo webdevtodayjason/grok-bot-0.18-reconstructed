@@ -562,6 +562,39 @@ CREATE TABLE IF NOT EXISTS sign_in_links (
 );
 CREATE INDEX IF NOT EXISTS sign_in_links_tenant ON sign_in_links (tenant, minted_at);
 CREATE INDEX IF NOT EXISTS sign_in_links_expires ON sign_in_links (expires_at);
+-- DISCOVER-1. A choice ONE PERSON made about their own console, kept where their account is.
+--
+-- The first row is the welcome bar: Hide retires it, the Settings row brings it back. It is not a
+-- tenant setting, because two accounts share one workspace (accounts.tenant carries no UNIQUE
+-- constraint, which is the reason ui/server.mjs has subOf at all) and one person hiding a bar must
+-- not take it off their colleague's screen.
+--
+-- WHY THE KEY IS (tenant, sub, name) AND NOT THE ACCOUNT ID. The sub is the relay's own word for a
+-- person -- the session token's person claim, and "" for the instance-password door, which names
+-- nobody and reads as the workspace's own everywhere else in that file. Keying on the account id
+-- would have no row at all to put the instance door's choice in, and the relay would have to look an
+-- account up on this service to write a preference, which is a read it is forbidden to make on a
+-- request path (ui/session-token.mjs: the relay never asks this service to validate anything).
+--
+-- A TABLE RATHER THAN A COLUMN ON accounts, for the same reason admin_settings is a table: the next
+-- per-person flag (a dismissed tip, a chosen density) has no other home either, and a column per
+-- flag is an ALTER on a live database every time somebody adds a checkbox.
+--
+-- VALUE IS TEXT, and the one value this wave writes is "1". A boolean column would answer the next
+-- flag that wants a number with another migration, and there is nothing here worth the saving.
+--
+-- No TENANT_MIGRATIONS entry, for the reason written over admin_actions, welcome_sends, sign_in_links
+-- and the rest above: db.exec(SCHEMA) runs on every open and CREATE TABLE IF NOT EXISTS makes a table
+-- that is not there. Only a new COLUMN on a table that already exists needs an ALTER.
+CREATE TABLE IF NOT EXISTS person_flags (
+  tenant TEXT NOT NULL,
+  sub    TEXT NOT NULL DEFAULT '',
+  name   TEXT NOT NULL,
+  value  TEXT NOT NULL DEFAULT '',
+  at     INTEGER NOT NULL,
+  PRIMARY KEY (tenant, sub, name)
+);
+CREATE INDEX IF NOT EXISTS person_flags_tenant ON person_flags (tenant, name);
 `;
 
 /**
@@ -581,6 +614,18 @@ export const FEEDBACK_STATES = ["new", "approved", "filed", "suppressed", "close
  * and a table that is never pruned must not be a place one caller can fill.
  */
 export const FEEDBACK_FIELD_LIMIT = 256 * 1024;
+
+/**
+ * DISCOVER-1. The three bounds on a per-person flag, and all three exist because this table's key is
+ * made of strings a caller supplies.
+ *
+ * 256 for the person, which is the bound ui/voice-edge.mjs already puts on the same claim; 64 for the
+ * flag's name and 64 for its value, because every flag this product has is a word and a "1". A row
+ * that cannot be longer than about 400 bytes is a table one caller cannot fill.
+ */
+export const PERSON_SUB_LIMIT = 256;
+export const PERSON_FLAG_NAME_LIMIT = 64;
+export const PERSON_FLAG_VALUE_LIMIT = 64;
 
 /**
  * SUPPORT-1. The three states a support message can be in, and there is no fourth.
@@ -957,6 +1002,25 @@ export function openStore(options = {}) {
   const selectVoiceByPrefix = statement("SELECT * FROM voice_sessions WHERE started_at LIKE ? ORDER BY tenant, started_at, id");
   const selectVoiceAll = statement("SELECT * FROM voice_sessions ORDER BY tenant, started_at, id");
   const countVoiceRows = statement("SELECT COUNT(*) AS n FROM voice_sessions");
+  // DISCOVER-1. "Has anybody on this workspace finished a real voice call?"
+  //
+  // SETTLED ROWS ONLY, which is the whole reason this is its own statement rather than a filter over
+  // listVoiceSessions. An OPEN row is a call in progress or a call whose relay went away, and its
+  // wall_seconds is 0 until the settle writes one -- cp/voice.mjs reconcileOpen exists because rows
+  // are left open often enough to need a sweep. Counting an open row would tick this step the moment
+  // somebody pressed Talk, which is the opposite of what the step says.
+  //
+  // The threshold is bound rather than baked so the caller owns the number and the SQL owns nothing.
+  const countSettledVoiceRows = statement(
+    "SELECT COUNT(*) AS n FROM voice_sessions WHERE tenant = ? AND state = 'closed' AND wall_seconds >= ?");
+  // DISCOVER-1. One person's own flags. INSERT OR REPLACE rather than an UPDATE plus an INSERT: the
+  // row IS the value, there is no history worth keeping on a checkbox, and two consoles of the same
+  // person pressing Hide at once must not be a constraint failure on either.
+  const setPersonFlagRow = statement(
+    "INSERT INTO person_flags (tenant, sub, name, value, at) VALUES (?, ?, ?, ?, ?)"
+    + " ON CONFLICT(tenant, sub, name) DO UPDATE SET value = excluded.value, at = excluded.at");
+  const selectPersonFlag = statement("SELECT * FROM person_flags WHERE tenant = ? AND sub = ? AND name = ?");
+  const deletePersonFlagRow = statement("DELETE FROM person_flags WHERE tenant = ? AND sub = ? AND name = ?");
   // ONBOARD-2. The welcome mail's receipt. Ten columns, none of which is a secret: see the DDL for
   // what is deliberately not in here and why this is not mail_send_log.
   const insertWelcomeSend = statement(
@@ -1955,6 +2019,50 @@ export function openStore(options = {}) {
 
     /** Whether this table has ever held a row, which is what "not measured" is drawn from. */
     countVoiceSessions() { return Number(countVoiceRows.get()?.n ?? 0); },
+
+    /**
+     * DISCOVER-1. How many SETTLED voice calls this workspace has that ran at least `minSeconds`.
+     *
+     * Settled only, and see the statement for why: an open row has no wall_seconds yet, so counting
+     * one would tick the welcome bar's voice step on the press of the Talk button rather than on a
+     * call that happened.
+     */
+    countSettledVoiceSessions({ tenant = "", minSeconds = 0 } = {}) {
+      const who = String(tenant ?? "").trim();
+      if (who.length === 0) return 0;
+      const floor = Math.max(0, Math.trunc(Number(minSeconds) || 0));
+      return Number(countSettledVoiceRows.get(who, floor)?.n ?? 0);
+    },
+
+    // ---- per-person flags (DISCOVER-1) -----------------------------------------------------------
+
+    /**
+     * One person's own choice about their own console, stored under the relay's word for that person.
+     *
+     * An EMPTY value CLEARS the row rather than writing an empty string. "This person has never
+     * chosen" and "this person chose the default" are the same fact for a flag, and keeping a row for
+     * the second one is a table that only grows. It is also what makes Show the exact inverse of
+     * Hide rather than a second state.
+     */
+    setPersonFlag({ tenant = "", sub = "", name = "", value = "", at = now() } = {}) {
+      const who = String(tenant ?? "").trim();
+      const person = String(sub ?? "").slice(0, PERSON_SUB_LIMIT);
+      const flag = String(name ?? "").trim().slice(0, PERSON_FLAG_NAME_LIMIT);
+      if (who.length === 0 || flag.length === 0) return false;
+      const held = String(value ?? "").slice(0, PERSON_FLAG_VALUE_LIMIT);
+      if (held.length === 0) { deletePersonFlagRow.run(who, person, flag); return true; }
+      setPersonFlagRow.run(who, person, flag, held, Number(at));
+      return true;
+    },
+
+    /** The value, or "" for a person who has never chosen. Never null, so no caller has two empties. */
+    getPersonFlag({ tenant = "", sub = "", name = "" } = {}) {
+      const who = String(tenant ?? "").trim();
+      const flag = String(name ?? "").trim();
+      if (who.length === 0 || flag.length === 0) return "";
+      const row = selectPersonFlag.get(who, String(sub ?? "").slice(0, PERSON_SUB_LIMIT), flag);
+      return row == null ? "" : String(row.value ?? "");
+    },
 
     // ---- login failures ------------------------------------------------------------------------
 
