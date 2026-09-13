@@ -1389,6 +1389,13 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     fromCard: "",
     /** Which card is on screen, by the id of the row it was copied from. */
     card: "",
+    /**
+     * VOICE-19. What state that card was in when it was copied, so a card the person SETTLES -- with
+     * the copy's own button, with the row's, or by a spoken yes -- is repainted into its settled
+     * shape instead of standing on the screen still offering Allow and Refuse. The copy is only ever
+     * rebuilt when this or the id above moves, which is the guarded-write rule the whole file keeps.
+     */
+    cardState: "",
     /** A level a gate injected, which the output labels as injected. Null when nothing is injected. */
     levels: null,
     /** The screen-awake request, where the browser or the shell has one to give. */
@@ -1516,6 +1523,14 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       if (event.target?.closest?.("[data-voice-call-retry]") != null) {
         event.preventDefault();
         retryCall();
+        return;
+      }
+      // VOICE-19. The copied approval card's own Allow / Refuse / Always allow. It presses the row's
+      // button rather than the adapter, so this screen adds no second way to decide anything.
+      const decide = event.target?.closest?.("[data-decide]");
+      if (decide != null) {
+        event.preventDefault();
+        decideFromCall(decide);
         return;
       }
       if (event.target?.closest?.("[data-voice-call-mute]") != null) {
@@ -1680,31 +1695,126 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   }
 
   /**
-   * THE CARD IS COPIED, AND ITS CONTROLS ARE LEFT BEHIND. Every card's buttons are wired by delegation
-   * against the row in the transcript and carry its data-message-id; a live copy of them on top of the
-   * screen would be a second control for one decision, and the one underneath is the one that works.
-   * So the copy is there to be READ, and the chat keeps the controls.
+   * VOICE-19. Which state a copied card is in, and it is the WHOLE of the change signature beside the
+   * row's id. "" for anything that is not an approval card, which is every other kind and every
+   * settled one the renderer draws without the attribute.
+   */
+  function callCardState(row) {
+    const card = row?.querySelector?.("[data-approval-card]") ?? null;
+    return card == null ? "" : String(card.getAttribute?.("data-approval-state") ?? "");
+  }
+
+  /**
+   * VOICE-19. The controls the copy KEEPS: a pending auto-review card's Allow, Refuse and Always
+   * allow, and nothing else, ever.
+   *
+   * Jason, on build 21: "the approval card popped up while I was in my voice chat session, which is
+   * beautiful, but it did not have an approve or deny button in that view ... it doesn't exist inside
+   * the voice chat and it should." A person on a call cannot reach the chat behind the screen -- the
+   * shell is `inert` while a call is up -- so a card with its buttons taken off is a question with no
+   * way to answer it.
+   *
+   * ONE KIND AND NOT ALL OF THEM. A widget's options, a credential field and a report card's textarea
+   * are each a different promise about what a press does, and a copy of a text input on this screen
+   * would be a second place to type one answer. Those stay exactly as they were: read-only copies.
+   */
+  function keptCardControls(copy) {
+    const card = copy?.querySelector?.("[data-approval-card]") ?? null;
+    if (card == null) return [];
+    if (String(card.getAttribute?.("data-approval-state") ?? "") !== "pending") return [];
+    return [...(card.querySelectorAll?.("[data-decide]") ?? [])];
+  }
+
+  /**
+   * THE CARD IS COPIED, AND ITS CONTROLS ARE LEFT BEHIND -- with ONE exception since VOICE-19. Every
+   * card's buttons are wired by delegation against the row in the transcript and carry its
+   * data-message-id; a live copy of them on top of the screen would be a second control for one
+   * decision, and the one underneath is the one that works. So the copy is there to be READ.
+   *
+   * The exception is a PENDING auto-review card, whose decide buttons are kept and press the row's
+   * own buttons rather than the adapter (see decideFromCall): still one control path, still one
+   * adapter call, and now a reachable one on the screen the person is actually looking at.
+   *
+   * AND THE CARD'S PUSH HOOKS COME OFF THE COPY, which is a pre-existing defect this wave found
+   * rather than introduced. `data-needs-you-card` marks every pending card in the open conversation
+   * and a shell with no bearer COUNTS those nodes off the DOM (docs/APPS.md section 6, and
+   * scripts/verify-push.mjs reads them); a clone of a pending card carries the attribute too, so one
+   * approval with a call screen up counted as two. The hook is the row's, and it stays the row's.
    */
   function paintCallCard(node) {
     const slot = node.querySelector("[data-voice-call-card-slot]");
     if (slot == null) return;
     const row = callCardRow();
     const id = String(row?.getAttribute?.("data-message-id") ?? "");
-    if (row == null || id.length === 0 || id === call.fromCard) {
-      if (call.card.length > 0) { call.card = ""; slot.textContent = ""; node.removeAttribute("data-voice-call-card"); }
+    const cardState = callCardState(row);
+    // VOICE-19. A PENDING APPROVAL IS NEVER STALE. `fromCard` is the newest card in the conversation
+    // at the moment the call opened, and it exists so a weather card from this morning is not put in
+    // the middle of a call. A card the person has NOT ANSWERED is a different thing: it is blocking
+    // the agent right now, it is what the relay asks about out loud whenever it finds one, and a
+    // question in somebody's ear about a card the screen refuses to draw is the worst of both. So the
+    // staleness rule holds for every other kind and lets this one through, however old it is.
+    const waiting = cardState === "pending";
+    // AND A CARD THIS CALL HAS ALREADY DRAWN STAYS DRAWN. Without this the card vanishes from the
+    // screen the instant the person answers it -- it stops being `pending`, the staleness rule above
+    // catches it again and takes it away -- so the one thing a person wants to see after pressing
+    // Allow, that it was allowed, is the one thing they never see. MEASURED in --leg call before this
+    // line: the row read "approved" and the slot was empty.
+    const mine = id === call.card && call.card.length > 0;
+    if (row == null || id.length === 0 || (id === call.fromCard && !waiting && !mine)) {
+      if (call.card.length > 0) { call.card = ""; call.cardState = ""; slot.textContent = ""; node.removeAttribute("data-voice-call-card"); }
       return;
     }
-    if (id === call.card) return;
+    if (id === call.card && cardState === call.cardState) return;
     let copy = null;
     try { copy = row.cloneNode(true); } catch { copy = null; }
     if (copy == null) return;
+    const keep = new Set(keptCardControls(copy));
     for (const one of copy.querySelectorAll?.("button, input, textarea, select, details") ?? []) {
+      if (keep.has(one)) continue;
       try { one.remove(); } catch { /* a node that will not go is read-only anyway */ }
+    }
+    for (const one of copy.querySelectorAll?.("[data-needs-you-card]") ?? []) {
+      for (const name of ["data-needs-you-card", "data-card-id", "data-card-kind", "data-agent", "data-title", "data-href"]) {
+        try { one.removeAttribute(name); } catch { /* an attribute that will not go was not there */ }
+      }
     }
     slot.textContent = "";
     slot.appendChild(copy);
     call.card = id;
+    call.cardState = cardState;
     if (node.getAttribute("data-voice-call-card") !== "up") node.setAttribute("data-voice-call-card", "up");
+  }
+
+  /**
+   * VOICE-19. THE COPY'S BUTTON PRESSES THE ROW'S BUTTON, and there is still exactly ONE decide path.
+   *
+   * app.js listens for `[data-decide]` by delegation on #transcript and calls adapter.decideApproval
+   * from there, with everything that hangs off it: the sending state, the allow-rule write, the
+   * repaint, the toast on a failure. The call screen is a fixed div on document.body, so a press on
+   * it never reaches that listener -- and calling the adapter from this file instead would be a
+   * SECOND gate on one decision, which is the thing docs/VOICE-19.md rules out by name. So the copy's
+   * button finds the button it was cloned from and clicks THAT one.
+   *
+   * The row is walked rather than selected, because a message id is the host's own string and
+   * CSS.escape is not something this file may assume. A row that is no longer on the page (the
+   * transcript repainted between the copy and the thumb) answers false and paints nothing: the next
+   * repaint redraws the copy from whatever the row says now.
+   */
+  function decideFromCall(button) {
+    const document_ = global.document;
+    const id = String(button?.getAttribute?.("data-message-id") ?? "");
+    const value = String(button?.getAttribute?.("data-decide") ?? "");
+    if (document_ == null || id.length === 0 || value.length === 0) return false;
+    const rows = document_.querySelectorAll?.("#transcript .message-row") ?? [];
+    for (const row of rows) {
+      if (String(row.getAttribute?.("data-message-id") ?? "") !== id) continue;
+      for (const one of row.querySelectorAll?.("[data-decide]") ?? []) {
+        if (String(one.getAttribute?.("data-decide") ?? "") !== value) continue;
+        try { one.click(); } catch { return false; }
+        return true;
+      }
+    }
+    return false;
   }
 
   // Every write here is guarded on a change, the same rule paint() and paintOverlay() keep: the
@@ -3454,6 +3564,9 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       // person's own words as the ended card would read them back, and the card's whole sentence.
       call: {
         up: call.up, word: call.word, muted: call.muted, status: call.status, card: call.card,
+        // VOICE-19. Which state the card on the screen is in, so a gate can say whether the copy is
+        // still offering a decision or has followed the row into a settled one.
+        cardState: call.cardState,
         down: call.down, output: call.output, route: call.route,
         typed: typedLineWanted(), heard: [...call.heard], ended: endedCardText(),
       },
@@ -3561,6 +3674,11 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       mute: callMute,
       statusText: callStatusText,
       cardRow: callCardRow,
+      // VOICE-19. The card's state as the copy reads it, which controls the copy keeps, and the one
+      // door a press on the copy leaves by.
+      cardState: callCardState,
+      keptControls: keptCardControls,
+      decide: decideFromCall,
       typed: sendThroughComposer,
       endedNoteUp: endedNoteUp,
       dismissEndedNote,

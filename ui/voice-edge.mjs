@@ -1422,6 +1422,19 @@ export const FIRST_NUDGE_MS = 20000;
 /** Two announcements never closer than this, and never while a response is in flight. */
 export const ANNOUNCE_GAP_MS = 8000;
 /**
+ * VOICE-19. How often the relay looks for a card the box raised with NO spoken turn behind it.
+ *
+ * Until this wave the tail was read only inside `makeTurnRunner.run`, which is to say only while a
+ * spoken turn was with Titan. Every other pending approval -- one raised by a turn somebody started
+ * in the chat, by a routine, by a subagent, or by the agent carrying on working after his reply had
+ * already landed -- appeared on the person's screen and was never asked about out loud. Jason, on
+ * build 21: "the approval card popped up while I was in my voice chat session ... I should also be
+ * able to tell Titan when it pops up on the screen." So this is the missing moment, and it is a
+ * SLOW tick on purpose: the turn runner's own 400 ms poll is what a live turn needs, and between
+ * turns three seconds is the difference between reading the card and hearing about it.
+ */
+export const CARD_WATCH_MS = 3000;
+/**
  * VOICE-14c. The line says hello the moment it is up, before the person has said a word. Jason,
  * 2026-09-12: "as soon as you start the call, it should say something first, like Hey there ...
  * or just Hi. It could be random." A silent open line reads as a dead one; this is the dial tone.
@@ -1730,12 +1743,45 @@ export function pendingCardsOf(entries) {
   return out;
 }
 
+/**
+ * VOICE-19. THE ONE WORDING for a card, wherever it is asked.
+ *
+ * Two paths ask it now -- the turn that came back holding one, and the watcher below that finds one
+ * the box raised on its own -- and a person answering "yes" has to be answering the same question in
+ * both, or the two surfaces drift into two different promises about one decision. It ASKS, which the
+ * mid-turn wording never did: it read out the card's summary as a statement and left the person to
+ * work out that a spoken yes would close it.
+ *
+ * The title and the detail are the card's own strings, verbatim, and nothing is gisted: "there is
+ * something waiting on you" is how somebody says yes to the wrong thing.
+ */
+export function cardQuestion(card) {
+  if (card == null) return "";
+  if (card.kind === "many")
+    return `There are ${card.count} things waiting on you: ${card.cards.map((one) => one.title).join("; ")}. Say which one.`;
+  const tidy = (text) => String(text ?? "").trim().replace(/\s+/g, " ");
+  // A full stop is added only where the card's own string has none, so a summary the host already
+  // wrote as a sentence is not read out as "Run psql?." and one written as a fragment still ends.
+  const sentence = (text) => (text.length === 0 || /[.?!]$/.test(text) ? text : `${text}.`);
+  const said = [sentence(tidy(card.title)), sentence(tidy(card.detail))].filter((one) => one.length > 0).join(" ");
+  if (said.length === 0) return "Something is waiting on you. Allow it?";
+  return `${said} Allow it?`;
+}
+
 const NEGATION = /\b(?:not|never|don'?t|doesn'?t|didn'?t|won'?t|can'?t|cannot|no longer|hold off|wait)\b/i;
 /** A leading refusal, which turns the yes phrase after it into a no rather than into nothing. */
 const NEGATION_PREFIX = /^(?:don'?t|do not|dont|never|no|not|please don'?t|i don'?t want to)\s+/;
-const YES = ["yes", "yeah", "yep", "yup", "sure", "go ahead", "do it", "send it", "send that", "approve", "approved", "confirm", "confirmed", "ok", "okay", "that's right", "correct", "go for it"];
-const NO = ["no", "nope", "nah", "stop", "cancel", "deny", "denied", "don't", "do not", "hold off", "not yet", "never mind", "nevermind", "forget it"];
-const FILLER = new Set(["please", "thanks", "thank", "you", "then", "now", "titan", "mate", "man"]);
+// VOICE-19 added "allow" and "permit" here, and "refuse", "reject" and "block" below, because the
+// question the relay now asks ends in the button's own word: "Allow it?". A person answering the
+// question they were asked was, until this wave, answering with a word this matcher did not know,
+// and an unmatched answer goes to Titan as prose -- which leaves the card open and reads as the
+// relay ignoring them.
+const YES = ["yes", "yeah", "yep", "yup", "sure", "go ahead", "do it", "send it", "send that", "approve", "approved", "allow", "allowed", "permit", "confirm", "confirmed", "ok", "okay", "that's right", "correct", "go for it"];
+const NO = ["no", "nope", "nah", "stop", "cancel", "deny", "denied", "refuse", "refused", "reject", "block", "don't", "do not", "hold off", "not yet", "never mind", "nevermind", "forget it"];
+// "it" is filler on the TAIL of a phrase only, which is what makes "allow it", "approve it",
+// "refuse it" and "stop it" whole answers while "I am not sure, can you confirm what it would do"
+// is still prose: the utterance has to START with one of the phrases above before a tail is read.
+const FILLER = new Set(["please", "thanks", "thank", "you", "then", "now", "titan", "mate", "man", "it"]);
 
 /**
  * A WHOLE-UTTERANCE yes or no, with a negation guard.
@@ -2281,6 +2327,12 @@ export function makeVoiceSession({
   capTickMs = CAP_TICK_MS,
   // How long the dial may stay silent before the person is told. A test shortens it.
   dialWatchdogMs = DIAL_WATCHDOG_MS,
+  /**
+   * VOICE-19. How often the relay looks for a card the box raised between spoken turns. A test and a
+   * gate shorten it so that proving the question is asked is an assertion rather than a three second
+   * wall-clock wait.
+   */
+  cardWatchMs = CARD_WATCH_MS,
   /** Called once, after the row is settled, so the edge can forget this session. */
   onClosed = () => {},
   log = () => {},
@@ -2346,6 +2398,25 @@ export function makeVoiceSession({
   let bargeIn = false;
   let helloSeen = false;
   let tick = null;
+  /**
+   * VOICE-19. The between-turns card watcher: its interval, whether a read of its own is already in
+   * flight, and the entry ids it has already asked about out loud.
+   *
+   * `cardsAsked` is what keeps one card one question. A card stays PENDING on the box until somebody
+   * answers it, so a watcher with no memory would re-ask the same approval every three seconds for
+   * the length of the call; and a card the person has just settled with their thumb must not be
+   * asked about at all. It is never pruned, because a session is one call and an entry id is unique
+   * within it.
+   */
+  let cardWatch = null;
+  let cardWatching = false;
+  const cardsAsked = new Set();
+  /**
+   * How many `titan` tool turns are inside `runner.run` right now. The runner polls the tail at
+   * 400 ms while it runs and returns the card it finds, so the watcher stands aside for it: two
+   * readers racing on one card is how the same approval gets asked twice in different words.
+   */
+  let turnsInFlight = 0;
   let rateLimitWaits = 0;
   /** Whether the provider socket ever opened, which is what tells a refused dial from a dropped line. */
   let opened = false;
@@ -2592,8 +2663,82 @@ export function makeVoiceSession({
     if (respond) sendProvider({ type: "response.create" });
   };
 
+  /**
+   * VOICE-19. A pending card the box raised with NO spoken turn behind it, asked out loud.
+   *
+   * THE MOMENT THAT WAS MISSING. `pendingCardsOf` is read in exactly one other place: inside
+   * `makeTurnRunner.run`, against the entries that landed after this line's own prompt. That covers
+   * an approval a spoken turn caused and nothing else. An approval raised by a turn started in the
+   * chat, by a routine, by a subagent, or by Titan carrying on working AFTER his reply had already
+   * landed and closed the turn, reached the person's screen and was never mentioned -- which is the
+   * half of Jason's build-21 report that is not about buttons: "Titan did not ask."
+   *
+   * IT ALSO LETS A CARD GO. A card the person settles with their thumb stops being pending, and the
+   * spoken question that was about it has to stop standing: without this, "yes" said a minute later
+   * would still be read as an answer to a card that is already closed, and the person would be told
+   * "that one already closed" instead of being heard.
+   *
+   * NEVER A SECOND GATE and never a second wording: the question is `cardQuestion`, the same string
+   * the mid-turn path speaks, and a spoken answer to it goes through `resolveHeldCard` exactly as it
+   * did before -- the console's own approval commands.
+   */
+  const watchCards = async () => {
+    if (stopping || cardWatching || turnsInFlight > 0) return undefined;
+    if (String(agent.agentId ?? "").length === 0) return undefined;
+    cardWatching = true;
+    try {
+      const answer = await call("getAgentTranscriptTail", { id: agent.agentId, limit: 24 }).catch(() => null);
+      if (answer == null || stopping) return undefined;
+      const pending = pendingCardsOf(Array.isArray(answer?.entries) ? answer.entries : []);
+      // A card that is no longer waiting is no longer the question on the table. This is the tap:
+      // the person pressed Allow on the screen, the host rewrote the card's status, and the spoken
+      // question it was holding is answered.
+      const held = session.heldCard;
+      if (held != null) {
+        const stillOpen = held.kind === "many"
+          ? (held.cards ?? []).some((one) => pending.some((row) => row.entryId === one.entryId))
+          : pending.some((row) => row.entryId === held.entryId);
+        if (!stillOpen) {
+          session.heldCard = null;
+          log(`voice ${t.slug} let go of a held card: it was settled on screen rather than out loud`);
+        }
+        return undefined;
+      }
+      // A spoken turn may have started while this read was in flight, and the runner's own poll is
+      // the one that should find the card then.
+      if (turnsInFlight > 0) return undefined;
+      const fresh = pending.filter((row) => !cardsAsked.has(row.entryId));
+      if (fresh.length === 0) return undefined;
+      for (const row of fresh) cardsAsked.add(row.entryId);
+      const card = pickOneCard(fresh);
+      // `offeredTurn` is the guard that already exists on the mid-turn path: an answer has to arrive
+      // in a LATER user turn than the question, or the model can talk itself into a confirmation.
+      session.heldCard = { ...card, offeredTurn: session.userTurn };
+      const question = cardQuestion(card);
+      log(`voice ${t.slug} is asking about a card the box raised on its own: ${JSON.stringify(question.slice(0, 120))}`);
+      // The page paints NOTHING for this frame (voice.js reads `said` for the gate and for VOICE-15b's
+      // own-speech guard); the card itself is already on screen, drawn from the transcript.
+      browser?.sendJson({ t: "said", text: question });
+      await say(question);
+    } catch (error) {
+      log(`voice could not look for a pending card: ${error?.message ?? error}`);
+    } finally {
+      cardWatching = false;
+    }
+    return undefined;
+  };
+
   /** The one tool, dispatched once per call_id, on whichever surface carried it first. */
   const dispatch = async (toolCall) => {
+    // VOICE-19. While a spoken turn is with Titan, the turn runner owns the tail: it polls at 400 ms
+    // and returns whatever card lands beside the reply. The watcher above stands aside for the whole
+    // of it, including the answerTool that follows, so one card is one question.
+    turnsInFlight += 1;
+    try { return await dispatchTool(toolCall); }
+    finally { turnsInFlight -= 1; }
+  };
+
+  const dispatchTool = async (toolCall) => {
     if (toolCall.name !== "titan") return answerTool(toolCall.callId, { error: "there is no such tool here" });
     meter.toolCalls += 1;
     // THE TURN THIS CALL BELONGS TO, taken here rather than read later: in always-listening the next
@@ -2684,9 +2829,11 @@ export function makeVoiceSession({
     let reply = pieces.join(" ");
     if (result.card != null) {
       session.heldCard = { ...result.card, offeredTurn: session.userTurn };
-      const question = result.card.kind === "many"
-        ? `There are ${result.card.count} things waiting on you: ${result.card.cards.map((c) => c.title).join("; ")}. Say which one.`
-        : `${result.card.title}. ${result.card.detail ?? ""}`.trim();
+      // VOICE-19. Asked here, so the watcher above never asks it a second time in its own words.
+      for (const one of result.card.kind === "many" ? (result.card.cards ?? []) : [result.card]) {
+        if (String(one?.entryId ?? "").length > 0) cardsAsked.add(String(one.entryId));
+      }
+      const question = cardQuestion(result.card);
       reply = `${reply} ${question}`.trim();
       // The card's question was never in the draft, so it is always still owed to the person.
       unsaid.push(question);
@@ -2756,6 +2903,14 @@ export function makeVoiceSession({
       setState("listening");
       // VOICE-14c: once per line, the first time the provider confirms the session.
       if (greet && !greeted) { greeted = true; void say(pickGreeting()); }
+      // VOICE-19. ARMED HERE AND NOT IN start(), because the watcher SPEAKS: sendProvider drops
+      // anything written before the provider socket is up, so a card found in that window would be
+      // marked asked and never said out loud. This event is the one moment the relay knows the line
+      // is really live.
+      if (cardWatch == null && !stopping) {
+        cardWatch = setInterval(() => void watchCards(), cardWatchMs);
+        cardWatch.unref?.();
+      }
       return undefined;
     }
     if (type === "input_audio_buffer.speech_started") {
@@ -2944,6 +3099,7 @@ export function makeVoiceSession({
     if (stopping) return;
     stopping = true;
     if (tick != null) clearInterval(tick);
+    if (cardWatch != null) clearInterval(cardWatch);
     if (dialWatch != null) clearTimeout(dialWatch);
     if (sentence.length > 0) browser?.note(sentence, condition);
     // The line is going down with words on screen, so the panel is dissolved before the socket is.
@@ -3222,6 +3378,8 @@ export function makeVoiceEdge({
   // How long a silent dial is waited on. A test and a gate shorten it so that proving the sentence
   // arrives is an assertion rather than an eight second wall-clock wait.
   dialWatchdogMs = DIAL_WATCHDOG_MS,
+  // VOICE-19. How often a live line looks for a card the box raised between spoken turns.
+  cardWatchMs = CARD_WATCH_MS,
   newSessionId = () => `vs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
   // KEYS-1. The operator's own keys, read from the control plane and kept in memory by
   // ui/relay-secrets.mjs. Null is a console with no control plane -- every single-box install, every
@@ -3458,7 +3616,7 @@ export function makeVoiceEdge({
       const session = makeVoiceSession({
         greet, brief,
         t, settings, policy, agent, call, ledger, sessionId, now, WebSocketImpl, providerUrl, capTickMs, log,
-        dialWatchdogMs,
+        dialWatchdogMs, cardWatchMs,
         onClosed: (one) => { sessions.delete(one); },
       });
       // THE ROW EXISTS BEFORE THE PROVIDER HEARS A BYTE. A row written on close does not exist for a

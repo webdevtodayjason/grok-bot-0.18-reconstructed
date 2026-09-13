@@ -2694,6 +2694,60 @@ async function legRelease() {
 // one-thumb-two-events case stays a Chromium measurement and a unit case), and there is no
 // --use-file-for-fake-audio-capture, so the microphone is built out of Web Audio and the mic level is
 // driven through __voice._setCallLevels, which the output labels as injected.
+// ---- VOICE-19: the box this leg forces one real approval on ------------------------------------
+//
+// The call leg already talks to the local box: the relay it stands up reads the same host gateway the
+// console does. What it could not do until this wave is make that box RAISE a card, and a card nobody
+// has ever seen on a real call screen is the thing Jason reported on build 21. So this borrows the rig
+// scripts/verify-console-polish.mjs --approval already proves out: arm Auto-review to enforce, add one
+// block instruction, prompt a scratch agent to run one harmless echo, and wait for the host's own
+// pending approval. Everything is put back in a finally, including the scratch agent, because a roster
+// that grows during a gate run is a bug (memory: agent-lifecycle-hygiene).
+//
+// IT NEVER TOUCHES THE R750 and it never restarts the shared relay on 7777: the box is the local
+// container and the relay is this leg's own, on its own port.
+const BOX = process.env.GROK_BOT_BOX ?? process.env.SAND_BOX_CONTAINER ?? "grok-bot-local-vm";
+const BOX_SETTINGS = "/home/box/sand-data/sand-host-settings.json";
+const APPROVAL_BLOCK = "ask me before running any shell command";
+const APPROVAL_PROBE = "echo hello-from-voice-call-card";
+/** The whole of section H, so a box whose model will not take the turn costs this leg and no more. */
+const APPROVAL_BUDGET_MS = Number(process.env.VOICE_GATE_APPROVAL_MS ?? 170_000);
+
+/**
+ * One picture of the call screen with a live card on it, into the scratch directory this run already
+ * owns. A screenshot is not a check and is never counted as one -- it is what lets a person look at
+ * the thing the numbers above it describe, which is how VOICE-13's two live defects were found.
+ */
+const shootCall = async (page, name) => {
+  const dir = path.join(os.tmpdir(), "voice-gate-shots");
+  try { mkdirSync(dir, { recursive: true }); } catch { /* it is there */ }
+  const file = path.join(dir, `${name}-${Date.now()}.png`);
+  const ok = await page.screenshot({ path: file }).then(() => true).catch(() => false);
+  if (ok) info(`picture: ${file}`);
+  return ok;
+};
+
+const dockerExec = (args) => new Promise((resolve, reject) => execFile(
+  "docker", ["exec", BOX, ...args], { maxBuffer: 8 << 20 },
+  (error, out) => (error ? reject(new Error(`docker exec ${args[0]}: ${error.message}`)) : resolve(out)),
+));
+// readSettingsFile (source/host/sand-box-setting.ts) accepts a flat object or { settings: {...} } and
+// PREFERS the nested one, so both helpers resolve the container the reader actually consults. Nothing
+// is read into this process but the one key being moved: the file is the operator's.
+const settingsContainer = "const c=(d&&typeof d.settings==='object'&&d.settings!=null&&!Array.isArray(d.settings))?d.settings:d;";
+const boxSettingsPreamble = `const fs=require('fs');const p=${JSON.stringify(BOX_SETTINGS)};let d={};`
+  + `try{const parsed=JSON.parse(fs.readFileSync(p,'utf8'));if(parsed&&typeof parsed==='object'&&!Array.isArray(parsed))d=parsed;}catch{}`;
+const readBoxSetting = async (name) => {
+  const out = await dockerExec(["node", "-e", `${boxSettingsPreamble}${settingsContainer}`
+    + `process.stdout.write(JSON.stringify(c[${JSON.stringify(name)}] ?? null));`]);
+  try { return JSON.parse(out); } catch { return null; }
+};
+const writeBoxSetting = async (name, value) => {
+  const mutate = value == null ? `delete c[${JSON.stringify(name)}];` : `c[${JSON.stringify(name)}]=${JSON.stringify(value)};`;
+  await dockerExec(["node", "-e", `${boxSettingsPreamble}${settingsContainer}${mutate}`
+    + "fs.writeFileSync(p,JSON.stringify(d,null,2));"]);
+};
+
 async function legCall() {
   console.log(`verify-voice --leg call on ${MACHINE} (engine: webkit)`);
   requireTheOtherItems(true);
@@ -2784,9 +2838,20 @@ async function legCall() {
   await context.addInitScript(() => {
     window.__gateCallUpAt = 0;
     window.__gatePressAt = 0;
+    // VOICE-19. EVERY WORD THE LINE EVER SHOWS, in order, recorded off the same observer rather than
+    // polled for one at a time. VOICE-14c greets the moment the provider confirms the session, so the
+    // Listening between Connecting and that greeting can last milliseconds and a leg that waits for
+    // one word at a time walks straight past it. This is what a person watching the screen sees.
+    window.__gateWords = [];
+    const word = () => {
+      const text = (document.querySelector("[data-voice-call-state]")?.textContent ?? "").trim();
+      if (text.length === 0) return;
+      if (window.__gateWords[window.__gateWords.length - 1] !== text) window.__gateWords.push(text);
+    };
     const watch = () => {
       const node = document.getElementById("voice-call");
       if (node != null && node.hidden === false && window.__gateCallUpAt === 0) window.__gateCallUpAt = performance.now();
+      word();
     };
     // document.documentElement does not exist yet at addInitScript time in WebKit, and observe() throws
     // on a null target -- which this leg then counted as the page throwing.
@@ -2806,7 +2871,11 @@ async function legCall() {
   // that does and does not prove.
   const page = await context.newPage();
   const pageErrors = [];
-  page.on("pageerror", (error) => pageErrors.push(String(error)));
+  // WHICH PART OF THE LEG THE PAGE COMPLAINED DURING. The check at the end is one line for the whole
+  // run, and "the page threw" with no idea when is a check nobody can act on: two reads of this leg
+  // went on working out whether a browser notice belonged to the reload or to the card copy.
+  let phase = "boot";
+  page.on("pageerror", (error) => pageErrors.push(`[${phase}] ${String(error)}`));
   await page.goto(`${relay.base}/login`, { waitUntil: "domcontentloaded" });
   await page.fill('input[type="password"]', relay.password).catch(() => {});
   await page.press('input[type="password"]', "Enter").catch(() => {});
@@ -2952,6 +3021,7 @@ async function legCall() {
 
   // ---- A: the press opens the screen ------------------------------------------------------------
   step("webkit 390x844 dpr 3: one press of Talk brings up the call screen");
+  phase = "the press";
   const before = await page.evaluate(RECTS);
   check(before.screen == null || before.screen.hidden === true, "there is no call screen before anybody presses anything",
     before.screen == null ? "not mounted yet" : `hidden ${before.screen.hidden}`);
@@ -3012,6 +3082,7 @@ async function legCall() {
 
   // ---- B: the five words, in order, across one stub turn ----------------------------------------
   step("the five words across one turn, in the order a person hears them");
+  phase = "one turn";
   const words = [];
   const watchWord = async (want, ms = 15_000) => {
     await page.waitForFunction((w) => (document.querySelector("[data-voice-call-state]")?.textContent ?? "").trim() === w, want, { timeout: ms }).catch(() => {});
@@ -3019,8 +3090,21 @@ async function legCall() {
     if (words.at(-1) !== now) words.push(now);
     return now;
   };
+  /** Every word the screen has shown so far, off the page's own recorder rather than off a poll. */
+  const wordsSeen = () => page.evaluate(() => [...(window.__gateWords ?? [])]);
   words.push(opened.screen?.word ?? "");
-  await watchWord("Listening");
+  // TWO PRECONDITIONS BEFORE A TURN IS DRIVEN, and VOICE-14c is the reason for both. The line greets
+  // the moment the provider confirms the session, so the FIRST Listening can be gone in milliseconds
+  // and the word is Talking; and a tool call driven into that window reaches the relay before the
+  // microphone has been heard, which VOICE-15c correctly drops with "I am not hearing your
+  // microphone" and no prompt at all. MEASURED: waiting only for the line left `lastHeard` empty and
+  // no spoken row in the chat. The row this replaced got both preconditions BY ACCIDENT, out of a 15
+  // second timeout spent waiting for a word the greeting had already taken away.
+  await page.waitForFunction(() => {
+    const word = (document.querySelector("[data-voice-call-state]")?.textContent ?? "").trim();
+    const stats = window.__voice?.stats?.();
+    return word === "Listening" && (stats?.micFrames ?? 0) >= 20 ? true : null;
+  }, null, { timeout: 25_000 }).catch(() => {});
   stub.emitSpeechStart();
   const said = `what is the team working on, call ${runId}`;
   for (const part of ["what is", "what is the team", said]) {
@@ -3041,10 +3125,31 @@ async function legCall() {
   await sleep(200);
   void stub.speak("The team is on the settings surface this afternoon.");
   await watchWord("Talking");
-  check(words.includes("Connecting") || words[0] === "Connecting", "the first word is Connecting, because the screen is up before the line is", JSON.stringify(words));
-  const order = ["Listening", "Thinking", "Talking"].map((one) => words.indexOf(one));
-  check(order.every((n, i) => n >= 0 && (i === 0 || n > order[i - 1])),
-    "and then Listening, Thinking and Talking in that order", `the whole observed sequence was ${JSON.stringify(words)}`);
+  const seen = await wordsSeen();
+  check(seen[0] === "Connecting", "the first word is Connecting, because the screen is up before the line is", JSON.stringify(seen));
+  // RE-CUT 2026-09-13 (VOICE-19), and not to get past a red line. This row was written before VOICE-14c
+  // and asserted that the FIRST occurrence of Listening, Thinking and Talking arrived in that order.
+  // The line now says hello the instant the provider confirms the session, so a Talking nobody asked
+  // for lands between Connecting and the person's first word, and that ordering can never hold again.
+  // The greeting is the product, so the row moves to what the product now promises: all three words
+  // are shown during a call, and the TURN'S OWN order still holds inside whatever the greeting did --
+  // the person is heard, then he is working, then he is answering. A regression this still catches: a
+  // turn with no Thinking, a reply that never reaches Talking, or a line that never returns to
+  // Listening after the greeting.
+  const firstTalking = seen.indexOf("Talking");
+  check(["Listening", "Thinking", "Talking"].every((one) => seen.includes(one)),
+    "all three of Listening, Thinking and Talking are shown during the call", `the whole observed sequence was ${JSON.stringify(seen)}`);
+  const heardAt = seen.indexOf("Listening");
+  const workingAt = seen.indexOf("Thinking", heardAt + 1);
+  const answeringAt = workingAt < 0 ? -1 : seen.indexOf("Talking", workingAt + 1);
+  check(heardAt >= 0 && workingAt > heardAt && answeringAt > workingAt,
+    "and the turn's own order holds inside them: heard, then working, then answering",
+    `Listening at ${heardAt}, Thinking at ${workingAt}, Talking at ${answeringAt} of ${JSON.stringify(seen)}`);
+  const greetingLanded = firstTalking >= 0 && firstTalking < workingAt
+    ? (firstTalking < heardAt ? "ahead of the first Listening" : "between the first Listening and the person's words")
+    : "nowhere ahead of the turn";
+  info(`VOICE-14c's greeting is why this row no longer asks for Listening first; on this run it landed ${greetingLanded}, `
+    + `and the whole sequence the screen showed was ${JSON.stringify(seen)}`);
 
   // ---- C: the avatar moves, and nothing in its chain is scaled -----------------------------------
   step("the avatar reacts to a level, and the mascot itself is never transformed");
@@ -3164,6 +3269,7 @@ async function legCall() {
 
   // ---- a card takes the middle and the avatar shrinks -------------------------------------------
   step("a reply carrying a card shrinks him to an orb and shows the card in the middle");
+  phase = "the injected card";
   const card = await page.evaluate(async () => {
     const transcript = document.getElementById("transcript");
     const row = document.createElement("article");
@@ -3210,6 +3316,7 @@ async function legCall() {
 
   // ---- mute ------------------------------------------------------------------------------------
   step("mute, which is this page's own fact and no frame on the wire");
+  phase = "mute";
   const mutedBefore = (await page.evaluate(RECTS)).mutedFrames;
   await page.tap("[data-voice-call-mute]");
   await page.waitForFunction(() => (document.querySelector("[data-voice-call-state]")?.textContent ?? "").trim() === "Muted", null, { timeout: 5000 }).catch(() => {});
@@ -3246,6 +3353,7 @@ async function legCall() {
 
   // ---- D: End ----------------------------------------------------------------------------------
   step("End puts the person back on their chat at the newest line");
+  phase = "End";
   const beforeEnd = await page.evaluate(RECTS);
   if (!sameRect(beforeEnd.shelf, before.shelf)) {
     info(`the shelf is ${beforeEnd.shelf.h} px now against ${before.shelf.h} px at the start, because the typed line above really was sent and the console draws its own row for a message in flight: ${JSON.stringify(beforeEnd.shelfKids)} against ${JSON.stringify(before.shelfKids)}. The call screen's own footer reading is the one taken at the press.`);
@@ -3275,6 +3383,7 @@ async function legCall() {
 
   // ---- E: the lifecycle -------------------------------------------------------------------------
   step("an app switch, a lock screen or a phone call ends the call cleanly and says so once");
+  phase = "the app switch";
   const box2 = await buttonAt();
   if (box2 != null) {
     await page.touchscreen.tap(box2.x, box2.y);
@@ -3309,6 +3418,7 @@ async function legCall() {
 
   // ---- F: Escape -------------------------------------------------------------------------------
   step("Escape ends a call at 390x844");
+  phase = "Escape";
   const box3 = await buttonAt();
   if (box3 != null) {
     await page.touchscreen.tap(box3.x, box3.y);
@@ -3320,6 +3430,296 @@ async function legCall() {
     const escaped = await page.evaluate(RECTS);
     check(escaped.on === false && escaped.screen?.hidden === true, "Escape ends the call and takes the screen with it", JSON.stringify({ on: escaped.on, hidden: escaped.screen?.hidden }));
     check(escaped.note == null || escaped.note.hidden === true, "and gets no note either, because a person pressed a key to leave", JSON.stringify(escaped.note));
+  }
+
+  // ---- H: VOICE-19, a real approval answered on the call screen --------------------------------
+  //
+  // Jason, 2026-09-13 on build 21: "The approval card popped up while I was in my voice chat session,
+  // which is beautiful, but it did not have an approve or deny button in that view ... I should also
+  // be able to tell Titan when it pops up on the screen."
+  //
+  // Everything above this line is the screen. This section is the CARD: one real pending approval,
+  // raised by the box's own host under enforce, drawn by the console's own renderer, copied onto the
+  // call screen with its buttons kept, asked about out loud by the relay, and settled by a thumb on
+  // the copy. Nothing here is injected markup -- the whole point of it is that the row and the copy
+  // are the same decision, and an injected row cannot be settled by the host.
+  step("VOICE-19: one real approval, asked out loud and answered on the call screen");
+  phase = "VOICE-19 setup";
+  const approvalStartedAt = Date.now();
+  const approvalLeft = () => APPROVAL_BUDGET_MS - (Date.now() - approvalStartedAt);
+  const boxCall = async (method, args = {}, ms = 25_000) => {
+    const answer = await ask(`${relay.base}/api/${method}`, {
+      method: "POST",
+      headers: { cookie: session.cookie, "content-type": "application/json" },
+      body: JSON.stringify(args),
+      timeoutMs: ms,
+    });
+    if (answer.status !== 200) throw new Error(`${method} answered ${answer.status}: ${answer.text.slice(0, 160)}`);
+    return answer.body;
+  };
+  let beforeMode = null;
+  let beforeInstructions = null;
+  let probeId = null;
+  let stillPending = null;
+  let armed = false;
+  try {
+    // The relay proxies the gateway's answer VERBATIM, so the parsed body IS the value -- exactly
+    // what ui/machine-room/gateway-adapter.js reads (`live?.autoReviewInstructions`). An extra
+    // `.value` hop here is how the first run of this section skipped itself with "nothing to arm"
+    // against a box that had settings all along.
+    const host = await boxCall("getHostSettings").catch(() => null);
+    beforeInstructions = host?.autoReviewInstructions ?? null;
+    if (beforeInstructions == null) {
+      skip("a real forced approval on the local box", "getHostSettings answered no autoReviewInstructions, so there is nothing to arm");
+    } else {
+      beforeMode = await readBoxSetting("SAND_AUTO_REVIEW_MODE").catch(() => null);
+      await writeBoxSetting("SAND_AUTO_REVIEW_MODE", "enforce");
+      armed = true;
+      await boxCall("setHostSettings", {
+        autoReviewInstructions: {
+          isEnabled: true,
+          allowInstructions: [...(beforeInstructions.allowInstructions ?? [])],
+          blockInstructions: [...new Set([...(beforeInstructions.blockInstructions ?? []), APPROVAL_BLOCK])],
+        },
+      });
+      const armedNow = await boxCall("getHostSettings").then((r) => r?.autoReviewInstructions ?? {});
+      check((armedNow.blockInstructions ?? []).includes(APPROVAL_BLOCK),
+        "the box is armed: the block instruction is stored and the review mode is enforce",
+        `${(armedNow.blockInstructions ?? []).length} block instruction(s), mode was ${JSON.stringify(beforeMode)}`);
+      const created = await boxCall("createAgent", { name: `probe-voice-card-${randomBytes(3).toString("hex")}`, description: "", origin: "user", isKickstartRequested: false });
+      probeId = created?.agent?.id ?? created?.id ?? null;
+      check(probeId != null, "a scratch agent to raise the approval on", String(probeId ?? "none"));
+      if (probeId != null) {
+        // THE VOICE LINE HAS TO BE POINTED AT THIS AGENT BEFORE THE PRESS. The relay resolves the
+        // agent once, when the socket is accepted, and it is that agent's tail the card watcher reads.
+        await ask(`${relay.base}/voice/settings`, {
+          method: "POST",
+          headers: { cookie: session.cookie, "content-type": "application/json" },
+          body: JSON.stringify({ agentId: probeId }),
+        });
+        await boxCall("sendPrompt", {
+          agentId: probeId,
+          prompt: `Run exactly this one command in your box shell and then tell me what happened: ${APPROVAL_PROBE}\n`
+            + "If Auto-review blocks it, immediately retry the exact same command once with "
+            + "request_smart_mode_approval set to true so the approval card reaches me, then stop and wait for my "
+            + "answer. Do not run any other command and do not work around the block.",
+        }, 30_000);
+        const askedAt = Date.now();
+        let pending = null;
+        while (pending == null && approvalLeft() > 55_000) {
+          const entries = await boxCall("getAgentTranscript", { id: probeId }, 20_000).catch(() => []);
+          pending = (Array.isArray(entries) ? entries : [])
+            .filter((one) => one.kind === "send-message" && one.message?.type === "auto-review-approval")
+            .map((one) => ({ entryId: one.id, ...one.message.approval }))
+            .find((one) => one.status === "pending") ?? null;
+          if (pending == null) await sleep(3000);
+        }
+        stillPending = pending;
+        if (pending == null) {
+          skip("a real forced approval on the call screen",
+            `no pending approval inside ${Math.round((Date.now() - askedAt) / 1000)}s; the box's model endpoint may not have taken the turn`);
+        } else {
+          check(true, "the host raised a real pending approval",
+            `${Math.round((Date.now() - askedAt) / 1000)}s, surface ${pending.surface}, command ${JSON.stringify(String(pending.command ?? "").slice(0, 50))}`);
+          // The roster on the page predates this agent, so the page is reloaded rather than waited on.
+          const errorsBeforeReload = pageErrors.length;
+          phase = "VOICE-19 reload";
+          await page.reload({ waitUntil: "load", timeout: 40_000 });
+          await page.waitForFunction(() => window.__machineRoomAdapter != null && window.__voice != null, null, { timeout: 40_000 }).catch(() => {});
+          await page.addStyleTag({ content: ":root { --sat: 59px; --sab: 34px; }" }).catch(() => {});
+          const opened = await page.evaluate(async (want) => {
+            document.querySelectorAll("dialog[open]").forEach((one) => one.close());
+            for (let i = 0; i < 60; i += 1) {
+              const el = document.querySelector(`.worker-card[data-context-id="${want}"]`);
+              if (el != null) { el.click(); await new Promise((r) => setTimeout(r, 400)); }
+              if (document.querySelector(".worker-card.is-active")?.dataset.contextId === want) return true;
+              await new Promise((r) => setTimeout(r, 400));
+            }
+            return false;
+          }, probeId);
+          check(opened, "the console opens the conversation the approval is waiting in");
+          const rowUp = await page.waitForFunction(
+            () => document.querySelector('#transcript [data-approval-card][data-approval-state="pending"]') != null,
+            null, { timeout: 45_000 },
+          ).then(() => true).catch(() => false);
+          check(rowUp, "and the real card is drawn in the transcript, pending");
+          const cardsBefore = await page.evaluate(() => document.querySelectorAll("[data-needs-you-card]").length);
+          const errorsAfterReload = pageErrors.length;
+          if (errorsAfterReload > errorsBeforeReload) {
+            info(`the reload and the conversation switch alone produced ${errorsAfterReload - errorsBeforeReload} browser notice(s), before any call screen: `
+              + `${JSON.stringify(pageErrors.slice(errorsBeforeReload).map((one) => String(one).slice(0, 90)))}`);
+          }
+          // THE PRESS. Everything from here is the call screen with a live card on it.
+          const spot = await buttonAt();
+          check(spot != null, "the talk button is reachable again after the reload", JSON.stringify(spot));
+          if (spot != null && rowUp) {
+            phase = "VOICE-19 the call with a card on it";
+            await page.touchscreen.tap(spot.x, spot.y);
+            await page.waitForFunction(() => document.getElementById("voice-call")?.hidden === false, null, { timeout: 10_000 }).catch(() => {});
+            const onCall = await page.waitForFunction(
+              () => (document.querySelector("[data-voice-call-card-slot] [data-approval-card]") != null ? true : null),
+              null, { timeout: 20_000 },
+            ).then(() => true).catch(() => false);
+            check(onCall, "the pending approval is the card in the middle of the call screen");
+            const copied = await page.evaluate(() => {
+              const slot = document.querySelector("[data-voice-call-card-slot]");
+              const card = slot?.querySelector("[data-approval-card]") ?? null;
+              if (card == null) return null;
+              const buttons = [...card.querySelectorAll("[data-decide]")].map((one) => {
+                const rect = one.getBoundingClientRect();
+                const at = document.elementFromPoint(Math.round(rect.x + rect.width / 2), Math.round(rect.y + rect.height / 2));
+                const style = getComputedStyle(one);
+                return {
+                  decide: one.getAttribute("data-decide"),
+                  id: one.getAttribute("data-message-id"),
+                  label: (one.textContent ?? "").trim(),
+                  w: Math.round(rect.width), h: Math.round(rect.height),
+                  exact: Math.round(rect.height * 100) / 100,
+                  x: Math.round(rect.x), y: Math.round(rect.y),
+                  hit: at != null && (at === one || one.contains(at)),
+                  on: at == null ? "nothing" : `${at.tagName.toLowerCase()}${at.className ? `.${String(at.className).split(" ")[0]}` : ""}`,
+                  onScreen: rect.top >= 0 && rect.bottom <= window.innerHeight && rect.left >= 0 && rect.right <= window.innerWidth,
+                  // What the cascade actually resolved, so a button one pixel short says WHY rather
+                  // than leaving the next person to guess at the sheet.
+                  css: `min-height ${style.minHeight}, box-sizing ${style.boxSizing}, padding ${style.paddingTop}/${style.paddingBottom}, border ${style.borderTopWidth}, font ${style.fontSize}/${style.lineHeight}`,
+                };
+              });
+              return {
+                buttons,
+                state: card.getAttribute("data-approval-state"),
+                request: (card.querySelector(".approval-request")?.textContent ?? "").trim(),
+                hooks: document.querySelectorAll("[data-needs-you-card]").length,
+                rowId: document.querySelector("#transcript [data-approval-card]")?.closest(".message-row")?.getAttribute("data-message-id") ?? "",
+                inputs: slot.querySelectorAll("input, textarea, select, details").length,
+              };
+            });
+            if (copied == null) {
+              check(false, "the copied approval card could be read off the call screen", "no [data-approval-card] in the slot");
+            } else {
+              const decides = copied.buttons.map((one) => one.decide);
+              check(decides.includes("approved") && decides.includes("denied"),
+                "the copy carries Allow and Refuse, which is the half of this that was missing",
+                `${JSON.stringify(copied.buttons.map((one) => `${one.label} ${one.w}x${one.h}`))}`);
+              const big = copied.buttons.filter((one) => one.w >= 44 && one.h >= 44);
+              check(big.length === copied.buttons.length && copied.buttons.length > 0,
+                "every one of them is at least 44 px, on a screen with no breakpoint to lean on",
+                `${JSON.stringify(copied.buttons.map((one) => `${one.w}x${one.exact} at ${one.x},${one.y}`))} on ${MACHINE}`);
+              info(`the cascade on the copied buttons: ${JSON.stringify(copied.buttons.map((one) => one.css))}`);
+              check(copied.buttons.every((one) => one.hit && one.onScreen),
+                "and a thumb at each button's own centre really lands on it",
+                JSON.stringify(copied.buttons.map((one) => ({ decide: one.decide, hit: one.hit, under: one.on, onScreen: one.onScreen }))));
+              check(copied.buttons.every((one) => one.id === copied.rowId),
+                "each copied button still names the row it was cloned from, which is how the press finds its way back",
+                `${JSON.stringify(copied.buttons.map((one) => one.id))} vs row ${JSON.stringify(copied.rowId)}`);
+              check(copied.inputs === 0, "and nothing else came with them: no field, no disclosure", `${copied.inputs} other control(s)`);
+              check(copied.hooks === cardsBefore,
+                "the copy is not a second card waiting on anybody, which a shell counting [data-needs-you-card] off the DOM would have read as two",
+                `${cardsBefore} before the call, ${copied.hooks} with the copy on screen`);
+              await shootCall(page, "voice19-approval-on-call");
+              // THE RELAY ASKED IT OUT LOUD. The stub vendor is in this process, so the words the
+              // relay sent are read off it rather than guessed at from the page.
+              const wanted = String(stillPending.summary ?? "").slice(0, 24);
+              let heard = null;
+              for (let i = 0; i < 40 && heard == null; i += 1) {
+                heard = stub.events.inbound.find((one) => one.type === "conversation.item.create"
+                  && String(one.item?.content?.[0]?.text ?? "").includes("Allow it?")) ?? null;
+                if (heard == null) await sleep(500);
+              }
+              check(heard != null, "the relay asked the person about it out loud, without anybody starting a turn",
+                heard == null ? `nothing carrying "Allow it?" reached the vendor in 20s` : JSON.stringify(String(heard.item.content[0].text).slice(0, 140)));
+              if (heard != null) {
+                const said = String(heard.item.content[0].text);
+                check(said.startsWith("Read this out to the person, word for word"),
+                  "in the one shape that makes a realtime model say an exact string");
+                check(wanted.length === 0 || said.includes(wanted),
+                  "and the question names the action rather than gisting it", JSON.stringify(wanted));
+                const asked = stub.events.inbound.filter((one) => one.type === "conversation.item.create"
+                  && String(one.item?.content?.[0]?.text ?? "").includes("Allow it?")).length;
+                check(asked === 1, "once, and not once per watcher tick", `${asked} question(s) on the wire`);
+              }
+              // THE TAP. On the COPY, and the row in the chat is what has to settle.
+              const target = copied.buttons.find((one) => one.decide === "approved");
+              await page.touchscreen.tap(target.x + Math.round(target.w / 2), target.y + Math.round(target.h / 2));
+              const settled = await page.waitForFunction(() => {
+                const row = document.querySelector("#transcript [data-approval-card]");
+                const state = row?.getAttribute("data-approval-state") ?? "";
+                return state !== "" && state !== "pending" && state !== "sending" ? state : null;
+              }, null, { timeout: 45_000 }).then((handle) => handle.jsonValue()).catch(() => null);
+              check(settled === "approved", "a tap on the COPY settled the row in the chat, which is the one that talks to the host",
+                `the transcript row reads ${JSON.stringify(settled)}`);
+              const after = await page.evaluate(() => {
+                const slot = document.querySelector("[data-voice-call-card-slot]");
+                const card = slot?.querySelector("[data-approval-card]") ?? null;
+                return {
+                  state: card?.getAttribute("data-approval-state") ?? "",
+                  buttons: card?.querySelectorAll("[data-decide]").length ?? -1,
+                  pill: (card?.querySelector("[data-approval-pill]")?.textContent ?? "").trim(),
+                  up: window.__voice?.stats?.()?.on === true,
+                  screen: document.getElementById("voice-call")?.hidden === false,
+                  stat: window.__voice?.stats?.()?.call ?? null,
+                };
+              });
+              check(after.state === "approved" && after.buttons === 0,
+                "and the copy followed it: the settled state, with no buttons left offering a decision that is made",
+                `${JSON.stringify(after.state)}, ${after.buttons} button(s), pill ${JSON.stringify(after.pill)}`);
+              check(after.screen === true, "and the call is still up through all of it: answering a card is not leaving",
+                `screen ${after.screen}, line ${after.up}`);
+              await shootCall(page, "voice19-approval-settled");
+              if (settled === "approved") stillPending = null;
+              if (pageErrors.length > errorsAfterReload) {
+                info(`and the call screen with a live card on it produced ${pageErrors.length - errorsAfterReload} more: `
+                  + `${JSON.stringify(pageErrors.slice(errorsAfterReload).map((one) => String(one).slice(0, 90)))}`);
+              }
+            }
+            // THE LINE IS LET GO OF PROPERLY BEFORE THE NEXT SECTION DIALS. The relay releases a
+            // session only AFTER it has written this call's one note (VOICE-16), and until it does the
+            // one-call-at-a-time check refuses the next press -- which is how the reduced-motion
+            // section below sat on "Connecting" with no still to draw. Measured: 300 ms was not
+            // enough; the note write has its own budget on the far side of the close.
+            phase = "VOICE-19 leaving the call";
+            await page.evaluate(() => window.__voice?.stop?.());
+            await sleep(10_000);
+          }
+        }
+      }
+    }
+  } catch (error) {
+    check(false, "the VOICE-19 section ran to the end", String(error?.message ?? error).slice(0, 200));
+  } finally {
+    phase = "VOICE-19 restore";
+    // Back the way it was found, in this order: answer anything still pending, put the operator's
+    // instructions back, put the switch back, delete the scratch agent.
+    if (stillPending != null && probeId != null) {
+      await boxCall("resolveAutoReviewApproval", { agentId: probeId, entryId: stillPending.entryId, requestId: stillPending.requestId, resolution: "denied" }).catch(() => {});
+    }
+    if (beforeInstructions != null) {
+      await boxCall("setHostSettings", { autoReviewInstructions: beforeInstructions }).catch((error) => info(`the instructions were NOT restored: ${error.message}`));
+      const back = await boxCall("getHostSettings").then((r) => r?.autoReviewInstructions ?? {}).catch(() => ({}));
+      check(!(back.blockInstructions ?? []).includes(APPROVAL_BLOCK),
+        "the box is back the way it was found: this gate's block instruction is not left behind",
+        `${(back.blockInstructions ?? []).length} block instruction(s)`);
+    }
+    if (armed) {
+      await writeBoxSetting("SAND_AUTO_REVIEW_MODE", beforeMode).catch((error) => info(`SAND_AUTO_REVIEW_MODE was NOT restored: ${error.message}`));
+      const mode = await readBoxSetting("SAND_AUTO_REVIEW_MODE").catch(() => "?");
+      check(JSON.stringify(mode) === JSON.stringify(beforeMode), "the box's review mode is back where it started",
+        `now ${JSON.stringify(mode)}, was ${JSON.stringify(beforeMode)}`);
+    }
+    if (probeId != null) {
+      // THE WORKSPACE'S VOICE AGENT GOES BACK FIRST. This section pointed the door at the scratch
+      // agent so the relay's card watcher would read ITS tail; leaving it there and then deleting the
+      // agent left the next press dialling a bot that no longer exists, which is how the
+      // reduced-motion section below sat on "Connecting" with nothing drawn.
+      await ask(`${relay.base}/voice/settings`, {
+        method: "POST",
+        headers: { cookie: session.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ agentId: chosen?.id ?? "" }),
+      }).catch(() => {});
+      await boxCall("deleteAgents", { ids: [probeId] }).catch(() => boxCall("deleteAgent", { id: probeId }).catch(() => {}));
+      const roster = await boxCall("listAgents").catch(() => []);
+      const list = Array.isArray(roster) ? roster : (roster?.agents ?? []);
+      check(list.every((one) => one.id !== probeId), "and the scratch agent is gone from the roster", `${list.length} bot(s) left`);
+    }
   }
 
   check(pageErrors.length === 0, "and the page threw nothing through any of it", pageErrors.slice(0, 2).join(" | ") || "clean");

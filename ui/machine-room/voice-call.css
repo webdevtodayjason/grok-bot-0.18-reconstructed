@@ -159,10 +159,38 @@ body[data-voice-call] { overflow: hidden; }
 .voice-call[data-voice-call-card] .voice-call-halo.is-outer { width: 120px; }
 
 .voice-call-card .message-row { margin: 0 0 8px; }
+
+/* VOICE-19. THE COPY IS NOT AN ARRIVING MESSAGE. `.message-row` carries
+   `animation: float-in var(--duration-standard) var(--ease-spring) both`, and float-in is
+   `translateY(10px) scale(0.985)` with a spring easing -- so every time paintCallCard appends a fresh
+   clone the animation starts again, on a node nobody is watching arrive. MEASURED in --leg call with
+   it running: the copy's Allow button computed `min-height: 44px` and `box-sizing: border-box` and
+   still measured 43.34 px (44 x 0.985), and a thumb at its own centre missed it entirely because the
+   row was ten pixels below where it would settle. gap-badge.css turns the same animation off for the
+   same reason. Nothing about the row in the transcript changes: this is the copy only. */
+.voice-call-card .message-row { animation: none; }
 .voice-call-card .message-bubble,
 .voice-call-card .inline-card {
   background: rgb(255 255 255 / 6%);
   border-radius: 12px;
+}
+
+/* VOICE-19. The one card whose controls the copy keeps: a pending approval, answered from the screen
+   the person is looking at rather than from a chat the call has made `inert`.
+   NO BREAKPOINT, deliberately -- this sheet carries none at all, and the phone rule in styles.css
+   that takes every in-transcript card action to 44 px stops at 690 px, so an iPad-sized web view
+   running a call screen (a shell that names its platform gets one at any size) would otherwise hand
+   a thumb the 34 px desktop button. 44 px here is unconditional and cannot drift from that rule. */
+.voice-call-card .inline-card-actions {
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.voice-call-card .inline-card-actions .card-action {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 10px 16px;
+  font-size: 13px;
 }
 
 /* ---------------------------------------------------------------- the words under him */

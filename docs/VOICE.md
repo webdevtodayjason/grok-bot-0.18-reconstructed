@@ -1937,3 +1937,111 @@ and missing in the other is the kind of bug only a phone finds. It round-trips a
   standard iOS alert, governed by `NSMicrophoneUsageDescription`. `UIBackgroundModes` carries no
   `audio` entry, which is correct: the app stops audio when it backgrounds.
 - **-6 dB of trim has been heard by nobody.** It is arithmetic against one measured peak.
+
+## 16. The approval card, answered on the call (VOICE-19)
+
+Jason, 2026-09-13 on TestFlight build 21: *"The approval card popped up while I was in my voice chat
+session, which is beautiful, but it did not have an approve or deny button in that view. When I
+closed or ended the call, it was there in my chat, and I was able to click approve ... it doesn't
+exist inside the voice chat and it should. I should also be able to tell Titan when it pops up on the
+screen ... I approve it and let Titan approve it through my verbal approval."*
+
+Two halves, and both were real.
+
+### The screen keeps the buttons, and there is still one decide path
+
+VOICE-13 copies the newest card into the middle of the call screen and strips every control off the
+copy. The reason was right: a card's buttons are wired by delegation against its row in
+`#transcript`, and a live second copy of them would be a second control for one decision. What it
+missed is that the chat behind a call is `inert`, so a card on the one surface a person can reach was
+a question with no way to answer it.
+
+Since VOICE-19 the copy keeps exactly one kind of control: a **pending auto-review card's** Allow,
+Refuse and Always allow. Every other kind is copied read-only as before, because a widget's options,
+a credential field and a report card's textarea are each a different promise about what a press does.
+
+**The kept button presses the row's button.** `app.js` owns the only `adapter.decideApproval` call
+site in the console and reaches it from a `[data-decide]` listener delegated on the transcript; the
+call screen is a fixed div on `document.body`, so nothing pressed there reaches that listener. Rather
+than call the adapter a second time, the copy's button finds the button it was cloned from and clicks
+that one. One handler, one adapter call, one settled row, and everything `app.js` does next happens
+exactly once.
+
+Three things came with it, each found by measuring rather than by reading:
+
+- **A pending approval is never stale.** VOICE-13 refuses to draw a card that was already the newest
+  one when the call opened, so a weather card from this morning does not take the middle of a call. A
+  card nobody has answered is not that: it is blocking the agent right now and the relay asks about it
+  out loud whenever it finds one, so a screen that refused to draw it would leave a question in
+  somebody's ear about a card they cannot see.
+- **A card this call has drawn stays drawn.** Without that, the card vanished the instant it was
+  answered, and the one thing a person wants to see after pressing Allow is that it was allowed.
+- **The copy does not animate in, and the push hook comes off it.** `.message-row` carries
+  `float-in`, which is `translateY(10px) scale(0.985)` with a spring easing, and a fresh clone
+  restarts it on every paint: MEASURED, a button whose computed `min-height` was 44 px and whose
+  `box-sizing` was `border-box` still measured 43.34 px, and a thumb at its own centre missed it
+  entirely. `data-needs-you-card` is stripped from the copy for a separate reason and it is a fault
+  that predates this wave: docs/APPS.md section 6 makes that attribute one node per pending card and
+  a shell with no bearer counts those nodes off the DOM, so one approval with a call screen up
+  counted as two.
+
+### Titan asks, and a spoken yes settles it
+
+Until this wave `pendingCardsOf` was read in exactly one place: inside `makeTurnRunner.run`, against
+the entries that landed after this line's own prompt. That covers an approval a spoken turn caused and
+nothing else. An approval raised by a turn somebody started in the chat, by a routine, by a subagent,
+or by Titan carrying on working after his reply had already closed the turn, reached the person's
+screen and was never mentioned out loud.
+
+`ui/voice-edge.mjs` now carries a **between-turns card watcher**: a three second tick, armed when the
+provider confirms the session and cleared on close, that reads the same tail and speaks the same
+question. It stands aside entirely while a `titan` tool turn is in flight, because the turn runner
+polls at 400 ms and owns the tail then, and two readers racing on one card is how the same approval
+gets asked twice in two different sentences. Every card it asks about is remembered by entry id, so
+one card is one question however many ticks see it.
+
+**It also lets a card go.** A card the person settles with their thumb stops being pending, the
+watcher sees that, and the held question stops standing. Without it a "yes" said a minute later would
+be read as an answer to a decision that was already made.
+
+**One wording, and it asks.** `cardQuestion` is the same string on both paths: the card's own summary
+and detail, verbatim, then "Allow it?". The mid-turn path used to read the summary out as a statement
+and leave the person to work out that a spoken yes would close it. Nothing is gisted, because "there
+is something waiting on you" is how somebody says yes to the wrong thing.
+
+Because the question now ends in the button's own word, `matchYesNo` learned that word: **allow**,
+**allowed** and **permit** are a yes, **refuse**, **refused**, **reject** and **block** are a no, and
+"it" is filler on the tail of a phrase, so "allow it", "approve it" and "refuse it" are whole answers.
+The negation guard did not move: "don't allow it" is a no, and a sentence that merely contains one of
+those words is still prose that goes to Titan.
+
+Nothing else moved. No new frame on the wire in either direction, the session instructions are still
+written once per call, and the transcript row is still the only thing that talks to the host.
+
+### Measured
+
+`node --test` on this Mac: `tests/machine-room-voice.test.mjs` 105 of 105 and
+`tests/voice-turn.test.mjs` 90 of 90; all twelve voice suites together 376 of 376.
+
+`node scripts/verify-voice.mjs --leg call`, WebKit 390x844 device scale 3 with touch, against
+grok-bot-local-vm and the stub vendor: **89 of 90**, up from 64 of 66 before this wave. The new
+section forces one **real** approval on the local box (Auto-review to enforce, one block instruction,
+a scratch agent prompted to run one echo) and puts everything back afterwards, the scratch agent
+included. The host raised it in 24 to 30 s; the copy on the call screen measured **84x44 and 89x44**
+with a thumb at each centre landing on the button itself; the relay asked about it out loud **once**,
+with nobody having started a turn, in the read-this-out shape and naming the action; a tap on the
+**copy** settled the transcript row to `approved` with the pill reading "Allowed once"; the copy
+followed it to the settled state with zero buttons left, and the call stayed up through all of it.
+
+One gate row was re-cut with it, and not to get past a red line. "Listening, Thinking and Talking in
+that order" was written before VOICE-14c and asserted that the first occurrence of those three words
+arrived in that order; the line now greets the instant the provider confirms the session, so a
+Talking nobody asked for lands between Connecting and the person's first word and that ordering can
+never hold again. It failed identically on the pristine tree. The greeting is the product, so the row
+now asks that all three words are shown during the call and that the turn's own order holds inside
+whatever the greeting did, read off a continuous in-page recorder rather than a poll for one word at
+a time. MEASURED after the re-cut: `["Connecting","Listening","Talking","Listening","Thinking","Listening","Talking"]`.
+
+What is NOT proven: no real phone and no real vendor, so nothing here says an iPhone reads the card
+at a real notch or that a real realtime model reads the question well. The one row still red in that
+leg is filed as VOICE-19a and is not a VOICE-19 behaviour.
