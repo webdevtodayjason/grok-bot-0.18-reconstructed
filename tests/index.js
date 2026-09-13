@@ -322,5 +322,9 @@ import "./cp-allowance.test.mjs";
 // CP-2, 2026-09-13: the adopt path and the kept-data sweep.
 import "./cp-adopt.test.mjs";
 import "./cp-kept.test.mjs";
+// DISCOVER-1, 2026-09-13: the welcome bar, its relay reads and its per-person flag.
+import "./cp-discover.test.mjs";
+import "./discover-edge.test.mjs";
+import "./machine-room-discover.test.mjs";
 import "./relay-allowance-edge.test.mjs";
 import "./machine-room-allowance.test.mjs";
