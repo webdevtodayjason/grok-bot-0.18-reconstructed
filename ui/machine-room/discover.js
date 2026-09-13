@@ -72,7 +72,10 @@
       label.textContent = step.label;
       const count = doc().createElement("span");
       count.className = "discover-step-count";
-      count.textContent = `${step.count}/${step.of}`;
+      // DISCOVER-1c: a step counts evidence, not a score. Sixty-eight messages against a target of one
+      // read as "68/1" on the demo workspace; the display caps at the target.
+      const of = Math.max(1, Number(step.of) || 1);
+      count.textContent = `${Math.min(of, Math.max(0, Number(step.count) || 0))}/${of}`;
       row.append(mark, label, count);
       list.appendChild(row);
     }

@@ -141,7 +141,8 @@ test("DISCOVER-1 in a real browser at 1440x900 and 390x844", async (t) => {
       console.log(`    DISCOVER-1 at ${viewport.width}x${viewport.height}: pill ${JSON.stringify(measured.pill)}, sheet ${JSON.stringify(measured.menu)}`);
       assert.equal(geometry.rows, 6);
       assert.equal(geometry.done, 3);
-      assert.deepEqual(geometry.counts, ["1/1", "0/1", "2/1", "0/1", "1/1", "0/1"]);
+      // DISCOVER-1c: a count past its target displays as the target (the fake serves 2 of 1 for the third step).
+      assert.deepEqual(geometry.counts, ["1/1", "0/1", "1/1", "0/1", "1/1", "0/1"]);
       assert.ok(Math.abs(geometry.progress.fillWidth * 2 - geometry.progress.width) < 1, "50% must fill half the bar");
       assert.equal(geometry.sideways, false);
       if (viewport.width === 390) {
