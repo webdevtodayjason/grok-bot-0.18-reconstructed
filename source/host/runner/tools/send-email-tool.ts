@@ -50,7 +50,7 @@ export const SEND_EMAIL_TOOL_NAME = "send_email";
 export const SEND_EMAIL_OUTLINE_NAME = "sendToUserToolCall";
 /** The one line the model reads in the dynamic-tool hint table. */
 export const SEND_EMAIL_TOOL_HINT =
-  "Send an email from your own address to one person, and say afterwards what went and to whom.";
+  "Send an email from your own address, to one person or several, and say afterwards what went and to whom.";
 
 /**
  * The outcome marker, and the one place this design bends.
@@ -80,8 +80,18 @@ const ACK_BY_RESULT = new WeakMap<SendToUserResult, string>();
 
 export const sendEmailParameters = z.object({
   to: z.string().trim().min(1).describe(
-    "The one person this goes to, as a plain email address. One recipient per call: send a second"
-      + " mail rather than adding a second address here, and never put a list in this field.",
+    "Who this goes to, as a plain email address. Several people go in this one field separated by"
+      + " commas, and they all see each other on the mail. At most twenty addresses across this"
+      + " field, cc and bcc together.",
+  ),
+  cc: z.string().trim().optional().catch(undefined).describe(
+    "Anybody who should get a copy, separated by commas. Everybody on the mail sees these"
+      + " addresses. Leave it out when there is nobody to copy.",
+  ),
+  bcc: z.string().trim().optional().catch(undefined).describe(
+    "Anybody who should get a copy the other people cannot see, separated by commas. The send is"
+      + " still written down where your operator can read it, names and all, so use it to keep an"
+      + " address private from the other recipients and never to hide a mail from the person here.",
   ),
   subject: z.string().trim().min(1).describe(
     "The subject line, as the person receiving it would want to read it. Keep it short and say"
@@ -117,11 +127,11 @@ export interface SendEmailDependencies {
   timeoutMs?: number;
 }
 
-const DESCRIPTION = `Send an email from your own address to one person.
+const DESCRIPTION = `Send an email from your own address to one person or several.
 
 Your address is fixed and this tool has no "from": every mail goes out as your own code address at the workspace's mail domain, with your name and workspace shown beside it, and replies come back to you here. You cannot send as anybody else, and there is no parameter that would let you try.
 
-One recipient per call. If two people need the same mail, send it twice.
+Several people go in "to" separated by commas, and they see each other. "cc" is a copy everybody can see and "bcc" is a copy they cannot. At most twenty addresses across the three, and one bad address stops the whole mail rather than sending part of it.
 
 Ask the person you are working with before writing to somebody they did not name. Mail leaves the workspace and arrives with your business's name on it, so a mail nobody asked for is a mistake you cannot take back.
 
@@ -140,6 +150,41 @@ export function sendEmailProtoArgs(to: string, outcome: "sent" | "failed"): Send
   return new SendToUserArgs({
     message: outcome === "failed" ? `${MAIL_SEND_FAILED_PREFIX}${recipient}` : recipient,
   });
+}
+
+/**
+ * MAIL-4. One field of addresses, as the model typed it, split on the commas it was told to use.
+ *
+ * The splitting happens HERE and not in the relay because a string holding commas is exactly what
+ * the relay refuses: one string is one address there, so that the shape MAIL-3 has been sending for
+ * days keeps its meaning. Nothing is validated here on purpose -- the relay validates every address
+ * against one rule and names the field that was wrong, and a second opinion in the box would be a
+ * second rule to drift.
+ */
+export const sendEmailAddresses = (value: string | undefined): string[] =>
+  String(value ?? "").split(",").map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+
+/**
+ * MAIL-4. The recipients as the ROW ON THE PERSON'S SCREEN names them.
+ *
+ * Two addresses, then a count. The row is one muted line with nothing to expand (the console has no
+ * detail for this tool call), it is read on a phone as often as a desktop, and twenty addresses in it
+ * would push everything else off the line. Who exactly the rest were is on the Sent table of the
+ * workspace's own Email card, which holds every recipient of every send.
+ */
+export function sendEmailRecipientChip(addresses: readonly string[]): string {
+  const shown = addresses.slice(0, 2);
+  const rest = addresses.length - shown.length;
+  return rest > 0 ? `${shown.join(", ")} and ${rest} more` : shown.join(", ");
+}
+
+/** MAIL-4. The same people in the words the model reads back, copies named as copies. */
+export function sendEmailRecipientWords(
+  to: readonly string[], cc: readonly string[], bcc: readonly string[],
+): string {
+  return to.join(", ")
+    + (cc.length > 0 ? `, copying ${cc.join(", ")}` : "")
+    + (bcc.length > 0 ? `, blind copying ${bcc.join(", ")}` : "");
 }
 
 /** The sentence the model reads back on a send that the relay confirmed. */
@@ -164,10 +209,19 @@ export function createSendEmailTool(dependencies: SendEmailDependencies) {
     args: SendEmailArgs,
     meta: { readonly toolCallId: string },
   ): Promise<SendToUserResult> => {
-    const to = args.to.trim();
+    // MAIL-4. Three fields of addresses, each split on its commas. The relay decides whether any of
+    // them is an address, how many are too many and which field was wrong; what is decided here is
+    // only what the row on the page and the sentence to the model say.
+    const toList = sendEmailAddresses(args.to);
+    const ccList = sendEmailAddresses(args.cc);
+    const bccList = sendEmailAddresses(args.bcc);
+    const everyone = [...toList, ...ccList, ...bccList];
+    // A `to` that split to nothing still has to draw a row and name something, so the raw string is
+    // the fallback: the relay is the one that refuses it, and the row has to say which send failed.
+    const shown = everyone.length > 0 ? sendEmailRecipientChip(everyone) : args.to.trim();
     // What the row says while the call is in flight. The completed row is minted below from the
     // outcome, so a refusal never leaves "Sent an email to ..." on the page.
-    const pending = sendEmailProtoArgs(to, "sent");
+    const pending = sendEmailProtoArgs(shown, "sent");
     let outcome: "sent" | "failed" = "failed";
     const refuse = (why: string): SendToUserResult => new SendToUserResult({
       result: { case: "error", value: new SendToUserError({ error: why }) },
@@ -199,7 +253,11 @@ export function createSendEmailTool(dependencies: SendEmailDependencies) {
         try {
           answer = await dependencies.post(relay, {
             agentId,
-            to,
+            // One address goes as the string MAIL-3 sent, so the common send is byte for byte the
+            // request the relay has been answering since that wave; several go as a list.
+            to: toList.length === 1 ? toList[0] as string : toList,
+            ...(ccList.length === 0 ? {} : { cc: ccList }),
+            ...(bccList.length === 0 ? {} : { bcc: bccList }),
             subject: args.subject,
             text: args.text,
             ...(args.html == null || args.html.length === 0 ? {} : { html: args.html }),
@@ -223,10 +281,15 @@ export function createSendEmailTool(dependencies: SendEmailDependencies) {
         const done = new SendToUserResult({
           result: { case: "success", value: new SendToUserSuccess() },
         });
-        ACK_BY_RESULT.set(done, sendEmailAck(to, own.address, answer.id));
+        ACK_BY_RESULT.set(done, sendEmailAck(
+          // The model reads every recipient back, copies and blind copies named, because it has to
+          // tell the person in one line who the mail went to. The ROW on the page is the short form.
+          sendEmailRecipientWords(toList, ccList, bccList) || args.to.trim(),
+          own.address, answer.id,
+        ));
         return done;
       },
-      (result) => wrap(new SendToUserToolCall({ args: sendEmailProtoArgs(to, outcome), result })),
+      (result) => wrap(new SendToUserToolCall({ args: sendEmailProtoArgs(shown, outcome), result })),
     );
   };
 
