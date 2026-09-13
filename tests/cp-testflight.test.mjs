@@ -196,6 +196,35 @@ test("a newly accepted in-app report makes the same one roster read and one prom
   }
 });
 
+test("a report Titan filed himself does not come back to him as news", async () => {
+  const box = await startJsonServer((call) => {
+    if (call.url === "/api/listAgents") return { body: { agents: [{ id: "titan-1", name: "Titan", isGroup: false }] } };
+    if (call.url === "/api/sendPrompt") return { body: { accepted: true } };
+    return { status: 404, body: {} };
+  });
+  const relayToken = "r".repeat(40);
+  const plane = await startControlPlane({ env: { CP_RELAY_TOKEN: relayToken, CP_BOX_URL_OVERRIDE: box.url } });
+  try {
+    plane.store.createTenant({ slug: "titanium", name: "Titanium", status: "running" });
+    plane.store.db.prepare("UPDATE tenants SET box_container = ? WHERE slug = ?").run("titanbot-box-svc", "titanium");
+    const account = plane.store.createAccount({ email: "boss@example.com", password: "a-good-password", tenant: "titanium" });
+    plane.store.setSuperAdmin(account.id, true);
+    const profile = path.join(plane.config.tenantRoot, "titanium", "profile");
+    await mkdir(profile, { recursive: true });
+    await writeFile(path.join(profile, "local-docker-vm.json"), JSON.stringify({ token: "gateway-token" }), { mode: 0o600 });
+    const answer = await plane.request("POST", "/v1/feedback", {
+      token: relayToken,
+      headers: { "x-titanbot-tenant": "titanium" },
+      body: { version: 1, tier: "quality", title: "Speaker toggle test result", description: "Filed by Titan.", evidence: { agent: "titan-1", agentName: "Titan" } },
+    });
+    assert.equal(answer.status, 201, answer.text);
+    assert.deepEqual(box.calls.map((call) => call.url), ["/api/listAgents"], "the roster is read, and no prompt goes back to the bot that filed it");
+  } finally {
+    await plane.dispose();
+    await box.close();
+  }
+});
+
 test("the admin route lists TestFlight rows and marks one seen", async () => {
   const plane = await startControlPlane();
   try {

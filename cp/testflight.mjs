@@ -113,7 +113,7 @@ export function createFeedbackNotifier({ store, config = {}, probeImpl = globalT
     }
   };
 
-  return async function notifyFeedback({ source = "in-app", id = "", tenant = "", title = "", tester = "", comment = "", kind = "feedback" } = {}) {
+  return async function notifyFeedback({ source = "in-app", id = "", tenant = "", title = "", tester = "", comment = "", kind = "feedback", agent = "" } = {}) {
     if (String(store.getSetting(FEEDBACK_NOTIFY_SETTING, "1")) === "0") {
       return { ok: false, why: `${FEEDBACK_NOTIFY_SETTING} is off, so nothing was announced` };
     }
@@ -127,6 +127,11 @@ export function createFeedbackNotifier({ store, config = {}, probeImpl = globalT
     const people = rows.filter((row) => row?.isGroup !== true && String(row?.id ?? ""));
     const titan = people.find((row) => String(row?.name ?? "").trim().toLowerCase() === "titan");
     if (titan == null) return { ok: false, why: `${slug} has no bot called Titan to tell` };
+    // Jason, 2026-09-13: "filing a ticket bounces its own title back into the chat". A row Titan
+    // filed himself, from the workspace he would be told in, is not news to him.
+    if (source === "in-app" && String(tenant) === slug && String(agent ?? "") !== "" && String(agent) === String(titan.id)) {
+      return { ok: false, why: "Titan filed this one himself, so he was not told" };
+    }
     const summary = source === "testflight"
       ? `New TestFlight ${kind} feedback from ${tester || "an unknown tester"}: ${String(comment || "no comment").replace(/[\r\n\t]+/g, " ").slice(0, 300)}`
       : `New in-app feedback from ${tenant || "an unknown workspace"}: ${String(title || "no title").replace(/[\r\n\t]+/g, " ").slice(0, 300)}`;

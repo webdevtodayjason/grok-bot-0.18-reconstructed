@@ -1007,7 +1007,7 @@ export function createApp(options = {}) {
       const code = error?.code === "too_large" ? 413 : 400;
       return json(response, code, { error: error?.code ?? "bad_request", message: String(error?.message ?? "that report could not be stored") });
     }
-    await notifyFeedback({ source: "in-app", id: row.id, tenant: row.tenant, title: row.title });
+    await notifyFeedback({ source: "in-app", id: row.id, tenant: row.tenant, title: row.title, agent: row.agent });
     return json(response, 201, { id: row.id, tier: row.tier, state: row.state });
   }
 
