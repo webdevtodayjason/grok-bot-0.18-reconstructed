@@ -1552,13 +1552,30 @@ export function createApp(options = {}) {
             message: `To remove this account send {"confirm": "${account.email}"} in the body.`,
           });
         }
+        // DEVICE-1. The bearers FIRST, while the account row is still there to read a sub from, and
+        // then the row. A bearer needs no sign-in at all, so "can no longer sign in" was never the
+        // whole truth: MEASURED ON THE R750 2026-09-10, two bearers belonging to a removed account
+        // were still opening /api and /push on the demo workspace and had 30 days left on them.
+        //
+        // A relay that cannot be asked does NOT stop the delete. Leaving the account in place
+        // because a device list could not be read is the worse of the two failures, so the answer
+        // says what is still live and names the command that finishes it.
+        const devices = await admin.revokeDevicesForAccount({ slug: account.tenant, sub: account.id });
         store.deleteAccount(account.id);
+        const saidAboutDevices = !devices.asked
+          ? ` Its device bearers could not be revoked: ${devices.why}`
+          : devices.revoked.length > 0
+            ? ` ${devices.revoked.length} device bearer${devices.revoked.length === 1 ? "" : "s"} on ${account.tenant} ${devices.revoked.length === 1 ? "was" : "were"} revoked, so an app signed in on ${devices.revoked.length === 1 ? "it" : "them"} stops at its next request.`
+            : ` That account held no live device bearer on ${account.tenant}.`;
         return json(response, 200, {
           deleted: true,
           email: account.email,
           tenant: account.tenant,
+          // What happened to the bearers, as an object rather than only in the sentence, so the CLI
+          // and a gate can read it without parsing prose.
+          devices,
           // Said out loud because it is the question the operator is actually asking.
-          message: `${account.email} can no longer sign in. Nothing in that workspace was touched, and a session they already hold keeps working until it expires, which is at most 12 hours.`,
+          message: `${account.email} can no longer sign in.${saidAboutDevices}${devices.failed.length > 0 ? ` ${devices.why}` : ""} Nothing in that workspace was touched, and a session they already hold keeps working until it expires, which is at most 12 hours.`,
         });
       }
 

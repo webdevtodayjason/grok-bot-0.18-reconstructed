@@ -336,6 +336,11 @@ test("the control plane can list and revoke a device on its own credential, and 
     await sleep(DEVICE_CACHE_MS + 400);
     const dead = await fetch(`${relay.base}/api/getHealth`, { method: "POST", headers: { ...json, ...withBearer(answer.body.token) }, body: "{}" });
     assert.equal(dead.status, 401, "a phone killed from the cp container is a phone that stops");
+    // DEVICE-1. This is the route the control plane now calls for every bearer a removed account
+    // holds, so the answer a dead bearer gets is pinned here: the 401 the front door already uses,
+    // in its own plain words, with no second sentence invented for this case.
+    assert.deepEqual(await dead.json(), { error: "not signed in" });
+    assert.equal(dead.headers.get("x-relay-auth"), "required");
 
     assert.equal((await fetch(`${relay.base}/admin/tenants/${OPERATOR}/devices`, { method: "DELETE", headers: admin })).status, 400, "name a device");
     assert.equal((await fetch(`${relay.base}/admin/tenants/nope/devices`, { headers: admin })).status, 404);

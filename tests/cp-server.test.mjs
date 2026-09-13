@@ -1028,6 +1028,89 @@ test("a workspace that is deleted names the sign-ins it leaves standing, and the
   }, { withCoolify: true });
 });
 
+/**
+ * DEVICE-1. Removing an account kills the bearers it minted.
+ *
+ * MEASURED ON THE R750 2026-09-10: after `cp account remove` took a throwaway account away, two of
+ * its device bearers were still live rows on the demo workspace and would have kept opening /api and
+ * /push for the rest of their thirty days. A device bearer is an HMAC payload plus a row in the
+ * TENANT'S OWN state directory, and the account row this service deletes is neither of those, so
+ * nothing about the delete reached them. The two rows were revoked by hand with
+ * `cp device revoke demo <id>`, which is the hand operation a verb is supposed to replace.
+ */
+function fakeDeviceRelay(devices) {
+  const asked = [];
+  const rows = devices.map((row) => ({ ...row }));
+  const fetchImpl = async (url, init = {}) => {
+    const parsed = new URL(url);
+    const method = init.method ?? "GET";
+    asked.push({ pathname: parsed.pathname, search: parsed.search, method });
+    const slug = /^\/admin\/tenants\/([^/]+)\/devices$/.exec(parsed.pathname)?.[1] ?? null;
+    if (slug == null) return { ok: false, status: 404, text: async () => "", json: async () => ({}) };
+    if (method === "DELETE") {
+      const id = parsed.searchParams.get("id");
+      const row = rows.find((one) => one.id === id);
+      if (row == null) return { ok: false, status: 404, text: async () => "no such device", json: async () => ({}) };
+      row.revokedAt = Date.now();
+      const body = { slug, revoked: id };
+      return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body };
+    }
+    const body = { slug, measuredAt: new Date().toISOString(), devices: rows };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body };
+  };
+  return { asked, rows, fetchImpl };
+}
+
+test("removing an account revokes every device bearer it minted, and says how many", async () => {
+  const relay = fakeDeviceRelay([
+    { id: "phone-1", name: "iPhone", platform: "ios", sub: "", createdAt: 1, lastSeenAt: 2, revokedAt: null },
+    { id: "phone-2", name: "iPad", platform: "ios", sub: "", createdAt: 1, lastSeenAt: 3, revokedAt: null },
+    { id: "mac-1", name: "the other person's Mac", platform: "macos", sub: "somebody-else", createdAt: 1, lastSeenAt: 4, revokedAt: null },
+  ]);
+  await withPlane(async (plane) => {
+    const account = await seedTenantAndAccount(plane, { slug: "acme", email: "leaver@acme.test" });
+    // The two rows that belong to this person. A device row keys on the account id off the verified
+    // session token, which is what `sub` is.
+    for (const id of ["phone-1", "phone-2"]) relay.rows.find((row) => row.id === id).sub = account.id;
+
+    const removed = await plane.admin("DELETE", `/v1/accounts/${encodeURIComponent("leaver@acme.test")}`, { confirm: "leaver@acme.test" });
+    assert.equal(removed.status, 200, removed.text.slice(0, 200));
+    assert.deepEqual(removed.body.devices.revoked.sort(), ["phone-1", "phone-2"]);
+    assert.equal(removed.body.devices.asked, true);
+    // THE OTHER PERSON ON THE SAME WORKSPACE IS UNTOUCHED. Two people can share a workspace, and a
+    // revoke that took the workspace's devices rather than the account's would sign out a colleague.
+    assert.equal(relay.rows.find((row) => row.id === "mac-1").revokedAt, null);
+    for (const id of ["phone-1", "phone-2"]) assert.ok(relay.rows.find((row) => row.id === id).revokedAt > 0, `${id} is still live`);
+    // One list and one delete per row that had to go, and never a delete for the colleague's.
+    const deletes = relay.asked.filter((one) => one.method === "DELETE");
+    assert.equal(deletes.length, 2);
+    assert.equal(deletes.some((one) => one.search.includes("mac-1")), false);
+    // And the sentence the operator reads says it, because "can no longer sign in" was the whole
+    // answer before and a live bearer needs no sign-in at all.
+    assert.match(removed.body.message, /2 device/);
+  }, { fetchImpl: relay.fetchImpl, env: { CP_RELAY_URL: "http://relay.invalid", CP_RELAY_TOKEN: "a-relay-token-of-real-length-here" } });
+});
+
+test("a relay that cannot be asked does not hold up the removal, and the answer says what is unknown", async () => {
+  await withPlane(async (plane) => {
+    await seedTenantAndAccount(plane, { slug: "acme", email: "leaver@acme.test" });
+    const removed = await plane.admin("DELETE", `/v1/accounts/${encodeURIComponent("leaver@acme.test")}`, { confirm: "leaver@acme.test" });
+    // The account is gone either way: leaving it because a device list could not be read would be
+    // the worse of the two failures.
+    assert.equal(removed.status, 200, removed.text.slice(0, 200));
+    assert.equal((await plane.admin("GET", "/v1/accounts")).body.accounts.length, 0);
+    assert.equal(removed.body.devices.asked, false);
+    assert.deepEqual(removed.body.devices.revoked, []);
+    assert.ok(String(removed.body.devices.why).length > 0);
+    // Named in the message too, so an operator reading the answer knows to check by hand rather than
+    // assuming the phones are dead.
+    assert.match(removed.body.message, /could not/i);
+  }, {
+    fetchImpl: async () => { throw new Error("the relay is down"); },
+    env: { CP_RELAY_URL: "http://relay.invalid", CP_RELAY_TOKEN: "a-relay-token-of-real-length-here" },
+  });
+});
+
 test("a workspace name with sign-ins still pointing at it is never handed to a second company", async () => {
   await withPlane(async (plane) => {
     // The first company signs up and gets "acme".

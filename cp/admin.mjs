@@ -2730,6 +2730,76 @@ export function createAdminApi({
   }
 
   /**
+   * The relay's box door again, with the one method the two above cannot send. Modelled line for line
+   * on askRelayPost: a bearer, a deadline, and it never throws.
+   */
+  async function askRelayDelete(pathname, query = "") {
+    if (relayBase.length === 0 || String(config.relayToken ?? "").length === 0) {
+      return { ok: false, why: "this control plane has no relay configured (CP_RELAY_URL and CP_RELAY_TOKEN), and only the relay can write inside a box" };
+    }
+    try {
+      const response = await fetchImpl(`${relayBase}${pathname}${query}`, {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${config.relayToken}`, accept: "application/json" },
+        signal: AbortSignal.timeout(relayTimeoutMs),
+      });
+      const text = await response.text();
+      let parsed = null;
+      if (text.length > 0) { try { parsed = JSON.parse(text); } catch { parsed = null; } }
+      if (!response.ok) return { ok: false, why: `the relay answered ${response.status}${parsed?.message ? `: ${String(parsed.message).split("\n")[0].slice(0, 200)}` : ""}` };
+      return { ok: true, body: parsed ?? {} };
+    } catch (error) {
+      return { ok: false, why: error?.name === "TimeoutError" ? "the relay did not answer in time" : `the relay did not answer (${notMeasured(error)})` };
+    }
+  }
+
+  /**
+   * DEVICE-1. Every live device bearer one account holds, taken away.
+   *
+   * MEASURED ON THE R750 2026-09-10: removing an account left two of its bearers live on the demo
+   * workspace, good for the rest of their thirty days. A bearer is an HMAC payload plus a row in the
+   * TENANT'S OWN state directory, and the account row this service deletes is neither of those, so
+   * nothing about a delete reached them and the hand fix was `cp device revoke demo <id>` twice.
+   *
+   * BY `sub`, NEVER BY WORKSPACE. Two people can share a workspace -- accounts.tenant has no unique
+   * constraint -- so revoking the workspace's devices to close one account would sign a colleague's
+   * phone out. The device row's `sub` is the account id off the verified session token that minted
+   * it, which is exactly this account.
+   *
+   * It never throws and it never holds up the delete. A relay that cannot be asked means the bearers
+   * are still live, and the honest thing is to say so with the command that finishes the job rather
+   * than to leave the account in place because a list could not be read.
+   */
+  async function revokeDevicesForAccount({ slug, sub }) {
+    const workspace = String(slug ?? "");
+    const route = `/admin/tenants/${encodeURIComponent(workspace)}/devices`;
+    const listed = await askRelay(route, "");
+    if (!listed.ok) {
+      return {
+        asked: false, revoked: [], failed: [],
+        why: `the relay could not be asked for ${workspace}'s device list (${listed.why}), so a bearer this account holds is still live until it expires. Finish it with: node cp/cli.mjs device list ${workspace}`,
+      };
+    }
+    const rows = Array.isArray(listed.body?.devices) ? listed.body.devices : [];
+    const mine = rows.filter((row) => String(row?.id ?? "").length > 0
+      && String(row?.sub ?? "") === String(sub ?? "")
+      && (row?.revokedAt == null || Number(row.revokedAt) === 0));
+    const revoked = [];
+    const failed = [];
+    for (const row of mine) {
+      const gone = await askRelayDelete(route, `?id=${encodeURIComponent(String(row.id))}`);
+      if (gone.ok) revoked.push(String(row.id));
+      else failed.push({ id: String(row.id), why: gone.why });
+    }
+    return {
+      asked: true, revoked, failed,
+      why: failed.length === 0
+        ? ""
+        : `${failed.length} of ${mine.length} device bearers on ${workspace} would not revoke (${failed.map((one) => `${one.id}: ${one.why}`).join("; ")}). Those are still live: node cp/cli.mjs device revoke ${workspace} <id>`,
+    };
+  }
+
+  /**
    * One workspace pointed at one plan model, label and all.
    *
    * The relay's use-included door writes the base url, the model, the endpoint name, the served-by
@@ -4984,5 +5054,8 @@ export function createAdminApi({
   // ONBOARD-2. `onboarding` is on here for one reason: a shutdown and a gate both need to be able to
   // wait for an invite that is still going, and a background job writing into a store somebody has
   // already closed is a stack trace nobody can act on.
-  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system, spend, providers: providersAnswer, feedback, onboarding };
+  // DEVICE-1. revokeDevicesForAccount is on here for the same reason recordAttempt is: the account
+  // door lives in cp/server.mjs and the relay client lives in this file, and a second relay client
+  // in that one is how one of the two ends up without the bearer or without the timeout.
+  return { handle, servePage, recordAttempt, requireSuperAdmin, signIns, clients, boxes, system, spend, providers: providersAnswer, feedback, onboarding, revokeDevicesForAccount };
 }

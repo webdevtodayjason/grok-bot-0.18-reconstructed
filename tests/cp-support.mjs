@@ -429,6 +429,10 @@ export async function startControlPlane(options = {}) {
   // that has nothing to do with the code under test.
   const app = createApp({
     config, store,
+    // One word, so a test can stand a relay in front of the routes that ask one for something only
+    // it can see: the device list and the device revoke a removed account's bearers go through.
+    // Production passes nothing and gets globalThis.fetch, which is what createApp defaults to.
+    ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
     probeImpl: config.boxUrlOverride.length > 0
       ? (options.probeImpl ?? globalThis.fetch)
       : (options.probeImpl ?? (() => { throw new Error("there is no docker network in a test"); })),
