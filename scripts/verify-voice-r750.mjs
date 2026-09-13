@@ -12,6 +12,25 @@
 //   SHOTS                        where the screenshots go.
 //   CONSOLE_BASE                 defaults to https://console.titanium.bot.
 //
+// THE THROWAWAY CUSTOMER, IN FULL, because a gate whose only credential is described rather than
+// minted is a gate nobody else can run. On the server, as the operator, in three lines. The password
+// goes in on STDIN and is never an argument: `cp/cli.mjs` reads a non-TTY stdin as the password
+// exactly so it never lands in shell history, in `ps`, or in somebody's scrollback.
+//
+//   CP=$(docker ps --format '{{.Names}}' | grep '^titanbot-cp-')
+//   printf '%s' "$GATE_PASSWORD" | docker exec -i "$CP" node cp/cli.mjs account add \
+//     "$GATE_EMAIL" demo --name "VOICE gate"
+//   # ... run this file ...
+//   docker exec "$CP" node cp/cli.mjs account remove "$GATE_EMAIL"
+//
+// `demo` is the demo tenant's slug (`cp/cli.mjs tenant list` prints them) and it is the ONLY workspace
+// this gate may be pointed at: it is the one with nobody's work in it. The account is a plain customer
+// and is never promoted. IT IS NEVER JASON'S ACCOUNT AND NEVER ANOTHER TESTER'S: this file signs in at
+// a real front door, writes a real row on the Sign-in attempts panel, and turns the workspace's own
+// talking switch on and back off, and doing any of that as somebody else is doing it to their
+// workspace. The email is made unique per run (a `voice-gate-<random>@titanium.bot` shape) so two runs
+// can never share one account, and `account list` after the run is what proves none was left behind.
+//
 // WHAT IT CAN AND CANNOT SHOW. A workspace with talking switched off and no operator key cannot open a
 // line, so what is measurable here is the Talk mode row and its round trip, the panel being mounted
 // over the conversation, the button behaving per mode for the instant before the refusal lands, and
@@ -363,6 +382,8 @@ try {
 // door answers enabled false, the honest result is the refusal path measured live -- the screen opens,
 // the refusal takes it away, one plain sentence stands on the shelf -- and the spoken turn recorded as
 // NOT MEASURED, which is the same shape docs/VOICE.md 13 already uses.
+/** How long the fake microphone stays quiet before it says anything, and the builder below says why. */
+const SPEECH_LEAD_S = Number(process.env.SPEECH_LEAD_S ?? 6);
 const speechWav = await (async () => {
   const dir = path.join(os.tmpdir(), `voice13-speech-${Date.now()}`);
   mkdirSync(dir, { recursive: true });
@@ -370,8 +391,23 @@ const speechWav = await (async () => {
   const wav = path.join(dir, "said.wav");
   const run = (cmd, args) => new Promise((resolve, reject) => execFile(cmd, args, (error) => (error ? reject(error) : resolve())));
   try {
-    await run("say", ["-o", aiff, "Hello Titan. In one short sentence, what is the team working on today?"]);
-    await run("ffmpeg", ["-y", "-i", aiff, "-ar", "48000", "-ac", "1", "-acodec", "pcm_s16le", wav]);
+    // VOICE-20. THE SENTENCE IS THE MEASUREMENT NOW. A question Titan answers out of his own head
+    // never reaches the box, and the hand-off -- the waiting sentence, the `titan` tool call, the box's
+    // answer coming back as tool output -- is the moment Jason reported a clip in. Asking what is in
+    // the inbox is a job, so the model says it is checking and calls the tool in the same response,
+    // which is exactly the shape docs/VOICE-20.md is about.
+    await run("say", ["-o", aiff, "Titan, check what is in the inbox and tell me in one short sentence."]);
+    // SIX SECONDS OF SILENCE IN FRONT OF IT, and this is a measurement bug that cost one whole live run
+    // rather than a precaution. Chromium starts the fake capture file the moment the page opens the
+    // microphone, which is the moment the call opens -- and since VOICE-14c the line SAYS HELLO the
+    // instant the provider confirms the session, so the echo gate holds the microphone shut for the
+    // whole of the greeting. Played once (%noloop), the sentence was gone by the time the gate opened:
+    // MEASURED on the R750 2026-09-13, microphone level 0.0005, the words reached Listening and Talking
+    // and nothing was ever confirmed in 150 s. The silence is what makes the person start talking AFTER
+    // the greeting, the way a person really would.
+    await run("ffmpeg", ["-y", "-f", "lavfi", "-t", String(SPEECH_LEAD_S), "-i", "anullsrc=r=48000:cl=mono",
+      "-i", aiff, "-filter_complex", "[0:a][1:a]concat=n=2:v=0:a=1",
+      "-ar", "48000", "-ac", "1", "-acodec", "pcm_s16le", wav]);
     return wav;
   } catch (error) {
     info(`no speech file could be made on this Mac (${String(error?.message ?? error).split("\n")[0]}), so the spoken turns are NOT MEASURED and only the screen is`);
@@ -434,6 +470,15 @@ const CALL_READ = `(() => {
     rows: [...document.querySelectorAll("#transcript .message-row")].length,
     on: stats?.on === true, orb: stats?.orb ?? "", lastHeard: stats?.lastHeard ?? "", lastSaid: stats?.lastSaid ?? "",
     notes: stats?.notes ?? [], talking: stats?.talking === true, micLevel: stats?.micLevel ?? 0, level: stats?.level ?? 0,
+    // VOICE-20. THE NUMBERS A CLIP IS MADE OF, read off the page's own player rather than guessed
+    // at from what a person heard. playedBytes is every PCM byte the relay has handed this page;
+    // playsUntilMs is when the last of it will have finished coming out of a speaker; flushes and
+    // stoppedBuffers are the only two ways audio already booked can ever be thrown away in a browser.
+    at: Date.now(), micPeak: stats?.micPeak ?? 0, micFrames: stats?.micFrames ?? 0,
+    playedBytes: stats?.playedBytes ?? 0, playedBuffers: stats?.playedBuffers ?? 0,
+    playsUntilMs: stats?.playsUntilMs ?? 0, flushes: stats?.flushes ?? 0,
+    stoppedBuffers: stats?.stoppedBuffers ?? 0, liveBuffers: stats?.liveBuffers ?? 0,
+    hops: stats?.hops ?? null,
     gap: (() => { const t = document.getElementById("transcript");
       return t == null ? -1 : Math.round(t.scrollHeight - t.scrollTop - t.clientHeight); })(),
   };
@@ -585,25 +630,88 @@ else {
         await page.waitForFunction(() => document.getElementById("voice-call")?.hidden === false, null, { timeout: 10_000 }).catch(() => {});
         await callShots(page, "chromium-connecting");
         // TWO TURNS AND NO MORE. The vendor bills by the minute and this is his key.
+        //
+        // VOICE-20. AND IT IS SAMPLED AT 150 ms RATHER THAN ONCE A SECOND, because the thing being
+        // measured is a gap in a sentence: a second between reads is long enough to walk straight past
+        // one. Every sample is kept, so the timeline below is read off what the page really reported
+        // rather than off whichever sample happened to be last.
         const seen = new Set();
+        const shot = new Set();
+        const trail = [];
         let heard = [];
         let said = [];
         const deadline = Date.now() + 150_000;
         while (Date.now() < deadline) {
           const now = await page.evaluate(CALL_READ);
+          trail.push(now);
           seen.add(now.word);
-          if (now.word === "Thinking") await callShots(page, "chromium-thinking");
-          if (now.word === "Talking") await callShots(page, "chromium-talking");
+          if ((now.word === "Thinking" || now.word === "Talking") && !shot.has(now.word)) {
+            shot.add(now.word);
+            await callShots(page, `chromium-${now.word.toLowerCase()}`);
+          }
           if (now.lastHeard.length > 0 && !heard.includes(now.lastHeard)) heard.push(now.lastHeard);
           if (now.lastSaid.length > 0 && !said.includes(now.lastSaid)) said.push(now.lastSaid);
           if (now.up === false) { info(`the call ended on its own after ${JSON.stringify(now.notes)}`); break; }
           if (heard.length >= 2 && said.length >= 2) break;
-          await sleep(1000);
+          // THE CALL IS LET GO OF AS SOON AS THE ANSWER HAS FINISHED BEING SPOKEN, rather than sat on
+          // until the 150 s deadline. The vendor bills by the minute and the minutes are Jason's: once
+          // the bot has answered and the page has had nothing booked to play for three seconds, there
+          // is nothing left in this turn to measure.
+          if (said.length >= 1 && now.playsUntilMs > 0 && now.at - now.playsUntilMs > 3000) break;
+          await sleep(150);
         }
         const live = await page.evaluate(CALL_READ);
+        // ---- VOICE-20: the hand-off, read off the trail --------------------------------------------
+        //
+        // Jason, 2026-09-13 on build 22: "when Titan starts to send work to the subagent, it interrupts
+        // what Titan is saying. If Titan is in mid-sentence or at the end of the sentence, it will
+        // clip." docs/VOICE-20.md names two candidate causes and this is the half of the measurement a
+        // browser can take: whether the page ever threw booked audio away, and how much of the waiting
+        // sentence was still to come out of the speaker at the moment the next audio started arriving.
+        //
+        // WHAT IT CANNOT SAY. The vendor's own side is not visible from here: a response the vendor
+        // cancelled or truncated arrives as audio that simply stops, and the honest reading of that is
+        // the relay's log, which this file does not read and must not restart anything to get.
+        // One burst is a run of consecutive samples in which new bytes kept arriving. A sample with no
+        // new bytes closes the burst; the next byte after it opens another.
+        const bursts = [];
+        let open = null;
+        for (let i = 1; i < trail.length; i += 1) {
+          const before = trail[i - 1];
+          const now = trail[i];
+          if (now.playedBytes <= before.playedBytes) { open = null; continue; }
+          if (open == null) {
+            open = {
+              startedAt: now.at, endedAt: now.at, startBytes: before.playedBytes, endBytes: now.playedBytes,
+              // THE NUMBER THE WHOLE WAVE TURNS ON: how much of what the page had ALREADY been given
+              // was still to be spoken at the instant the next burst of audio began arriving.
+              bookedLeftAtStart: Math.max(0, before.playsUntilMs - now.at),
+              flushesBefore: before.flushes, stoppedBefore: before.stoppedBuffers,
+            };
+            bursts.push(open);
+          } else {
+            open.endedAt = now.at;
+            open.endBytes = now.playedBytes;
+          }
+        }
+        const msOf = (bytes) => Math.round((bytes / (24000 * 2)) * 1000);
+        for (const burst of bursts) {
+          info(`audio burst: ${burst.endBytes - burst.startBytes} byte(s) = ${msOf(burst.endBytes - burst.startBytes)} ms of speech`
+            + ` over ${burst.endedAt - burst.startedAt} ms, and ${burst.bookedLeftAtStart} ms of the audio before it was still booked to play when it started`);
+        }
+        const overlapping = bursts.filter((one) => one.bookedLeftAtStart > 0);
+        info(`${bursts.length} burst(s) of audio on this turn, ${overlapping.length} of them starting while the page still had sound booked`);
+        check(live.flushes === 0, "the page was never told to throw away audio it had already been given, which is the only way a browser can clip a sentence",
+          `${live.flushes} flush(es), ${live.stoppedBuffers} scheduled buffer(s) stopped`);
+        check(live.stoppedBuffers === 0, "and nothing already scheduled was stopped part way out of the speaker",
+          `${live.stoppedBuffers} stopped, ${live.playedBuffers} buffer(s) scheduled in all`);
+        info(`the page was handed ${live.playedBytes} audio byte(s) = ${msOf(live.playedBytes)} ms of speech in ${live.playedBuffers} buffer(s); hops ${JSON.stringify(live.hops)}`);
         info(`the microphone's own level on the live call: ${live.micLevel}; the playback analyser: ${live.level}`);
         check(heard.length >= 1, "the real vendor heard the person and the relay handed the words to the bot",
-          heard.length === 0 ? "nothing was confirmed inside 150 s" : JSON.stringify(heard));
+          heard.length === 0
+            ? `nothing was confirmed inside 150 s; the microphone's loudest frame on this call was ${live.micPeak} over ${live.micFrames} frame(s)`
+            + `, and a level near zero means the capture file had already finished playing before the echo gate opened`
+            : JSON.stringify(heard));
         check(said.length >= 1, "and the bot answered out loud", said.length === 0 ? "no reply inside 150 s" : JSON.stringify(said.map((one) => one.slice(0, 120))));
         info(`turns heard: ${heard.length}, replies spoken: ${said.length}, state words seen: ${JSON.stringify([...seen])}`);
         if (live.up === true) {

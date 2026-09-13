@@ -2881,6 +2881,95 @@ const putRow = (dom, node) => {
   dom.document._rows["#transcript .message-row"] = [node];
 };
 
+/** Two or more rows in the transcript, oldest first, the way the console draws them. */
+const putRows = (dom, nodes) => {
+  dom.document._rows["#transcript .message-row:not(.is-user)"] = [...nodes];
+  dom.document._rows["#transcript .message-row"] = [...nodes];
+};
+
+// ==================================== VOICE-20: the newest question is the one on the call screen
+//
+// Jason, 2026-09-13 on build 22: "I did get it to pop up once, but the other one didn't pop up. It
+// popped up underneath, so when I closed the chat I saw it in the normal chat to approve."
+//
+// VOICE-19 keeps a card this call has drawn once it settles, so the person can see that what they
+// pressed was allowed. That is right, and it left a rule unwritten: what happens when a NEW question
+// arrives over a card that is already answered, or under something newer that is not a question at
+// all. On a call there is no second place to answer one -- the chat behind the screen is `inert` --
+// so a question the screen will not draw is a question with no way to answer it.
+
+test("VOICE-20 call: a second pending card raised after the first settles takes the middle", async () => {
+  const dom = callDom();
+  const { voice } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const first = approvalRow(dom.made, { id: "reply-1" });
+  putRow(dom, first.node);
+  voice._paintCall();
+  assert.equal(voice.stats().call.card, "reply-1", "the first question is in the middle");
+  // Answered, and it stays drawn, which is VOICE-19's own rule and is not being undone here.
+  first.settle("approved");
+  voice._paintCall();
+  assert.equal(voice.stats().call.card, "reply-1");
+  assert.equal(voice.stats().call.cardState, "approved", "the person can still see what they allowed");
+  // And now the agent carries on working and hits the block again.
+  const second = approvalRow(dom.made, { id: "reply-2" });
+  putRows(dom, [first.node, second.node]);
+  voice._paintCall();
+  assert.equal(voice.stats().call.card, "reply-2", "the NEW question takes the middle");
+  assert.equal(voice.stats().call.cardState, "pending");
+  const copy = second.copy();
+  assert.equal(copy.buttons.length, 3, "with its own buttons, because it is the one waiting on an answer");
+  assert.deepEqual(copy.gone, [copy.disclosure], "and nothing else came with them");
+  voice.stop();
+});
+
+test("VOICE-20 call: a question is not buried by a newer card that is not one", async () => {
+  // THE SHAPE THE LIVE GATE CANNOT BUILD. --leg call forces real approvals on the local box, and a
+  // real box will not raise an approval and then land a weather card on top of it to order. A
+  // conversation does it constantly: a tool receipt with an attachment, a widget, a report offer.
+  const dom = callDom();
+  const { voice } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const asking = approvalRow(dom.made, { id: "ask-1" });
+  const weather = dom.made({ "data-message-id": "weather-1", class: "message-row" });
+  weather._find[".inline-card, [data-attachment]"] = dom.made();
+  putRows(dom, [asking.node, weather]);
+  voice._paintCall();
+  assert.equal(voice.stats().call.card, "ask-1",
+    "the question is in the middle even though a newer card is under it in the chat");
+  assert.equal(voice.stats().call.cardState, "pending");
+  // And once it is answered, the rule goes back to exactly what VOICE-13 wrote: nothing is waiting, so
+  // the newest card in the conversation is the newest card again. That is the whole of this change --
+  // a question jumps the queue, and nothing else about the middle of the screen moves.
+  asking.settle("approved");
+  voice._paintCall();
+  assert.equal(voice.stats().call.card, "weather-1",
+    "with nothing waiting, the newest card in the conversation takes the middle the way it always did");
+  voice.stop();
+});
+
+test("VOICE-20 call: two questions waiting at once, and the newest is the one on the screen", async () => {
+  const dom = callDom();
+  const { voice } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });
+  await voice.talkDown();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const older = approvalRow(dom.made, { id: "ask-1" });
+  const newer = approvalRow(dom.made, { id: "ask-2" });
+  putRows(dom, [older.node, newer.node]);
+  voice._paintCall();
+  assert.equal(voice.stats().call.card, "ask-2", "the newest question is the one asked on screen");
+  // The relay asks about a card out loud one at a time and holds it for a spoken yes (VOICE-19), so
+  // the screen showing the newest is the same order the voice uses. Answering it hands the middle to
+  // the one still waiting rather than to nothing.
+  newer.settle("approved");
+  voice._paintCall();
+  assert.equal(voice.stats().call.card, "ask-1", "and the one still waiting takes the middle back");
+  assert.equal(voice.stats().call.cardState, "pending");
+  voice.stop();
+});
+
 test("VOICE-19 call: a pending approval card keeps its buttons on the call screen, and nothing else does", async () => {
   const dom = callDom();
   const { voice } = await loadTalking({ innerWidth: 390, innerHeight: 844, document: dom.document });

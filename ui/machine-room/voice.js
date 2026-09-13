@@ -1682,16 +1682,34 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     return String(words).replace(/\s+/g, " ").trim().slice(0, 90);
   }
 
-  /** The newest card or tool result in a reply, as the row it lives in. Never one of the person's own. */
+  /**
+   * The newest card or tool result in a reply, as the row it lives in. Never one of the person's own.
+   *
+   * VOICE-20. A PENDING APPROVAL OUTRANKS EVERYTHING ELSE IN THE CONVERSATION, however new the other
+   * thing is. Until this wave the middle of the call screen was simply "the newest row with a card in
+   * it", which is the right rule for a weather card and the wrong one for a question: a settled card
+   * this call has already drawn (VOICE-19 keeps it drawn on purpose), a tool receipt, a widget or an
+   * attachment landing after the question all take the middle away from the one thing the person has
+   * to answer -- and on a call there is nowhere else to answer it, because the chat behind the screen
+   * is `inert`.
+   *
+   * Jason, 2026-09-13 on build 22: "I did get it to pop up once, but the other one didn't pop up. It
+   * popped up underneath, so when I closed the chat I saw it in the normal chat to approve."
+   *
+   * So a question wins, the newest question wins over an older one, and when nothing is waiting the
+   * rule is exactly what it was.
+   */
   function callCardRow() {
     const document_ = global.document;
     const rows = document_?.querySelectorAll?.("#transcript .message-row:not(.is-user)") ?? [];
+    let newestCard = null;
     for (let i = rows.length - 1; i >= 0; i -= 1) {
       const row = rows[i];
       if (row.querySelector?.(".inline-card, [data-attachment]") == null) continue;
-      return row;
+      if (callCardState(row) === "pending") return row;
+      if (newestCard == null) newestCard = row;
     }
-    return null;
+    return newestCard;
   }
 
   /**
