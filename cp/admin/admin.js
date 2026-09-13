@@ -1026,6 +1026,10 @@
     summarise("panel-clients", clientChips(answer), clientHeadline(answer));
     const host = $("clients");
     clear(host);
+    // CP-FIX 2. A sign-in count that is SHORT says so at the top of the panel rather than letting
+    // every "never" on it be read as a fact. A login by sign-in link exists only in the relay's
+    // ledger, so a relay that cannot be asked can hide one.
+    if (String(answer.signIns?.why ?? "").length > 0) host.appendChild(el("p", "quiet", String(answer.signIns.why)));
     if (answer.clients.length === 0) {
       host.appendChild(el("p", "empty", "No customers yet."));
       return;
@@ -1095,8 +1099,29 @@
         const added = el("td", null, ago(user.createdAt));
         added.title = when(user.createdAt);
         tr.appendChild(added);
+        // CP-FIX 2 and 3. WHEN, HOW, and the last thing that went wrong, in that order. A count and a
+        // door were both missing and beta-36 is what that cost: a tester who came in by sign-in link
+        // read as "never" on this cell for the 38 minutes his box was spending 9.7M input tokens. The
+        // kind is drawn because "signed in" and "was handed a link" are different facts, and the
+        // failure is drawn because "refused" on its own never says that somebody's password was
+        // changed under him.
         const seen = el("td", null, user.lastSignInAt ? ago(user.lastSignInAt) : "never");
         seen.title = user.lastSignInAt ? when(user.lastSignInAt) : "no successful sign-in is on record";
+        if (user.lastSignInAt && String(user.lastSignInKind ?? "").length > 0) {
+          const kind = el("span", "quiet", ` ${user.lastSignInKind}`);
+          kind.title = `${user.signIns} successful sign-in${user.signIns === 1 ? "" : "s"} on record, counting both this console's ledger and the relay's`;
+          seen.appendChild(kind);
+        }
+        if (user.lastFailure != null) {
+          const failure = el("div", "quiet");
+          const word = user.lastFailure.outcome === "locked" ? "locked out" : "refused";
+          failure.appendChild(text(`${word} ${ago(user.lastFailure.at)}`));
+          // The reason is the whole point of the row, so it is on the screen and not only in a
+          // tooltip. A row with no reason is one written before this wave and says so by saying less.
+          if (String(user.lastFailure.reason ?? "").length > 0) failure.appendChild(text(`: ${user.lastFailure.reason}`));
+          failure.title = `${when(user.lastFailure.at)} . ${user.failures} failed attempt${user.failures === 1 ? "" : "s"} on record`;
+          seen.appendChild(failure);
+        }
         tr.appendChild(seen);
         const role = document.createElement("td");
         if (user.superAdmin) role.appendChild(el("span", "chip super", "super admin"));

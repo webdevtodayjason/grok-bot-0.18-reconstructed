@@ -27,6 +27,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:http";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 import { base64urlEncode, mintSessionToken } from "../ui/session-token.mjs";
 import { OPERATOR_SLUG } from "../ui/tenant-registry.mjs";
@@ -659,6 +661,53 @@ test("a relay with the wrong relay credential serves the operator and nobody els
     assert.equal(byPassword.status, 302);
     assert.ok(cookieOf(byPassword).length > 0);
   } finally { relay.stop(); await cp.stop(); }
+});
+
+/**
+ * CP-FIX 2. A login by sign-in link is written into the relay's own ledger.
+ *
+ * MEASURED ON THE R750 2026-09-12 for beta-36: the tester came in by link at 13:52 and the Clients
+ * panel said he had never logged in for the next 38 minutes, while his box spent 9.7M input tokens.
+ * The link door wrote a console log line and nothing else, and the control plane cannot hear about
+ * it any other way: no password is typed, so POST /v1/sessions is never called.
+ */
+test("a login by sign-in link lands in the login ledger, and a bad link lands as a refusal", async () => {
+  const demo = tenantRow(TENANT);
+  // No SAND_UI_STATE_DIR on purpose: with none the ledger lands beside the code, which for a test is
+  // the relay's own copy directory, and the auth.json serverCopy wrote stays the one the door reads.
+  const relay = await startRelay({
+    CP_URL: "http://127.0.0.1:1", CP_RELAY_TOKEN: RELAY_TOKEN,
+    SAND_UI_TENANTS_FILE: tenantsFile([demo.row]),
+  }, { pathValue: "/nonexistent" });
+  try {
+    const arrived = await fetch(`${relay.base}/login?sso=${encodeURIComponent(tokenFor(TENANT, KEY))}`,
+      { redirect: "manual", headers: { accept: "text/html" } });
+    assert.equal(arrived.status, 302, "the link itself still works");
+    const refused = await fetch(`${relay.base}/login?sso=not-a-token`,
+      { redirect: "manual", headers: { accept: "text/html" } });
+    assert.equal(refused.status, 401);
+
+    // The write is never awaited by the route, so the rows are read once they are there rather than
+    // immediately. The ledger is a record of the door and must never hold a sign-in open.
+    const file = path.join(relay.dir, "login-attempts.jsonl");
+    let rows = [];
+    for (let attempt = 0; attempt < 50 && rows.length < 2; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      try {
+        rows = readFileSync(file, "utf8").split("\n").filter((line) => line.trim().length > 0).map((line) => JSON.parse(line));
+      } catch { rows = []; }
+    }
+    assert.equal(rows.length, 2, `the ledger has ${rows.length} rows, not two`);
+    const [ok, bad] = rows;
+    assert.equal(ok.door, "link", "a third door, named, so the control plane can count it as a login");
+    assert.equal(ok.outcome, "ok");
+    assert.equal(ok.tenant, TENANT, "the workspace comes off the verified token");
+    assert.equal(ok.email, `${TENANT}@titanium.bot`, "and so does the person, which is what the Clients panel joins on");
+    assert.equal(ok.triedHash, "", "no password was typed, so there is nothing derived from one");
+    assert.equal(bad.door, "link");
+    assert.equal(bad.outcome, "refused");
+    assert.equal(bad.triedHash, "", "a forged link carries no password either");
+  } finally { relay.stop(); }
 });
 
 // mintSessionToken is imported for the hand-made token above; naming it here keeps the linter and

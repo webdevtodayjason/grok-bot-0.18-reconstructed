@@ -183,7 +183,13 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   tenant     TEXT NOT NULL DEFAULT '',
   -- "relay" when a tenant console forwarded this sign-in, which makes the ip column that machine's
   -- egress address rather than the visitor's. Empty is a client posting straight at this service.
-  via        TEXT NOT NULL DEFAULT ''
+  via        TEXT NOT NULL DEFAULT '',
+  -- WHY this attempt ended the way it did, in the words the sign-in route decided, and never
+  -- anything derived from a password. An outcome word alone cannot tell an operator the difference
+  -- between somebody guessing and a customer holding a password that was changed under him, which
+  -- is exactly the question beta-36 asked on 2026-09-12. Empty is honest for a row written before
+  -- this column existed and for a relay row, which carries no reason of its own.
+  reason     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS login_attempts_at ON login_attempts (at);
 -- A workspace name that has been removed while sign-ins still pointed at it.
@@ -466,6 +472,11 @@ export const FEEDBACK_FIELD_LIMIT = 256 * 1024;
 // now, held here and read only by the relay behind CP_RELAY_TOKEN, so they go in this set for the
 // same reason the three above are in it -- listSettings hands every value back wholesale and
 // cp/verification.mjs reads that list, so a name left out of here is a key in somebody's answer.
+// How long a refusal's reason may be. Two hundred characters is a sentence an operator can read on
+// a row; anything longer is not a reason, and a column with no ceiling on it is somewhere a caller
+// could eventually put a body.
+export const ATTEMPT_REASON_LIMIT = 200;
+
 // The names are cp/secrets.mjs's allowlist and are spelled out rather than imported: this module is
 // the store and importing a route module into it would invert the dependency. Its test asserts the
 // two lists are the same three names.
@@ -561,6 +572,9 @@ const TENANT_MIGRATIONS = [
   // the relay wrote its own richer row for the same attempt at its own door. Empty is the ordinary
   // case, a client posting straight at this service. See recordLoginAttempt.
   "ALTER TABLE login_attempts ADD COLUMN via TEXT NOT NULL DEFAULT ''",
+  // The reason in words, for the R750's database, which has held this table since ADMIN-1. Both
+  // places are needed for the same reason the two mail columns below need both.
+  "ALTER TABLE login_attempts ADD COLUMN reason TEXT NOT NULL DEFAULT ''",
   // MAIL-3. The provider's id for a message and the reason an outcome is what it is. The same two
   // columns are on the CREATE TABLE in SCHEMA and BOTH places are needed: the DDL makes them on a
   // database that has no mail_send_log, and these make them on the R750's, which has held that
@@ -632,7 +646,7 @@ export function openStore(options = {}) {
   const updateDisabled = statement("UPDATE accounts SET disabled = ?, updated_at = ? WHERE id = ?");
   const countSuperAdminsRow = statement("SELECT COUNT(*) AS n FROM accounts WHERE super_admin = 1");
 
-  const insertAttempt = statement("INSERT INTO login_attempts (at, email, ip, outcome, tried_hash, tenant, via) VALUES (?, ?, ?, ?, ?, ?, ?)");
+  const insertAttempt = statement("INSERT INTO login_attempts (at, email, ip, outcome, tried_hash, tenant, via, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
   const selectAttempts = statement("SELECT * FROM login_attempts WHERE at >= ? ORDER BY at DESC, id DESC LIMIT ?");
   const selectAttemptsByOutcome = statement("SELECT * FROM login_attempts WHERE at >= ? AND outcome = ? ORDER BY at DESC, id DESC LIMIT ?");
   const deleteOldAttempts = statement("DELETE FROM login_attempts WHERE at < ?");
@@ -902,7 +916,7 @@ export function openStore(options = {}) {
     // reaches this service from one egress address, so without the flag the whole fleet's console
     // sign-ins pile into one bucket that belongs to nobody. The relay wrote its own row for the same
     // attempt, with the real address on it, and the merge drops this one in favour of that.
-    recordLoginAttempt({ at = now(), email = "", ip = "", outcome = "refused", triedHash = "", tenant = "", via = "" }) {
+    recordLoginAttempt({ at = now(), email = "", ip = "", outcome = "refused", triedHash = "", tenant = "", via = "", reason = "" }) {
       insertAttempt.run(
         Number(at), normalizeEmail(email), String(ip ?? ""), String(outcome),
         // Only ever a hex digest. A caller that passed a password here by mistake would be writing
@@ -910,6 +924,9 @@ export function openStore(options = {}) {
         /^[0-9a-f]{64}$/i.test(String(triedHash ?? "")) ? String(triedHash) : "",
         String(tenant ?? ""),
         String(via ?? "") === "relay" ? "relay" : "",
+        // A sentence this service wrote, capped so it cannot become somewhere a caller parks
+        // anything long, and with the newlines out so one row stays one row on a page.
+        String(reason ?? "").replace(/\s+/g, " ").trim().slice(0, ATTEMPT_REASON_LIMIT),
       );
     },
 
@@ -928,6 +945,7 @@ export function openStore(options = {}) {
         outcome: row.outcome ?? "refused",
         tenant: row.tenant ?? "",
         via: row.via ?? "",
+        reason: row.reason ?? "",
       }));
     },
 

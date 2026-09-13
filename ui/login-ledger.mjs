@@ -51,7 +51,14 @@ export const USER_AGENT_LIMIT = 120;
 // password, which the control plane decides. A request too large to be a password has no door of
 // its own and is recorded as `instance`, because that is the door the relay's own code would have
 // sent it to: an empty email means the instance door.
-export const DOORS = new Set(["account", "instance"]);
+//
+// `link` is the third, and it is here because a login through it was invisible. A sign-in link is
+// minted by the control plane and verified HERE against this workspace's own key: no password is
+// typed, so POST /v1/sessions is never called and the control plane's own ledger has no row for it
+// at all. MEASURED ON THE R750 2026-09-12: beta-36's tester came in by link at 13:52 and the
+// Clients panel said he had never logged in while his box spent 9.7M input tokens. A door nobody
+// writes down is a login nobody can count.
+export const DOORS = new Set(["account", "instance", "link"]);
 export const OUTCOMES = new Set(["ok", "refused", "locked"]);
 
 const clip = (value, limit) => {

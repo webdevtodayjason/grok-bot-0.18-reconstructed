@@ -975,3 +975,132 @@ test("listSettings answers the two push names with no value at all", async () =>
     assert.ok(!text.includes(PUSH_P8.slice(40, 120)));
   });
 });
+
+// ---- CP-FIX 2 and 3: what the Clients panel knows about a person's sign-ins ----------------------
+//
+// MEASURED ON THE R750 2026-09-12 for beta-36: the tester signed in by sign-in link at 13:52, his
+// Titan then ran an interview and a computer-use subagent that spent 9.7M input tokens in 38
+// minutes, and the Clients panel said he had NEVER LOGGED IN the whole time. Two separate holes,
+// both of them here:
+//
+//   the last sign-in was read from this service's OWN ledger alone, and a sign-in-link login
+//   happens entirely at the relay: there is no password, so POST /v1/sessions is never called and
+//   this service never hears about it;
+//
+//   and a FAILURE had nowhere to show at all. The same tester could not sign back in after his
+//   password was changed, and the row for it carried an outcome word and no reason, on a panel that
+//   only ever rendered successes.
+
+/** A relay that answers the login ledger and the ceiling route, and records what it was asked. */
+function fakeSignInRelay({ rows = [] } = {}) {
+  const asked = [];
+  const fetchImpl = async (url, init = {}) => {
+    const parsed = new URL(url);
+    asked.push({ pathname: parsed.pathname, search: parsed.search, method: init.method ?? "GET" });
+    const body = parsed.pathname === "/admin/login-attempts"
+      ? { source: "relay", measuredAt: new Date().toISOString(), rows }
+      : null;
+    if (body == null) return { ok: false, status: 404, text: async () => "", json: async () => ({}) };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body };
+  };
+  return { asked, fetchImpl };
+}
+
+const relayRow = ({ at, door = "account", email, outcome = "ok", tenant = "", ip = "203.0.113.40" }) => ({
+  at: new Date(at).toISOString(), door, email, ip, userAgent: "Mozilla/5.0", triedHash: "", outcome, tenant,
+});
+
+test("a sign-in-link login is a login: the panel counts it and names the kind", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "beta-36", name: "Beta 36", status: "running" });
+    store.createAccount({ email: "tester@beta36.test", password: PASSWORD, tenant: "beta-36" });
+    const at = Date.now() - 60_000;
+    // The shape the relay writes for GET /login?sso=<token>: no password was typed, so there is no
+    // row on this service's side at all and the merge has exactly one row to work with.
+    const relay = fakeSignInRelay({ rows: [relayRow({ at, door: "link", email: "tester@beta36.test", tenant: "beta-36" })] });
+    const answer = await ceilingApi({ store, root, fetchImpl: relay.fetchImpl }).clients();
+    const person = answer.clients.find((row) => row.slug === "beta-36").users[0];
+    assert.equal(person.signIns, 1, "a link login is a successful login and is counted as one");
+    assert.equal(person.lastSignInAt, new Date(at).toISOString());
+    assert.equal(person.lastSignInKind, "by sign-in link", "the kind of the last one, in words");
+  });
+});
+
+test("one sign-in seen by both ledgers is counted once, and the kind is the door it came in by", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "acme", name: "Acme", status: "running" });
+    store.createAccount({ email: "owner@acme.test", password: PASSWORD, tenant: "acme" });
+    const at = Date.now() - 30_000;
+    // A password sign-in at a tenant console: the relay writes its own row with the visitor's
+    // address, forwards it here, and this service writes one too with via=relay. The panel must not
+    // read that as two sign-ins.
+    store.recordLoginAttempt({ at: at + 200, email: "owner@acme.test", ip: "10.0.0.7", outcome: "ok", tenant: "acme", via: "relay" });
+    const relay = fakeSignInRelay({ rows: [relayRow({ at, email: "owner@acme.test", tenant: "acme" })] });
+    const answer = await ceilingApi({ store, root, fetchImpl: relay.fetchImpl }).clients();
+    const person = answer.clients[0].users[0];
+    assert.equal(person.signIns, 1, "the same attempt seen twice is one sign-in");
+    assert.equal(person.lastSignInKind, "with an email and password");
+  });
+});
+
+test("an account nobody has ever used still reads as never, and the relay being down says so", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "acme", name: "Acme", status: "running" });
+    store.createAccount({ email: "owner@acme.test", password: PASSWORD, tenant: "acme" });
+    const answer = await ceilingApi({ store, root, fetchImpl: async () => { throw new Error("the relay is down"); } }).clients();
+    const person = answer.clients[0].users[0];
+    assert.equal(person.signIns, 0);
+    assert.equal(person.lastSignInAt, null, "never is a real answer and reads as one");
+    assert.equal(person.lastSignInKind, "");
+    // And the panel is told the count is short rather than being left to present it as whole: a
+    // link login lives only at the relay, so an unreachable relay can hide one.
+    assert.equal(answer.signIns.relay.reachable, false);
+    assert.ok(String(answer.signIns.why).length > 0);
+  });
+});
+
+test("a lockout and a refusal after a password change reach the panel with the reason in words", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "beta-36", name: "Beta 36", status: "running" });
+    const account = store.createAccount({ email: "tester@beta36.test", password: PASSWORD, tenant: "beta-36" });
+    const at = Date.now();
+    store.setAccountPassword(account.id, "a-brand-new-password");
+    // What the sign-in route writes when the password on file is not the one that was typed, and
+    // then when the address has knocked too often. Both carry the sentence the route decided, which
+    // is the part that was missing: "refused" alone does not tell an operator that this person is
+    // holding a password somebody changed.
+    store.recordLoginAttempt({
+      at: at - 2000, email: "tester@beta36.test", ip: "203.0.113.40", outcome: "refused", tenant: "beta-36",
+      reason: "the password did not match the one on file, which was changed 1 minute before this try",
+    });
+    store.recordLoginAttempt({
+      at: at - 1000, email: "tester@beta36.test", ip: "203.0.113.40", outcome: "locked", tenant: "beta-36",
+      reason: "too many tries from this address, so the door was shut for 600 seconds",
+    });
+    const relay = fakeSignInRelay({ rows: [] });
+    const answer = await ceilingApi({ store, root, fetchImpl: relay.fetchImpl }).clients();
+    const person = answer.clients[0].users[0];
+    assert.equal(person.signIns, 0, "none of this is a sign-in");
+    assert.equal(person.lastSignInAt, null);
+    // The newest failure, because that is the one the person is living with right now.
+    assert.equal(person.lastFailure.outcome, "locked");
+    assert.match(person.lastFailure.reason, /too many tries from this address/);
+    assert.equal(person.lastFailure.at, new Date(at - 1000).toISOString());
+    assert.equal(person.failures, 2, "both of them are counted");
+  });
+});
+
+test("the reason a sign-in was refused is stored as words and never as a password", async () => {
+  await withStore((store) => {
+    store.recordLoginAttempt({
+      email: "owner@acme.test", ip: "1.1.1.1", outcome: "refused",
+      reason: "the password did not match the one on file",
+    });
+    const row = store.listLoginAttempts({ since: 0 })[0];
+    assert.equal(row.reason, "the password did not match the one on file");
+    // A reason is a sentence this service wrote, so it is capped and it is never allowed to become a
+    // place a caller could park a password. The hash column is the only thing derived from one.
+    store.recordLoginAttempt({ email: "owner@acme.test", ip: "1.1.1.1", outcome: "refused", reason: "x".repeat(500) });
+    assert.equal(store.listLoginAttempts({ since: 0 })[0].reason.length, 200);
+  });
+});
