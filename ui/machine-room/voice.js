@@ -1544,12 +1544,25 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
   // VOICE-15. The shell's route report, verbatim, on start and on every route change. It only moves the
   // toggle's own state when the real output is one the toggle can pick; headphones and Bluetooth win the
   // route on their own and the line says so, but the person's speaker/earpiece choice is left as it was.
+  const routeFrame = (info) => {
+    const out = String(info?.output ?? "");
+    return { t: "route", output: out, category: String(info?.category ?? ""), mode: String(info?.mode ?? ""),
+      outputs: Array.isArray(info?.outputs) ? info.outputs.map(String).slice(0, 6) : [], error: String(info?.error ?? "").slice(0, 200) };
+  };
   function applyRoute(info) {
-    if (!call.up || info == null || typeof info !== "object") return;
+    if (info == null || typeof info !== "object") return;
+    // The shell reports at audioStart, which is BEFORE the socket is open and before the screen is
+    // up, so the report is kept whatever the call's state and sent once the line exists.
+    state.lastRoute = info;
+    if (!call.up) return;
     call.route = info;
     const out = String(info.output ?? "");
     if (out === "speaker" || out === "earpiece") call.output = out;
     paintCall();
+    // VOICE-15d. The shell's own report goes to the relay too, so a call that heard nothing can be
+    // read in the relay log rather than guessed at from a screenshot. 2026-09-12, build 17: two
+    // calls with 0 s of audio in and nothing on this side could say what the phone's session was.
+    if (state.socket != null && state.socket.readyState === 1) send(routeFrame(info));
   }
 
   // VOICE-15. The person's speaker/earpiece choice. The shell applies it and remembers it; the page
@@ -2009,6 +2022,8 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     // the same bytes it carried before this wave, and sent BEFORE the queued audio below so the relay
     // knows which kind of line it is holding before the first frame reaches it.
     if (state.bargeIn) send({ t: "hello", bargeIn: true });
+    // VOICE-15d: the shell's audio report from audioStart, which arrived before this socket existed.
+    if (state.lastRoute != null && nativeAudioWanted()) send(routeFrame(state.lastRoute));
     // WHATEVER WAS CAPTURED WHILE THE LINE WAS STILL OPENING GOES NOW, in order, and whether or not the
     // button is still down. Flushing it only on the next frame that is allowed through would lose a
     // hold SHORTER than the dial entirely: every frame after the release is muted, so the queue would
@@ -2033,6 +2048,12 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     heldTimer = global.setInterval(() => {
       const stats = state.capture?.stats;
       if (stats == null || state.socket == null || state.socket.readyState !== 1) return;
+      // VOICE-15d: how many frames the shell has handed the page at all, native calls only, so the
+      // relay can tell "the mic produced nothing" from "the page dropped it".
+      if (state.capture?.native && stats.blocks !== state.blocksReported) {
+        state.blocksReported = stats.blocks;
+        send({ t: "capture", native: true, blocks: stats.blocks, sent: stats.sent });
+      }
       if (stats.heldFrames === state.heldReported) return;
       state.heldReported = stats.heldFrames;
       send({ t: "held", frames: stats.heldFrames, ms: Math.round(stats.heldMs) });

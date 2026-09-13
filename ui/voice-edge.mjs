@@ -2085,7 +2085,7 @@ export function makeVoiceSession({
   const exchange = makeSpokenExchange();
   const runner = makeTurnRunner({ call, now, sleep, log });
   const startedMs = now();
-  const meter = { audioInBytes: 0, audioOutBytes: 0, billedItemEvents: 0, toolCalls: 0, browserHeld: 0, audioInPeak: 0, audioInSumSq: 0, audioInSamples: 0, bargeIns: 0 };
+  const meter = { audioInBytes: 0, audioOutBytes: 0, billedItemEvents: 0, toolCalls: 0, browserHeld: 0, audioInPeak: 0, audioInSumSq: 0, audioInSamples: 0, phoneRoute: null, captureBlocks: 0, captureSent: 0, captureNative: false, bargeIns: 0 };
   const announcements = [];
   let browser = null;
   let provider = null;
@@ -2628,6 +2628,7 @@ export function makeVoiceSession({
     log(`voice ${t.slug} settled this line: ${settled.wallSeconds} s, ${settled.audioInSeconds} s of audio in, `
       + `${settled.audioOutSeconds} s out, ${settled.toolCalls} turn(s) to the agent, ${settled.heldFrames} held frame(s), `
       + `${meter.bargeIns} barge-in(s), mic peak ${dbfs(meter.audioInPeak)} rms ${dbfs(meter.audioInSamples > 0 ? Math.sqrt(meter.audioInSumSq / meter.audioInSamples) : 0)}, `
+      + (meter.captureNative ? `phone mic frames ${meter.captureBlocks} seen ${meter.captureSent} sent, route ${meter.phoneRoute?.output || "never reported"}${meter.phoneRoute?.error ? ` error "${meter.phoneRoute.error}"` : ""}, ` : "")
       + `and it ended because ${reason}`);
     // VOICE-16. ONE MEMORY FOR THE WHOLE CALL, and it is written AFTER the ledger row is settled on
     // purpose. The row is what the day cap is read out of and what the operator's Spend line shows, so
@@ -2726,6 +2727,21 @@ export function makeVoiceSession({
           if (message?.t === "stop") { void close("the person pressed the button"); return undefined; }
           if (message?.t === "ping") { browser?.sendJson({ t: "pong" }); return undefined; }
           if (message?.t === "held") { meter.browserHeld += Math.max(0, Number(message.frames) || 0); return undefined; }
+          // VOICE-15d: what the phone's own audio session reports, and how many frames the shell has
+          // handed the page. Logged so a call that heard nothing is readable here.
+          if (message?.t === "route") {
+            meter.phoneRoute = { output: String(message.output ?? ""), error: String(message.error ?? "").slice(0, 200) };
+            log(`voice ${t.slug} phone route: output ${meter.phoneRoute.output || "?"}, category ${String(message.category ?? "?")}, `
+              + `mode ${String(message.mode ?? "?")}, outputs ${JSON.stringify(Array.isArray(message.outputs) ? message.outputs.slice(0, 6) : [])}`
+              + (meter.phoneRoute.error ? `, error "${meter.phoneRoute.error}"` : ""));
+            return undefined;
+          }
+          if (message?.t === "capture") {
+            meter.captureBlocks = Math.max(0, Number(message.blocks) || 0);
+            meter.captureSent = Math.max(0, Number(message.sent) || 0);
+            meter.captureNative = message.native === true;
+            return undefined;
+          }
           if (message?.t === "mic" && message.on !== true) { gate.release(); return undefined; }
           return undefined;
         },
