@@ -40,7 +40,6 @@ import http from "node:http";
 // there, so a test reaches every branch of its verdict table with no network.
 import http2Impl from "node:http2";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -74,8 +73,10 @@ import {
 } from "./verification.mjs";
 import {
   NEW_TENANTS_BLOCKED,
+  adoptedProfileDirDefault,
+  adoptedStateDirDefault,
   adoptionDirs,
-  boxContainerName,
+  boxContainerFor,
   configProblems,
   consoleHost,
   createCoolifyClient,
@@ -84,7 +85,7 @@ import {
   provisionTenant,
   proxyKeyFileIn,
   readCoolifyState,
-  readGatewayToken,
+  readGatewayTokenFor,
   readProxyKey,
   tenantDirectory,
   tenantPaths,
@@ -232,7 +233,14 @@ export function createApp(options = {}) {
     ? sourceAddress(request)
     : clientAddress(request, trustedProxies, cloudflareRanges));
   // The container names in the ledger, resolved on a schedule by whoever owns the timer.
-  const refreshBoxPeers = () => boxPeers.refresh(store.listTenants().map((row) => row.boxContainer ?? ""));
+  //
+  // SUPPORT-1d. Through the one helper, and this reader is the one with teeth. This set is what holds a
+  // box's own address UNTRUSTED as a forwarder (section 19.3 of docs/TENANCY.md): a customer's agents
+  // reach this service from their container, and an address that is trusted can forge
+  // X-Forwarded-For, which the sign-in lockout is keyed on. A row with a NULL box_container beside a
+  // Coolify uuid -- which is what the adopted `titanium` row really was -- contributed an empty name
+  // here, so that box was never held out of the trusted set. Deriving the name closes it.
+  const refreshBoxPeers = () => boxPeers.refresh(store.listTenants().map((row) => boxContainerFor(row)));
 
   // Which callers are a RELAY forwarding a customer, rather than a customer.
   //
@@ -293,12 +301,12 @@ export function createApp(options = {}) {
       const paths = tenantPaths(row.slug, config);
       const stateDir = adoption.stateDir || paths.state;
       const profileDir = adoption.profileDir || paths.profile;
-      const box = row.boxContainer || (row.coolifyServiceUuid ? boxContainerName(row.coolifyServiceUuid) : "");
+      const box = boxContainerFor(row);
       if (row.status === "failed") { skipped.push({ slug: row.slug, what: "tenant", why: "this workspace did not finish being built" }); continue; }
       if (!box) { skipped.push({ slug: row.slug, what: "tenant", why: "this workspace has no container yet" }); continue; }
-      const token = adoption.profileDir
-        ? readTokenFromDirectory(adoption.profileDir)
-        : readGatewayToken(row.slug, config);
+      // SUPPORT-1d. This was the only adoption-aware token read in the service and every other reader
+      // got it wrong, so the read moved into cp/provision.mjs and this calls it like everybody else.
+      const token = readGatewayTokenFor(store, row.slug, config);
       if (!token) {
         skipped.push({ slug: row.slug, what: "tenant", why: "this workspace has no gateway token on this server" });
         // PROXY-1, MEASURED ON THE R750 2026-09-08. The operator's own workspace is adopted and
@@ -537,17 +545,6 @@ export function createApp(options = {}) {
   // the directory this reader names, and a second implementation of "where does this workspace keep
   // its files" is how one of the two ends up writing a file nothing reads.
   const adoptionDetail = (slug) => adoptionDirs(store.listSteps(slug));
-
-  // The same 0600 file cp/provision.mjs writes, read from a directory an adoption named rather than
-  // from this service's own tenant root. Nothing else reads a path a request supplied: the path
-  // here came from the operator through the admin door, not from a customer.
-  function readTokenFromDirectory(directory) {
-    try {
-      const parsed = JSON.parse(readFileSync(path.join(directory, "local-docker-vm.json"), "utf8"));
-      const token = String(parsed?.token ?? "");
-      return token.length > 0 ? token : null;
-    } catch { return null; }
-  }
 
   // A tenant row plus the live Coolify state when we can get it. The ledger is what this service
   // knows; the live read is what the server says right now, and when they disagree about a tenant
@@ -1811,9 +1808,15 @@ export function createApp(options = {}) {
         // own environment at boot, so a control plane that is down cannot take his console with it.
         // This is what makes the row consistent with the rest of the fleet, and what would serve a
         // second adopted instance.
-        const boxContainer = String(body.boxContainer ?? "").trim() || boxContainerName(uuid);
-        const stateDir = String(body.stateDir ?? "").trim() || path.join(config.releaseRoot, "state");
-        const profileDir = String(body.profileDir ?? "").trim() || path.join(config.releaseRoot, "profile");
+        // SUPPORT-1d. --box when the operator named one, and otherwise the name Coolify gives it,
+        // through the SAME helper every reader resolves a container with. It was written by hand here
+        // and the adopted row that shipped before it still carried NULL, which is the other half of
+        // why the helper exists: a reader that derives the name does not care when the row was made.
+        const boxContainer = boxContainerFor({ boxContainer: body.boxContainer, coolifyServiceUuid: uuid });
+        // The two defaults are in cp/provision.mjs, because `tenant adopt --gateway-token-stdin` has
+        // to know where this route will say the token lives before it calls it.
+        const stateDir = String(body.stateDir ?? "").trim() || adoptedStateDirDefault(config);
+        const profileDir = String(body.profileDir ?? "").trim() || adoptedProfileDirDefault(config);
         const existing = store.getTenant(value);
         const tenant = existing == null
           ? store.createTenant({ slug: value, name: String(body.name ?? value), host, status: "adopted", coolifyServiceUuid: uuid, boxContainer })

@@ -9,7 +9,7 @@
 //   node cp/cli.mjs account demote <email>
 //   node cp/cli.mjs tenant add <slug> <name> [--dry-run]
 //   node cp/cli.mjs tenant list
-//   node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>]
+//   node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>] [--gateway-token-stdin]
 //   node cp/cli.mjs proxy list
 //   node cp/cli.mjs proxy mint <slug|--all>
 //   node cp/cli.mjs proxy rotate <slug|--all>
@@ -59,14 +59,20 @@
 // echo turned off, exactly the way ui/set-password.mjs does.
 
 import {
+  GATEWAY_TOKEN_NAME,
   PROXY_ROLLBACK_NAME,
+  adoptedProfileDirDefault,
+  boxContainerFor,
   ensureProxyKey,
   forgetProxyKey,
+  gatewayTokenFileIn,
   loadConfig,
   proxyKeyFileIn,
+  readGatewayTokenIn,
   readProxyKey,
   tenantProfileDir,
   validateSlug,
+  writeGatewayTokenIn,
 } from "./provision.mjs";
 import { TENANT_ALLOWED_ROUTES, createProxyClient, proxyKeyAlias, tenantRoutesFor } from "./proxy.mjs";
 import { tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken } from "./session.mjs";
@@ -417,11 +423,15 @@ async function tenantList() {
   if (answer.tenants.length === 0) return out("no tenants yet");
   out(`${pad("SLUG", 20)}${pad("BOX", 34)}${pad("STATUS", 14)}${pad("LIVE", 14)}SERVICE`);
   for (const tenant of answer.tenants) {
-    // An adopted row with no box recorded is not a fault and must not read like one: the relay
-    // builds the operator's own entry from its own environment, which is what keeps that console
-    // working when this service is down. Every other row has to have a box or it cannot be served.
-    const box = tenant.boxContainer
-      ?? (tenant.status === "adopted" ? "(from the relay's own env)" : "(none yet)");
+    // SUPPORT-1d. The same helper every reader in the service resolves a container with, so this
+    // column shows the name the registry, the support desk and the removal would all use. A row with
+    // neither a written name nor a Coolify service has nothing to show, and for an adopted row that
+    // is still not a fault: the relay builds the operator's own entry from its own environment, which
+    // is what keeps that console working when this service is down.
+    const derived = boxContainerFor(tenant);
+    const box = derived.length > 0
+      ? derived
+      : (tenant.status === "adopted" ? "(from the relay's own env)" : "(none yet)");
     out(`${pad(tenant.slug, 20)}${pad(box, 34)}${pad(tenant.status, 14)}${pad(tenant.coolify?.status ?? "unknown", 14)}${tenant.coolifyServiceUuid ?? ""}`);
     if (tenant.lastError) out(`  last error: ${tenant.lastError}`);
   }
@@ -500,12 +510,50 @@ function tenantOrphans() {
   } finally { store.close(); }
 }
 
+/**
+ * The gateway token, off stdin or off the terminal, and never out of an argument.
+ *
+ * SUPPORT-1d. The same rule readPassword above keeps, for the same three reasons: an argument is in
+ * the shell history, in `ps` output, and in the scrollback of whoever is watching. The token this
+ * reads is a bearer that opens a customer's whole box, so it is the last credential in this product
+ * that should be typed after a flag.
+ */
+async function readGatewayTokenFromStdin() {
+  if (!process.stdin.isTTY) {
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    const value = Buffer.concat(chunks).toString("utf8").trim();
+    if (value.length === 0) die("no gateway token on stdin, nothing was done");
+    if (/\s/.test(value)) die("that gateway token has a space or a newline in the middle of it, so it is not one token; nothing was done");
+    return value;
+  }
+  const typed = (await promptHidden("Gateway token: ")).trim();
+  if (typed.length === 0) die("no gateway token was typed, nothing was done");
+  return typed;
+}
+
 // Claims an instance that already exists, and tells the registry where its box and its files are so
 // the one relay can serve it. The three optional flags are for an instance that was not built from
 // this repo's compose; the defaults are what Coolify and deploy/r750 already produce.
+//
+// SUPPORT-1d, MEASURED ON THE R750 2026-09-13. This verb used to claim a row and stop, and the row it
+// left could not be served: `titanium` was adopted with no --box, so its box_container column was
+// NULL, and no gateway token for it existed anywhere this service reads. The support desk's
+// notification and the onboarding sequence's box asks both answered "no container name on its row"
+// and then "gateway token could not be read", and the first three support mails ever to arrive told
+// nobody. An operator fixed it by writing a column and a 0600 file on a live server by hand, which is
+// exactly the kind of repair that has to become a mechanism.
+//
+// So two things changed. The container name is now written from --box or derived from the Coolify
+// uuid, by the same helper every reader in the service resolves a container with. And the token has a
+// way IN: --gateway-token-stdin, which writes profileDir/local-docker-vm.json at 0600 from stdin and
+// never from an argument. THE VERB WILL NOT FINISH AN ADOPT WITHOUT A TOKEN, because a row with no
+// token is a workspace the relay answers 401 for with nothing in any log to say why. It says which of
+// the two ways is missing, and it refuses BEFORE it calls the route, so a refused adopt is
+// indistinguishable from never having asked.
 async function tenantAdopt(args) {
   const [slug, uuid, host] = positional(args);
-  if (!slug || !uuid || !host) die("usage: node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>]");
+  if (!slug || !uuid || !host) die("usage: node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>] [--gateway-token-stdin]");
   const body = { coolifyServiceUuid: uuid, host };
   const box = flag(args, "--box");
   const stateDir = flag(args, "--state");
@@ -513,11 +561,44 @@ async function tenantAdopt(args) {
   if (box) body.boxContainer = box;
   if (stateDir) body.stateDir = stateDir;
   if (profileDir) body.profileDir = profileDir;
+
+  // Where the route is going to say this workspace's files are. The same default the route itself
+  // uses, out of cp/provision.mjs so there is one join and not two.
+  const wantedProfileDir = profileDir || adoptedProfileDirDefault(config);
+  const fromStdin = hasFlag(args, "--gateway-token-stdin");
+  const alreadyThere = readGatewayTokenIn(wantedProfileDir);
+  if (!fromStdin && alreadyThere == null) {
+    die(`there is no gateway token at ${gatewayTokenFileIn(wantedProfileDir)}, so the relay could not talk to this workspace's box and nothing was done.`
+      + ` Either pipe the token in -- node cp/cli.mjs tenant adopt ${slug} ${uuid} ${host} --gateway-token-stdin < the-token --`
+      + ` or put the box's own ${GATEWAY_TOKEN_NAME} in that directory first and run this again.`);
+  }
+  // READ BEFORE THE ROUTE IS CALLED, so an empty pipe refuses with nothing claimed.
+  const token = fromStdin ? await readGatewayTokenFromStdin() : null;
+
   const answer = await api("POST", `/v1/tenants/${encodeURIComponent(slug)}/adopt`, body);
   out(`${answer.tenant.slug} now points at Coolify service ${answer.tenant.coolifyServiceUuid} on ${answer.tenant.host}`);
   out(`box ${answer.boxContainer}`);
   out(`state ${answer.stateDir}`);
-  out(`profile ${answer.profileDir}, which is where its gateway token is read from`);
+
+  // The route is the authority on where the profile directory is, so the token goes where IT said
+  // rather than where this guessed. The value is never printed, only the path and the mode.
+  if (token != null) {
+    let written;
+    try { written = writeGatewayTokenIn(answer.profileDir, token); }
+    catch (error) {
+      die(`${slug} is claimed, but its gateway token could not be written: ${String(error?.message ?? error)}.`
+        + ` The relay cannot talk to its box until that file exists, so run this again with --gateway-token-stdin.`);
+    }
+    out(`profile ${answer.profileDir}, and its gateway token is now at ${written}, 0600`);
+  } else {
+    out(`profile ${answer.profileDir}, which is where its gateway token is read from; one is already there`);
+  }
+  // The same read the registry makes, against the directory the route named, so this says whether the
+  // relay can actually serve this workspace rather than whether a file was written somewhere.
+  if (readGatewayTokenIn(answer.profileDir) == null) {
+    die(`${slug} is claimed, but there is no readable gateway token at ${gatewayTokenFileIn(answer.profileDir)},`
+      + ` so the relay will skip this workspace. Run this again with --gateway-token-stdin.`);
+  }
   out("nothing on that service was changed");
 }
 
@@ -601,7 +682,7 @@ async function proxyMint(args) {
   const store = openLedger();
   try {
     for (const row of proxyTargets(store, args)) {
-      const answer = await ensureProxyKey(row.slug, config, { box: row.boxContainer ?? "", file: keyFileFor(store, row.slug), onNote: (note) => out(`  note: ${note}`) });
+      const answer = await ensureProxyKey(row.slug, config, { box: boxContainerFor(row), file: keyFileFor(store, row.slug), onNote: (note) => out(`  note: ${note}`) });
       if (!answer.ok) { out(`${pad(row.slug, 20)}not minted: ${answer.why}`); continue; }
       // "read" rather than "minted" is the answer a second run gives, and it is the answer that
       // proves this is safe to run twice: the key is read back off the disk and no second one is
@@ -616,7 +697,7 @@ async function proxyRotate(args) {
   const store = openLedger();
   try {
     for (const row of proxyTargets(store, args)) {
-      const answer = await ensureProxyKey(row.slug, config, { force: true, box: row.boxContainer ?? "", file: keyFileFor(store, row.slug), onNote: (note) => out(`  note: ${note}`) });
+      const answer = await ensureProxyKey(row.slug, config, { force: true, box: boxContainerFor(row), file: keyFileFor(store, row.slug), onNote: (note) => out(`  note: ${note}`) });
       if (!answer.ok) { out(`${pad(row.slug, 20)}not rotated: ${answer.why}`); continue; }
       out(`${pad(row.slug, 20)}${pad(answer.record.alias, 26)}rotated`);
       out("  the box picks the new key up on its next message, because the host re-reads that file every turn");
@@ -778,7 +859,7 @@ async function proxyMigrate(args) {
         out("  nothing was written");
         continue;
       }
-      const minted = await ensureProxyKey(row.slug, config, { box: row.boxContainer ?? "", file: keyFile, onNote: (note) => out(`  note: ${note}`) });
+      const minted = await ensureProxyKey(row.slug, config, { box: boxContainerFor(row), file: keyFile, onNote: (note) => out(`  note: ${note}`) });
       if (!minted.ok) { out(`  stopped: ${minted.why}`); continue; }
       out(`  key ${minted.record.alias} ${minted.minted ? "minted" : "already there"}`);
 
@@ -1499,7 +1580,7 @@ const USAGE = [
   "node cp/cli.mjs tenant add <slug> <name> [--dry-run]",
   "node cp/cli.mjs tenant list",
   "node cp/cli.mjs tenant orphans",
-  "node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>]",
+  "node cp/cli.mjs tenant adopt <slug> <coolify-uuid> <host> [--box <container>] [--state <dir>] [--profile <dir>] [--gateway-token-stdin]",
   "node cp/cli.mjs tenant remove <slug> [--delete-data] [--yes]",
   "node cp/cli.mjs proxy list",
   "node cp/cli.mjs proxy mint <slug|--all>",

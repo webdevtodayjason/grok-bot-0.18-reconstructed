@@ -39,9 +39,9 @@
 import { randomUUID } from "node:crypto";
 
 import {
-  boxContainerName,
+  boxContainerFor,
   provisionTenant,
-  readGatewayToken,
+  readGatewayTokenFor,
 } from "./provision.mjs";
 import { mintSessionToken, tenantSessionSecret } from "./session.mjs";
 
@@ -477,12 +477,12 @@ export function createOnboarding(options = {}) {
     const provisionerHow = String(parse(lastOf(store.listSteps(slug), "ready")?.detail)?.how ?? "");
 
     const tenant = store.getTenant(slug);
-    const container = String(tenant?.boxContainer ?? "") || (tenant?.coolifyServiceUuid ? boxContainerName(tenant.coolifyServiceUuid) : "");
+    const container = boxContainerFor(tenant);
     if (container.length === 0) {
       return stop(slug, LEDGER.box, "failed", { why: "this workspace has no container name on its row, so there is nothing to ask for its health", next: "Press Provision on this row." });
     }
     const gateway = boxBase(container);
-    const token = readGatewayToken(slug, config) ?? "";
+    const token = readGatewayTokenFor(store, slug, config) ?? "";
 
     // WHY ANY ANSWER ON 1340 IS THE PROOF. source/host/main.ts awaits host.start() before it binds
     // the gateway port, so anything answering there -- a 200, a 401, a 404 -- means the host booted
@@ -540,9 +540,12 @@ export function createOnboarding(options = {}) {
 
   async function boxCall(slug, command, args = {}) {
     const tenant = store.getTenant(slug);
-    const container = String(tenant?.boxContainer ?? "");
+    // SUPPORT-1d. The same one helper the health step above uses, and the reason it is a helper: this
+    // read the column alone, so every box ask the invite makes -- the plan model, the ceiling, Titan's
+    // own introduction -- refused on an adopted workspace whose name was derivable from its uuid.
+    const container = boxContainerFor(tenant);
     if (container.length === 0) return { ok: false, why: "this workspace has no container name on its row" };
-    const token = readGatewayToken(slug, config) ?? "";
+    const token = readGatewayTokenFor(store, slug, config) ?? "";
     if (token.length === 0) return { ok: false, why: "this workspace's gateway token could not be read, so its box cannot be asked anything" };
     try {
       const answer = await probeImpl(`${boxBase(container)}/api/${command}`, {

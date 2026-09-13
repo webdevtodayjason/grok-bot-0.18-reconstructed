@@ -34,6 +34,7 @@ import {
   notificationLine,
   stripHtml,
 } from "../cp/support.mjs";
+import { boxContainerFor } from "../cp/provision.mjs";
 import { makeTempRoot, startControlPlane } from "./cp-support.mjs";
 
 const ADMIN_JS = path.join(import.meta.dirname, "../cp/admin/admin.js");
@@ -95,6 +96,45 @@ async function startFakeBox({ agents = [{ id: "agent-titan", name: "Titan", isGr
     callsTo: (command) => calls.filter((call) => call.command === command),
     async close() { await new Promise((resolve) => server.close(resolve)); },
   };
+}
+
+/**
+ * SUPPORT-1d. The SHAPE THE R750 ACTUALLY HAD on 2026-09-13, which is the shape that broke.
+ *
+ * `titanium` is Jason's own console and the one workspace this service did not build: it was claimed
+ * with `tenant adopt`, so its row carries a Coolify service uuid and NO box_container, and its profile
+ * directory is under the release root rather than the tenant root. Both reads in cp/support.mjs went
+ * looking in the other place -- the column alone for the container, the tenant root for the token --
+ * and the first three support mails ever to reach this product answered "no container name on its row"
+ * and then "gateway token could not be read" and told nobody. An operator repaired it by writing a
+ * database column and a 0600 file on a live server by hand.
+ *
+ * So this builds the row the way an adoption really builds it and asserts the notification lands. It
+ * is a separate fixture from withPlane below on purpose: that one writes the column, and a test that
+ * writes the column cannot catch a reader that only reads the column.
+ */
+async function withAdoptedPlane(run, { box = null, env = {} } = {}) {
+  const plane = await startControlPlane({
+    env: { ...(box == null ? {} : { CP_BOX_URL_OVERRIDE: box.url }), ...env },
+  });
+  try {
+    const uuid = "p927bfqm83ioloibamlvyd7g";
+    plane.store.createTenant({ slug: "titanium", name: "Titanium", status: "adopted", coolifyServiceUuid: uuid });
+    assert.equal(plane.store.getTenant("titanium").boxContainer, null,
+      "an adopted row with its container written down is not the row this case is about");
+    // Where an adoption says this workspace's files are, recorded in the adopt step and nowhere else,
+    // which is exactly how POST /v1/tenants/<slug>/adopt records it.
+    const profileDir = path.join(plane.config.releaseRoot, "profile");
+    plane.store.recordStep({
+      slug: "titanium", step: "adopt", status: "ok",
+      detail: JSON.stringify({ uuid, host: "console.titanium.bot", stateDir: path.join(plane.config.releaseRoot, "state"), profileDir }),
+    });
+    const account = plane.store.createAccount({ email: "jason@example.com", password: PASSWORD, tenant: "titanium" });
+    plane.store.setSuperAdmin(account.id, true);
+    await mkdir(profileDir, { recursive: true });
+    await writeFile(path.join(profileDir, "local-docker-vm.json"), JSON.stringify({ token: "gateway-token-for-titanium" }), { mode: 0o600 });
+    await run(plane, { uuid, profileDir });
+  } finally { await plane.dispose(); }
 }
 
 /**
@@ -335,6 +375,33 @@ test("the intake refuses a bad body with the field named, and a wrong method bef
     assert.equal(wrongMethod.status, 405, wrongMethod.text);
     assert.equal(plane.store.countSupportMessages(), 0);
   });
+});
+
+test("SUPPORT-1d: an adopted workspace with no container column and its profile elsewhere is still told", async () => {
+  const box = await startFakeBox();
+  try {
+    await withAdoptedPlane(async (plane, { uuid }) => {
+      const token = await mint(plane);
+      const answer = await plane.request("POST", "/v1/relay/support", { body: MAIL, token });
+      assert.equal(answer.status, 201, answer.text);
+      // THE TWO SENTENCES THAT WERE THE BUG. Either one of them here means the mail landed and nobody
+      // heard about it, which is what happened to the first three.
+      assert.doesNotMatch(String(answer.body.notifyWhy ?? ""), /no container name on its row/);
+      assert.doesNotMatch(String(answer.body.notifyWhy ?? ""), /gateway token could not be read/);
+      assert.equal(answer.body.notified, true, answer.text);
+
+      const rows = plane.store.listSupportMessages({});
+      assert.match(rows[0].notifyDetail, /Titan in titanium was told/);
+      assert.ok(rows[0].notifiedAt > 0);
+
+      // The name it used is the one Coolify gives a service, derived from the uuid on the row by the
+      // one helper every reader in this service shares.
+      assert.equal(boxContainerFor(plane.store.getTenant("titanium")), `titanbot-box-${uuid}`);
+      assert.deepEqual(box.calls.map((call) => call.command), ["listAgents", "sendPrompt"]);
+      assert.equal(box.callsTo("sendPrompt")[0].authorization, "Bearer gateway-token-for-titanium",
+        "the token came out of the directory the adoption named, which is the read that used to miss");
+    }, { box });
+  } finally { await box.close(); }
 });
 
 test("a good delivery is stored, and the operator's workspace is told once", async () => {

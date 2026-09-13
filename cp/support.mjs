@@ -38,7 +38,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { SECRET_SETTINGS, SUPPORT_STATES } from "./store.mjs";
-import { readGatewayToken } from "./provision.mjs";
+import { boxContainerFor, readGatewayTokenFor } from "./provision.mjs";
 
 /**
  * The bearer the operator's Email Worker presents, held write-only.
@@ -294,9 +294,15 @@ export function createSupport({
   const callBox = boxCall ?? (async (slug, command, args = {}) => {
     const tenant = store.getTenant(slug);
     if (tenant == null) return { ok: false, why: `there is no workspace called ${slug} on this control plane` };
-    const container = String(tenant.boxContainer ?? "");
+    // SUPPORT-1d. One helper, shared with the registry, the removal, the onboarding sequence and the
+    // Box health panel: the written column wins, and a row with only a Coolify service uuid on it
+    // derives the name rather than reading as a workspace with no box. The first three support mails
+    // ever to reach this product told nobody because this read the column alone.
+    const container = boxContainerFor(tenant);
     if (container.length === 0) return { ok: false, why: `${slug} has no container name on its row, so its box cannot be asked anything` };
-    const token = readGatewayToken(slug, config) ?? "";
+    // ADOPTION-AWARE, for the same measured reason: `titanium` keeps its profile directory under the
+    // release root, and the tenant-root read answered "could not be read" for a token that was there.
+    const token = readGatewayTokenFor(store, slug, config) ?? "";
     if (token.length === 0) return { ok: false, why: `${slug}'s gateway token could not be read, so its box cannot be asked anything` };
     try {
       const answer = await probeImpl(`${boxBase(container)}/api/${command}`, {

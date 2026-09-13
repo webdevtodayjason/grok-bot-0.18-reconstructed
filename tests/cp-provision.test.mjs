@@ -14,12 +14,16 @@ import {
   boxDefaultNames,
   writeBoxDefaults,
   RESERVED_SLUGS,
+  boxContainerFor,
   boxContainerName,
   configProblems,
   coolifyStatusOf,
   deriveSlug,
   loadConfig,
+  gatewayTokenFileIn,
   readCoolifyState,
+  readGatewayToken,
+  readGatewayTokenFor,
   readProxyKey,
   provisionTenant,
   renderBoxCompose,
@@ -28,6 +32,7 @@ import {
   tenantPaths,
   validateSlug,
   waitForBox,
+  writeGatewayTokenIn,
 } from "../cp/provision.mjs";
 import { openStore } from "../cp/store.mjs";
 import { makeTempRoot, startFakeCoolify } from "./cp-support.mjs";
@@ -66,6 +71,56 @@ async function withWorld(run, options = {}) {
 // own container status. Every provisioning test here uses it: a fetch to titanbot-box-svc-xxxx:1340
 // from this Mac would sit there resolving a name that is only meaningful inside the R750's docker.
 const noGateway = () => { throw new Error("there is no docker network in a test"); };
+
+// ---- SUPPORT-1d: the one answer to which container, and the one reader of a gateway token ---------
+//
+// MEASURED ON THE R750 2026-09-13. The adopted `titanium` row carried box_container NULL beside a
+// Coolify service uuid, and its profile directory was under the release root rather than the tenant
+// root. Six readers in this service asked those two questions and only one of them got both right, so
+// the first three support mails ever to arrive were stored and told nobody. The answers live here now.
+
+test("the container name comes off the row, and a written one always wins", () => {
+  // A row this service built: the name was computed once and written down.
+  assert.equal(boxContainerFor({ boxContainer: "titanbot-box-operator", coolifyServiceUuid: "p927bfqm83ioloibamlvyd7g" }), "titanbot-box-operator",
+    "a re-provision mints a new uuid, so a reader that rebuilt the name from a stale row would land on a container that is not this customer's");
+  // The adopted row that broke. Nothing written, a service uuid beside it.
+  assert.equal(boxContainerFor({ boxContainer: null, coolifyServiceUuid: "p927bfqm83ioloibamlvyd7g" }), boxContainerName("p927bfqm83ioloibamlvyd7g"));
+  assert.equal(boxContainerFor({ boxContainer: "   ", coolifyServiceUuid: "p927bfqm83ioloibamlvyd7g" }), "titanbot-box-p927bfqm83ioloibamlvyd7g",
+    "a column of spaces is not a container name");
+  // Recorded but never built. There is nothing to derive from and the honest answer is nothing.
+  assert.equal(boxContainerFor({ boxContainer: null, coolifyServiceUuid: null }), "");
+  assert.equal(boxContainerFor(null), "");
+  assert.equal(boxContainerFor(undefined), "");
+});
+
+test("a gateway token is written 0600 and read back from the directory an adoption named", async () => {
+  await withWorld(async ({ config, store }) => {
+    // A workspace this service built: its token is under the tenant root, and both readers find it.
+    store.createTenant({ slug: "acme", name: "Acme", status: "running", coolifyServiceUuid: "svc-acme" });
+    const built = writeGatewayTokenIn(tenantPaths("acme", config).profile, "token-for-acme");
+    assert.equal(built, gatewayTokenFileIn(tenantPaths("acme", config).profile));
+    assert.equal((await stat(built)).mode & 0o777, 0o600);
+    assert.equal(readGatewayToken("acme", config), "token-for-acme");
+    assert.equal(readGatewayTokenFor(store, "acme", config), "token-for-acme");
+
+    // An ADOPTED workspace: its files are wherever the operator already had them, recorded in the
+    // adopt step and nowhere else. The tenant-root reader misses it, which is the bug; the
+    // adoption-aware one is what every caller uses now.
+    const elsewhere = path.join(config.tenantRoot, "..", "release", "profile");
+    store.createTenant({ slug: "titanium", name: "Titanium", status: "adopted", coolifyServiceUuid: "p927bfqm83ioloibamlvyd7g" });
+    store.recordStep({ slug: "titanium", step: "adopt", status: "ok", detail: JSON.stringify({ profileDir: elsewhere, stateDir: elsewhere }) });
+    writeGatewayTokenIn(elsewhere, "token-for-titanium");
+    assert.equal(readGatewayToken("titanium", config), null, "there is nothing under the tenant root for an adopted workspace, which is why the other reader exists");
+    assert.equal(readGatewayTokenFor(store, "titanium", config), "token-for-titanium");
+
+    // A token of no characters is not a credential and is never written.
+    assert.throws(() => writeGatewayTokenIn(elsewhere, ""), /not a credential/);
+    // And a file that is there but holds nothing reads as nothing rather than as an empty bearer.
+    writeGatewayTokenIn(elsewhere, "x");
+    mkdirSync(path.join(config.tenantRoot, "empty-token", "profile"), { recursive: true });
+    assert.equal(readGatewayToken("empty-token", config), null);
+  });
+});
 
 // ---- the slug ------------------------------------------------------------------------------------
 

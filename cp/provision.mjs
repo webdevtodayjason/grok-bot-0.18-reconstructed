@@ -72,6 +72,29 @@ export function boxDefaultNames({ defaultsDir = BOX_DEFAULTS_DIR } = {}) {
 export const BOX_SERVICE_NAME = "titanbot-box";
 export const boxContainerName = (uuid) => `${BOX_SERVICE_NAME}-${String(uuid ?? "")}`;
 
+/**
+ * THE ONE ANSWER TO "WHICH CONTAINER IS THIS WORKSPACE'S BOX", for every reader in this service.
+ *
+ * SUPPORT-1d, MEASURED ON THE R750 2026-09-13. The one ADOPTED workspace -- `titanium`, Jason's own
+ * console, claimed with `tenant adopt` before that verb wrote the name down -- had `box_container`
+ * NULL on its row while its Coolify service uuid sat right beside it. Six readers asked the same
+ * question six times: the registry and the removal both fell back to the uuid, and the support
+ * desk's notification, the onboarding sequence's box calls and the Box health panel read the column
+ * alone and answered "this workspace has no container name on its row". The first three support
+ * mails to reach the product told nobody, and an operator had to write the column in by hand.
+ *
+ * So the fallback is not a fallback any more, it is the rule, and it lives here. The written column
+ * still WINS, for the reason its own comment gives: a re-provision mints a new uuid, and a reader
+ * that rebuilt the name from a stale row would land on a container that is not this customer's. The
+ * derivation only answers when there is nothing written, which is the only case that was broken.
+ */
+export function boxContainerFor(row) {
+  const written = String(row?.boxContainer ?? "").trim();
+  if (written.length > 0) return written;
+  const uuid = String(row?.coolifyServiceUuid ?? "").trim();
+  return uuid.length > 0 ? boxContainerName(uuid) : "";
+}
+
 // Names a tenant may not take. www, console, api, mail, app, admin, status, docs, blog, help and
 // support are the hostnames the product itself will want; titanium and titan are the brand; resend,
 // send, rsend and _dmarc are the mail records already published under titanium.bot, and handing one
@@ -90,6 +113,11 @@ export const SLUG_MAX = 32;
 // and two spellings of one name is a bug nobody sees until a rollback does nothing.
 export const PROXY_KEY_NAME = "model-proxy.json";
 export const PROXY_ROLLBACK_NAME = "model-proxy-rollback.json";
+
+// The token a tenant's box authenticates with, pinned here beside the proxy's two for the same
+// reason: it was a string literal in tenantPaths and a second one in cp/server.mjs, and a third
+// would have been whatever the next reader typed.
+export const GATEWAY_TOKEN_NAME = "local-docker-vm.json";
 
 // The answers are the sentences an operator reads, so they say what to do rather than which rule
 // fired.
@@ -372,7 +400,9 @@ export function tenantPaths(slug, config) {
     data: path.join(root, "volumes", "data"),
     store: path.join(root, "volumes", "store"),
     chrome: path.join(root, "volumes", "chrome"),
-    profileTokenFile: path.join(root, "profile", "local-docker-vm.json"),
+    // The name itself is GATEWAY_TOKEN_NAME, so the three readers and the one writer cannot drift
+    // onto two spellings of the same file.
+    profileTokenFile: path.join(root, "profile", GATEWAY_TOKEN_NAME),
     // PROXY-1. This tenant's virtual key at the proxy, beside its gateway token and written the
     // same way: 0600, in the profile directory, read back on a retry rather than minted twice.
     proxyKeyFile: path.join(root, "profile", PROXY_KEY_NAME),
@@ -835,17 +865,66 @@ function ensureSecrets(slug, config, { bytes = randomBytes } = {}) {
   return { gatewayToken };
 }
 
-// The token a tenant's box authenticates with, read back off the disk. This is the one place that
-// reads it, and it is read for exactly one caller: GET /v1/relay/tenants, which hands it to the
-// relay so the relay can talk to that customer's box. It never goes to a browser and never goes in
-// an answer to anybody holding any other credential.
-export function readGatewayToken(slug, config) {
-  const paths = tenantPaths(slug, config);
-  if (!existsSync(paths.profileTokenFile)) return null;
+// The token a tenant's box authenticates with, read back off the disk. It never goes to a browser
+// and never goes in an answer to anybody holding any other credential.
+
+/** Where one workspace's gateway token is, given the directory its profile really lives in. */
+export const gatewayTokenFileIn = (profileDir) => path.join(String(profileDir ?? ""), GATEWAY_TOKEN_NAME);
+
+/** The token in a named profile directory, or null. The single parse. */
+export function readGatewayTokenIn(profileDir) {
+  const file = gatewayTokenFileIn(profileDir);
+  if (!existsSync(file)) return null;
   try {
-    const token = String(JSON.parse(readFileSync(paths.profileTokenFile, "utf8"))?.token ?? "");
+    const token = String(JSON.parse(readFileSync(file, "utf8"))?.token ?? "");
     return token.length > 0 ? token : null;
   } catch { return null; }
+}
+
+/**
+ * Writing it, 0600, in the shape every reader above parses.
+ *
+ * SUPPORT-1d. Used by `tenant adopt --gateway-token-stdin`, which is the only way a token reaches
+ * this service without somebody writing a file on the server by hand. The directory is made 0700
+ * first, because an adopted workspace may have no profile directory here at all yet.
+ */
+export function writeGatewayTokenIn(profileDir, token) {
+  const value = String(token ?? "");
+  if (value.length === 0) throw new Error("a gateway token of no characters is not a credential, so nothing was written");
+  const dir = String(profileDir ?? "");
+  if (dir.length === 0) throw new Error("no profile directory to write a gateway token into, so nothing was written");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const file = gatewayTokenFileIn(dir);
+  writeFileSync(file, `${JSON.stringify({ token: value }, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(file, 0o600);
+  return file;
+}
+
+/**
+ * The token for a workspace this service BUILT, under its own tenant root.
+ *
+ * Kept for the callers that hold no store. An ADOPTED workspace keeps its files wherever the
+ * operator already had them, so anything with a store in hand wants readGatewayTokenFor below.
+ */
+export function readGatewayToken(slug, config) {
+  return readGatewayTokenIn(tenantPaths(slug, config).profile);
+}
+
+/**
+ * The token for one workspace, ADOPTED OR NOT, which is the answer every reader actually wants.
+ *
+ * SUPPORT-1d, the other half of the R750 failure. `titanium` is adopted, its profile directory is
+ * under the release root and is recorded in its adopt step, and three readers -- the support desk's
+ * notification, the onboarding sequence's box calls, and anything else that reached for
+ * readGatewayToken -- looked under the TENANT root instead and answered "this workspace's gateway
+ * token could not be read". The relay's registry had the adoption-aware read inline and was the only
+ * thing in the service that got it right. One reader now, on tenantProfileDir, which is the same
+ * function `proxy mint` uses to decide where to WRITE that workspace's files.
+ */
+export function readGatewayTokenFor(store, slug, config) {
+  let steps = [];
+  try { steps = store?.listSteps?.(slug) ?? []; } catch { steps = []; }
+  return readGatewayTokenIn(tenantProfileDir(slug, config, steps));
 }
 
 // ---- the proxy key (PROXY-1) -------------------------------------------------------------------
@@ -887,6 +966,18 @@ export function adoptionDirs(steps = []) {
 export function tenantProfileDir(slug, config, steps = []) {
   return adoptionDirs(steps).profileDir || tenantPaths(slug, config).profile;
 }
+
+/**
+ * Where an ADOPTED workspace's two directories default to, in one place.
+ *
+ * The release root, because that is where an operator's own state and profile already are. Written
+ * here rather than in the adopt route because `tenant adopt --gateway-token-stdin` has to know where
+ * the route is going to say the token lives BEFORE it calls it, so it can refuse an adopt that would
+ * leave the relay unable to serve the workspace. Two copies of this join is one of them writing a
+ * file nothing reads.
+ */
+export const adoptedProfileDirDefault = (config) => path.join(String(config?.releaseRoot ?? ""), "profile");
+export const adoptedStateDirDefault = (config) => path.join(String(config?.releaseRoot ?? ""), "state");
 
 /** The path of one tenant's plan key, adopted or not. */
 export const proxyKeyFileIn = (profileDir) => path.join(profileDir, PROXY_KEY_NAME);
