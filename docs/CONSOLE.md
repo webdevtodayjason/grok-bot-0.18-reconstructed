@@ -1296,8 +1296,13 @@ conversation went from 512 px to 556.
 **The capability dock is the composer's + menu.** Taking the dock off the bar is the only move that
 buys the second row back, and squeezing it into the first was measured at 94 px of track for six
 buttons — three and a half of them, behind a sideways scroll nobody would find. So the same markup is
-drawn as a sheet above the shelf: seven full-width 44 px rows with their words back, the Add count
-with them, and an **Attach a file** row that is the job the + button used to do by itself. Nothing
+drawn as a sheet above the shelf: **eight** full-width 44 px rows with their words back (seven until
+ROUTER-1d added Think harder on 2026-09-13), the Add count with them, and an **Attach a file** row that
+is the job the + button used to do by itself. Two of the eight exist only in the menu and are
+`display: none` above the breakpoint: Attach a file, because the + button beside the message box picks a
+file itself up there, and Think harder, because the composer carries its own switch up there and
+ROUTER-1 hides that switch at 690 px and below. MEASURED in Chrome at 390x844 on MacBook-Pro.local: the
+Think harder row is 360 x 44 at 15,680 and a thumb at 195,702 reaches it. Nothing
 about the dock's wiring changes — every button keeps the handler `app.js` bound to it at boot — and
 above the breakpoint the dock is the bar's second row exactly as it was.
 
