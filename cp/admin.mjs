@@ -4963,12 +4963,18 @@ export function createAdminApi({
 
   /**
    * One sign-in written down, from cp/server.mjs's own sign-in route. The PASSWORD comes in and the
-   * keyed hash goes to disk; a success gets no hash at all.
+   * keyed hash goes to disk; a success gets no hash at all. `reason` is the route's own words for
+   * why a refusal is a refusal, which is the difference between a panel an operator can act on and
+   * one that says "refused" about four different things.
    */
-  function recordAttempt({ email, ip, outcome, password = "", tenant = "", at = now(), via = "" }) {
+  function recordAttempt({ email, ip, outcome, password = "", tenant = "", at = now(), via = "", reason = "" }) {
     store.recordLoginAttempt({
       at, email, ip, outcome, tenant, via,
       triedHash: outcome === "ok" ? "" : hashTried(password, saltOf()),
+      // CP-FIX 3. The sentence the sign-in route decided, passed through as words. The store caps it
+      // and takes its newlines out; nothing derived from a password is ever in it, and the one field
+      // that is derived from one is the hash above.
+      reason: String(reason ?? ""),
     });
     // Pruned on the same call rather than on a timer, so the table cannot grow without bound on a
     // service nobody restarts.

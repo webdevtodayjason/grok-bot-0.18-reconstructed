@@ -220,6 +220,62 @@ test("ten wrong tries lock the address out with a retryAfter, and a Retry-After 
   });
 });
 
+/**
+ * CP-FIX 3. A failed sign-in reaches the ledger WITH THE REASON IN WORDS.
+ *
+ * MEASURED ON THE R750 2026-09-12: beta-36's tester said he could not sign back in after his
+ * password was changed, and there was nothing anywhere that said so. The outcome word was the whole
+ * record, and "refused" is the same word for a stranger guessing, for a customer holding a password
+ * somebody changed under him, and for an account whose door was turned off on purpose. An operator
+ * cannot act on any of those without the sentence behind it.
+ */
+test("a refusal after a password change says so, and a lockout says how long", async () => {
+  await withPlane(async (plane) => {
+    const account = await seedTenantAndAccount(plane);
+    assert.equal((await plane.admin("POST", `/v1/accounts/${account.id}/password`, { password: "a-brand-new-password" })).status, 204);
+
+    // The browser that still holds the old password, which is exactly what the tester had.
+    assert.equal((await plane.request("POST", "/v1/sessions", { body: { email: "owner@example.com", password: PASSWORD } })).status, 401);
+    const refused = plane.store.listLoginAttempts({ since: 0 })[0];
+    assert.equal(refused.outcome, "refused");
+    assert.match(refused.reason, /did not match the one on file/);
+    assert.match(refused.reason, /changed/, "and the row says the password was changed, which is the fact that explains it");
+    assert.equal(refused.triedHash.length, 64, "the keyed hash is still the only thing derived from a password");
+    assert.equal(refused.reason.includes(PASSWORD), false, "and no reason ever carries a password");
+
+    for (let attempt = 0; attempt < LOCKOUT_MAX_FAILURES; attempt += 1) {
+      await plane.request("POST", "/v1/sessions", { body: { email: "owner@example.com", password: "not-the-password" } });
+    }
+    const locked = plane.store.listLoginAttempts({ since: 0 })[0];
+    assert.equal(locked.outcome, "locked");
+    assert.match(locked.reason, /too many/);
+    assert.match(locked.reason, /\d+ more seconds/, "a lockout with no duration in it is a dead end for whoever reads it");
+    assert.equal(locked.triedHash, "", "a lockout still answers before the password check, so there is nothing to hash");
+  });
+});
+
+test("a door that was turned off, and a workspace that is gone, are both written down as themselves", async () => {
+  await withPlane(async (plane) => {
+    const account = await seedTenantAndAccount(plane);
+    plane.store.setAccountDisabled(account.id, true);
+    assert.equal((await plane.request("POST", "/v1/sessions", { body: { email: "owner@example.com", password: PASSWORD } })).status, 403);
+    const off = plane.store.listLoginAttempts({ since: 0 })[0];
+    assert.equal(off.outcome, "refused");
+    assert.match(off.reason, /turned off/);
+    assert.equal(off.tenant, "acme", "the workspace is known on this one, because the password was right");
+
+    plane.store.setAccountDisabled(account.id, false);
+    // A workspace removed while its people's sign-ins still point at it. The password is RIGHT, so
+    // this is not a refusal in the lockout's sense, and before this wave it was not recorded at all:
+    // the one answer a customer meets for ever with nothing on any panel to say why.
+    plane.store.deleteTenant("acme");
+    assert.equal((await plane.request("POST", "/v1/sessions", { body: { email: "owner@example.com", password: PASSWORD } })).status, 409);
+    const gone = plane.store.listLoginAttempts({ since: 0 })[0];
+    assert.match(gone.reason, /not registered/);
+    assert.equal(gone.triedHash, "", "the password was right, so nothing derived from it is kept");
+  });
+});
+
 test("signing in successfully clears the counter", async () => {
   await withPlane(async (plane) => {
     await seedTenantAndAccount(plane);

@@ -120,7 +120,12 @@ CREATE TABLE IF NOT EXISTS accounts (
   tenant        TEXT NOT NULL,
   password_json TEXT NOT NULL,
   created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
+  updated_at    INTEGER NOT NULL,
+  -- WHEN THE PASSWORD LAST CHANGED, which updated_at cannot answer: that column moves for a promote,
+  -- a disable and a rename too. It exists so a refused sign-in can say the one thing that explains
+  -- it -- the password on file is not the one this person is holding, and here is when it changed.
+  -- Zero means it has never changed since the account was made, which is its own honest answer.
+  password_changed_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS tenants (
   slug                  TEXT PRIMARY KEY,
@@ -500,6 +505,9 @@ const accountRow = (row) => (row == null ? null : {
   disabled: Number(row.disabled ?? 0) === 1,
   createdAt: Number(row.created_at),
   updatedAt: Number(row.updated_at),
+  // DELIBERATELY NOT IN publicAccount: the sign-in route uses it to write one sentence into the
+  // ledger, and the exact key set /v1/accounts answers is pinned by a test on purpose.
+  passwordChangedAt: Number(row.password_changed_at ?? 0) || 0,
 });
 
 const tenantRow = (row) => (row == null ? null : {
@@ -567,6 +575,9 @@ const TENANT_MIGRATIONS = [
   // Jason's own flag is set afterwards by hand, with `account promote`, on an account he creates.
   "ALTER TABLE accounts ADD COLUMN super_admin INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE accounts ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0",
+  // Zero on every existing row, which reads as "never changed since it was made". Backdating it to
+  // updated_at would be inventing a password change that may never have happened.
+  "ALTER TABLE accounts ADD COLUMN password_changed_at INTEGER NOT NULL DEFAULT 0",
   // Whether this row's address is a person's or a relay's. "relay" means the sign-in arrived here
   // forwarded by a tenant console, so `ip` is that machine's egress address and not the visitor's;
   // the relay wrote its own richer row for the same attempt at its own door. Empty is the ordinary
@@ -620,7 +631,7 @@ export function openStore(options = {}) {
   const selectAccounts = statement("SELECT * FROM accounts ORDER BY created_at, email");
   const selectAccountsByTenant = statement("SELECT * FROM accounts WHERE tenant = ? ORDER BY created_at, email");
   const deleteAccountRow = statement("DELETE FROM accounts WHERE id = ?");
-  const updateAccountPassword = statement("UPDATE accounts SET password_json = ?, updated_at = ? WHERE id = ?");
+  const updateAccountPassword = statement("UPDATE accounts SET password_json = ?, updated_at = ?, password_changed_at = ? WHERE id = ?");
   const countAccountsRow = statement("SELECT COUNT(*) AS n FROM accounts");
 
   const insertTenant = statement("INSERT INTO tenants (slug, name, host, status, coolify_service_uuid, owner_email, last_error, box_container, box_ready, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)");
@@ -878,7 +889,8 @@ export function openStore(options = {}) {
     setAccountPassword(id, password) {
       const account = selectAccountById.get(String(id));
       if (account == null) return null;
-      updateAccountPassword.run(JSON.stringify(hashPassword(password)), now(), String(id));
+      const changedAt = now();
+      updateAccountPassword.run(JSON.stringify(hashPassword(password)), changedAt, changedAt, String(id));
       return accountRow(selectAccountById.get(String(id)));
     },
 
@@ -1435,17 +1447,22 @@ export function openStore(options = {}) {
     loginLock({ email = "", ip = "", at = now(), countIp = true }) {
       const since = Number(at) - LOCKOUT_WINDOW_MS;
       const buckets = [
-        countFailuresByEmail.get(normalizeEmail(email), since),
-        countIp ? countFailuresByIp.get(String(ip ?? ""), since) : null,
+        ["this account", countFailuresByEmail.get(normalizeEmail(email), since)],
+        ["this address", countIp ? countFailuresByIp.get(String(ip ?? ""), since) : null],
       ];
       let retryAfter = 0;
-      for (const bucket of buckets) {
+      // WHICH BUCKET FIRED, so the reason written into the ledger can say it. "Somebody has been
+      // guessing at this account" and "this address has been knocking on several" are different
+      // things to do about it, and a retryAfter alone cannot tell them apart.
+      const which = [];
+      for (const [name, bucket] of buckets) {
         if (Number(bucket?.n ?? 0) < LOCKOUT_MAX_FAILURES) continue;
         const oldest = Number(bucket.oldest);
         retryAfter = Math.max(retryAfter, Math.ceil((oldest + LOCKOUT_WINDOW_MS - Number(at)) / 1000));
+        which.push(name);
       }
-      if (retryAfter <= 0) return { locked: false, retryAfter: 0 };
-      return { locked: true, retryAfter };
+      if (retryAfter <= 0) return { locked: false, retryAfter: 0, which: [] };
+      return { locked: true, retryAfter, which };
     },
   };
 

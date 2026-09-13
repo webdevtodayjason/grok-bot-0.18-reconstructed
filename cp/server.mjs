@@ -732,6 +732,43 @@ export function createApp(options = {}) {
     };
   }
 
+  /**
+   * "2 minutes ago", for the one place a sign-in refusal needs it: the reason it writes down.
+   *
+   * Rounded and coarse on purpose. The exact millisecond is in the row's own timestamp; what the
+   * sentence is for is an operator reading a Clients row and knowing whether the password moved
+   * under this person today or last spring.
+   */
+  function agoWords(thenMs, atMs) {
+    const ms = Math.max(0, Number(atMs) - Number(thenMs));
+    const units = [["day", 86_400_000], ["hour", 3_600_000], ["minute", 60_000]];
+    for (const [name, size] of units) {
+      const n = Math.round(ms / size);
+      if (n >= 1) return `${n} ${name}${n === 1 ? "" : "s"} ago`;
+    }
+    return "less than a minute ago";
+  }
+
+  /**
+   * CP-FIX 3. WHY a sign-in did not work, in words, for the row this service writes down.
+   *
+   * MEASURED ON THE R750 2026-09-12: beta-36's tester could not sign back in after his password was
+   * changed and there was nothing on any panel that said so. Every refusal carried the word
+   * "refused" and nothing else, which is the same word for a stranger guessing, for a customer
+   * holding a password somebody changed under him, and for a door that was turned off on purpose.
+   *
+   * NONE OF THESE EVER REACH THE CALLER. The answers on the wire are unchanged -- a wrong email and
+   * a wrong password still get the identical 401 body, because telling them apart tells a guesser
+   * who has an account here. This is what the operator reads, not what the visitor is told.
+   */
+  const passwordReason = (account, at) => {
+    if (account == null) return "there is no account for that address on this control plane";
+    const changedAt = Number(account.passwordChangedAt ?? 0);
+    return changedAt > 0
+      ? `the password did not match the one on file, which was changed ${agoWords(changedAt, at)}`
+      : "the password did not match the one on file, which has not been changed since the account was made";
+  };
+
   async function handleSessionCreate(request, response, body) {
     const email = normalizeEmail(body.email);
     const password = typeof body.password === "string" ? body.password : "";
@@ -752,13 +789,23 @@ export function createApp(options = {}) {
     if (lock.locked) {
       // ADMIN-1. Written down before the answer goes out. No hash: this branch never reached the
       // password check, so there is nothing that was tried, only somebody who kept knocking.
-      admin.recordAttempt({ email, ip, outcome: "locked", at, via });
+      admin.recordAttempt({
+        email, ip, outcome: "locked", at, via,
+        reason: `too many failed tries on ${lock.which.join(" and ") || "this account"} in the last ten minutes, so the door is shut for ${lock.retryAfter} more seconds`,
+      });
       return json(response, 429, { error: "locked", retryAfter: lock.retryAfter }, { "retry-after": String(lock.retryAfter) });
     }
 
     // The cap goes on before the derivation and comes off after it, in a finally, because a
     // counter that leaks on a throw is a service that stops answering sign-ins for good.
     if (derivations >= MAX_CONCURRENT_DERIVATIONS) {
+      // Written down, because this is a sign-in that did not work and nothing else would ever say
+      // so: it never reaches the password check, so it is not a refusal of anybody's password, and
+      // a customer meeting it twice would otherwise be a silent 429 on a panel showing nothing.
+      admin.recordAttempt({
+        email, ip, outcome: "refused", at, via,
+        reason: `${MAX_CONCURRENT_DERIVATIONS} sign-ins were already being checked on this service, so this one was refused before the password was looked at`,
+      });
       return json(response, 429, {
         error: "busy",
         retryAfter: 1,
@@ -779,7 +826,12 @@ export function createApp(options = {}) {
     if (!attempt.ok) {
       store.recordLoginFailure({ email, ip, at });
       // The keyed hash of what was tried, never the password. cp/admin.mjs carries the decision.
-      admin.recordAttempt({ email, ip, outcome: "refused", password, at, via });
+      // The reason says whether the password on file has been changed, and when, which is the fact
+      // that explains a customer who was signing in fine yesterday.
+      admin.recordAttempt({
+        email, ip, outcome: "refused", password, at, via,
+        reason: passwordReason(store.getAccountByEmail(email), at),
+      });
       return json(response, 401, { error: "invalid_login" });
     }
 
@@ -787,7 +839,10 @@ export function createApp(options = {}) {
     // not a refusal in the lockout's sense and it is not counted as one; it is a sentence saying
     // their sign-in is off. ADMIN-1.
     if (attempt.account.disabled === true) {
-      admin.recordAttempt({ email, ip, outcome: "refused", password, tenant: attempt.account.tenant, at, via });
+      admin.recordAttempt({
+        email, ip, outcome: "refused", password, tenant: attempt.account.tenant, at, via,
+        reason: "the password was right and this sign-in has been turned off, so nobody is guessing: somebody closed this door",
+      });
       return json(response, 403, {
         error: "disabled",
         message: "This sign-in has been turned off. Contact your Titanium Bot support contact.",
@@ -796,6 +851,13 @@ export function createApp(options = {}) {
 
     const tenant = store.getTenant(attempt.account.tenant);
     if (tenant == null) {
+      // The password was RIGHT, so nothing derived from it is kept and the lockout is not charged.
+      // It is written down all the same: this is the answer a customer meets for ever after their
+      // workspace is removed from under their account, and until this wave no panel could show it.
+      admin.recordAttempt({
+        email, ip, outcome: "refused", tenant: attempt.account.tenant, at, via,
+        reason: `the password was right and the workspace ${attempt.account.tenant} is not registered on this control plane, so there is nothing to sign in to`,
+      });
       return json(response, 409, {
         error: "tenant_missing",
         message: "Your account is set up but its instance is not registered yet. Please contact support.",
