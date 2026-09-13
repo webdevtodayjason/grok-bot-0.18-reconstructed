@@ -642,12 +642,20 @@ row, so the console marks it spoken.
 It lives where your conversation lives: **your own volume, your own console, nowhere else.** Nothing
 about it reaches the control plane, and the relay keeps no copy once the note is written.
 
-**The note asks to be filed and not answered, and asking is all it can do.** There is no flag on the
-host's `sendPrompt` that means "remember this, do not reply". The options are agent, acceptance,
-attachments, rich text, reply-to, nonce, think-harder, fork, trace, two clocks and await-turn, and not
-one of them suppresses a reply. So the note says so in its own first lines. Whether your team lead
-honours that is the model's call and is **not proven**; if he does answer it, the answer lands in your
-conversation like any other and nothing is lost.
+**The note is filed, not asked.** VOICE-16 had to send it as a prompt, because the only way to write a
+row into a conversation was the verb that also runs a turn: there is no flag on the host's `sendPrompt`
+that means "remember this, do not reply". The options are agent, acceptance, attachments, rich text,
+reply-to, nonce, think-harder, fork, trace, two clocks and await-turn, and not one of them suppresses a
+reply. So the note asked in writing, and on five calls on the night of 2026-09-12 asking was all that
+stood between you and a message nobody wanted.
+
+VOICE-16c gave the host the verb instead of the note a flag. `appendTranscriptNote` writes the row,
+your own row, the same one typing writes, in your console and in his context for his next real turn,
+and runs no turn at all. There is nothing to honour and nothing to refuse, and a call costs a reply
+only when the call asked for one. The note still carries the old please-do-not-answer sentences,
+because a box whose host predates the command gets the note the old way and there they are the only
+defence there is. The relay log says which happened: **filed** when the row went in on its own, **sent**
+when it went as a prompt.
 
 **The row is claimed before the socket is dialled**, not written when it closes. A row written on
 close does not exist for a relay that crashed or a tab closed mid-sentence — and the daily cap is read

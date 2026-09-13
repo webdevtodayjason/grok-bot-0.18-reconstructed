@@ -262,6 +262,9 @@ import "./machine-room-voice.test.mjs";
 // (`getVoiceBrief`) is added here in the commit that writes it, rather than a wave later.
 import "./voice-turn-draft.test.mjs";
 import "./voice-brief.test.mjs";
+// VOICE-16c: the write that files a call's closing note as the person's own row and runs no turn for
+// it, which is what stops Titan answering a note nobody was waiting on.
+import "./voice-note.test.mjs";
 
 // BOTS-4: the write path behind Add on a catalog row. The host verb that seeds an agent's own
 // remembered facts and refuses one over the store's ceiling rather than storing it short, and the

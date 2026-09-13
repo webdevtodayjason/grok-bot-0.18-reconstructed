@@ -86,6 +86,11 @@ export const SAND_GATEWAY_COMMANDS = {
   // "unknown gateway method" and the relay dials with the phone-line instructions it used before,
   // byte for byte.
   getVoiceBrief: (api: GatewayApi, body: string) => api.getVoiceBrief(parseCommandArgs(body)),
+  // VOICE-16c. Write one note into an agent's conversation as the person's own entry and run NO turn
+  // for it. Safe to call on an older host: it answers "unknown gateway method" and the relay writes
+  // the note with sendPrompt the way VOICE-16 did, which costs a reply nobody asked for but loses
+  // nothing. This is the only gateway command that appends a user row without a model call behind it.
+  appendTranscriptNote: (api: GatewayApi, body: string) => api.appendTranscriptNote(parseCommandArgs(body)),
   getAgentEvidence: (api: GatewayApi, body: string) => api.getAgentEvidence(parseCommandArgs(body)),
   getAgentActionAudit: (api: GatewayApi, body: string) => api.getAgentActionAudit(parseCommandArgs(body)),
   repairAgentTranscript: (api: GatewayApi, body: string) => api.repairAgentTranscript(parseCommandArgs(body)),

@@ -934,6 +934,26 @@ export function createHostGatewayApi(
           redact: redactVoiceBriefSecrets,
         })) ?? null,
     }),
+    // VOICE-16c. File a note into an agent's conversation WITHOUT running a turn: the row is written
+    // and persisted and the console is told, and no model is ever asked anything.
+    //
+    // WHY IT EXISTS BESIDE sendPrompt RATHER THAN AS A FLAG ON IT. A flag would have to reach through
+    // the send pipeline, the turn dispatch and the runner, every one of which exists to run a turn;
+    // the note needs none of it. What it does need is the ROW, in the shape the pipeline writes, which
+    // is all this command does. VOICE-16's closing note used sendPrompt because nothing else existed,
+    // and "do not reply to this" was a sentence in the prompt rather than a property of the call.
+    //
+    // An id this box does not hold THROWS (AgentGoneError) instead of answering a quiet null, because
+    // a caller that is recording what a person said must not be told it worked when it did not.
+    appendTranscriptNote: async (args: any) =>
+      await method(manager, "appendTranscriptNote")(
+        String(args.agentId ?? args.id ?? ""),
+        {
+          text: String(args.text ?? ""),
+          at: Number(args.at) || 0,
+          clientNonce: String(args.clientNonce ?? ""),
+        },
+      ),
     getAgentEvidence: async (args: any) =>
       readAgentEvidence(String(args.id), {
         ...(args.attemptId == null ? {} : { attemptId: String(args.attemptId) }),
