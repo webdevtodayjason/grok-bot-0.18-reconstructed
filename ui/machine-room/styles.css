@@ -5516,9 +5516,18 @@ body[data-composer-drop="1"] .composer {
    The attribute's value is never read. It is a state flag, and the selector is listed beside
    `.composer` in tests/machine-room-voice.test.mjs's allow-list for the same reason that one is:
    deliberately, in this commit, rather than discovered in CI. */
+/* VOICE-14: the switch sits BETWEEN the message box and the line (index.html puts .think-harder
+   before the Talk button, and voice.js puts the line before Talk), so the line's track is the
+   fourth, not the third. With the fr track third, the switch took it and the line landed in an
+   auto track sized to its own sentence; MEASURED at 1440x900, message box 90.61 px. */
 .composer[data-voice-line] {
-  grid-template-columns: 38px minmax(0, 1fr) minmax(0, 0.7fr) auto auto auto;
+  grid-template-columns: 38px minmax(0, 1fr) auto minmax(0, 0.7fr) auto auto;
 }
+/* VOICE-14: while the line is up the Think harder word goes, as it already does on a phone. MEASURED
+   at 1440x900 with ROUTER-1's switch in the row: the message box read 90.61 px against the 150 px floor
+   tests/machine-room-voice.test.mjs has held since VOICE-2. The switch keeps its box and its aria-label. */
+.composer[data-voice-line] .think-harder { min-width: 44px; justify-content: center; }
+.composer[data-voice-line] .think-harder span { display: none; }
 
 @media (max-width: 690px) {
   /* On a phone the textarea is the scarce thing, so the word goes and the orb stays -- the button
@@ -5530,11 +5539,14 @@ body[data-composer-drop="1"] .composer {
   /* PHONE-CONSOLE-1: and the same first track while the live line is up, or the attach button is
      back over the message box for the length of a refusal. */
   .composer[data-voice-line] {
-    grid-template-columns: 44px minmax(0, 1fr) minmax(0, 0.7fr) auto auto auto;
+    grid-template-columns: 44px minmax(0, 1fr) auto minmax(0, 0.7fr) auto auto;
   }
 
-  .think-harder { min-width: 44px; justify-content: center; }
-  .think-harder span { display: none; }
+  /* VOICE-14: on a phone the switch leaves the row altogether. MEASURED at 390x844 with it in the
+     row: message box 123 px against the 150 px floor. Its track stays in the template so the count
+     is the same at every width; empty, it costs one gap. The phone gets the switch back as a row
+     of the + menu, which is filed in docs/VOICE-14-REPORT-barge.md. */
+  .think-harder { display: none; }
 
   /* VOICE-2, A BROKEN WINDOW CLOSED IN THE SAME PASS. This shipped at 38x38 to match the attach
      button beside it, and MEASURED at 390x844 that is under the 44 px floor :4641-4652 enforces for

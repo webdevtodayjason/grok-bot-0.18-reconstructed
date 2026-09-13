@@ -150,3 +150,20 @@ rather than taken: the cost is one appended CSS rule plus a re-measure of this l
   the ledger row and not at the control plane, for the reason in the first section.
 - **The interruption's latency is unmeasured.** How long after a person starts talking the speaker
   actually goes quiet depends on the provider's turn detection and the phone, and nothing here times it.
+
+## Operator follow-up (2026-09-12 20:55 CDT, after the merge)
+
+The tripwire above was fixed in the same pass, in ui/machine-room/styles.css and the test's own
+numbers, all measured by tests/machine-room-voice.test.mjs on this Mac at 1440x900 and 390x844:
+
+- The line's track is the FOURTH column, not the third: index.html puts the Think harder switch
+  before the Talk button and voice.js puts the line before Talk, so with the fr track third the
+  switch took it and the line sat in an auto track sized to its sentence. Message box 90.61 px
+  before, over the 150 px floor after.
+- While the line is up on desktop the switch drops its word, the way a phone already did.
+- On a phone the switch leaves the composer row entirely (message box was 123 px at rest with it
+  in the row). Its track stays in the template so the count is five at every width.
+- The at-rest track count in the browser leg is five since ROUTER-1, at every width.
+
+Owned follow-up, filed here: ROUTER-1d, the phone gets Think harder back as a row of the + menu
+(PHONE-CONSOLE-1's pattern for a control that only exists there). Owner: the next console wave.

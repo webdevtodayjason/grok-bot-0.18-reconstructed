@@ -736,6 +736,8 @@ test("VOICE-1 source: styles.css gained only new selectors, under one banner", a
   const allowed = new Set([
     ".composer", ".composer[data-voice-line]",
     ".think-harder", ".think-harder input", ".think-harder span",
+    // VOICE-14: the switch's word goes while the line is up, the way it already does on a phone.
+    ".composer[data-voice-line] .think-harder", ".composer[data-voice-line] .think-harder span",
   ]);
   for (const selector of selectors) {
     for (const part of selector.split(",").map((one) => one.trim()).filter(Boolean)) {
@@ -1242,7 +1244,8 @@ test("VOICE-1 in a real browser: the button is on screen, a mouse can press it, 
         assert.equal(row.reachable, true, `a mouse cannot reach the talk button. ${where}`);
         assert.equal(row.sideways, false, `the page scrolls sideways. ${where}`);
         assert.equal(row.lineHidden, true, `the line is showing with nothing to say. ${where}`);
-        assert.equal(row.tracks, 4, `the composer grew a track with the line down. ${where}`);
+        // Five since ROUTER-1: the Think harder switch has a track of its own at every width.
+        assert.equal(row.tracks, 5, `the composer grew a track with the line down. ${where}`);
         // At rest the message box is exactly what it always was: the line costs nothing until it has
         // something to say, which is why the fifth track hangs off a state attribute.
         assert.ok(row.boxWidth >= 150, `the message box is too narrow to type in. ${where}`);
