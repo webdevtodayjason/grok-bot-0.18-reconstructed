@@ -331,7 +331,10 @@ already fetched. **Support is the eleventh and was added by SUPPORT-1 on 2026-09
 Keys it brought a route and a loader of its own, which is the ordinary case. **So the numbers on this
 console are eleven panels and nine loaders**, and they are different on purpose: the Overview is
 drawn from a registry the nine write to, and Keys is drawn by a loader on another panel. The
-readiness flag a gate waits on counts loaders, so it reads nine.
+readiness flag a gate waits on counts loaders, so it reads nine. **Eleventh means the eleventh panel to
+exist and not the eleventh entry in the rail:** Support sits TENTH in rail order, between Feedback and
+Marketplace, the way Keys was the tenth panel to exist and sits sixth. `docs/SUPPORT.md` names it by its
+rail position and this document by its age, and they are the same panel.
 
 Every number carries the moment it was measured. Anything that could not be measured says **"not
 measured"** and why, and never a zero, a dash, or a green tick. That rule is the reason the Overview
@@ -469,8 +472,13 @@ address. The link is **good for 24 hours, works every time it is clicked, and ca
 this Mac 2026-09-10: one link verified at +1 s, +2 s and +23 h, refused `expired` at +24 h 1 min, and
 minting a second left the first working). Call it one-time when ONBOARD-3/ONBOARD-5 land a link that
 is consumed once, and not before. Replies come back to `mail.welcome.replyTo`, which defaults to
-`support@titaniumcomputing.com` -- a domain that already receives, because a reply address nobody
-reads is worse than one on the parent company's brand. Change it in one line:
+`support@titaniumcomputing.com`, a domain that already receives, because a reply address nobody reads is
+worse than one on the parent company's brand. **That reason expired on 2026-09-12, and the default has
+not:** `titanium.bot` now publishes MX (measured from this Mac on 2026-09-13: `dig MX titanium.bot`
+answers route1, route2 and route3 at `mx.cloudflare.net`), `support@titanium.bot` is routed to the
+operator's own Email Worker, and SUPPORT-1 gives it a desk. The R750's setting was moved to
+`support@titanium.bot` on 2026-09-12 21:30Z; the code default is still the parent company's address, so
+a fresh install gets the old one until somebody changes it. Change it in one line:
 
 ```sh
 node cp/cli.mjs settings set mail.welcome.replyTo help@titanium.bot
@@ -1208,8 +1216,18 @@ operator's own record that they answered from their mail client.
 is deliberately **not** `CP_RELAY_TOKEN`: the caller is a Worker in Cloudflare's datacentre, and the
 relay token opens the route that hands out every customer's gateway token.
 
-**Not measured:** the worker has never run and no message has ever arrived through it. Everything
-behind the intake is measured in `tests/cp-support.test.mjs` against a stub box.
+**MEASURED END TO END ON THE R750 at 00:34 CDT on 2026-09-13**, which is the one thing this panel was
+waiting on: a test mail to `support@titanium.bot` reached the operator's own `support-intake` Cloudflare
+Email Worker, which posted `POST /v1/relay/support`, which wrote the row and told **Titan in the
+`titanium` workspace**. Five rows sit in the panel as new, from `farm@tiinyapp.farm`, and they are
+Jason's to close. The first three landed with the notification failing, because the adopted `titanium`
+row carried no `box_container` and no profile token file; the operator wrote both on the R750 from the
+box env, and mail four and five were told. **Still not measured:** no browser leg has walked this panel,
+though `scripts/verify-admin.mjs` now carries `panel-support` in its panel walk and its control list, so
+the next run of that gate measures it in real Chromium. Everything behind the intake is measured in
+`tests/cp-support.test.mjs` against a stub box. `docs/SUPPORT.md` section 8 still reads as though none of
+this had happened and is owned by the wave that wrote it; the tracker's SUPPORT-1 row carries that as a
+next action.
 
 ### Marketplace
 

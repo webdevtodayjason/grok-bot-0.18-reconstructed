@@ -836,9 +836,16 @@ not the From's the answer carries a `replyToWhy` sentence saying so.
 
 That is the default install rather than an edge case, which is why it has to work. The operator's
 support address is `support@titaniumcomputing.com`, a domain that already receives mail; the From is
-`welcome@titanium.bot`, and **`titanium.bot` publishes no MX record at all** (measured from this Mac
-2026-09-10: `dig MX titanium.bot` answers nothing, while `titaniumcomputing.com` and
-`myagents.email` both answer with real hosts). This route used to DROP a cross-domain reply address,
+`welcome@titanium.bot`, and on 2026-09-10 **`titanium.bot` published no MX record at all** (measured
+from this Mac that day: `dig MX titanium.bot` answered nothing, while `titaniumcomputing.com` and
+`myagents.email` both answered with real hosts). **That changed on 2026-09-12 and this paragraph is kept
+rather than rewritten, because the cross-domain rule below is what it bought:** `dig MX titanium.bot`
+now answers route1, route2 and route3 at `mx.cloudflare.net` (measured from this Mac 2026-09-13),
+`support@titanium.bot` routes to the operator's own Cloudflare Email Worker, and SUPPORT-1 gives that
+address a desk on the admin console (`docs/SUPPORT.md`). The R750's `mail.welcome.replyTo` was moved to
+`support@titanium.bot` at 21:30Z on 2026-09-12; the code default is still the parent company's address,
+so a fresh install still sends a customer to a mailbox on the other brand. This route used to DROP a
+cross-domain reply address,
 so on a default install the first thing the product ever sent a business owner invited a reply to a
 mailbox that does not exist. Nothing is weakened by letting it through: DKIM signs the From and the
 body, SPF and DMARC are evaluated on the envelope and the From domain, Resend does not require
@@ -1121,7 +1128,7 @@ export (`createMailSends`) rather than failing eighteen times unreadably.
 
 ---
 
-## 9c. Several people, and copies (MAIL-4), 2026-09-13
+## 9d. Several people, and copies (MAIL-4), 2026-09-13
 
 **Measured on this Mac, node v22.23.1, on the branch `night-mail4` off `e4e8455`.** Nothing in this
 wave was measured against `api.resend.com`, a box or the R750; the numbers below are the shipped route
