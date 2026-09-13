@@ -83,17 +83,22 @@ export class ModelTierTurnRouter {
     if (isHeavyModelTool(name)) this.upgraded = true;
   }
 
-  observeMessages(messages: readonly unknown[]): void {
+  observeMessages(messages: unknown): void {
+    // The base appendMessages contract takes a single message OR an array, and the ack-reminder and
+    // send-message-reminder middlewares append ONE message. A single object has no .slice, so this
+    // threw "messages.slice is not a function" and ended the turn, and the ack-redrive re-fired it
+    // into a duplicate-ticket storm (measured 2026-09-12). Normalize to an array here.
+    const list: readonly unknown[] = Array.isArray(messages) ? messages : messages == null ? [] : [messages];
     // Only THIS turn counts: the messages after the last user message. A shell call three turns ago
     // must not make today's "say hello" a heavy turn. Measured on the demo box 2026-09-12: every turn
     // of a conversation that had once run a shell command routed to work, because the whole history
     // was scanned.
     let start = 0;
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const candidate = record(messages[index]);
+    for (let index = list.length - 1; index >= 0; index -= 1) {
+      const candidate = record(list[index]);
       if (candidate != null && String(candidate.role ?? "").toLowerCase() === "user") { start = index + 1; break; }
     }
-    for (const rawMessage of messages.slice(start)) {
+    for (const rawMessage of list.slice(start)) {
       const message = record(rawMessage);
       if (message == null) continue;
       let sawToolResult = false;

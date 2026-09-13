@@ -849,7 +849,7 @@ class ProviderPromptExecutor extends BasePromptExecutor<ProviderMessage> {
     super(new BasePromptBuilder(initialMessages));
     this.tierRouter = new ModelTierTurnRouter(sessionOptions);
   }
-  appendMessages(messages: readonly ProviderMessage[]) {
+  appendMessages(messages: ProviderMessage | readonly ProviderMessage[]) {
     this.tierRouter.observeMessages(messages);
     return super.appendMessages(messages);
   }

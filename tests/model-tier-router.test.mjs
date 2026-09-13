@@ -83,6 +83,22 @@ test("workspace pins win over the conversation pin and automatic upgrades", asyn
   } finally { await loaded.dispose(); }
 });
 
+test("observeMessages takes a single message, not only an array: the ack-reminder appends one", async () => {
+  // 2026-09-12: the ack-reminder and send-message-reminder middlewares append ONE message object,
+  // not an array, and observeMessages threw "messages.slice is not a function", ended the turn, and
+  // the ack-redrive re-fired it into a duplicate-ticket storm.
+  const loaded = await loadRouter();
+  try {
+    const shell = { role: "assistant", content: [{ type: "tool-call", toolName: "Shell", args: {} }] };
+    const router = new loaded.module.ModelTierTurnRouter();
+    assert.doesNotThrow(() => router.observeMessages(shell), "a single message must not throw");
+    assert.equal(choose(router).tier, "work", "and the single heavy tool call still upgrades the turn");
+    const empty = new loaded.module.ModelTierTurnRouter();
+    assert.doesNotThrow(() => empty.observeMessages(null), "null or undefined is a no-op, never a throw");
+    assert.equal(choose(empty).tier, "talk");
+  } finally { await loaded.dispose(); }
+});
+
 test("only this turn's tool calls count: a shell call before the last user message does not make the next turn heavy", async () => {
   const loaded = await loadRouter();
   try {
