@@ -124,6 +124,98 @@ test("the fence covers the whole store, and the symlink road into it as well", a
   await assertPathOutsideProtectedRoots([store], "notes.md", workspace);
 });
 
+test("BASELINE-1: a managed seed opens by the path the catalog advertises, and nothing else does", async () => {
+  // THE MEASURED FAULT. On the R750 demo box 2026-09-15, a bot asked a research question reached for
+  // /home/box/agent-data/managed-skills/skills/research/SKILL.md one minute into its turn, was
+  // refused by this fence, and answered without the recipe: 2 of 8 on the acceptance gate, opening
+  // on the universal negative the recipe exists to forbid. Eleven managed seeds were named to the
+  // model by path and none of them could be opened, the five handbook packs included.
+  //
+  // So ONE subtree is carved out, and this case pins both halves of it: the skills open, and
+  // everything else under the root still refuses. The agent-data spelling is the one that matters
+  // most, because it is the spelling the catalog actually hands over.
+  const root = mkdtempSync(path.join(tmpdir(), "read-fence-seed-"));
+  roots.push(root);
+  const store = path.join(root, "sand-data");
+  const skills = path.join(store, "managed-skills", "skills");
+  mkdirSync(path.join(skills, "research"), { recursive: true });
+  writeFileSync(path.join(skills, "research", "SKILL.md"), "---\nname: research\n---\n# Research\n");
+  writeFileSync(path.join(store, "managed-skills", "cache.json"), '{"fetchedAt":0,"skills":[]}');
+  writeFileSync(path.join(store, "connector-env-secrets.json"), '{"servers":{}}');
+  symlinkSync(store, path.join(root, "agent-data"));
+  const workspace = path.join(root, "workspace");
+  mkdirSync(workspace, { recursive: true });
+  const readable = [skills];
+
+  const opens = async (candidate) => {
+    await assertPathOutsideProtectedRoots([store], candidate, workspace, readable);
+  };
+  const refuses = async (candidate) => {
+    await assert.rejects(
+      () => assertPathOutsideProtectedRoots([store], candidate, workspace, readable),
+      (error) => {
+        assert.ok(error instanceof SandProtectedPathError);
+        assert.match(error.message, /boundary, not a fault/, "the wording is unchanged by the carve-out");
+        return true;
+      },
+      `${candidate} is not a seed skill and has to stay refused`,
+    );
+  };
+
+  // Both spellings of the advertised path. The second is the one the catalog and the persona use.
+  await opens(path.join(skills, "research", "SKILL.md"));
+  await opens(path.join(root, "agent-data", "managed-skills", "skills", "research", "SKILL.md"));
+
+  // The carve-out is the SKILL files and nothing above them. cache.json is what an invocation
+  // inlines and it sits one directory up, so it stays fenced by both spellings.
+  await refuses(path.join(store, "managed-skills", "cache.json"));
+  await refuses(path.join(root, "agent-data", "managed-skills", "cache.json"));
+  await refuses(path.join(store, "connector-env-secrets.json"));
+  await refuses(path.join(root, "agent-data", "connector-env-secrets.json"));
+  await refuses(store);
+
+  // THE SYMLINK ROAD, which is what makes this a carve-out rather than a hole. The agent's shell
+  // runs as uid 0 inside the box, so it can plant a link inside the readable subtree pointing at
+  // anything. The guard decides on the REALPATH, so the link is refused by where it goes rather
+  // than allowed by where it sits.
+  symlinkSync(path.join(store, "connector-env-secrets.json"), path.join(skills, "research", "sneak.md"));
+  await refuses(path.join(skills, "research", "sneak.md"));
+  await refuses(path.join(root, "agent-data", "managed-skills", "skills", "research", "sneak.md"));
+  // A directory link out of the subtree, with a real target: the link resolves to the agent store,
+  // which is outside the readable root, so it is refused. The target has to exist for this to be
+  // the case it claims to be -- a DANGLING link resolves to its own nearest existing parent, which
+  // is inside the readable root, and is allowed. That is harmless, because a dangling link opens
+  // nothing, but it is the difference between this case and a case that passes for the wrong
+  // reason.
+  mkdirSync(path.join(store, "agents", "abc"), { recursive: true });
+  writeFileSync(path.join(store, "agents", "abc", "profile.json"), "{}");
+  mkdirSync(path.join(skills, "escape"), { recursive: true });
+  symlinkSync(path.join(store, "agents"), path.join(skills, "escape", "agents"));
+  await refuses(path.join(skills, "escape", "agents"));
+  await refuses(path.join(skills, "escape", "agents", "abc", "profile.json"));
+
+  // And with no carve-out passed at all, the seed is refused exactly as it was before this change,
+  // so every other caller of this guard keeps today's behaviour byte for byte.
+  await assert.rejects(
+    () => assertPathOutsideProtectedRoots([store], path.join(skills, "research", "SKILL.md"), workspace),
+    (error) => error instanceof SandProtectedPathError,
+  );
+});
+
+test("the readable root the host actually passes is the skills subtree, not the cache", async () => {
+  // A carve-out that is right in this suite and wrong in the wiring is a carve-out that does
+  // nothing, which is the shape of the KB-1f defect that made this whole row necessary: a callback
+  // that existed and that nothing ever supplied. So the wiring is read, not assumed.
+  const { readFile } = await import("node:fs/promises");
+  const extension = await readFile(
+    new URL("../source/host/extensions/forever-box/extension.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(extension, /readableBoxPaths:\s*\[join\(getSandRootDir\(\), MANAGED_SKILLS_DIRNAME, MANAGED_SKILL_FILES_DIRNAME\)\]/,
+    "the host passes the skills subtree as the one readable root");
+  assert.match(extension, /protectedBoxPaths:\s*\[getSandRootDir\(\)\]/, "and the fence itself is unchanged");
+});
+
 test("the shell is deliberately NOT fenced, and nothing in the tree pretends it is", async () => {
   // The second half of the decision, asserted rather than assumed. If somebody later adds a path
   // or command filter to the shell executors, this test fails and they have to come back here,

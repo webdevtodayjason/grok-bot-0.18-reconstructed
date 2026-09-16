@@ -64,6 +64,8 @@ export interface ProductionBoxProviderOptions<
   readonly generated: ProductionBoxGeneratedPorts<Transport, Accessor>;
   readonly telemetry: LoopbackTelemetry;
   readonly protectedBoxPaths: readonly string[];
+  /** BASELINE-1. Subtrees inside a protected root the agent may still Read. See protected-path-guard.ts. */
+  readonly readableBoxPaths?: readonly string[];
   readonly host?: string;
   readonly authToken?: string;
   /**
@@ -171,6 +173,7 @@ export function createProductionBoxInner<
     ...(options.authToken === undefined ? {} : { authToken: options.authToken }),
     telemetry: options.telemetry,
     protectedBoxPaths: options.protectedBoxPaths,
+    ...(options.readableBoxPaths === undefined ? {} : { readableBoxPaths: options.readableBoxPaths }),
     ...(options.storedEnvironment === undefined ? {} : { storedEnvironment: options.storedEnvironment }),
     operations: {
       async ping(ctx, endpoint): Promise<PingResult> {

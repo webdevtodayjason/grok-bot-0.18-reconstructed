@@ -89,6 +89,29 @@ own files live goes there.
 It says **"a boundary, not a fault"**, in those words, because the whole cost of the old message was
 an agent spending a self-test writing up a working product as broken.
 
+### One subtree is readable (BASELINE-1, 2026-09-16)
+
+`managed-skills/skills/` is carved out of the fence, and only that. Measured on the R750 demo box
+on 2026-09-15: a bot asked a research question reached for
+`/home/box/agent-data/managed-skills/skills/research/SKILL.md` one minute into its turn, was
+refused here, and answered without the recipe, scoring 2 of 8 on the acceptance gate and opening
+on the universal negative that recipe exists to forbid. Every managed seed was in that state: the
+`<available_skills>` catalog hands the model exactly those paths (KB-1f) and the standing persona
+tells it to open the handbook index at one (KB-1), so eleven skills were named to the model and
+none of them could be opened.
+
+The carve-out is safe in the terms this fence is written in. This is a **context** boundary, and a
+seed skill exists to enter the model's context; that subtree holds no credential, and the host
+writes it from the bundle rather than from anything a customer typed. It is the materialized
+`SKILL.md` files alone: `managed-skills/cache.json` sits one directory up and stays fenced, and so
+does everything else under the root. `tests/read-fence.test.mjs` pins both halves, including the
+`agent-data` spelling, which is the one the catalog actually hands over.
+
+The carve-out is decided on the **realpath**, not on the spelling, and that is what keeps it a
+carve-out rather than a hole. The agent's shell runs as uid 0 in the box, so it can plant a link
+inside that subtree; resolving first means such a link is refused by where it points rather than
+allowed by where it sits.
+
 ---
 
 ## 2. Where the GitHub credential lives, and what wiped it (GH-1)
