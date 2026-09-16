@@ -22,6 +22,8 @@
 //   node cp/cli.mjs proxy model add|set|apply|vision-check|push-label|remove
 //   node cp/cli.mjs proxy catalog refresh <provider>
 //   node cp/cli.mjs proxy default-model [<alias>|none]
+//   node cp/cli.mjs websearch list
+//   node cp/cli.mjs websearch set <slug|--all> [--dry-run] [--prove]
 //   node cp/cli.mjs mail list [<slug>]
 //   node cp/cli.mjs mail retire <code>
 //   node cp/cli.mjs mail senders <slug> | allow <slug> <address> | only <slug> on|off
@@ -68,6 +70,7 @@ import {
   gatewayTokenFileIn,
   loadConfig,
   proxyKeyFileIn,
+  readGatewayTokenFor,
   readGatewayTokenIn,
   readProxyKey,
   tenantProfileDir,
@@ -75,6 +78,7 @@ import {
   writeGatewayTokenIn,
 } from "./provision.mjs";
 import { TENANT_ALLOWED_ROUTES, createProxyClient, proxyKeyAlias, tenantRoutesFor } from "./proxy.mjs";
+import { createWebSearchProvisioner } from "./websearch.mjs";
 import { tenantOfUnverifiedToken, tenantSessionSecret, verifySessionToken } from "./session.mjs";
 import { openStore } from "./store.mjs";
 import { mailDomain } from "./mail.mjs";
@@ -118,6 +122,9 @@ const VALUED_FLAGS = new Set([
   // workspace that has not talked. Caught on this Mac 2026-09-09 by a gate that passed for the wrong
   // reason: both readings gave an empty answer.
   "--day-minutes", "--session-minutes", "--vendors", "--day",
+  // BASELINE-1. `websearch set --query "..."` and `--ask "..."`: without these, the words of the
+  // query are read as workspace names and the command acts on workspaces nobody has.
+  "--query", "--ask",
   // CODE-1. Everything the coding verbs take a value for. A flag missing from this set has its
   // VALUE read as a positional, so `code cap demo --usd 5` would act on the workspace "5".
   "--limit", "--usd", "--minutes", "--concurrent", "--daily", "--cpus", "--memory", "--tenant",
@@ -1602,6 +1609,8 @@ const USAGE = [
   "node cp/cli.mjs proxy model apply <alias> | vision-check <alias> | push-label <alias> <slug>... | remove <alias> --confirm <alias>",
   "node cp/cli.mjs proxy catalog refresh <provider>",
   "node cp/cli.mjs proxy default-model [<alias>|none]",
+  "node cp/cli.mjs websearch list",
+  "node cp/cli.mjs websearch set <slug|--all> [--dry-run] [--prove] [--query \"...\"] [--ask \"...\"]",
   "node cp/cli.mjs mail list [<slug>]",
   "node cp/cli.mjs mail retire <code>",
   "node cp/cli.mjs mail senders <slug> | allow <slug> <address> | only <slug> on|off",
@@ -1638,6 +1647,9 @@ const USAGE = [
   "proxy providers, seed, key, model, catalog and default-model go over the api, so they keep the same rules the console keeps and write the same record.",
   "a provider key is never an argument. These read it from the terminal with the echo off, or from stdin.",
   "proxy mint is the only way the operator's own workspace gets a key, because an adopted row is never re-provisioned.",
+  "websearch list asks every box what it has and writes nothing. It is the before and after measurement for a fleet.",
+  "websearch set points one workspace at a time at the proxy's own search, on that workspace's own key. It refuses outright when the proxy carries no credential on those doors, because a door with nothing behind it fails upstream and bills for it.",
+  "websearch set --prove asks that workspace's own bot a real question, which puts a message in a customer's conversation and spends their allowance. The proof that runs anyway costs neither.",
   "mail list shows the address each bot answers at. A code is minted once and never reused; retire kills one for good.",
   "mail sweep goes through the relay, because the roster lives inside a box and only the relay can read one.",
   "voice cap is the only way the minutes change. A customer chooses whether to talk and can never raise their own limit; the key the product talks with is pasted once at the admin console.",
@@ -2233,6 +2245,87 @@ async function mailSweep() {
 }
 
 const [group, action, ...rest] = process.argv.slice(2);
+// ---- BASELINE-1: web search for every tenant ---------------------------------------------------
+//
+// THE MEASURED STATE THIS CLOSES, on the R750 2026-09-15: ten workspaces, three boxes holding the
+// operator's own TinyFish key against the vendor's own hosts, and seven with no connector-env-secrets
+// file at all, whose customers were told "No web search service is set up on this machine" every
+// time they asked a question about the world. The proxy has had per-tenant pass-throughs since
+// PROXY-1 and the host has read its route out of one 0600 file since the same wave; the writer is
+// what never existed, and the only way to set those three values was a person with a shell inside
+// somebody's container.
+//
+// IT RUNS IN THIS CONTAINER, like the other proxy verbs, because it needs three things that live
+// here and nowhere else: the tenant root (each workspace's virtual key), CP_PROXY_MASTER_KEY (to ask
+// the proxy what it carries) and the docker network (to reach a box on 1340). It goes to a box's own
+// gateway rather than through the relay, so no relay change, and the door it calls is the host's own
+// setWebSearchRoute, so an agent can run this exactly as the operator can.
+
+/** One command against one box's own gateway, as that workspace, over the docker bridge. */
+const boxGatewayCall = (store) => async (slug, command, args = {}) => {
+  const tenant = store.getTenant(slug);
+  if (tenant == null) return { ok: false, why: `there is no workspace called ${slug} on this control plane` };
+  const container = boxContainerFor(tenant);
+  if (container.length === 0) return { ok: false, why: `${slug} has no container on its row, so its box cannot be asked anything` };
+  // ADOPTION-AWARE for the same measured reason `keyFileFor` is: titanium keeps its profile under
+  // the release root, and the tenant-root read answers "no token" for a token that is there.
+  const token = readGatewayTokenFor(store, slug, config) ?? "";
+  if (token.length === 0) return { ok: false, why: `${slug}'s gateway token could not be read, so its box cannot be asked anything` };
+  const override = String(config?.boxUrlOverride ?? "").trim().replace(/\/+$/, "");
+  const base = override.length > 0 ? override : `http://${container}:1340`;
+  try {
+    const answer = await fetch(`${base}/api/${command}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(args ?? {}),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const text = await answer.text();
+    if (Number(answer.status) !== 200) return { ok: false, why: `${command} answered HTTP ${answer.status}` };
+    try { return { ok: true, body: text.length > 0 ? JSON.parse(text) : {} }; }
+    catch { return { ok: false, why: `${command} answered something that is not json` }; }
+  } catch (error) {
+    return { ok: false, why: `${command} did not answer (${String(error?.message ?? error).split("\n")[0]})` };
+  }
+};
+
+function webSearchProvisioner(store, tenants) {
+  return createWebSearchProvisioner({
+    tenants,
+    boxCall: boxGatewayCall(store),
+    proxy: proxyClient(),
+    // The key file, resolved from the ledger rather than assumed, the same way every proxy verb does.
+    keyOf: (slug) => readProxyKey(slug, config, { file: keyFileFor(store, slug) })?.key ?? null,
+    proxyUrl: config.proxyUrl,
+    out,
+  });
+}
+
+async function webSearchList() {
+  const store = openLedger();
+  try {
+    const tenants = store.listTenants();
+    if (tenants.length === 0) return out("no workspaces in the ledger yet");
+    await webSearchProvisioner(store, tenants).list();
+  } finally { store.close(); }
+}
+
+async function webSearchSet(args) {
+  requireProxyConfigured();
+  const store = openLedger();
+  try {
+    const targets = proxyTargets(store, args);
+    const answer = await webSearchProvisioner(store, targets).set({
+      slugs: targets.map((row) => row.slug),
+      dryRun: hasFlag(args, "--dry-run"),
+      prove: hasFlag(args, "--prove"),
+      query: String(flag(args, "--query") ?? "").trim() || undefined,
+      question: String(flag(args, "--ask") ?? "").trim(),
+    });
+    if (answer?.ok !== true) process.exitCode = 1;
+  } finally { store.close(); }
+}
+
 const commands = {
   "signup add": signupAdd,
   "account add": accountAdd,
@@ -2258,6 +2351,8 @@ const commands = {
   "proxy model": proxyModel,
   "proxy catalog": proxyCatalog,
   "proxy default-model": proxyDefaultModel,
+  "websearch list": webSearchList,
+  "websearch set": webSearchSet,
   "mail list": mailList,
   "mail retire": mailRetire,
   "mail senders": mailSenders,

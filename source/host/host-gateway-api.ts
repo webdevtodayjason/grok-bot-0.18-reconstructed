@@ -6,6 +6,15 @@ import { shellExecutorResource } from "../packages/agent-exec/shell.js";
 import { buildHostShellArgs } from "./box/box-shell-command.js";
 import { getSandRootDir } from "./host-paths.js";
 import { isConnectorEnvFieldName, readConnectorEnvSecrets } from "./extensions/mcp/connector-secrets.js";
+import { readLocalConnectorFile } from "./extensions/mcp/local-connectors.js";
+import { writeConnectorEnvSecret } from "./extensions/mcp/connector-secrets.js";
+import {
+  WEB_SEARCH_ROUTE_FIELDS,
+  WEB_SEARCH_ROUTE_SERVER,
+  checkWebSearchRouteWrite,
+  describeWebSearchRoute,
+  webSearchRouteEvidence,
+} from "./extensions/inference/web-search-route.js";
 // CLOUD-BROWSER-1. The cloud leg's own state: its 0600 credential section, its policy file, its
 // ledger, and the process-wide register of sessions that are open right now.
 import {
@@ -1501,6 +1510,63 @@ export function createHostGatewayApi(
     // connectors.json entry to hang the key on would ship a connector that can only ever fail,
     // which is the live CONNECT-13 defect, so the key lands in the cloudBrowser section of the same
     // 0600 store instead, and this is the door it comes through.
+    // BASELINE-1. The box's web search route, read and written.
+    //
+    // WHY THIS DOOR EXISTS. Measured on the R750 2026-09-15: seven of ten tenant boxes had no
+    // connector-env-secrets.json at all, so WebSearch answered "No web search service is set up on
+    // this machine" to every question those customers asked. tinyfish-route.ts has always READ that
+    // file; nothing could write it but a person with a shell inside the container, which is the one
+    // thing this product is not allowed to need (docs/GAP-ANALYSIS.md, no hand operations).
+    //
+    // WHY NOT setConnectorSecret. That door resolves a connector out of connectors.json and then
+    // refuses any field the entry does not declare as a credential. A box with no TinyFish connector
+    // installed -- which is every box this is for -- has neither, and the two endpoint fields are
+    // configuration rather than credentials, so all three writes would be refused. The section is
+    // read straight off the file by the route resolver, so it is written straight to the file here.
+    //
+    // NEITHER COMMAND RETURNS A STORED VALUE. The read answers with the key's length and twelve
+    // characters of its sha256, which is what the control plane compares to decide there is nothing
+    // to do. A read that answered with the value would be a new way out of a customer's box.
+    getWebSearchRoute: () => describeWebSearchRoute(
+      readConnectorEnvSecrets(getSandRootDir())[WEB_SEARCH_ROUTE_SERVER] ?? null,
+      Object.keys(readLocalConnectorFile(getSandRootDir())),
+    ),
+    setWebSearchRoute: async (args: any) => {
+      const checked = checkWebSearchRouteWrite(args);
+      if (!checked.ok) throw new Error(checked.why);
+      const root = getSandRootDir();
+      const { apiKey, fetchEndpoint, searchEndpoint } = checked.write;
+      // All three or none. A box left holding a new key against the old endpoints, or new endpoints
+      // against a key that does not open them, is worse than a box with no search at all: it answers
+      // nothing and the failure names the site rather than the setup.
+      const values: readonly (readonly [string, string])[] = [
+        [WEB_SEARCH_ROUTE_FIELDS[0], apiKey],
+        [WEB_SEARCH_ROUTE_FIELDS[1], fetchEndpoint],
+        [WEB_SEARCH_ROUTE_FIELDS[2], searchEndpoint],
+      ];
+      const before = describeWebSearchRoute(readConnectorEnvSecrets(root)[WEB_SEARCH_ROUTE_SERVER] ?? null);
+      for (const [field, value] of values) {
+        if (!writeConnectorEnvSecret(root, WEB_SEARCH_ROUTE_SERVER, field, value)) {
+          throw new Error(`the web search route could not be written: ${field} was refused by the secret store`);
+        }
+      }
+      const after = describeWebSearchRoute(
+        readConnectorEnvSecrets(root)[WEB_SEARCH_ROUTE_SERVER] ?? null,
+        Object.keys(readLocalConnectorFile(root)),
+      );
+      return {
+        server: WEB_SEARCH_ROUTE_SERVER,
+        fields: [...WEB_SEARCH_ROUTE_FIELDS],
+        stored: true,
+        // Whether this write changed anything, so a sweep over ten workspaces can say which of them
+        // it actually touched rather than reporting ten writes every time it runs.
+        changed: before.keySha256 !== after.keySha256
+          || before.fetchEndpoint !== after.fetchEndpoint
+          || before.searchEndpoint !== after.searchEndpoint,
+        ...webSearchRouteEvidence(checked.write),
+        route: after,
+      };
+    },
     setCloudBrowserKey: async (args: any) => {
       const field = typeof args?.field === "string" ? args.field : "";
       if (!CLOUD_BROWSER_FIELDS.includes(field)) {

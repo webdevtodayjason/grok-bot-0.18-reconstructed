@@ -218,6 +218,11 @@ export const SAND_GATEWAY_COMMANDS = {
   // commands and no more: one credential (Browserbase's row is credential-only, because that vendor
   // has no honest connector to hang a key on), the workspace's engine choice both ways, and the
   // open sessions the Computer card draws a live view from. Nothing here returns a stored value.
+  // BASELINE-1. This box's web search route: what it has, and where the control plane points it.
+  // A read that answers with a length and a hash, and a write that moves the credential and its two
+  // addresses together. Neither carries a stored value in either direction.
+  getWebSearchRoute: (api: GatewayApi) => api.getWebSearchRoute(),
+  setWebSearchRoute: (api: GatewayApi, body: string) => api.setWebSearchRoute(parseCommandArgs(body)),
   setCloudBrowserKey: (api: GatewayApi, body: string) => api.setCloudBrowserKey(parseCommandArgs(body)),
   getCloudBrowserPolicy: (api: GatewayApi) => api.getCloudBrowserPolicy(),
   setCloudBrowserPolicy: (api: GatewayApi, body: string) => api.setCloudBrowserPolicy(parseCommandArgs(body)),

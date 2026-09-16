@@ -119,6 +119,8 @@ import "./standing-persona.test.mjs";
 import "./handbook-seeds.test.mjs";
 import "./research-seed-skill.test.mjs";
 import "./research-base-rules.test.mjs";
+import "./web-search-route.test.mjs";
+import "./cp-websearch.test.mjs";
 import "./handbook-rubric.test.mjs";
 // KB-1f: the producer that puts an installed skill's name and description in the prompt.
 import "./agent-skill-catalog.test.mjs";
