@@ -314,6 +314,30 @@ test("with the proxy's doors empty, nothing is written and no box is even asked"
   assert.match(lines.join("\n"), /PROXY_TINYFISH_KEY_1/);
 });
 
+test("a dry run past a dead door still shows the plan, and still says it would stop", async () => {
+  // THE STATE THE FLEET IS ACTUALLY IN. Measured on the R750 2026-09-15: both doors serve with an
+  // empty credential. A dry run that stopped at the refusal could say nothing at all about a fleet
+  // on the one night somebody wanted to look at it, so it carries on, writes nothing, and says in
+  // its first line that a real run would stop.
+  const boxes = fleet({ "beta-33": {}, demo: { section: { TINYFISH_API_KEY: OPERATOR_KEY } } });
+  const { api, lines } = provisioner({ boxCall: boxes.boxCall, passThrough: deadDoors(), tenants: ["beta-33", "demo"] });
+  const answer = await api.set({ slugs: ["beta-33", "demo"], dryRun: true });
+  assert.equal(answer.ok, false, "it is still not a run that went through");
+  assert.equal(answer.written, 0);
+  assert.deepEqual(answer.results.map((row) => row.action), ["would-write", "would-write"]);
+  assert.equal(boxes.calls.filter((call) => call.command === "setWebSearchRoute").length, 0);
+  assert.equal(boxes.sectionOf("beta-33"), null);
+  const said = lines.join("\n");
+  assert.match(said, /a real run would STOP here before touching any workspace/);
+  assert.match(said, /PROXY_TINYFISH_KEY_1/);
+  assert.match(said, /nothing here writes anything/);
+  // And the real run in the same state still refuses before asking any box a thing.
+  const strict = fleet({ "beta-33": {} });
+  const real = provisioner({ boxCall: strict.boxCall, passThrough: deadDoors(), tenants: ["beta-33"] });
+  await real.api.set({ slugs: ["beta-33"] });
+  assert.deepEqual(strict.calls, [], "a real run touches nothing");
+});
+
 test("a dry run says what it would write into each box and writes nothing", async () => {
   const boxes = fleet({ "beta-33": {}, demo: { section: { TINYFISH_API_KEY: OPERATOR_KEY } } });
   const { api, lines } = provisioner({ boxCall: boxes.boxCall, tenants: ["beta-33", "demo"] });

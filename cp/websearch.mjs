@@ -346,12 +346,22 @@ export function createWebSearchProvisioner({
       }
       const state = proxyTinyFishState(await proxy.listPassThrough());
       if (!state.ok) {
-        out(`STOPPED before touching any workspace: ${state.why}`);
+        out(`${dryRun ? "a real run would STOP here" : "STOPPED"} before touching any workspace: ${state.why}`);
         if (state.fix) out(`  ${state.fix}`);
-        out("  nothing was written");
-        return { ok: false, written: 0, why: state.why };
+        // A DRY RUN CARRIES ON, and a real one does not. Measured on the R750 2026-09-15, the doors
+        // ARE empty, so a dry run that stopped here would be able to say nothing at all about a
+        // fleet on the one night somebody wanted to look at it. Carrying on writes nothing and
+        // shows exactly what a working proxy would get; the refusal above still stands, and the
+        // answer is still not ok, so nothing reads this as a run that went through.
+        if (!dryRun) {
+          out("  nothing was written");
+          return { ok: false, written: 0, why: state.why };
+        }
+        out("  the plan below is what a run would do once that is fixed, and nothing here writes anything");
+        out("");
+      } else {
+        out(`the proxy carries a credential on ${state.paths.join(" and ")}`);
       }
-      out(`the proxy carries a credential on ${state.paths.join(" and ")}`);
       out(`boxes will be pointed at ${endpoints.searchEndpoint} and ${endpoints.fetchEndpoint}`);
       out("");
       let written = 0;
@@ -398,7 +408,7 @@ export function createWebSearchProvisioner({
       }
       out("");
       out(dryRun ? "dry run: nothing was written into any box" : `${written} workspace(s) written`);
-      return { ok: true, written, results };
+      return { ok: state.ok, written, results, ...(state.ok ? {} : { why: state.why }) };
     },
   };
 }
