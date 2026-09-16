@@ -394,6 +394,27 @@ test("a box that will not answer stops that workspace and not the sweep", async 
   assert.match(lines.join("\n"), /beta-35's box could not be asked/);
 });
 
+test("a box still on the old host stops at itself and says the command is not there", async () => {
+  // THE SHIP ORDERING HAZARD, measured on the R750 2026-09-15: every live box runs host f37fc02e562d,
+  // where getWebSearchRoute answers HTTP 404 because it does not exist yet. So the host bundle has to
+  // reach a box before this command can do anything to it, and the way that failure reads matters:
+  // it stops at that one workspace, names the 404, and moves on to the next.
+  const boxes = fleet({ "beta-33": {}, "beta-34": {} });
+  const oldHost = async (slug, command, args = {}) => {
+    if (slug === "beta-33" && command === "getWebSearchRoute") {
+      return { ok: false, why: "getWebSearchRoute answered HTTP 404" };
+    }
+    return boxes.boxCall(slug, command, args);
+  };
+  const { api, lines } = provisioner({ boxCall: oldHost, tenants: ["beta-33", "beta-34"] });
+  const answer = await api.set({ slugs: ["beta-33", "beta-34"] });
+  assert.deepEqual(answer.results.map((row) => row.action), ["stop", "written"]);
+  assert.equal(answer.written, 1);
+  assert.match(lines.join("\n"), /beta-33's box could not be asked: getWebSearchRoute answered HTTP 404/);
+  assert.equal(boxes.sectionOf("beta-34").TINYFISH_API_KEY, keyFor("beta-34"),
+    "a box on the new host is written even while another is still on the old one");
+});
+
 test("a door that answers 200 with nothing is reported as not proved, and the write still stands", async () => {
   const boxes = fleet({ demo: {} });
   const { api, lines } = provisioner({ boxCall: boxes.boxCall, tenants: ["demo"], fetchImpl: searchFetch([]) });
