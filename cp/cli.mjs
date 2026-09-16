@@ -658,9 +658,12 @@ function proxyTargets(store, args) {
 // message anywhere. cp/server.mjs resolves it with the same function.
 const keyFileFor = (store, slug) => proxyKeyFileIn(tenantProfileDir(slug, config, store.listSteps(slug)));
 
-function requireProxyConfigured() {
+// `purpose` is the half of the sentence that changes with the verb. BASELINE-1 added a caller that
+// does not mint anything, and "there is no proxy to mint keys at" on a command that points a box at
+// a search address is the kind of line somebody spends ten minutes on.
+function requireProxyConfigured(purpose = "mint keys at") {
   if (String(config.proxyUrl ?? "").length === 0) {
-    die("CP_PROXY_URL is not set on this control plane, so there is no proxy to mint keys at.");
+    die(`CP_PROXY_URL is not set on this control plane, so there is no proxy to ${purpose}.`);
   }
   if (String(config.proxyMasterKey ?? "").length === 0) {
     die("CP_PROXY_MASTER_KEY is not set on this control plane, so the proxy cannot be opened.");
@@ -2311,7 +2314,7 @@ async function webSearchList() {
 }
 
 async function webSearchSet(args) {
-  requireProxyConfigured();
+  requireProxyConfigured("point a box at");
   const store = openLedger();
   try {
     const targets = proxyTargets(store, args);
