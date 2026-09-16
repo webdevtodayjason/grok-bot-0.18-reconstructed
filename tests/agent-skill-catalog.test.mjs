@@ -150,13 +150,15 @@ test("the catalog stops at forty and the product's own packs are the ones that s
   const catalog = agentSkillCatalog(store.list());
   assert.equal(AGENT_SKILL_CATALOG_LIMIT, 40);
   assert.equal(catalog.rows.length, 40);
-  assert.equal(catalog.offeredCount, 70, "ten seeds and sixty library skills were offered");
+  // BASELINE-1 made it eleven seeds: research joined the ten. The cap is what this case is about,
+  // so the count moves with the seed roster rather than being pinned to a number of its own.
+  assert.equal(catalog.offeredCount, SEED_MANAGED_SKILLS.length + 60, "every seed and sixty library skills were offered");
   const ids = catalog.rows.map((row) => row.fullPath.split("/").at(-2));
   for (const seed of SEED_MANAGED_SKILLS) assert.ok(ids.includes(seed.id), `${seed.id} was dropped by the cap`);
   const capped = [];
   const skills = createAgentSkillsResolver({ store, reportCapped: (offered, limit) => capped.push([offered, limit]) })();
   assert.equal(skills.length, 40);
-  assert.deepEqual(capped, [[70, 40]], "the operator is told once that the list is not the whole library");
+  assert.deepEqual(capped, [[SEED_MANAGED_SKILLS.length + 60, 40]], "the operator is told once that the list is not the whole library");
   // Forty rows of real descriptions still fit the section's own 2%-of-context budget, so the cap
   // and the budget do not fight: nothing is shortened at the cap.
   const rendered = renderCatalogSection(skills);
@@ -244,9 +246,12 @@ test("the standing cost of the catalog is the measured one", () => {
   const rendered = renderCatalogSection(boxRows.map((row) => ({
     ...row, content: "", environments: [], disabledEnvironments: [], globs: [], scopedTo: [], disableModelInvocation: false,
   })));
-  // Measured: 3,927 chars / 982 estimated tokens for ten seeds; 886 chars / 222 tokens for one,
-  // so the fixed preamble is about 700 chars and each further skill about 338 chars (84 tokens).
-  assert.ok(rendered.text.length < 4_600, `ten seeds render at ${rendered.text.length} chars`);
-  assert.ok(estimateStringTokenCount(rendered.text) < 1_150, `ten seeds render at ${estimateStringTokenCount(rendered.text)} estimated tokens`);
-  assert.equal(rendered.strategy, "under_budget", "nothing is shortened at ten seeds");
+  // Measured 2026-09-12: 3,927 chars / 982 estimated tokens for ten seeds; 886 chars / 222 tokens
+  // for one, so the fixed preamble is about 700 chars and each further skill about 338 chars
+  // (84 tokens). BASELINE-1 added an eleventh, research, whose row is a 60-character path and a
+  // 307-character description. MEASURED ON THIS MAC 2026-09-15: eleven seeds render at 4,335
+  // characters, 408 more than ten did, so the ceiling below moves by that much and no more.
+  assert.ok(rendered.text.length < 4_450, `${boxRows.length} seeds render at ${rendered.text.length} chars`);
+  assert.ok(estimateStringTokenCount(rendered.text) < 1_120, `${boxRows.length} seeds render at ${estimateStringTokenCount(rendered.text)} estimated tokens`);
+  assert.equal(rendered.strategy, "under_budget", "nothing is shortened at the seed roster's size");
 });
