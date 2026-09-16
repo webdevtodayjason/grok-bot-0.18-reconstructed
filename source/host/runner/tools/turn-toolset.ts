@@ -1061,11 +1061,16 @@ export function createTurnMcpMetaToolFactory(
 function toComputerUseMessage(inner: unknown): ComputerUseResultMessage {
   const outcome = (inner as { readonly result?: { readonly case?: string; readonly value?: unknown } } | null)?.result;
   if (outcome?.case === "success") {
-    const value = (outcome.value ?? {}) as { readonly screenshot?: string; readonly screenshotPath?: string; readonly log?: string };
+    const value = (outcome.value ?? {}) as { readonly screenshot?: string; readonly screenshotPath?: string; readonly log?: string; readonly actionCount?: number; readonly durationMs?: number };
     return new ComputerUseResultMessage({ result: { case: "success", value: new ComputerUseSuccessMessage({
       ...(value.screenshot == null ? {} : { screenshot: value.screenshot }),
       ...(value.screenshotPath == null ? {} : { screenshotPath: value.screenshotPath }),
       ...(value.log == null ? {} : { log: value.log }),
+      // Carried through rather than dropped. Both fields exist on the message and defaulted to 0
+      // because this adapter never copied them, which is what made a busy subagent look idle on
+      // Jason's box (report 45); sand-computer-tool.ts carries the measurement.
+      ...(value.actionCount == null ? {} : { actionCount: value.actionCount }),
+      ...(value.durationMs == null ? {} : { durationMs: value.durationMs }),
     }) } });
   }
   const error = (outcome?.value as { readonly error?: string } | undefined)?.error;

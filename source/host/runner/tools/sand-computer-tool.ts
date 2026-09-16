@@ -162,6 +162,22 @@ export interface ComputerUseSuccess {
   readonly screenshot?: string;
   screenshotPath?: string;
   readonly cursorPosition?: { readonly x: number; readonly y: number };
+  /**
+   * How many actions this call ran, and how long they took. Mutable for the same reason
+   * `screenshotPath` is: `executeAndPersistComputerUse` is the one chokepoint every Computer and
+   * Screenshot call goes through, so it fills them in there rather than in each executor.
+   *
+   * MEASURED ON JASON'S BOX 2026-09-16, and this is why they exist. `ComputerUseSuccessMessage`
+   * has carried both fields all along and nothing ever set them, so every Computer success in
+   * every audit read `actionCount: 0, durationMs: 0` -- the protobuf's default for a field nobody
+   * writes. Titan read those zeros on two subagents driving a live browser, concluded they were
+   * wedged, killed both, and filed a desktop incident (report 45). The screenshots in the same
+   * rows were changing the whole time: 22 distinct screens across 28 calls on one, 20 across 23
+   * on the other. A number that is always zero is worse than no number at all, because it reads
+   * like a measurement.
+   */
+  actionCount?: number;
+  durationMs?: number;
 }
 export type ComputerUseResult =
   | { readonly result: { readonly case: "success"; readonly value: ComputerUseSuccess } }
@@ -229,9 +245,14 @@ async function captureComputerDisplayStateIdentity(
 }
 
 export async function executeAndPersistComputerUse<Context>(context: Context, deps: ComputerToolDependencies<Context>, args: Parameters<ComputerToolDependencies<Context>["execute"]>[1]): Promise<ComputerUseResult> {
+  const startedAt = Date.now();
   const result = await deps.execute(context, args);
   if (result.result.case === "success") {
     const success = result.result.value as ComputerUseSuccess;
+    // Set before the screenshot is persisted, so the number is the actions' own time and not the
+    // time spent writing a picture to disk afterwards.
+    success.actionCount = args.actions.length;
+    success.durationMs = Math.max(0, Date.now() - startedAt);
     if (success.screenshot != null && success.screenshot.length > 0) {
       const saved = await deps.getPersistImage()?.(Buffer.from(success.screenshot, "base64"), "image/webp");
       if (saved != null) success.screenshotPath = saved.fileUrl;
