@@ -235,10 +235,13 @@ const textOf = (entry) => String(entry?.kind === "send-message" ? entry.message?
 
 async function runOnBox() {
   const call = boxCaller();
-  // MEASURED ON THE R750 DEMO BOX 2026-09-15: Titan was still working on this question after 420 s,
-  // so a research turn needs a research turn's budget. Fifteen minutes, and the run prints where it
-  // got to rather than only whether it finished.
-  const timeoutMs = Number(argOf("--timeout-ms", "900000")) || 900_000;
+  // MEASURED ON THE R750 DEMO BOX 2026-09-15, before this wave shipped anything: Titan was still
+  // working on this question after 420 s, and still working after THIRTY MINUTES. Its outline showed
+  // why, and it was not a stall: it was driving a browser through a retailer's store picker, typing a
+  // location, choosing Cashway Bldg Matls in Leander and pressing Make My Store, which is the rung a
+  // per-store availability question really needs. So the budget is half an hour, because a gate whose
+  // default always times out measures the gate.
+  const timeoutMs = Number(argOf("--timeout-ms", "1800000")) || 1_800_000;
   const roster = await call("listAgents");
   const rows = Array.isArray(roster) ? roster : (Array.isArray(roster?.agents) ? roster.agents : []);
   const people = rows.filter((row) => row?.isGroup !== true && String(row?.id ?? "").length > 0);
