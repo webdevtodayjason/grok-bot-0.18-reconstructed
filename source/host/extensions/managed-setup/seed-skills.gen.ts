@@ -1226,7 +1226,7 @@ ASSUMPTIONS
 - If you never reached the question's altitude, say that in the answer line.
 
 ## 6. Stopping criteria and budget
-**Budget.** Per named source: at most two on-site queries and two site-scoped queries, then that source becomes a COULDN'T ESTABLISH row with its phone number. Per turn: at most 40 tool calls or about 15 minutes, whichever comes first. When either runs out, stop searching and write the answer with what is in hand. An unfinished row is honest; an hour-long turn is not.
+**Budget.** Per named source: at most two on-site queries and two site-scoped queries, then that source becomes a COULDN'T ESTABLISH row with its phone number. Per turn: at most 50 tool calls or about 20 minutes, whichever comes first. When either runs out, stop searching and write the answer with what is in hand. An unfinished row is honest; an hour-long turn is not.
 
 Stop when **Done when** is satisfied, or named sources plus site-scoped fallbacks are exhausted. Do NOT stop because: the first plausible result appeared, a cheap rung returned something, or the formatting looks complete. A well-formatted confident answer is not evidence research was done.
 
