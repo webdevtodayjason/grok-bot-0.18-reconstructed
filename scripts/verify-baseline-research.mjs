@@ -210,12 +210,21 @@ function boxCaller() {
   if (box.length === 0) throw new Error("name a box with --box, or an address with --gateway");
   // The token is the box's own environment. It never reaches this process's command line, which is
   // why the script runs inside the box rather than reading the value out and dialling from here.
+  // THE STATUS TRAVELS BACK WITH THE BODY, and it has to. Measured on the R750 demo box
+  // 2026-09-15: getWebSearchRoute answers HTTP 404 there, because that host predates the command,
+  // and a caller that parsed the body alone got a perfectly good object with none of the fields it
+  // wanted. The gate then printed "the box's web search route: undefined, DOES NOT ANSWER", which
+  // reads like a measurement of a box and is a measurement of nothing.
   return async (command, body = {}) => {
     const script = `const b=${JSON.stringify(JSON.stringify(body))};`
       + `fetch('http://127.0.0.1:1340/api/${command}',{method:'POST',headers:{authorization:'Bearer '+process.env.SAND_GATEWAY_TOKEN,'content-type':'application/json'},body:b})`
-      + `.then(r=>r.text()).then(t=>process.stdout.write(t))`;
+      + `.then(r=>r.text().then(t=>process.stdout.write(r.status+'\\n'+t)))`;
     const out = await docker(["exec", box, "/exec-daemon/node", "-e", script]);
-    try { return JSON.parse(out); } catch { return out; }
+    const at = out.indexOf("\n");
+    const status = Number(out.slice(0, at));
+    const text = out.slice(at + 1);
+    if (status !== 200) throw new Error(`${command} answered ${status}: ${text.slice(0, 200)}`);
+    try { return JSON.parse(text); } catch { return text; }
   };
 }
 
@@ -226,7 +235,10 @@ const textOf = (entry) => String(entry?.kind === "send-message" ? entry.message?
 
 async function runOnBox() {
   const call = boxCaller();
-  const timeoutMs = Number(argOf("--timeout-ms", "600000")) || 600_000;
+  // MEASURED ON THE R750 DEMO BOX 2026-09-15: Titan was still working on this question after 420 s,
+  // so a research turn needs a research turn's budget. Fifteen minutes, and the run prints where it
+  // got to rather than only whether it finished.
+  const timeoutMs = Number(argOf("--timeout-ms", "900000")) || 900_000;
   const roster = await call("listAgents");
   const rows = Array.isArray(roster) ? roster : (Array.isArray(roster?.agents) ? roster.agents : []);
   const people = rows.filter((row) => row?.isGroup !== true && String(row?.id ?? "").length > 0);
@@ -240,12 +252,18 @@ async function runOnBox() {
   // What the box has BEFORE the turn. A gate that reads this afterwards cannot tell a box that was
   // already set up from one this run configured, and a gate that skips it cannot say why a failure
   // failed.
-  const before = await call("getWebSearchRoute").catch(() => null);
-  if (before != null) {
+  const before = await call("getWebSearchRoute").catch((error) => String(error?.message ?? error));
+  if (typeof before === "object" && before != null && typeof before.route === "string") {
     console.log(`the box's web search route: ${before.route}, ${before.answers ? "answers" : "DOES NOT ANSWER"}`
       + `, ${before.metered ? "metered" : "not metered"}, key ${before.keyLength} chars ${before.keySha256}`);
+  } else {
+    // Said plainly rather than skipped. A host without this command is a host from before BASELINE-1,
+    // which is the single most useful thing to know when a run of this gate comes back disappointing.
+    console.log(`the box could not say what its web search route is (${before}); this host predates BASELINE-1`);
   }
 
+  const startedAt = Date.now();
+  const elapsed = () => Math.round((Date.now() - startedAt) / 1000);
   await call("sendPrompt", { agentId: agent.id, prompt: KELLEY_QUESTION });
   const deadline = Date.now() + timeoutMs;
   let running = true;
@@ -259,9 +277,11 @@ async function runOnBox() {
   }
   process.stdout.write("\n");
   if (running) {
-    console.log(`FAIL  the turn was still running after ${Math.round(timeoutMs / 1000)} s`);
+    console.log(`FAIL  the turn was still running after ${elapsed()} s, against a budget of ${Math.round(timeoutMs / 1000)} s`);
+    console.log("  raise --timeout-ms, or read the transcript yourself and score it with --judge");
     return 1;
   }
+  console.log(`the turn ended after ${elapsed()} s`);
   const transcript = await call("getAgentTranscript", { id: agent.id });
   const entries = Array.isArray(transcript) ? transcript : [];
   const replies = said(entries);
