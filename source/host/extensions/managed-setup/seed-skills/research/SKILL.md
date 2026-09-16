@@ -72,7 +72,7 @@ Cost-minimizing is right for reading an article, wrong for local availability. P
 ## 5. Output contract
 
 ```
-ANSWER: [one sentence answering the actual question, at the actual altitude]
+ANSWER: Confirmed at [stores with a matching row]. Not confirmed at [stores], call to check. [At the question's altitude.]
 
 FINDINGS
 | Source | What I found | Qualifier match | Where / stock | Price | Checked |
@@ -87,11 +87,19 @@ ASSUMPTIONS
 
 - Every named source gets a row, even "nothing found" (R5).
 - **COULDN'T ESTABLISH is not optional and not a failure.** An answer with no uncertainty section usually hid its uncertainty.
-- No universal negatives in the summary line (R2).
+- No universal negatives in the summary line (R2). An ANSWER that begins "Nobody", "No one", "No store" or "None" is wrong by construction: rewrite it as which stores you confirmed and which you could not.
+- The heading `COULDN'T ESTABLISH` appears verbatim whenever any named source lacks a confirmed row. The store phone number goes inside it, never in a trailing sentence.
 - If you never reached the question's altitude, say that in the answer line.
 
-## 6. Stopping criteria
+## 6. Stopping criteria and budget
+**Budget.** Per named source: at most two on-site queries and two site-scoped queries, then that source becomes a COULDN'T ESTABLISH row with its phone number. Per turn: at most 40 tool calls or about 15 minutes, whichever comes first. When either runs out, stop searching and write the answer with what is in hand. An unfinished row is honest; an hour-long turn is not.
+
 Stop when **Done when** is satisfied, or named sources plus site-scoped fallbacks are exhausted. Do NOT stop because: the first plausible result appeared, a cheap rung returned something, or the formatting looks complete. A well-formatted confident answer is not evidence research was done.
+
+## 7. Before you send
+1. The ANSWER line names stores; it does not start with "Nobody" or any universal negative.
+2. The `COULDN'T ESTABLISH` heading is present if any named source lacks a confirmed row, with a phone number inside it.
+3. Every row carries the date checked.
 
 ## Worked example: the Kelley bolt case (Sep 2026)
 **Asked:** "Who carries 3/8 in. x 8 in. hot-dip galvanized hex bolts in packs of 10 or 25 in Leander or Cedar Park, TX, at local stores?"
