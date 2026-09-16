@@ -540,6 +540,48 @@ just not the thing that counts the money.
   it wrote against the key it just minted, waits for the refresh, and deletes nothing until they
   agree.
 
+### 7b. Putting a box on that route (BASELINE-1)
+
+Until 2026-09-15 the three values above could only be written by a person with a shell inside
+somebody's container. `tinyfish-route.ts` has always read them; nothing wrote them. So the host
+carries two gateway commands and the control plane carries the verbs that call them.
+
+```
+node cp/cli.mjs websearch list                             # every workspace's route. Writes nothing.
+node cp/cli.mjs websearch set <slug|--all> --dry-run       # what it would write, per workspace
+node cp/cli.mjs websearch set <slug>                       # write it, then prove the door
+node cp/cli.mjs websearch set <slug> --prove               # and ask that workspace's own bot
+```
+
+`getWebSearchRoute` answers with the route a box resolves (`connector`, `api` or `none`), the two
+addresses it dials, whether those are the proxy or the vendor's own hosts, and the stored key's
+length with twelve characters of its sha256. It never answers with a value. `setWebSearchRoute`
+moves the credential and both addresses together, because a box holding a new key against old
+addresses answers nothing and blames the site.
+
+Neither goes through `setConnectorSecret`. That door resolves a connector out of `connectors.json`
+and then refuses any field the entry does not declare as a credential; a box with no TinyFish
+connector installed has neither, and two of the three fields are addresses rather than credentials,
+so all three writes would be refused.
+
+**It refuses when the proxy's doors are empty, and that is the state today.** Measured on the R750
+2026-09-15: `PROXY_TINYFISH_KEY_1` and `PROXY_TINYFISH_KEY_2` are set as names and hold zero
+characters, and `GET /config/pass_through_endpoint` reports `x-api-key` empty on both
+`/tinyfish/fetch` and `/tinyfish/search`. Pointing a customer's box at that would replace "nothing
+is set up here", which is true and actionable, with a failure upstream on every question that books
+a metered request on the way. So the proxy is asked once, before the loop, and the refusal names
+`PROXY_TINYFISH_KEY_1` and touches no workspace at all. This is `PROXY-7`, and it is the one thing
+between this command and every tenant having search.
+
+**Two proofs, and only one of them is free.** After a write, the command asks the proxy's own search
+address the same question a box's host would ask it, on that box's own key, and counts the results:
+a 200 carrying no results is what an empty credential returns, so the count decides and not the
+status. `--prove` additionally asks that workspace's own bot a real question, which puts a visible
+message in a customer's conversation and spends their allowance, so it is opt-in and the help says
+why.
+
+---
+
 ---
 
 ## 8. What the proxy does not fix
