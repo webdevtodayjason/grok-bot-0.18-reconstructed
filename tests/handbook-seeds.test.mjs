@@ -45,8 +45,13 @@ const personaPath = path.join(stage, "standing-persona.cjs");
 writeFileSync(personaPath, result.outputFiles[0].text, "utf8");
 const persona = require_(personaPath);
 
-/** The ten seeds a box carries once this wave has landed: the five that were there, and the five packs. */
-const LEGACY_SEEDS = ["add-connector", "code", "email", "learn-from-demonstration", "onboarding"];
+/**
+ * The eleven seeds a box carries: the five that were there, the five handbook packs, and research.
+ *
+ * BASELINE-1 added research. It is not a handbook pack (no `handbook-` prefix, no block shape, no
+ * ceiling of its own), so it rides in the roster and nowhere else in this file.
+ */
+const LEGACY_SEEDS = ["add-connector", "code", "email", "learn-from-demonstration", "onboarding", "research"];
 const HANDBOOK_PACKS = [
   "handbook-connect-an-app", "handbook-never-ask", "handbook-plain-words",
   "handbook-starter-packs", "handbook-what-i-can-do",
@@ -54,7 +59,10 @@ const HANDBOOK_PACKS = [
 const EXPECTED_SEEDS = [...LEGACY_SEEDS, ...HANDBOOK_PACKS].sort();
 /** Each pack's ceiling, all of them under WORKFLOW_INJECTED_BODY_LIMIT with headroom. */
 const CEILINGS = {
-  "handbook-what-i-can-do": 14_000,
+  // BASELINE-1: the "Finding something out" block took this from 14,000 to 15,000. Measured on this
+  // Mac 2026-09-15 at 14,841 characters of body, so 159 of budget left and 1,159 clear of the
+  // injection limit. scripts/verify-handbook.mjs carries the same number.
+  "handbook-what-i-can-do": 15_000,
   "handbook-plain-words": 7_000,
   // The two generated packs sit at 14,000, not the 11,000 and 10,000 the design sketched: measured
   // on this Mac 2026-09-11, they render at 12,200 and 12,129, and the generator's only route under the smaller

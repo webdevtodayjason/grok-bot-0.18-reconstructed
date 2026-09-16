@@ -86,7 +86,11 @@ const has = (name) => argv.includes(name);
 // ids.
 const PACK_DIR = path.join(REPO, "source/host/extensions/managed-setup/seed-skills");
 const PACKS = [
-  { id: "handbook-what-i-can-do", max: 14_000, shape: "map" },
+  // BASELINE-1 raised this one from 14,000 to 15,000 for the "Finding something out" block, which
+  // is where the research skill is named for an owner. Measured on this Mac 2026-09-15: the body
+  // renders at 14,841, so the ceiling keeps 159 characters of budget and the pack keeps 1,159 clear
+  // of the injection limit, which is the line that actually cuts a pack in half.
+  { id: "handbook-what-i-can-do", max: 15_000, shape: "map" },
   { id: "handbook-plain-words", max: 7_000, shape: "glossary" },
   // The two generated packs sit at 14,000 rather than the 11,000 and 10,000 the design sketched.
   // Measured on this Mac 2026-09-10: the connector playbooks render at 12,200 and the starter packs
