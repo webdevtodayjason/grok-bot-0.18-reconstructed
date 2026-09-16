@@ -32,6 +32,17 @@ const stage = mkdtempSync(path.join(repoRoot, "node_modules", ".managed-seed-ski
 const bundlePath = path.join(stage, "managed-skills-service.cjs");
 writeFileSync(bundlePath, result.outputFiles[0].text, "utf8");
 const { SandManagedSkillsService, unionWithSeedSkills, withSeedSkillsRestored } = createRequire(import.meta.url)(bundlePath);
+// The same normalizer the generator's output goes through at load time, so the comparison below is
+// against the shape a box really holds rather than against raw markdown. Bundled the way this file
+// bundles the service, because it is TypeScript and node cannot import it directly.
+const normalizerBuild = await build({
+  entryPoints: [path.join(repoRoot, "source/host/extensions/managed-setup/sand-managed-skills.ts")],
+  bundle: true, write: false, format: "cjs", platform: "node", target: "es2022",
+  external: ["jsonc-parser"], logLevel: "silent",
+});
+const normalizerPath = path.join(stage, "sand-managed-skills.cjs");
+writeFileSync(normalizerPath, normalizerBuild.outputFiles[0].text, "utf8");
+const { fetchedManagedSkillToSandSkill } = createRequire(import.meta.url)(normalizerPath);
 
 const roots = [];
 after(() => {
@@ -131,6 +142,32 @@ test("the bundle carries every seed directory in the tree, frontmatter and all",
   assert.match(onboarding.body, /standing facts/,
     "it sends the agent to the live ceiling instead");
   assert.ok(!onboarding.body.startsWith("---"), "the body must not carry the frontmatter: it is re-serialized on top");
+});
+
+test("every bundled seed says what its SKILL.md on disk says, byte for byte", () => {
+  // THE GAP THIS CLOSES, caught on 2026-09-16 on the way to a box. A commit edited
+  // seed-skills/research/SKILL.md and did not re-run scripts/gen-seed-skills.mjs, so the file on
+  // disk carried the new recipe and the BUNDLE carried the old one. Every suite was green: the
+  // roster case above compares ids and the ids had not changed, and the suite that reads the
+  // recipe reads it off disk, which is the copy that was right. Only the box would have shown it,
+  // by answering with the old words, and a gate run against it would have measured nothing.
+  //
+  // So the content is compared, not just the roster. The comparison is against what
+  // fetchedManagedSkillToSandSkill makes of the file, because that is the transform the generator's
+  // own output goes through at load time, and the body it produces is the body an invocation
+  // inlines.
+  const bundled = new Map(unionWithSeedSkills([]).map((skill) => [skill.id, skill]));
+  for (const id of seedDirectories) {
+    const raw = readFileSync(path.join(seedSourceDir, id, "SKILL.md"), "utf8");
+    const onDisk = fetchedManagedSkillToSandSkill({ id, description: "", enabled: true, content: raw });
+    const inBundle = bundled.get(id);
+    assert.ok(inBundle != null, `${id} is on disk and not in the bundle`);
+    assert.equal(inBundle.name, onDisk.name, `re-run scripts/gen-seed-skills.mjs: ${id}'s NAME differs`);
+    assert.equal(inBundle.description, onDisk.description,
+      `re-run scripts/gen-seed-skills.mjs: ${id}'s DESCRIPTION differs, and the description is what the prompt catalog carries`);
+    assert.equal(inBundle.body, onDisk.body,
+      `re-run scripts/gen-seed-skills.mjs: ${id}'s BODY differs, so the box would ship words nobody wrote`);
+  }
 });
 
 test("a fetched skill wins over the seed of the same id, and both are kept", () => {
