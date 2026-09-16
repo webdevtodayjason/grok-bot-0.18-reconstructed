@@ -320,7 +320,15 @@ export function createWebSearchProvisioner({
       const rows = [];
       for (const tenant of tenants) {
         const route = await routeOf(tenant.slug);
-        if (route == null) { rows.push({ slug: tenant.slug, answers: false }); continue; }
+        if (route == null) {
+          // A ROW EITHER WAY. A box that could not be asked is not a box with no search, and a
+          // table that silently drops it counts it in the denominator while showing nine rows out
+          // of ten. On the R750 2026-09-15 every live box would land here, because that host
+          // predates the command this reads.
+          rows.push({ slug: tenant.slug, answers: false, route: "unknown" });
+          out(`${pad(tenant.slug, 20)}${pad("unknown", 9)}${pad("unknown", 11)}${pad("unknown", 9)}${pad("could not be asked", 22)}`);
+          continue;
+        }
         rows.push({ slug: tenant.slug, ...route });
         out(`${pad(tenant.slug, 20)}${pad(route.answers ? "yes" : "no", 9)}${pad(route.route, 11)}`
           + `${pad(route.metered ? "yes" : "no", 9)}`

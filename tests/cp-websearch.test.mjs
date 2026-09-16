@@ -497,6 +497,7 @@ test("list measures the fleet, writes nothing, and prints no key", async () => {
     "beta-33": {},
     titanium: { connectors: ["tinyfish"] },
   });
+  // Every workspace gets a row, including one that cannot be asked, which is checked below.
   const { api, lines } = provisioner({ boxCall: boxes.boxCall, tenants: ["demo", "beta-33", "titanium"] });
   const rows = await api.list();
   assert.deepEqual(rows.map((row) => row.route), ["api", "none", "connector"]);
@@ -507,6 +508,17 @@ test("list measures the fleet, writes nothing, and prints no key", async () => {
   assert.ok(!said.includes(OPERATOR_KEY), "no key value on the terminal");
   assert.ok(!said.includes(keyFor("demo")));
   assert.equal(said.includes(sha12(OPERATOR_KEY)), true, "the hash prefix is what identifies it instead");
+
+  // A box that will not answer still gets a row. Dropping it would leave a table of nine over a
+  // denominator of ten, which reads as nine workspaces measured and one of them fine.
+  const withDead = fleet({ demo: {}, "beta-33": { down: true } });
+  const second = provisioner({ boxCall: withDead.boxCall, tenants: ["demo", "beta-33"] });
+  const both = await second.api.list();
+  assert.deepEqual(both.map((row) => row.route), ["none", "unknown"]);
+  const rowLines = second.lines.filter((line) => line.startsWith("demo") || line.startsWith("beta-33"));
+  assert.equal(rowLines.length, 2, `both workspaces are rows:\n${second.lines.join("\n")}`);
+  assert.match(second.lines.join("\n"), /beta-33 *unknown .*could not be asked/);
+  assert.match(second.lines.join("\n"), /0 of 2 workspace\(s\) can answer/);
 });
 
 test("nothing this command prints ever carries a key, on any path through it", async () => {
