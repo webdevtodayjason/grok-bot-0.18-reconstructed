@@ -87,8 +87,9 @@ ASSUMPTIONS
 
 - Every named source gets a row, even "nothing found" (R5).
 - **COULDN'T ESTABLISH is not optional and not a failure.** An answer with no uncertainty section usually hid its uncertainty.
-- No universal negatives in the summary line (R2). An ANSWER that begins "Nobody", "No one", "No store" or "None" is wrong by construction: rewrite it as which stores you confirmed and which you could not.
+- The ANSWER line begins with the word Confirmed. A qualifier does not rescue a banned opener: "Nobody I could verify" is still "Nobody". If you confirmed nothing, write "Confirmed at none of the [N] sources checked; not confirmed at [stores], call to check."
 - The heading `COULDN'T ESTABLISH` appears verbatim whenever any named source lacks a confirmed row. The store phone number goes inside it, never in a trailing sentence.
+- FINDINGS is the table above, one row per named source. A bullet list is not a table and does not count as rows; bullets go under the table if you need them.
 - If you never reached the question's altitude, say that in the answer line.
 
 ## 6. Stopping criteria and budget
@@ -97,7 +98,7 @@ ASSUMPTIONS
 Stop when **Done when** is satisfied, or named sources plus site-scoped fallbacks are exhausted. Do NOT stop because: the first plausible result appeared, a cheap rung returned something, or the formatting looks complete. A well-formatted confident answer is not evidence research was done.
 
 ## 7. Before you send
-1. The ANSWER line names stores; it does not start with "Nobody" or any universal negative.
+1. The ANSWER line begins with the word Confirmed and names stores; it does not start with "Nobody" or any universal negative.
 2. The `COULDN'T ESTABLISH` heading is present if any named source lacks a confirmed row, with a phone number inside it.
 3. Every row carries the date checked.
 
