@@ -376,6 +376,71 @@ test("a door that answers 200 with nothing is reported as not proved, and the wr
   assert.equal(boxes.sectionOf("demo").TINYFISH_API_KEY, keyFor("demo"));
 });
 
+test("--prove asks the workspace's own bot, and judges the turn on the tools it called", async () => {
+  // The one proof the door proof cannot give: the box's OWN WebSearch answering. It costs a visible
+  // message in a customer's conversation and a model turn against their allowance, which is why it
+  // is opt-in, and it is judged on the outline rather than on how the reply reads.
+  //
+  // A FRESH BOX PER CASE. The second run against a box the first run already wrote plans "already"
+  // and never reaches the proof, which is the command behaving correctly and the test measuring
+  // nothing, so each case gets its own directory.
+  const turns = [];
+  const answering = ({ reply, tools, alwaysRunning = false }) => {
+    const boxes = fleet({ demo: {} });
+    const mine = [];
+    return {
+      boxes,
+      turns: mine,
+      call: async (slug, command, args = {}) => {
+        if (command === "sendPrompt") { mine.push(args); turns.push(args); return { ok: true, body: {} }; }
+        if (command === "listAgents") {
+          return { ok: true, body: [{ id: "agent-1", name: "Titan", isRunning: alwaysRunning && mine.length > 0 }] };
+        }
+        if (command === "getAgentTranscript") return { ok: true, body: [{ kind: "send-message", message: { content: reply } }] };
+        if (command === "getConversationOutline") return { ok: true, body: tools.map((name) => ({ kind: "tool-call", name })) };
+        return boxes.boxCall(slug, command, args);
+      },
+    };
+  };
+
+  const good = answering({ reply: "Node 24.11 is current.", tools: ["WebSearch", "SendMessage"] });
+  const run = provisioner({ boxCall: good.call, tenants: ["demo"] });
+  const passed = await run.api.set({ slugs: ["demo"], prove: true, question: "What is the current Node version?" });
+  assert.equal(passed.results[0].action, "written");
+  assert.equal(passed.results[0].inBox.ok, true);
+  assert.deepEqual(good.turns.map((turn) => turn.prompt), ["What is the current Node version?"]);
+  assert.equal(good.turns[0].agentId, "agent-1", "the bot called Titan, not whichever one came back first");
+  assert.match(run.lines.join("\n"), /Titan answered through its own web tool/);
+  assert.match(run.lines.join("\n"), /puts a message in their conversation/, "the cost is said before it is paid");
+
+  // The same reply with no web tool behind it. A model answers a lookup question out of its own
+  // memory and the sentence reads identically, so the outline is what decides.
+  const memory = answering({ reply: "Node 24.11 is current.", tools: ["SendMessage"] });
+  const fromMemory = await provisioner({ boxCall: memory.call, tenants: ["demo"] }).api.set({ slugs: ["demo"], prove: true });
+  assert.equal(fromMemory.results[0].inBox.ok, false);
+  assert.match(fromMemory.results[0].inBox.why, /came from the model and not from the web/);
+
+  // A turn that never stops is a failure with a number on it, rather than a command that hangs.
+  const wedged = answering({ reply: "", tools: [], alwaysRunning: true });
+  let clock = 0;
+  const stuck = await createWebSearchProvisioner({
+    tenants: [{ slug: "demo" }],
+    boxCall: wedged.call,
+    proxy: { listPassThrough: async () => liveDoors() },
+    keyOf: () => keyFor("demo"),
+    proxyUrl: PROXY_URL,
+    out: () => {},
+    fetchImpl: searchFetch([{ title: "x", url: "https://x" }]),
+    sleep: async () => {},
+    now: () => (clock += 60_000),
+    turnTimeoutMs: 120_000,
+  }).set({ slugs: ["demo"], prove: true });
+  assert.equal(stuck.results[0].inBox.ok, false);
+  assert.match(stuck.results[0].inBox.why, /still working after 120 s/);
+  // And the write it made still stands: a proof that could not be taken is not a write to undo.
+  assert.equal(wedged.boxes.sectionOf("demo").TINYFISH_API_KEY, keyFor("demo"));
+});
+
 test("list measures the fleet, writes nothing, and prints no key", async () => {
   const boxes = fleet({
     demo: { section: { TINYFISH_API_KEY: OPERATOR_KEY } },
