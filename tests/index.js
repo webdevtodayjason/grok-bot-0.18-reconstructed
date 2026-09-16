@@ -118,6 +118,7 @@ import "./standing-persona.test.mjs";
 // KB-1: the agent's handbook, its seeded packs and the rubric that scores what it changed.
 import "./handbook-seeds.test.mjs";
 import "./research-seed-skill.test.mjs";
+import "./research-base-rules.test.mjs";
 import "./handbook-rubric.test.mjs";
 // KB-1f: the producer that puts an installed skill's name and description in the prompt.
 import "./agent-skill-catalog.test.mjs";
