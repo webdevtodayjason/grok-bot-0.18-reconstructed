@@ -540,6 +540,32 @@ just not the thing that counts the money.
   it wrote against the key it just minted, waits for the refresh, and deletes nothing until they
   agree.
 
+### 6e. The fallback map, and where it really lives (BASELINE-1, 2026-09-16)
+
+`plan-minimax` answered a real turn with `MinimaxException - invalid params, 400 (2013)` on the demo
+box on 2026-09-15, and the customer saw "Agent failed to respond" because `Fallbacks` named only
+`plan-zai`, so that group had nowhere to go. The 400 did not reproduce: 72 requests over four turns
+the next day were all 200, so it is intermittent and provider-side, and a fallback is the right
+answer precisely because the cause is not ours to fix.
+
+Three general fallbacks are registered, all to `plan-zai`, through `POST /fallback` on the running
+proxy rather than by editing this file: the map moved into the database with PROVIDERS-1 and a
+`fallbacks` key in `config.yaml` would duplicate it. No restart was needed. Persisted, read straight
+out of `LiteLLM_Config.router_settings`, so it survives one:
+
+```json
+{"fallbacks": [{"plan-zai": ["plan-zai-vision"]}, {"plan-minimax": ["plan-zai"]},
+               {"plan-qwen": ["plan-zai"]}, {"plan-zai-talk": ["plan-zai"]}]}
+```
+
+A fallback is per request, so a provider hiccup costs that one answer some speed instead of failing
+it. Measured after the write, each alias still served itself: `plan-minimax` 1721 ms, `plan-qwen`
+1934 ms, `plan-zai-talk` 2702 ms, `plan-zai` 1528 ms. To take one back out, POST the same shape with
+an empty list, `{"model":"plan-minimax","fallback_models":[]}`, and read it back with
+`GET /fallback/plan-minimax`.
+
+---
+
 ### 7b. Putting a box on that route (BASELINE-1)
 
 Until 2026-09-15 the three values above could only be written by a person with a shell inside
