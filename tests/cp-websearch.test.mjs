@@ -229,6 +229,11 @@ test("a box running the connector itself is left alone", () => {
   });
   assert.equal(plan.action, "skip");
   assert.match(plan.why, /outranks this route/, "and the reason is the resolver's order, not a guess");
+  // Skipping is not a clean pass. Measured on the R750 2026-09-15, demo, titanium and richard-avery
+  // all run this connector, so all three answer on the operator's credential and none of their
+  // questions is metered to the workspace that asked. The line has to say that out loud.
+  assert.match(plan.why, /not metered|nothing it asks is metered/i, "the consequence of skipping is named");
+  assert.match(plan.why, /PROXY-7/, "and whose job moving it is");
 });
 
 test("a box already holding its own key against both addresses is nothing to do", () => {

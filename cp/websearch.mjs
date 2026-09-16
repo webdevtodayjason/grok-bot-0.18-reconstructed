@@ -121,8 +121,19 @@ export function webSearchPlan({ slug, route, key, endpoints }) {
   // A box running the TinyFish connector itself already answers, and the connector wins over the
   // REST route in resolveWebFallback whatever this file writes. Writing anyway would put a second
   // credential in a box for a route that never runs, which is a credential nobody is watching.
+  //
+  // IT IS NOT A CLEAN PASS, and the line says so. Measured on the R750 2026-09-15: demo, titanium
+  // and richard-avery all run this connector, so all three answer web questions today on the
+  // OPERATOR's credential rather than on their own, and none of those questions is metered to the
+  // workspace that asked. Moving them is PROXY-7's migration, which uninstalls a connector a
+  // customer has installed, and that is a bigger decision than this command is allowed to make.
   if (route.route === "connector") {
-    return { action: "skip", why: `${where} runs the connector itself, which already answers and outranks this route` };
+    return {
+      action: "skip",
+      why: `${where} runs the connector itself, which already answers and outranks this route.`
+        + " It answers on the connector's own credential, so nothing it asks is metered to this workspace;"
+        + " moving it off is the PROXY-7 migration and not this command",
+    };
   }
   const wantKey = sha12(key);
   const same = route.keySha256 === wantKey
