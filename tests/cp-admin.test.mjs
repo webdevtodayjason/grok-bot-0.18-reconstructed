@@ -1184,3 +1184,61 @@ test("the reason a sign-in was refused is stored as words and never as a passwor
     assert.equal(store.listLoginAttempts({ since: 0 })[0].reason.length, 200);
   });
 });
+
+// PROVIDERS-1 said "Runs on" is read out of the proxy's request log. It filtered that log for a
+// `plan-` prefix, which only `model_group` ever carries: the `model` field is the upstream that
+// served the request, `openai/glm-5.3-flash`. So the filter matched nothing and the field read
+// "not measured" for every workspace on the fleet, not only the quiet ones.
+test("Runs on reads the plan group out of a log of upstream names, and marks the pin", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "acme", name: "Acme", status: "running" });
+    const proxy = await startFakeProxy();
+    try {
+      const config = {
+        dataDir: root, tenantRoot: root,
+        proxyUrl: proxy.url, proxyMasterKey: proxy.masterKey,
+        relayUrl: "http://relay.invalid", relayToken: "r".repeat(32),
+      };
+      const client = createProxyClient({ config });
+      const minted = await client.mintKey({ slug: "acme", models: ["plan-zai-talk"] });
+      // What beta-36's log actually looked like: the group is a plan alias, the model is not.
+      proxy.chargeAlias("titanbot-acme", 1, 3, "plan-zai-talk", { recordedModel: "openai/glm-5.3-flash" });
+      const api = createAdminApi({
+        config, store,
+        client: { base: "", call: async () => ({}) },
+        json: () => {}, noContent: () => {},
+        publicAccount: (account) => account,
+        publicTenant: (tenant) => tenant,
+        tenantView: async (row) => ({ slug: row.slug, status: row.status, coolify: { reachable: false } }),
+        tenantPower: async () => {}, tenantProvision: async () => {},
+        currentSession: () => ({ ok: false }),
+        log: () => {},
+        proxy: client,
+        proxyKeyOf: () => ({ key: minted.key, keyId: minted.keyId, alias: minted.alias, mintedAt: "", enforced: false, models: [] }),
+        // The box's own file, through the relay: the only place that says what it is POINTED at.
+        fetchImpl: async (url) => {
+          const { pathname } = new URL(String(url));
+          if (!pathname.endsWith("/running")) return { ok: false, status: 404, text: async () => "", json: async () => ({}) };
+          const body = { read: true, model: "plan-zai", modelLabel: "GLM 5.3", pinned: false };
+          return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body };
+        },
+      });
+      const acme = (await api.clients()).clients.find((row) => row.slug === "acme");
+      assert.equal(acme.model.current, "plan-zai-talk", "the group it ran, not the upstream that served it");
+      assert.ok(!String(acme.model.current).startsWith("openai/"), "an upstream name never reaches this field");
+      // The pin is a separate fact from what was run, and the renderer's pinned branch needs it.
+      assert.equal(acme.model.pinned, true);
+      assert.equal(acme.model.pin, "plan-zai");
+    } finally { await proxy.close(); }
+  });
+});
+
+test("a box whose file cannot be read carries no pin rather than a guessed one", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "acme", name: "Acme", status: "running" });
+    const api = makeApi({ store, root, fetchImpl: async () => { throw new Error("the relay is down"); } });
+    const acme = (await api.clients()).clients.find((row) => row.slug === "acme");
+    assert.equal(acme.model.pinned, false);
+    assert.equal(Object.hasOwn(acme.model, "pin"), false);
+  });
+});

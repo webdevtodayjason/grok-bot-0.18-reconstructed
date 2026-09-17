@@ -122,3 +122,20 @@ test("the allowance route opens to its workspace session and the relay token, no
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// A 429 for an exhausted upstream still writes a spend row carrying the tokens it would have sent.
+// Counting those billed a tenant for an outage: beta-36's console read 1,553,655 tokens consumed on
+// 2026-09-17 and every one of them belonged to a refused request.
+test("a failed request produced no answer, so it spends no allowance", () => {
+  const cycle = { startsAt: "2026-09-01T00:00:00.000Z", endsAt: "2026-09-06T00:00:00.000Z" };
+  const answer = usageFor("acme", cycle, [
+    { startTime: "2026-09-01T01:00:00.000Z", key_alias: "titanbot-acme", model_group: "plan-zai", status: "success", prompt_tokens: 100, completion_tokens: 10 },
+    { startTime: "2026-09-02T01:00:00.000Z", key_alias: "titanbot-acme", model_group: "plan-zai", status: "failure", prompt_tokens: 900_000, completion_tokens: 0 },
+    { startTime: "2026-09-02T02:00:00.000Z", key_alias: "titanbot-acme", model_group: "plan-zai-talk", status: "Failure", prompt_tokens: 500_000, completion_tokens: 0 },
+    // No status at all: an older row, or a build that stopped carrying the field. It still counts,
+    // because undercounting one tenant beats zeroing every tenant the day the field disappears.
+    { startTime: "2026-09-03T01:00:00.000Z", key_alias: "titanbot-acme", model_group: "plan-qwen", prompt_tokens: 40, completion_tokens: 2 },
+  ]);
+  assert.equal(answer.used, 152, "only the answered requests are counted");
+  assert.ok(!answer.models.some((row) => row.model === "plan-zai-talk"), "a refused group never reaches the breakdown");
+});

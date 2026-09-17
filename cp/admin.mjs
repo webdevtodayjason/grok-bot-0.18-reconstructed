@@ -1338,6 +1338,13 @@ export function createAdminApi({
     // what it actually ran; where the log cannot be read that is said rather than guessed.
     const modelChoices = [];
     const runningBySlug = new Map();
+    // The pin, beside what was run. The log says what a workspace HAS run; only the box's own file
+    // says what it is pointed at, and the relay is the reader for that file (boxLabels, below).
+    // A relay that cannot answer leaves the map empty and the row simply carries no pin.
+    const pinsBySlug = new Map();
+    for (const row of await boxLabels().catch(() => [])) {
+      if (row?.read === true) pinsBySlug.set(row.slug, { model: row.model, label: row.label });
+    }
     let modelWhy = spending.configured ? "" : spending.why;
     if (spending.configured) {
       const shape = await proxyShape();
@@ -1356,7 +1363,12 @@ export function createAdminApi({
         for (const key of sweep.month.keys ?? []) {
           const alias = String(key.alias ?? "");
           if (!alias.startsWith("titanbot-")) continue;
-          const ran = (key.models ?? []).map((one) => String(one.model)).filter((one) => isPlanModel(one));
+          // The GROUP, not the upstream model name. A spend row records `plan-zai-talk` as its
+          // group and `openai/glm-5.3-flash` as its model; isPlanModel asks for a `plan-` prefix,
+          // so reading it off the model name matched nothing and "Runs on" was empty for every
+          // workspace, not just the quiet ones. `models` is left alone: the Spend panel and the
+          // TinyFish column both count upstream names.
+          const ran = (key.groups ?? []).map((one) => String(one.group)).filter((one) => isPlanModel(one));
           if (ran.length > 0) runningBySlug.set(alias.slice("titanbot-".length), ran);
         }
       } else {
@@ -1427,6 +1439,12 @@ export function createAdminApi({
         };
       });
       const ran = runningBySlug.get(tenant.slug) ?? [];
+      // What this workspace is POINTED at, which is a different question from what it has run.
+      // It comes from the box's own SAND_OPENAI_COMPATIBLE_MODEL through the relay, the same
+      // reader the Providers panel uses; the clients row never asked for it, so the renderer's
+      // pinned branch was unreachable.
+      const pin = pinsBySlug.get(tenant.slug);
+      const pinnedModel = isPlanModel(String(pin?.model ?? "")) ? String(pin.model) : "";
       // The flagship first when a workspace ran both it and its vision fallback, because the
       // fallback is not a thing anybody chose and is not what this workspace is "on".
       const current = ran.find((one) => modelChoices.some((row) => row.alias === one)) ?? ran[0] ?? "";
@@ -1466,13 +1484,19 @@ export function createAdminApi({
         },
         model: {
           current,
-          label: modelChoices.find((row) => row.alias === current)?.name ?? "",
+          pinned: pinnedModel.length > 0,
+          ...(pinnedModel.length === 0 ? {} : { pin: pinnedModel }),
+          label: modelChoices.find((row) => row.alias === current)?.name
+            ?? modelChoices.find((row) => row.alias === pinnedModel)?.name
+            ?? String(pin?.label ?? ""),
           choices: modelChoices,
           why: modelWhy.length > 0
             ? modelWhy
             : current.length > 0
               ? "read out of the proxy's request log: this is what this workspace has actually run inside the current window."
-              : "this workspace has run nothing through the proxy inside the current window, so what it is pointed at cannot be read from here. Its own file is the only place that says, and this service cannot read inside a box.",
+              : pinnedModel.length > 0
+                ? `this workspace has run nothing through the proxy inside the current window; ${pinnedModel} is what its own file says it is pointed at.`
+                : "this workspace has run nothing through the proxy inside the current window and its own file did not answer, so what it is pointed at cannot be read from here.",
         },
       });
     }

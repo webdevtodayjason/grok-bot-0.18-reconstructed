@@ -67,6 +67,14 @@ export function usageFor(slug, cycle, rows = []) {
     const rowAlias = String(row?.key_alias ?? row?.metadata?.user_api_key_alias ?? "");
     const rowSlug = String(row?.metadata?.slug ?? "");
     if (rowAlias !== alias && rowSlug !== String(slug)) continue;
+    // A request that failed produced no answer, so it spends no allowance. The proxy's own 429 for
+    // an exhausted upstream still writes a spend row carrying the prompt tokens it would have sent,
+    // and counting those billed a tenant for an outage: beta-36 showed 1,553,655 tokens "consumed"
+    // on 2026-09-17 of which every single one was a refused request. The test is not-failure rather
+    // than is-success, which is the convention cp/proxy.mjs already uses for these rows, because a
+    // build whose log stops carrying `status` must undercount nothing rather than zero every
+    // tenant's usage at once.
+    if (String(row?.status ?? "").toLowerCase() === "failure") continue;
     const tokens = finiteNonNegative(row?.prompt_tokens) + finiteNonNegative(row?.completion_tokens);
     used += tokens;
     const model = String(row?.model ?? row?.model_group ?? "").trim() || "not recorded";

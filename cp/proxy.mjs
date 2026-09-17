@@ -799,7 +799,7 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
         if (keyId.length === 0) continue;
         let entry = byKey.get(keyId);
         if (entry == null) {
-          entry = { keyId, alias: "", dollars: 0, requests: 0, rows: 0, tokens: 0, tokensIn: 0, tokensOut: 0, byModel: new Map(), byUsage: new Map(), byDeployment: new Map() };
+          entry = { keyId, alias: "", dollars: 0, requests: 0, rows: 0, tokens: 0, tokensIn: 0, tokensOut: 0, byModel: new Map(), byGroup: new Map(), byUsage: new Map(), byDeployment: new Map() };
           byKey.set(keyId, entry);
         }
         const dollars = Number(row?.spend ?? 0) || 0;
@@ -837,6 +837,16 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
         seen.requests += requests;
         seen.dollars += dollars;
         entry.byModel.set(model, seen);
+        // The GROUP the request asked for, kept apart from the upstream model above. They are not
+        // the same string and never were: a row records `plan-zai-talk` as its group and
+        // `openai/glm-5.3-flash` as its model. "Runs on" filters for a plan alias, so reading it
+        // off `model` matched nothing for any workspace and the field was empty fleet-wide.
+        const group = String(row?.model_group ?? "").trim();
+        if (group.length > 0) {
+          const byGroup = entry.byGroup.get(group) ?? { group, requests: 0 };
+          byGroup.requests += requests;
+          entry.byGroup.set(group, byGroup);
+        }
         // Prefer the provider recorded on the request. Some older rows only identify their
         // deployment; those retain an empty provider here so the control plane can fill it from
         // /model/info, and ultimately name the bucket "not recorded" if neither source can.
@@ -923,6 +933,9 @@ export function createProxyClient({ config = {}, fetchImpl = globalThis.fetch, t
           tokens: row.tokens,
           dollars: Math.round(row.dollars * 1e6) / 1e6,
         })),
+        groups: [...entry.byGroup.values()]
+          .sort((a, b) => (b.requests - a.requests) || a.group.localeCompare(b.group))
+          .map((row) => ({ group: row.group, requests: row.requests })),
         models: [...entry.byModel.values()].map((row) => ({
           model: row.model,
           requests: row.requests,

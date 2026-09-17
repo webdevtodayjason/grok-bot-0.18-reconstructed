@@ -605,7 +605,11 @@ export async function startFakeProxy(options = {}) {
           // PROVIDERS-8. WHEN, so a case can put old failures behind newer successes. The real log
           // is not ordered and neither is this one, which is the point of the assertions that read
           // it: an appended ring would keep the wrong five.
-          model: recordedModel || model, startTime: String(at) || nowIso(), status,
+          // BOTH names, because a real LiteLLM row carries both and they are not the same string:
+          // `model_group` is the plan alias the request asked for and `model` is the upstream that
+          // served it. This fixture used to carry only one, which is why nothing caught the Runs-on
+          // field filtering upstream names for a `plan-` prefix that only a group ever has.
+          model: recordedModel || model, model_group: model, startTime: String(at) || nowIso(), status,
           model_id: behind?.model_info?.id ?? "", prompt_tokens: tokensIn, completion_tokens: tokensOut,
           total_tokens: (Number(tokensIn) || 0) + (Number(tokensOut) || 0),
           ...(provider ? { custom_llm_provider: provider } : {}),
