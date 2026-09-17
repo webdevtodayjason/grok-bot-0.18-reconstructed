@@ -455,6 +455,13 @@ export function createPromptCollectorGlue<Context = unknown>(host: PromptCollect
     const above = options.isSilenceAllowed === true;
     if (reminder != null) text = text.length === 0 ? reminder : above ? `${reminder}\n\n${text}` : `${text}\n\n${reminder}`;
     if (args.profileUpdateForTurn != null) text = text.length === 0 ? args.profileUpdateForTurn.text : above ? `${args.profileUpdateForTurn.text}\n\n${text}` : `${text}\n\n${args.profileUpdateForTurn.text}`;
+    // JEV-2. After the person's words and never instead of them: the note states the constraints
+    // their request carries, and a turn whose judge said nothing looks exactly like today's turn.
+    // Hidden prompts are automation wakes with nobody asking, so they are skipped.
+    if (host.buildJevTurnNote != null && options.hidden !== true) {
+      const note = await host.buildJevTurnNote(args.trimmedPrompt, options.messageId);
+      if (note != null && note.length > 0) text = text.length === 0 ? note : `${text}\n\n${note}`;
+    }
     if (options.appendReplyReminder === true && options.hidden !== true) text = appendUserReplyReminder(text);
     if (options.hidden === true) text = `${SAND_HIDDEN_PROMPT_MARKER}${options.automationWake == null || options.automationWake.containsUntrustedEventText === true ? "" : SAND_TRUSTED_AUTOMATION_PROMPT_MARKER}${text}`;
 
