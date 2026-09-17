@@ -548,15 +548,38 @@ box on 2026-09-15, and the customer saw "Agent failed to respond" because `Fallb
 the next day were all 200, so it is intermittent and provider-side, and a fallback is the right
 answer precisely because the cause is not ours to fix.
 
-Three general fallbacks are registered, all to `plan-zai`, through `POST /fallback` on the running
-proxy rather than by editing this file: the map moved into the database with PROVIDERS-1 and a
-`fallbacks` key in `config.yaml` would duplicate it. No restart was needed. Persisted, read straight
-out of `LiteLLM_Config.router_settings`, so it survives one:
+Fallbacks are registered through `POST /fallback` on the running proxy rather than by editing this
+file: the map moved into the database with PROVIDERS-1 and a `fallbacks` key in `config.yaml` would
+duplicate it. No restart is needed. Persisted, read straight out of `LiteLLM_Config.router_settings`,
+so it survives one.
+
+**Every group now falls back across providers (2026-09-17).** The first map sent four groups to
+`plan-zai` and sent `plan-zai` only to `plan-zai-vision`, which is the same provider and the same
+balance. On 2026-09-17 that provider's balance ran out, and because every chain ended inside it
+there was nowhere to go: `plan-zai` and `plan-zai-talk` returned 429 for staff and, by 18:08, for
+`beta-36` as well. Jason's instruction was that all of them should have fallback providers, so each
+chain now leaves the provider it started in:
 
 ```json
-{"fallbacks": [{"plan-zai": ["plan-zai-vision"]}, {"plan-minimax": ["plan-zai"]},
-               {"plan-qwen": ["plan-zai"]}, {"plan-zai-talk": ["plan-zai"]}]}
+{"fallbacks": [{"plan-zai":        ["plan-zai-vision", "plan-qwen", "plan-minimax"]},
+               {"plan-zai-vision": ["plan-qwen", "plan-minimax"]},
+               {"plan-zai-talk":   ["plan-zai-vision", "plan-qwen", "plan-minimax"]},
+               {"plan-zai-code":   ["plan-qwen", "plan-minimax"]},
+               {"plan-qwen":       ["plan-zai", "plan-minimax"]},
+               {"plan-minimax":    ["plan-qwen", "plan-zai"]}]}
 ```
+
+`plan-zai-code` is a `hosted_vllm` alias and the proxy accepted a fallback on it like any other.
+Measured immediately after the write, with the zai balance still spent: one `plan-zai` chat request
+on the demo workspace's own key returned 200 served by `qwen3.8-max` in 8823 ms, and the same
+request on beta-36's key returned 200 served by `qwen3.8-max` in 4253 ms. Both spend rows record
+`model_group = plan-qwen`, so the spend log names the group that SERVED a request, not the one that
+was asked for; a chain that fell through leaves no row for the legs that failed.
+
+Two things to hold in mind. A chain that names a dead group first pays that group's attempts before
+it falls through, which is where the 8823 ms above went. And these chains are mutual, so a provider
+outage now spends the other providers' quota rather than failing: that is the trade Jason asked for,
+and it is worth watching the daily totals per group after a long outage.
 
 A fallback is per request, so a provider hiccup costs that one answer some speed instead of failing
 it. Measured after the write, each alias still served itself: `plan-minimax` 1721 ms, `plan-qwen`
