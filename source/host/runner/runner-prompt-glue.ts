@@ -5,6 +5,7 @@ import type { AutomationStatusReminderRequestContext, AutomationStatusReminderSt
 import type { AgentProfileIdentity } from "./sand-agent-profile-prompt.js";
 import { createSandMcpTextSpiller, isLargeOutputSpillEnabled } from "./large-output-spill.js";
 import type { FileTransferController, UserComputerHandle } from "./tools/sand-file-transfer-tools.js";
+import { buildJevTurnNote } from "../jev/turn-note.js";
 import {
   createPromptCollectorGlue,
   type PromptCollectorHost,
@@ -73,6 +74,10 @@ export function createRunnerPromptGlue(owner: RunnerPromptGlueOwner) {
     get resolveBoxId() { return owner.resolveBoxId; },
     get shellWatchHost() { return owner.shellWatchHost; },
     getConversationId: () => owner.getConversationId(),
+    // JEV-2. The conversation id lives here, so this is where the judge is bound to the agent whose
+    // turn it is. It answers undefined on every box without the flag.
+    buildJevTurnNote: (request: string, messageId: string | undefined) =>
+      buildJevTurnNote(owner.getConversationId(), request, messageId),
     resolveBoxBrowser: () => owner.resolveBoxBrowser?.() ?? null,
     mcpConnectedServerNamesForTurn: () => owner.mcpConnectedServerNamesForTurn(),
     mcpCustomInstructionsForTurn: () => owner.mcpCustomInstructionsForTurn(),

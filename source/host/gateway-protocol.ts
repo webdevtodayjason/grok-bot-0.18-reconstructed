@@ -223,6 +223,7 @@ export const SAND_GATEWAY_COMMANDS = {
   // addresses together. Neither carries a stored value in either direction.
   getWebSearchRoute: (api: GatewayApi) => api.getWebSearchRoute(),
   setWebSearchRoute: (api: GatewayApi, body: string) => api.setWebSearchRoute(parseCommandArgs(body)),
+  jevMarkWrong: (api: GatewayApi, body: string) => api.jevMarkWrong(parseCommandArgs(body)),
   setCloudBrowserKey: (api: GatewayApi, body: string) => api.setCloudBrowserKey(parseCommandArgs(body)),
   getCloudBrowserPolicy: (api: GatewayApi) => api.getCloudBrowserPolicy(),
   setCloudBrowserPolicy: (api: GatewayApi, body: string) => api.setCloudBrowserPolicy(parseCommandArgs(body)),

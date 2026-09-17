@@ -2102,6 +2102,46 @@
     return `<button type="button" ${attrs} data-evidence="1" data-message-id="${escapeHtml(message.id)}"><span>${escapeHtml(text)}</span></button>`;
   }
 
+  /**
+   * JEV-2. Whether this viewer is the operator, which is the only account offered the "wrong"
+   * control. Absent means false, the same fail-closed rule the settings panel uses: an identity
+   * nobody could read is not the operator.
+   */
+  let jevOperatorViewer = false;
+  function isOperatorViewer() { return jevOperatorViewer === true; }
+  adapter.getWorkspaceIdentity?.()
+    .then((who) => { jevOperatorViewer = who?.operator === true; })
+    .catch(() => { jevOperatorViewer = false; });
+
+  /**
+   * One quiet sentence under a judged reply, and for the operator a way to say it was wrong. Plain
+   * words and no prefix: a prefixed, underlined line under a delivered reply reads as an error to
+   * the person who owns the business (host-notes-read-as-errors).
+   */
+  function jevChipMarkup(message) {
+    const stamp = message.jev;
+    if (!stamp || typeof stamp.text !== "string" || stamp.text.length === 0) return "";
+    const text = escapeHtml(stamp.text);
+    if (!isOperatorViewer() || typeof stamp.decisionId !== "string" || stamp.decisionId.length === 0) {
+      return `<span class="evidence-chip" data-jev="1"><span>${text}</span></span>`;
+    }
+    return `<span class="evidence-chip" data-jev="1"><span>${text}</span>`
+      + `<button type="button" class="jev-wrong" data-jev-wrong="${escapeHtml(stamp.decisionId)}">wrong</button></span>`;
+  }
+
+  /** Writes the marker through the relay, which is what decides whether this viewer may. */
+  async function markJevWrong(decisionId, control) {
+    const context = activeContext();
+    if (!context || !decisionId) return;
+    control.disabled = true;
+    try {
+      await adapter.markJevWrong(context.id, decisionId);
+      control.replaceWith(document.createTextNode(" marked wrong"));
+    } catch {
+      control.disabled = false;
+    }
+  }
+
   // In a room the face sits at the foot of a long bubble and the small name line at its head, so a
   // reader looking at the face does not know who spoke (Jason, 2026-09-07 13:38). The speaker's
   // name goes under the face there. A direct conversation has one speaker and needs no caption.
@@ -2162,7 +2202,7 @@
       : message.type === "attachment" && message.attachment
         ? `${paragraphMarkup(message.text)}${(message.attachments ?? [message.attachment]).map((a) => attachmentMarkup({ ...message, attachment: a })).join("")}`
       : `${paragraphMarkup(message.text)}${specialMessageMarkup(message)}`;
-    return `<article class="message-row${isUser ? " is-user" : ""}${isWorking ? " working-message" : ""}" data-message-id="${escapeHtml(message.id)}">${!isUser ? roomSpeakerMarkup(author, message) : ""}<div class="message-block"><div class="message-meta"><strong>${escapeHtml(message.authorName || (author && author.name) || "Worker")}</strong><time>${escapeHtml(message.time || "now")}</time></div><div class="message-bubble">${body}</div>${message.spoken ? `<span class="voice-spoken-chip">Spoken</span>` : ""}${evidenceChipMarkup(message)}</div></article>`;
+    return `<article class="message-row${isUser ? " is-user" : ""}${isWorking ? " working-message" : ""}" data-message-id="${escapeHtml(message.id)}">${!isUser ? roomSpeakerMarkup(author, message) : ""}<div class="message-block"><div class="message-meta"><strong>${escapeHtml(message.authorName || (author && author.name) || "Worker")}</strong><time>${escapeHtml(message.time || "now")}</time></div><div class="message-bubble">${body}</div>${message.spoken ? `<span class="voice-spoken-chip">Spoken</span>` : ""}${evidenceChipMarkup(message)}${jevChipMarkup(message)}</div></article>`;
   }
 
   // The transcript is a tail window; the row above it says the host holds more and offers to
@@ -7100,6 +7140,8 @@
     }
     const more = event.target.closest("[data-attachment-more]");
     if (more) { showMoreAttachment(more.closest("[data-attachment]")); return; }
+    const jevWrong = event.target.closest("[data-jev-wrong]");
+    if (jevWrong) { markJevWrong(jevWrong.dataset.jevWrong, jevWrong); return; }
     const evidence = event.target.closest("[data-evidence]");
     if (evidence) { openEvidenceViewer(evidence.dataset.messageId); return; }
     const exchange = event.target.closest("[data-exchange]");

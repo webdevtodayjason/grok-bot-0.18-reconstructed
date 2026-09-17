@@ -28,6 +28,12 @@ export interface SendMessageDependencies<Context> {
   readonly readMediaDimensions?: (sourcePath: string) => Promise<{ width: number; height: number } | null>;
   readonly classifyAttachment?: (url: string) => "file" | "media";
   readonly onSendMessage: (message: SandOutgoingMessage, timestampMs: number) => string | undefined;
+  /**
+   * JEV-2. Asked about the message that is about to go out; a returned string refuses this send and
+   * reaches the model as this tool's own error, the same way the send cap's refusal does. Absent on
+   * every box without the flag, which is every box by default.
+   */
+  readonly checkOutgoingClaims?: (input: SendMessageInput) => Promise<string | undefined>;
 }
 function filePathFromFileUrl(url: string): string | null { try { return new URL(url).protocol === "file:" ? fileURLToPath(url) : null; } catch { return null; } }
 export async function resolveAttachmentSource<Context>(ctx: Context, sourceUrl: string, deps: SendMessageDependencies<Context>): Promise<{ url: string; fileName?: string }> {
@@ -128,6 +134,12 @@ export function createSendMessageTool(deps: SendMessageDependencies<Context>) {
       const fingerprint = JSON.stringify(input);
       const refusal = budget.admit(fingerprint);
       if (refusal !== null) return errorResult(refusal);
+      // JEV-2, after the cap so a message the cap would refuse never costs a judgement. A judge
+      // that times out or errors returns nothing and the message goes out exactly as written.
+      const claimRefusal = deps.checkOutgoingClaims === undefined
+        ? undefined
+        : await deps.checkOutgoingClaims(input);
+      if (claimRefusal != null && claimRefusal.length > 0) return errorResult(claimRefusal);
       const timestampMs = Date.now();
       const messageId = deps.onSendMessage(message, timestampMs);
       budget.recordDelivered(fingerprint);

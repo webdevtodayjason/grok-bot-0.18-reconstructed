@@ -696,6 +696,9 @@
           // give a duration where BOTH bounding chat entries exist.
           timestampMs: Number(e.timestampMs ?? e.createdAt) || 0,
           ...(e.evidence ? { evidence: e.evidence } : {}),
+          // JEV-2: what the judge decided about this reply, stamped by the host onto the entry the
+          // same way the evidence verdict is, so it survives a reload and a wholesale repaint.
+          ...(e.jev ? { jev: e.jev } : {}),
           // VOICE-1: the row was said out loud, not typed. It rides the send's own clientNonce, which
           // the host round-trips verbatim onto the durable user entry, so the chip survives a reload
           // and a wholesale repaint -- which page-local state in voice.js could not.
@@ -4019,6 +4022,13 @@
       // The receipts behind an evidence verdict. The host has measured and stored them all along
       // and getAgentEvidence was called by verification scripts only, so a pill said "unsupported"
       // and there was no way to see what it had been checked against.
+      // JEV-2. The relay is the layer that knows whether this viewer is the operator, so it is the
+      // layer that decides, and it stamps the account itself; the browser only says which decision
+      // it disagrees with.
+      markJevWrong(agentId, decisionId) {
+        return call("jevMarkWrong", { agentId, decisionId });
+      },
+
       getEvidence(agentId, attemptId) {
         return call("getAgentEvidence", { id: agentId, ...(attemptId ? { attemptId } : {}) })
           .then((answer) => ({

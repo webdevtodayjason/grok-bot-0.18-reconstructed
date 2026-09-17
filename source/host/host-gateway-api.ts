@@ -96,6 +96,8 @@ import {
 import { evidenceRegistry, readAgentEvidence } from "./extensions/evidence/evidence-registry.js";
 import { repairAgentTranscript } from "./extensions/transcript/repair-agent-transcript.js";
 import { GatewayCommandError } from "./gateway-command-error.js";
+import { checkJevMarkWrong } from "./jev/mark-wrong.js";
+import { markJevDecisionWrong } from "./jev/ledger.js";
 import {
   JOB_BUS_API_VERSION,
   createJobStore,
@@ -1527,6 +1529,22 @@ export function createHostGatewayApi(
     // NEITHER COMMAND RETURNS A STORED VALUE. The read answers with the key's length and twelve
     // characters of its sha256, which is what the control plane compares to decide there is nothing
     // to do. A read that answered with the value would be a new way out of a customer's box.
+    /**
+     * JEV-2. Marks one judge decision wrong, which is how a staff reader disagrees with the judge
+     * in a way that survives.
+     *
+     * The gateway has no idea who is calling: one bearer token opens the whole box and a handler
+     * receives nothing but its arguments. So `by` is not something this command can establish, and
+     * it is not trusted from a browser either. The relay, which is the only layer that can tell an
+     * operator from a customer, refuses this command for a non-operator tenant and stamps `by`
+     * itself from the session. What arrives here has already been decided; this only writes it.
+     */
+    jevMarkWrong: async (args: any) => {
+      const checked = checkJevMarkWrong(args);
+      if (!checked.ok) throw new GatewayCommandError(400, { error: checked.why });
+      const { agentId, decisionId, by } = checked.mark;
+      return await markJevDecisionWrong(agentId, decisionId, by);
+    },
     getWebSearchRoute: () => describeWebSearchRoute(
       readConnectorEnvSecrets(getSandRootDir())[WEB_SEARCH_ROUTE_SERVER] ?? null,
       Object.keys(readLocalConnectorFile(getSandRootDir())),

@@ -15,6 +15,8 @@ import { resolveSandExternalMachine } from "../../../shared/agents/agent-tool-na
 import { SAND_REACT_TO_MESSAGE_TOOL_NAME } from "./sand-reaction-tool.js";
 import { SAND_UPDATE_STATE_TOOL_NAME } from "./sand-state-tool.js";
 import { SAND_SEND_MESSAGE_TOOL_NAME } from "./send-message-tool.js";
+import type { JevTurn } from "../../jev/turn-state.js";
+import { collectJevEvidence, isJevWebToolName } from "../../jev/evidence.js";
 import { createTaskTool } from "../../../packages/agent/tools/task.js";
 import type { ToolSetHandle } from "../../../packages/agent/tools/core.js";
 import { sandLocalToolScopeKey, sandTurnDirectionEpochKey } from "../../../shared/local-tool-permission-machinery.js";
@@ -320,6 +322,12 @@ export interface TurnToolsetTurnInput {
    * that wired none.
    */
   readonly toolBudget?: TurnToolBudgetCounter;
+  /**
+   * JEV-2. This turn's Jev state, present only when SAND_JEV is on for the box. It carries the
+   * evidence the turn has retrieved so far, which is what the claim check judges a negative
+   * against, so the search and fetch wrappers write into it as results come back.
+   */
+  readonly jev?: JevTurn;
   /** Optional live Shell Smart Mode identities, supplied per turn by the host. */
   readonly shellAutoReview?: {
     readonly host?: TurnShellAutoReviewInput;
@@ -2129,6 +2137,12 @@ export function buildTurnTools(
           toolName: tool.name,
           executionTimeoutMs,
         }));
+    }
+    // JEV-2. What this turn actually retrieved is what a negative claim gets judged against, so
+    // every search and fetch result is kept, trimmed, with its domain. Off unless the box has the
+    // flag, and a failure to read a result is simply evidence this turn does not have.
+    if (turn.jev !== undefined && isJevWebToolName(tool.name)) {
+      inner = collectJevEvidence(inner, turn.jev);
     }
     // TOOLS-33. SendMessage is how a turn talks, so it is neither counted nor refused. A turn that
     // spends its budget still has to deliver the answer the refusal just told it to write, and a

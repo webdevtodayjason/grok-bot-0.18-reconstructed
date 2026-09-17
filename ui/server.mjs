@@ -2440,6 +2440,28 @@ async function readBody(req, maxBytes = Infinity) {
 
 // POST /api/<method> -> that tenant's gateway. The browser never sees the token.
 async function relayCommand(t, req, res, method) {
+  // JEV-2. The gateway cannot tell an operator from a customer: one bearer token opens a whole box
+  // and a command handler receives nothing but its arguments. This is the only layer that knows, so
+  // the staff-only command is refused here for any other tenant, and the account it is attributed
+  // to is taken from the session rather than from the browser, which could say anything.
+  if (method === "jevMarkWrong") {
+    const email = String(sessionPayload(req)?.email ?? "").trim();
+    if (!t.operator || email.length === 0) {
+      res.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" });
+      return res.end(JSON.stringify({ error: "marking a judgement wrong is for the operator workspace" }));
+    }
+    const sent = await readBody(req);
+    let args = {};
+    try { args = sent.length > 0 ? JSON.parse(sent) : {}; } catch { args = {}; }
+    const upstream = await fetch(`${t.gateway}/api/${method}`, {
+      method: "POST",
+      headers: t.headers({ "content-type": "application/json" }),
+      body: JSON.stringify({ ...args, by: email }),
+    });
+    const answered = await upstream.text();
+    res.writeHead(upstream.status, { "content-type": "application/json", "cache-control": "no-store" });
+    return res.end(answered);
+  }
   let tokenAllowance = null;
   if (MODEL_START_COMMANDS.has(method)) {
     tokenAllowance = await allowanceFor(t);

@@ -13,6 +13,8 @@ import {
   resolveTurnShellAutoReviewInputs,
 } from "./tools/turn-toolset.js";
 import { createTurnSendBudget } from "./tools/send-message-tool.js";
+import { isJevEnabled } from "../sand-box-setting.js";
+import { currentJevTurn, startJevTurn } from "../jev/turn-state.js";
 import type { Context } from "../../packages/context/core.js";
 import { requestIdKey } from "../../packages/chat-inference-proto/client.js";
 import { AnysphereAgent } from "../../packages/agent/index.js";
@@ -329,6 +331,14 @@ export function createTurnAgentToolsHandoff(input: {
     ...input.turn,
     sendBudget: input.turn.sendBudget ?? createTurnSendBudget(),
     toolBudget: input.turn.toolBudget ?? createTurnToolBudgetCounter(),
+    // JEV-2. Present only when the box carries the flag, which is read here so that turning it off
+    // stops the next turn rather than needing a restart. The turn state itself is started by the
+    // prompt assembly, which is where the request text is; a turn that reached the toolset without
+    // going through it (a subagent, say) gets its own so the two halves never share by accident.
+    ...(isJevEnabled()
+      ? { jev: input.turn.jev ?? currentJevTurn(input.toolHost.getConversationId())
+          ?? startJevTurn(input.toolHost.getConversationId(), undefined, true) }
+      : {}),
     ...(input.turnScope === undefined
       ? {}
       : createTurnScopeToolHooks(input.turnScope)),

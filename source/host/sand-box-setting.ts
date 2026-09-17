@@ -356,3 +356,15 @@ export function createTurnLocalMachineReader(deps: {
  * rooms. The environment still wins where it is set. Unset means the box tools ride along.
  */
 export const SAND_SHARED_ROOM_BOX_TOOLS_SETTING = "SAND_SHARED_ROOM_BOX_TOOLS";
+
+/**
+ * JEV-2. The one switch that turns the Jev judgements on. Off unless a box says otherwise, read
+ * per turn like every other switch here, so turning it off in sand-host-settings.json stops the
+ * next turn making a request without a recreate, a restart or a deploy. It is on only for
+ * Titanium staff workspaces; no external tester box gets it.
+ */
+export const SAND_JEV_SETTING = "SAND_JEV";
+
+export function isJevEnabled(): boolean {
+  return isSandBoxSettingEnabled(SAND_JEV_SETTING);
+}

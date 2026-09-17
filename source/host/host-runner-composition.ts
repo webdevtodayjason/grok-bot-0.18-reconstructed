@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getSandRootDir } from "./host-paths.js";
+import { createOutgoingClaimCheck } from "./jev/outgoing.js";
 import {
   createTurnLocalMachineReader,
   isSandBoxSettingEnabled,
@@ -2572,12 +2573,18 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         const budget = turn.sendBudget === undefined
           ? {}
           : { turnSendBudget: turn.sendBudget };
+        // JEV-2. The claim check rides the same per-turn state the evidence collection writes into,
+        // and is absent unless the box carries the flag, so a box without it builds today's tool.
+        const claims = turn.jev === undefined
+          ? {}
+          : { checkOutgoingClaims: createOutgoingClaimCheck(turn.jev) };
         return {
           dependencies: turn.emitUpdate === undefined
-            ? { ...dependencies.sendMessage, ...budget }
+            ? { ...dependencies.sendMessage, ...budget, ...claims }
             : {
                 ...dependencies.sendMessage,
                 ...budget,
+                ...claims,
                 onSendMessage: (message, timestampMs) => {
                   turn.emitUpdate?.({
                     type: "send-message",

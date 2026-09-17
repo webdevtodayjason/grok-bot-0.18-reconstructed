@@ -3048,6 +3048,22 @@ dialog[open] {
   border-color: rgba(30, 39, 43, 0.18);
   background: rgba(242, 241, 236, 0.88);
 }
+/* JEV-2: the judge's one quiet line under a reply, and the operator's way to disagree with it.
+   It borrows .evidence-chip so it is theme-aware and cannot drift from the chip beside it; only
+   the small control needs anything of its own. Never a colour that reads as a fault. */
+.jev-wrong {
+  margin-left: 6px;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  opacity: 0.65;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.jev-wrong:hover { opacity: 1; }
+.jev-wrong:disabled { cursor: default; opacity: 0.4; }
 
 [data-theme="mist"] .evidence-chip[data-verdict="evidenced"] { border-color: rgba(49, 182, 184, 0.5); }
 

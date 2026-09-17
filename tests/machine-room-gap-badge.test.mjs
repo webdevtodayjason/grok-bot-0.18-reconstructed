@@ -89,6 +89,7 @@ async function realMessageMarkup() {
     const attachmentMarkup = () => "";
     const specialMessageMarkup = () => "";
     const evidenceChipMarkup = () => "";
+    const jevChipMarkup = () => "";
     ${grab("escapeHtml")}
     ${grab("messageMarkup")}
     return messageMarkup;
