@@ -10,7 +10,8 @@
 // measure that, and they are the ones a green suite was missing while the cap did not bind.
 //
 // The cap is per turn, for every agent and every skill, and it never looks at what skill is active:
-// a subagent turn is its own turn with its own counter.
+// a subagent turn is its own turn with its own counter. SendMessage is exempt, because a refused
+// closing message is an answer nobody receives.
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -196,12 +197,14 @@ test("a setting of 0 is invalid, not unlimited, and drops to the 150 default", (
  * `toolsGenerator` is exactly what the runner calls before each model call -- so the counter's
  * lifetime is measured rather than assumed.
  */
-const handoffForTurn = () => mod.createTurnAgentToolsHandoff({
+const handoffForTurn = (options = {}) => mod.createTurnAgentToolsHandoff({
   turn: {
     autoReviewModes: {
       hostShell: "off", boxShell: "off", mcp: "off", computer: "off",
       automationWrite: "off", cloudAgent: "off", subagentLaunch: "off",
     },
+    // A counter the case can read afterwards, to see what was counted and what was not.
+    ...(options.counter === undefined ? {} : { toolBudget: options.counter }),
   },
   toolHost: {
     isSubagentRunner: false,
@@ -215,7 +218,8 @@ const handoffForTurn = () => mod.createTurnAgentToolsHandoff({
     getRemoteBoxAvailable: () => false,
     cloudAgentsDisabledByTeam: () => true,
     spotlightEnabled: () => false,
-    factories: {},
+    // A second tool, so a case can watch one tool refused while another is not.
+    factories: options.shell === undefined ? {} : { externalShell: () => options.shell },
     factoryProvider: {
       createSendMessageToolInputs: (turn) => ({
         dependencies: {
@@ -228,11 +232,22 @@ const handoffForTurn = () => mod.createTurnAgentToolsHandoff({
   },
 });
 
-/** One model step: the runner asks for a toolset, and the step calls tools out of that build. */
+/** A plain budgeted tool for the handoff to offer, so the cases count something that is counted. */
+const fakeShellTool = () => ({
+  name: "Shell",
+  toolIdentifier: "Shell",
+  execute: async () => ({ ok: "Shell" }),
+  serializeError: (error) => (error instanceof Error ? error.message : String(error)),
+});
+
+/**
+ * One model step: the runner asks for a toolset, and the step calls tools out of that build. It
+ * takes Shell rather than SendMessage because SendMessage is deliberately exempt from the budget.
+ */
 const buildStep = (handoff) => {
   const tools = handoff.toolsGenerator({}).getAllTools();
-  const tool = tools.find((entry) => entry.name === "SendMessage");
-  assert.ok(tool, `the step built a SendMessage tool (got ${tools.map((t) => t.name).join(", ")})`);
+  const tool = tools.find((entry) => entry.name === "Shell");
+  assert.ok(tool, `the step built a Shell tool (got ${tools.map((t) => t.name).join(", ")})`);
   return tool;
 };
 
@@ -268,7 +283,7 @@ const withBudgetSetting = async (value, run) => {
 
 test("the count carries from one step's build to the next, because the turn owns the counter", async () => {
   await withBudgetSetting("2", async (logged) => {
-    const handoff = handoffForTurn();
+    const handoff = handoffForTurn({ shell: fakeShellTool() });
     const firstStep = buildStep(handoff);
     assert.notEqual(await callOnce(firstStep), refusalText(2), "call one of two is allowed");
     // The next model step of the SAME turn: a second build, and the count has to come with it.
@@ -287,10 +302,40 @@ test("the count carries from one step's build to the next, because the turn owns
 
 test("a fresh handoff is a fresh turn, so the next turn starts at zero", async () => {
   await withBudgetSetting("1", async () => {
-    const spent = buildStep(handoffForTurn());
+    const spent = buildStep(handoffForTurn({ shell: fakeShellTool() }));
     assert.notEqual(await callOnce(spent), refusalText(1), "the turn's one call is allowed");
     assert.equal(await callOnce(spent), refusalText(1), "the turn's budget is spent");
-    const nextTurn = buildStep(handoffForTurn());
+    const nextTurn = buildStep(handoffForTurn({ shell: fakeShellTool() }));
     assert.notEqual(await callOnce(nextTurn), refusalText(1), "the next turn starts at zero");
+  });
+});
+
+test("SendMessage is never counted and never refused, so a spent turn can still say so", async () => {
+  await withBudgetSetting("1", async () => {
+    const counter = mod.createTurnToolBudgetCounter();
+    const shellTool = {
+      name: "Shell",
+      toolIdentifier: "Shell",
+      execute: async () => ({ ok: "Shell" }),
+      serializeError: (error) => (error instanceof Error ? error.message : String(error)),
+    };
+    const tools = handoffForTurn({ counter, shell: shellTool }).toolsGenerator({}).getAllTools();
+    const shell = tools.find((entry) => entry.name === "Shell");
+    const send = tools.find((entry) => entry.name === "SendMessage");
+    assert.ok(shell, `the step built a Shell tool (got ${tools.map((t) => t.name).join(", ")})`);
+    assert.ok(send, `the step built a SendMessage tool (got ${tools.map((t) => t.name).join(", ")})`);
+
+    assert.notEqual(await callOnce(shell), refusalText(1), "the turn's one budgeted call runs");
+    assert.equal(await callOnce(shell), refusalText(1), "the next shell call is refused");
+    // The refusal just told the model to write its answer now, so the way it writes one has to
+    // still work. Three of them, well past a ceiling of one.
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      assert.notEqual(
+        await callOnce(send),
+        refusalText(1),
+        `SendMessage ${attempt} still goes through after the budget is spent`,
+      );
+    }
+    assert.equal(counter.calls, 2, "only the two shell calls were ever counted");
   });
 });

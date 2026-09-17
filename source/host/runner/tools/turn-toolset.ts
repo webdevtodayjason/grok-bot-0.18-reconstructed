@@ -2130,6 +2130,12 @@ export function buildTurnTools(
           executionTimeoutMs,
         }));
     }
+    // TOOLS-33. SendMessage is how a turn talks, so it is neither counted nor refused. A turn that
+    // spends its budget still has to deliver the answer the refusal just told it to write, and a
+    // refused closing message is an answer nobody receives -- worse than a turn that ran long. It
+    // is not unbounded either: the send cap already holds it to twenty a turn (LOOP-2), and it
+    // keeps its timeout and attestation here like every other tool.
+    if (tool.name === SAND_SEND_MESSAGE_TOOL_NAME) return inner;
     return withTurnToolBudget(inner, turnToolBudget, turnToolBudgetCounter, {
       agentId: host.getConversationId(),
     });

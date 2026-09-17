@@ -132,7 +132,9 @@ export const SAND_TURN_TOOL_BUDGET_DEFAULT = 150;
 /**
  * The ceiling on how many tool calls one turn may make before the host refuses the rest. This is
  * per turn, not per agent, not per skill, and every agent (subagents included) gets the same box:
- * a subagent turn is its own turn with its own counter. The research skill asks the
+ * a subagent turn is its own turn with its own counter. SendMessage is the one tool it never
+ * counts: a turn told to stop and write its answer has to be able to deliver it, and the send cap
+ * bounds that tool already. The research skill asks the
  * model for a budget in prose and the model ignores it, so a hard per-turn cap is the only thing
  * that actually bounds a long turn. The default is SAND_TURN_TOOL_BUDGET_DEFAULT, and an operator
  * moves it with the SAND_TURN_TOOL_BUDGET setting; read per tool build like every other switch, so
