@@ -1499,6 +1499,29 @@ export const AUDIO_LEAD_SECONDS = 3;
  */
 export const HEARD_PEAK_FLOOR = 64;
 /**
+ * VOICE-21. How much audio may reach the provider with nothing heard back before the person is
+ * told. Twenty seconds: long enough that a pause, a slow first transcript or a quiet room never
+ * trips it, short enough that nobody finishes a thought into a dead line. Measured against the
+ * failing R750 session, which ran 148 s with nothing heard.
+ */
+export const ONE_WAY_SECONDS = 20;
+/** The words the person reads. Plain, no prefix and no underline: a prefixed line reads as an error. */
+export const ONE_WAY_SENTENCE = "Your voice is not reaching Titan. Check the microphone, or hang up and call again.";
+
+/**
+ * Whether to tell the person their voice is going nowhere, and it is a pure function so the
+ * rule can be tested without a socket, a vendor or a clock.
+ *
+ * Fires when audio has been forwarded past the threshold with nothing heard since the session
+ * opened or since the last agent turn, and at most once per session.
+ */
+export function oneWayCallVerdict({ secondsSinceHeard = 0, heard = false, alreadyFired = false, thresholdSeconds = ONE_WAY_SECONDS } = {}) {
+  if (heard) return { fire: false, why: "the provider heard something" };
+  if (alreadyFired) return { fire: false, why: "the person has already been told on this line" };
+  if (secondsSinceHeard < thresholdSeconds) return { fire: false, why: "not enough audio yet" };
+  return { fire: true, why: `${Math.round(secondsSinceHeard)} s of audio in, nothing heard by the provider` };
+}
+/**
  * How long after the last frame with sound in it a provider transcript still counts as the person's.
  *
  * The window a transcript is measured against opens when the previous utterance closed, and on push to
@@ -2376,6 +2399,22 @@ export function makeVoiceSession({
   const startedMs = now();
   const meter = { audioInBytes: 0, audioOutBytes: 0, billedItemEvents: 0, toolCalls: 0, browserHeld: 0, audioInPeak: 0, audioInSumSq: 0, audioInSamples: 0, phoneRoute: null, captureBlocks: 0, captureSent: 0, captureNative: false, bargeIns: 0, heardDropped: 0 };
   /**
+   * VOICE-21. THE ONE-WAY CALL, which is what this whole watch exists for.
+   *
+   * MEASURED ON THE R750: a session took 148 s of audio at a peak of -2.6 dBFS and the provider
+   * emitted no speech_started, no transcript and no failure. Zero turns reached the agent, the
+   * person heard Titan answer, and nothing on the screen said their own voice was going nowhere.
+   * Reports 24 and 36 are both that call: "one-way audio, agent to operator works, operator to
+   * agent silently dropped with no error shown to the user".
+   *
+   * So the relay counts audio it has forwarded since the last thing the provider heard, and says
+   * so once. `heardAt` is set by the first speech_started OR the first transcription event,
+   * whichever a vendor sends first, because the two vendors differ on that and either one proves
+   * the far side is listening. An agent turn resets it, so a long call that works and then stops
+   * working is caught rather than only a call that never worked.
+   */
+  const oneWay = { bytesSinceHeard: 0, firedAtMs: 0, heardEver: false };
+  /**
    * VOICE-15c. WHETHER A MICROPHONE HAS ACTUALLY CARRIED SOUND INTO THE UTTERANCE BEING TRANSCRIBED.
    *
    * THE MEASURED FAULT. On TestFlight build 17, 2026-09-12, Jason made a call that delivered 0 s of
@@ -2626,6 +2665,38 @@ export function makeVoiceSession({
     return undefined;
   };
 
+  /**
+   * VOICE-21. One chip, one log line, once per line, and only while the provider has said nothing.
+   * `heardSomething` is the other half and is called from every event that proves the far side is
+   * listening, so a call that works and later stops working is caught as well as one that never
+   * worked.
+   */
+  const noteOneWayAudio = () => {
+    const verdict = oneWayCallVerdict({
+      secondsSinceHeard: bytesToSeconds(oneWay.bytesSinceHeard),
+      heard: false,
+      alreadyFired: oneWay.firedAtMs > 0,
+    });
+    if (!verdict.fire) return undefined;
+    oneWay.firedAtMs = now();
+    log(`voice one-way call: ${bytesToSeconds(oneWay.bytesSinceHeard)} s of audio in, nothing heard by the provider`);
+    // A quiet chip in the person's own words. `note` is the same channel a hand-off uses, so the
+    // call screen already knows how to draw one without colouring the orb.
+    browser?.sendJson({ t: "one-way", text: ONE_WAY_SENTENCE });
+    return undefined;
+  };
+
+  /** The provider proved it is listening. Clears the chip and restarts the count. */
+  const heardSomething = () => {
+    oneWay.bytesSinceHeard = 0;
+    oneWay.heardEver = true;
+    if (oneWay.firedAtMs > 0) {
+      oneWay.firedAtMs = 0;
+      browser?.sendJson({ t: "one-way", text: "" });
+    }
+    return undefined;
+  };
+
   const hearBegin = (itemId = "") => {
     if (machineTalking()) return undefined;
     hearTurn = Math.max(session.userTurn, 1);
@@ -2854,6 +2925,10 @@ export function makeVoiceSession({
   const dispatchTool = async (toolCall) => {
     if (toolCall.name !== "titan") return answerTool(toolCall.callId, { error: "there is no such tool here" });
     meter.toolCalls += 1;
+    // VOICE-21. A turn reached the agent, so the line is working right now whatever it did
+    // earlier. The count restarts here as well as on a transcript, so the watch is against the
+    // LAST thing that worked rather than against the start of the call.
+    heardSomething();
     // THE TURN THIS CALL BELONGS TO, taken here rather than read later: in always-listening the next
     // utterance can start while this one is still with Titan, and the panel's frames have to stay with
     // the words the person watched being built. Zero where no turn is open, and that matters: the old
@@ -3022,8 +3097,14 @@ export function makeVoiceSession({
       // nothing either way. It is still a note and still never colours the orb.
       if (providerErrorIsQuiet(event)) {
         const live = liveResponseId.length > 0 ? responses.get(liveResponseId) : null;
+        // VOICE-21. THE WHOLE OBJECT, not just the code. Seven of these were logged on the R750 as
+        // a bare `invalid_request_error` while the operator's voice was reaching nobody, and the
+        // line proved nothing either way because the code alone says neither which parameter the
+        // vendor refused nor why. Capped at 2,000 characters so one malformed event cannot flood a
+        // log a person has to read. The note the PERSON sees is unchanged: this is still a note.
         return log(`voice note from the provider: ${event?.error?.code} on ${live == null ? "no response" : live.id}`
-          + `${live != null && live.doneMs === 0 ? " while it was still generating" : ""}, ${soundLeftMs()} ms of audio still booked to play`);
+          + `${live != null && live.doneMs === 0 ? " while it was still generating" : ""}, ${soundLeftMs()} ms of audio still booked to play`
+          + `; the provider said ${JSON.stringify(event?.error ?? {}).slice(0, 2_000)}`);
       }
       log(`voice provider error: ${JSON.stringify(event?.error ?? {}).slice(0, 240)}`);
       // A session refused before a single word was said cannot recover by itself, and silence is
@@ -3046,6 +3127,7 @@ export function makeVoiceSession({
       return undefined;
     }
     if (type === "input_audio_buffer.speech_started") {
+      heardSomething();
       // VOICE-14. THE PERSON TALKED OVER THE AGENT, which in the phone app is allowed and everywhere
       // else cannot happen, because everywhere else the microphone was shut. BOOKED AUDIO IS THE TEST
       // and the orb is not: the model hands a reply over far faster than it is spoken, so the only
@@ -3075,6 +3157,7 @@ export function makeVoiceSession({
     }
     if (type === "input_audio_buffer.speech_stopped") { session.hops.t0 = now(); setState("thinking"); return undefined; }
     if (type === "conversation.item.input_audio_transcription.updated" || type === "conversation.item.input_audio_transcription.delta") {
+      heardSomething();
       // VOICE-15c. NOTHING HEARD, SO THESE ARE NOT THE PERSON'S WORDS. Dropped before the accumulator
       // as well as before the wire: a sentence nobody said must not be sitting in the caption waiting
       // for the next frame of real audio to carry it onto the screen.
@@ -3094,6 +3177,7 @@ export function makeVoiceSession({
       return undefined;
     }
     if (type === "conversation.item.input_audio_transcription.completed") {
+      heardSomething();
       // VOICE-15c. The settled transcript of an utterance no microphone carried. This is the event that
       // produced "them." on build 17, and HEARD_GRACE_MS is why a push-to-talk release does not land
       // here: the window keeps a tail for exactly this event's lateness.
@@ -3113,6 +3197,7 @@ export function makeVoiceSession({
       return undefined;
     }
     if (type === "conversation.item.input_audio_transcription.failed") {
+      heardSomething();
       // Handled nowhere in this file until 2026-09-10, which is how one utterance came to bleed into
       // the next. The words are gone; the turn is not left open waiting for them.
       log(`voice transcription failed: ${String(event?.error?.message ?? event?.error?.code ?? "").slice(0, 160)}`);
@@ -3371,6 +3456,9 @@ export function makeVoiceSession({
           if (framePeak > heardWindow.peak) heardWindow.peak = framePeak;
           if (framePeak >= HEARD_PEAK_FLOOR) heardWindow.soundMs = now();
           sendProvider({ type: "input_audio_buffer.append", audio: payload.toString("base64") });
+          // VOICE-21. Count what has gone with nothing heard back, and say so once.
+          oneWay.bytesSinceHeard += payload.byteLength;
+          noteOneWayAudio();
         },
         onJson: (message) => {
           // VOICE-14. The opening frame. One field on it, and a browser does not send the frame at all,

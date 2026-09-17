@@ -170,6 +170,8 @@
   const CALL_HEIGHT = 500;
   const CALL_ID = "voice-call";
   const CALL_ENDED_ID = "voice-call-ended";
+  /** VOICE-21. The one-way chip on the call screen, drawn only while the relay says the line is one-way. */
+  const ONE_WAY_ID = "voice-one-way";
   // Five words and no sixth. The brief names four; Connecting is honest, because the screen is up
   // before the line is -- 224 ms on loopback, 1.6 to 2.0 s through console.titanium.bot -- and
   // Thinking there would claim Titan is working on something nobody has said yet.
@@ -2146,6 +2148,37 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
     if (note != null) hide(note, true);
   }
 
+  /**
+   * VOICE-21. Draw or clear the chip that says the person's own voice is going nowhere.
+   *
+   * MEASURED ON THE R750: a call took 148 s of the operator's speech at a peak of -2.6 dBFS, the
+   * provider heard none of it, and the screen said nothing at all -- Titan answered normally, so
+   * from where the person stood the call was working. Reports 24 and 36 are both that call.
+   *
+   * A chip and not a note: no prefix, no underline, no colour on the orb. It is a fact about the
+   * microphone, not a failure of the call, and a prefixed line reads as an error.
+   */
+  function renderOneWayChip(text) {
+    const document = global.document;
+    if (document == null) return undefined;
+    let chip = document.getElementById(ONE_WAY_ID);
+    const words = String(text ?? "").trim();
+    if (words.length === 0) {
+      if (chip != null) hide(chip, true);
+      return undefined;
+    }
+    if (chip == null) {
+      chip = document.createElement("div");
+      chip.id = ONE_WAY_ID;
+      chip.className = "voice-chip voice-chip-quiet";
+      const screen = document.getElementById(CALL_ENDED_ID)?.parentNode ?? document.body;
+      screen?.appendChild?.(chip);
+    }
+    chip.textContent = words;
+    hide(chip, false);
+    return undefined;
+  }
+
   function endedNoteUp() {
     const note = global.document?.getElementById(CALL_ENDED_ID);
     return note != null && note.hidden !== true;
@@ -2951,6 +2984,15 @@ registerProcessor("voice-capture", VoiceCaptureProcessor);
       // and a frame with nothing to say paints no row rather than an empty one.
       case "note":
         if (String(frame.text ?? "").trim().length > 0) note(String(frame.reason ?? "relay"), frame.text, true);
+        break;
+      // VOICE-21. The person's own voice is reaching nobody. A quiet chip in plain words, cleared by
+      // an empty text the moment the provider hears anything. It never colours the orb, because the
+      // call is not broken from where they are standing: Titan is still talking back. The words
+      // carry no prefix and no underline, which is the whole reason this is not a `note`: a
+      // prefixed line reads as an error to the person who has to act on it.
+      case "one-way":
+        state.oneWay = String(frame.text ?? "");
+        renderOneWayChip(state.oneWay);
         break;
       // The relay's own latency ledger for the turn just taken. Nothing on screen: it is for the gate
       // and for a support question about why a reply felt slow, and the only number in it the page
