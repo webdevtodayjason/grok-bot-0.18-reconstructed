@@ -122,6 +122,35 @@ export function resolveSandMaxAgents(): number {
 }
 
 /**
+ * The name an operator writes into sand-host-settings.json (or the container env).
+ */
+export const SAND_TURN_TOOL_BUDGET_SETTING = "SAND_TURN_TOOL_BUDGET";
+
+/** The standing per-turn tool-call ceiling when SAND_TURN_TOOL_BUDGET is unset or out of range. */
+export const SAND_TURN_TOOL_BUDGET_DEFAULT = 150;
+
+/**
+ * The ceiling on how many tool calls one turn may make before the host refuses the rest. This is
+ * per turn, not per agent, not per skill, and every agent (subagents included) gets the same box:
+ * a subagent turn builds its own toolset and therefore its own counter. The research skill asks the
+ * model for a budget in prose and the model ignores it, so a hard per-turn cap is the only thing
+ * that actually bounds a long turn. The default is SAND_TURN_TOOL_BUDGET_DEFAULT, and an operator
+ * moves it with the SAND_TURN_TOOL_BUDGET setting; read per tool build like every other switch, so
+ * a live box can be re-bounded without a recreate.
+ *
+ * It fails CLOSED to the default here on purpose -- unlike resolveSandMaxAgents, which fails OPEN.
+ * A research turn with no cap at all ran for an hour, so the safe default when the setting is unset
+ * or out of range is the standing one, not "no limit". Anything outside 1..100000, and anything
+ * that is not a whole number in the settings file, is ignored in silence and the turn drops to the
+ * default. A value of 0 is that ignored case and means the default, never an open box, so a stray
+ * "0" in the file cannot turn the cap back off.
+ */
+export function resolveTurnToolBudget(): number {
+  return readSandBoxSettingNumber(SAND_TURN_TOOL_BUDGET_SETTING, { min: 1, max: 100_000 })
+    ?? SAND_TURN_TOOL_BUDGET_DEFAULT;
+}
+
+/**
  * SUB-1 / TOOLS-03. The browserUse subagent -- and with it the fifteen `browser_*` tools -- sat
  * behind a bare Statsig gate that this deployment can never turn on, so the subagent was
  * unreachable by construction. Same shape as `resolveMultitaskEnabled`: an explicit local
