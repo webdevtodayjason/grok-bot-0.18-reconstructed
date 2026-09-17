@@ -8,6 +8,7 @@ import {
   type TurnMultitaskToolFactoryInput,
   type TurnShellToolFactoryInput,
   createTurnShellAutoReviewOptions,
+  createTurnToolBudgetCounter,
   createTurnToolsetFactoriesForTurn,
   resolveTurnShellAutoReviewInputs,
 } from "./tools/turn-toolset.js";
@@ -320,10 +321,14 @@ export function createTurnAgentToolsHandoff(input: {
   let activeStateHandler: TurnAgentStateHandler | undefined;
   // LOOP-2. This handoff is built once per turn and its toolsGenerator runs once per step, so this
   // is the innermost scope that still spans the whole turn: the send budget is created here and
-  // every step's SendMessage tool shares it. A caller that already carries one keeps it.
+  // every step's SendMessage tool shares it. A caller that already carries one keeps it. TOOLS-33.
+  // The per-turn tool-call ceiling counts the same way and so is created in the same place; when it
+  // was created inside buildTurnTools instead, every step handed the turn a fresh count and the
+  // ceiling never bound.
   const turn: TurnToolsetTurnInput = {
     ...input.turn,
     sendBudget: input.turn.sendBudget ?? createTurnSendBudget(),
+    toolBudget: input.turn.toolBudget ?? createTurnToolBudgetCounter(),
     ...(input.turnScope === undefined
       ? {}
       : createTurnScopeToolHooks(input.turnScope)),

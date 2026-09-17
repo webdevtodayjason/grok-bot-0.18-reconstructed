@@ -313,6 +313,13 @@ export interface TurnToolsetTurnInput {
    * SendMessage through the host's tool inputs.
    */
   readonly sendBudget?: TurnSendBudget;
+  /**
+   * TOOLS-33. The per-turn tool-call ceiling counts across a whole turn, and the toolset is rebuilt
+   * every step for the same reason the send cap is, so the counter cannot be born in the build. It
+   * rides on the turn beside the send cap; `buildTurnTools` makes a fresh one only for a caller
+   * that wired none.
+   */
+  readonly toolBudget?: TurnToolBudgetCounter;
   /** Optional live Shell Smart Mode identities, supplied per turn by the host. */
   readonly shellAutoReview?: {
     readonly host?: TurnShellAutoReviewInput;
@@ -606,11 +613,12 @@ export function turnToolBudgetRefusalText(budgetCalls: number): string {
 }
 
 /**
- * TOOLS-33. Every tool an agent can call is built per turn; this wraps one of them so that, together
- * with the shared `counter`, the whole toolset may make at most `budget` calls before the host
- * refuses the rest. The cap is per turn, for every agent and every skill: it reads `budget` once
- * and never looks at what skill is active, and a subagent turn builds its own toolset and therefore
- * its own `counter`.
+ * TOOLS-33. Every tool an agent can call is rebuilt on every model step; this wraps one of them so
+ * that, together with a `counter` that spans the whole turn, the toolset may make at most `budget`
+ * calls before the host refuses the rest. The counter therefore cannot be created here or in
+ * `buildTurnTools` -- both run per step -- and comes from the turn instead. The cap is per turn, for
+ * every agent and every skill: it reads `budget` once and never looks at what skill is active, and a
+ * subagent turn is its own turn with its own handoff and therefore its own `counter`.
  *
  * Calls `1..budget` run the inner tool unchanged. Call `budget+1` and every later call do NOT run
  * the inner tool at all. Instead they throw a plain error carrying the refuse text, which the
@@ -2092,10 +2100,14 @@ export function buildTurnTools(
     ? offered.map(withDynamicToolPlacement)
     : offered;
   // TOOLS-33. One budget for this whole toolset, shared by every tool, so the cap counts tool calls
-  // across the set rather than per tool. A single buildTurnTools call is one turn and therefore one
-  // counter; the budget is read here, and it never depends on which skill is running.
+  // across the set rather than per tool. This function runs once per model STEP, not once per turn
+  // (LOOP-2, turn-agent-composition.ts), so a counter created here resets several times inside one
+  // turn and the cap never binds: a live box ran seventy-one calls against a ceiling of thirty and
+  // refused nothing. The counter rides on the turn instead, exactly as the send cap does, and the
+  // fresh one below is only for a caller that wired none. The budget is read here, and it never
+  // depends on which skill is running.
   const turnToolBudget = resolveTurnToolBudget();
-  const turnToolBudgetCounter = createTurnToolBudgetCounter();
+  const turnToolBudgetCounter = turn.toolBudget ?? createTurnToolBudgetCounter();
   const guarded = placed.map((tool) => {
     let inner: TurnTool;
     if (
