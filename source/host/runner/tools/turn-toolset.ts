@@ -39,8 +39,11 @@ import {
 } from "./mcp-meta-tools.js";
 import {
   isSandBoxSettingEnabled,
+  resolveTurnToolBudget,
   SAND_TOOL_TRACE_SETTING,
 } from "../../sand-box-setting.js";
+// Re-exported so the per-turn budget resolution is reachable from the toolset bundle's tests.
+export { resolveTurnToolBudget };
 import { fencedToolSet } from "./sand-spotlight-tools.js";
 import { isOnboardingActive } from "../../extensions/onboarding/onboarding-box-store.js";
 import { createFinishOnboardingTool, createSaveOnboardingAnswerTool } from "./onboarding-answer-tool.js";
@@ -583,6 +586,66 @@ export function withToolTimeout<T extends TurnTool>(
       } finally {
         if (timeout !== undefined) clearTimeout(timeout);
       }
+    },
+  };
+}
+
+/** The one piece of shared state for a single toolset build. It counts tool calls, not tools. */
+export interface TurnToolBudgetCounter {
+  calls: number;
+  loggedFirstRefusal: boolean;
+}
+
+export function createTurnToolBudgetCounter(): TurnToolBudgetCounter {
+  return { calls: 0, loggedFirstRefusal: false };
+}
+
+/** The exact words a refused call sends back, with the budget substituted for `budgetCalls`. */
+export function turnToolBudgetRefusalText(budgetCalls: number): string {
+  return `Tool budget for this turn is spent (${budgetCalls} calls). Stop calling tools and write your answer now with what you have; say plainly what you could not establish.`;
+}
+
+/**
+ * TOOLS-33. Every tool an agent can call is built per turn; this wraps one of them so that, together
+ * with the shared `counter`, the whole toolset may make at most `budget` calls before the host
+ * refuses the rest. The cap is per turn, for every agent and every skill: it reads `budget` once
+ * and never looks at what skill is active, and a subagent turn builds its own toolset and therefore
+ * its own `counter`.
+ *
+ * Calls `1..budget` run the inner tool unchanged. Call `budget+1` and every later call do NOT run
+ * the inner tool at all. Instead they throw a plain error carrying the refuse text, which the
+ * engine's error path turns into the tool's own error result -- its `serializeError` carrying the
+ * text -- so the model reads a normal tool failure, and in that very result is told to write
+ * its answer now. Throwing is what the other per-turn wrappers in this file do for their own failure
+ * mode, so the refusal takes the exact same shape a real tool error does and carries this exact
+ * text. The first refusal logs one line at info level naming the agent id and the budget, so an
+ * operator reading the log can see the cap held; the `loggedFirstRefusal` flag on the shared counter
+ * keeps every later refusal in the same turn quiet.
+ */
+export function withTurnToolBudget<T extends TurnTool>(
+  tool: T,
+  budget: number,
+  counter: TurnToolBudgetCounter,
+  options: { readonly agentId?: string; readonly log?: (agentId: string, budget: number) => void } = {},
+): T {
+  return {
+    ...tool,
+    async execute(...args: readonly unknown[]) {
+      counter.calls += 1;
+      if (counter.calls > budget) {
+        if (!counter.loggedFirstRefusal) {
+          counter.loggedFirstRefusal = true;
+          const agentId = options.agentId ?? "agent";
+          const log = options.log
+            ?? ((id: string, amount: number) =>
+              console.info(
+                `[sand][turn-tool-budget] conversation ${id}: per-turn tool budget of ${amount} is spent, refusing further tool calls this turn`,
+              ));
+          log(agentId, budget);
+        }
+        throw new Error(turnToolBudgetRefusalText(budget));
+      }
+      return tool.execute(...args);
     },
   };
 }
@@ -2028,26 +2091,36 @@ export function buildTurnTools(
   const placed = dynamicToolsEnabled
     ? offered.map(withDynamicToolPlacement)
     : offered;
+  // TOOLS-33. One budget for this whole toolset, shared by every tool, so the cap counts tool calls
+  // across the set rather than per tool. A single buildTurnTools call is one turn and therefore one
+  // counter; the budget is read here, and it never depends on which skill is running.
+  const turnToolBudget = resolveTurnToolBudget();
+  const turnToolBudgetCounter = createTurnToolBudgetCounter();
   const guarded = placed.map((tool) => {
+    let inner: TurnTool;
     if (
       dynamicInvocationRegistry !== undefined
       && tool.dynamicToolMetaRole === "invocation"
     ) {
-      return wrapDynamicInvocationToolWithTimeout(
+      inner = wrapDynamicInvocationToolWithTimeout(
         tool as StreamingTurnTool,
         dynamicInvocationRegistry,
         host.isComputerUseSubagent,
       ) as unknown as TurnTool;
+    } else {
+      const executionTimeoutMs = sandToolCallExecutionTimeoutMs(
+        tool.name,
+        host.isComputerUseSubagent,
+      );
+      inner = withToolTimeout(withAttestedResult(tool, host.getConversationId()), executionTimeoutMs, () =>
+        createToolCallExecutionTimeoutError({
+          toolName: tool.name,
+          executionTimeoutMs,
+        }));
     }
-    const executionTimeoutMs = sandToolCallExecutionTimeoutMs(
-      tool.name,
-      host.isComputerUseSubagent,
-    );
-    return withToolTimeout(withAttestedResult(tool, host.getConversationId()), executionTimeoutMs, () =>
-      createToolCallExecutionTimeoutError({
-        toolName: tool.name,
-        executionTimeoutMs,
-      }));
+    return withTurnToolBudget(inner, turnToolBudget, turnToolBudgetCounter, {
+      agentId: host.getConversationId(),
+    });
   });
 
   /**
