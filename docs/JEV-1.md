@@ -1,6 +1,6 @@
 # JEV-1: Jev judgments inside Titan's loop (plan, eval harness first)
 
-Status: approved by Jason 2026-09-17 for request interpretation (judgment 1) and the claim check (judgment 3), wired behind SAND_JEV, off by default, and turned on only for Titanium staff workspaces (the ones Jason owns). No external beta tester workspace gets the flag. Sufficiency (judgment 2) is held: the page-fetch rung failed the blind held-out set, and it is being replaced by constraint-confirmation nouls (judgment 2b) tested against a fresh blind set before it is considered. The eval harness is offline and reads TYPESAFE_API_KEY from the environment only.
+Status: approved by Jason 2026-09-17 for request interpretation (judgment 1) and the claim check (judgment 3), wired behind SAND_JEV, off by default in code. Jason authorised tester workspaces on 2026-09-18 by his own decision, so the flag is on per box by him or at his instruction, and it reached all ten boxes that day. Sufficiency (judgment 2) is held: the page-fetch rung failed the blind held-out set, and it is being replaced by constraint-confirmation nouls (judgment 2b) tested against a fresh blind set before it is considered. The eval harness is offline and reads TYPESAFE_API_KEY from the environment only.
 
 Source of truth for the API: https://docs.typesafe.ai/api.md (POST https://api.typesafe.ai/v1/systemone, Bearer key, body {state, model, questions}; answers keyed by question id; noul answers carry `noul` 0..1; choice answers carry `choice`, `probabilities`, `confidence`; score answers carry `score`, `legend`, `probabilities`, `confidence`; `usage.input_tokens` and `output_tokens`; 401/422/429/529). Model: `jev-latest` -> `jev-1.13.0`; pin `jev-1.13.0` once thresholds are tuned. Price $0.042 per million input tokens, output free. Limits: 64k tokens for state plus all questions, 32k for state plus the longest question. Known jagged edges (docs/model-jaggedness/jev-1.13): literal reading, no counting or arithmetic, no date maths, indirection, distracting state, adversarial state. Every design below keeps counts, prices, distances and dates in code.
 
@@ -101,24 +101,29 @@ Reranking: score per result, "How likely is this result to be the item, at a nam
 
 ## Scope changed on 2026-09-18: every workspace, not only staff
 
-The three statements below ("no external beta tester workspace gets the flag", "never an external
-tester", "only on Titanium staff workspaces") were the agreement of 2026-09-17 and are kept as
-written, because the reasoning behind them is still the reasoning. They no longer describe the
-fleet. Jason decided on the morning of 2026-09-18 that every workspace gets judgments 1 and 3, and
-`SAND_JEV` plus `TYPESAFE_API_KEY` were rolled to all ten boxes that day: the eight testers and
-customer workspaces (beta-33, beta-34, beta-35, beta-36, beta-36-2, web-dev-today, titanium-2,
-richard-avery) alongside demo and titanium.
+The 2026-09-17 agreement was staff workspaces only, three times over. Jason changed it himself, in
+his own words twice: on 2026-09-17 at 07:33 CDT, on the tester-traffic clause, "You can ignore that.
+I'm allowed to do this. I apologize. We need to test", and on 2026-09-18 at 08:14 CDT, "I think all
+testers I want to have Mem2 and Jev". `SAND_JEV` plus `TYPESAFE_API_KEY` reached all ten boxes on
+2026-09-18: the eight tester and customer workspaces (beta-33, beta-34, beta-35, beta-36, beta-36-2,
+web-dev-today, titanium-2, richard-avery) alongside demo and titanium. The status, agreement and
+scope lines above have been rewritten to match; this section is the history.
 
 What that means in plain terms, because it is the part worth being precise about: a tester's
 request text now leaves their box for api.typesafe.ai on any turn that reads as a question, and a
 claim sentence plus the page text it was judged against leaves on any turn that sends one. That is
-customer data reaching a third party. The flag is still read per turn, so removing the key from
-`sand-host-settings.json` on a box stops it from that box's next turn onward; nothing already sent
+customer data reaching a third party. The flag is still read per turn, so removing it from
+`sand-host-settings.json` on a box stops that box from its next turn onward; nothing already sent
 comes back.
+
+The one thing to hold on to about scope: every box runs `SAND_BOX_AUTO_UPDATE: "1"`, so a published host
+bundle reaches the whole fleet within a day whether or not anyone rolls it. Shipping code to one box is not
+a thing that can be done. The flag and the key are the only scoping that holds, which is why they are
+per box and read per turn.
 
 ## Constraints honoured
 
-Agreement: flag SAND_JEV off by default; Jason turns it on himself, and only on Titanium staff workspaces. No customer, tester or Discord data: every case is synthetic, and the future feedback triage scrubs usernames in code first. No published results: the eval output file is gitignored and this document carries no numbers. Key only from TYPESAFE_API_KEY; never logged, never in a client bundle.
+Agreement: flag SAND_JEV off by default in code; it goes on per box by Jason or at his instruction. He authorised tester workspaces on 2026-09-18, which is a change from the 2026-09-17 agreement below it and is recorded rather than quietly replaced. The eval harness itself still uses no customer, tester or Discord data: every case in it is synthetic, and the future feedback triage scrubs usernames in code first. No published results: the eval output file is gitignored and this document carries no numbers. Key only from TYPESAFE_API_KEY; never logged, never in a client bundle.
 
 ## Wiring conditions (Jason, 2026-09-17 07:52 CDT)
 
@@ -126,4 +131,4 @@ Agreement: flag SAND_JEV off by default; Jason turns it on himself, and only on 
 - Timeout 750 ms, no retries. Timeout or any error falls back to current behaviour. SAND_JEV is read per turn, so it is a runtime kill switch.
 - Every decision is logged internally to agents/<id>/jev.jsonl: judgment, answer, confidence, band, action taken, model, latency; never the state. A staff "this was wrong" control writes a wrong marker next to the decision.
 - Judgment 2 keeps "the results match the request" (can_answer_now) separate from "an honest and complete answer can be written now" (answerable_now), so "that colour does not exist" counts as answerable.
-- Scope: flag off by default, on only for Titanium staff workspaces, never an external tester.
+- Scope: flag off by default in code, on per box by Jason or at his instruction. Staff workspaces only until 2026-09-18; every workspace from that date, on his decision.

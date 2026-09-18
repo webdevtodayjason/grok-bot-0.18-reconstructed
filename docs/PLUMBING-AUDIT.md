@@ -1931,6 +1931,19 @@ baits 2/2, secret 1/1); V2 cost 2,420,865 input tokens and 425 s against the flo
 harder gate can**. Worth knowing for anyone reading the first run's 14 of 16: that was the gate's
 own scoring, not the product, and the rules were corrected before the comparison was run.
 
+**Superseded 2026-09-18:** Jason decided every workspace gets MEM-2 and Jev, and both flags reached
+all ten boxes that day. The sentence above about no tester getting V2 was the team's call on a gate
+that could not separate the two prompts; his was a product decision and it stands over it.
+
+**And the thing that makes "one box only" impossible.** Every box runs `SAND_BOX_AUTO_UPDATE: "1"`
+(`deploy/coolify/docker-compose.yml`), which watches for a new host bundle daily and swaps it in, so
+a published bundle reaches the whole fleet within about a day whether or not anyone rolls it.
+Several tester boxes were already on `3c4a9b25fe8e` before it was rolled to them. Shipping CODE to
+one box is not a thing this fleet can do; `POST /api/updateHostNow` only makes it happen sooner. The
+per-box setting in `sand-host-settings.json` and the per-box secret are the only scoping that holds,
+which is why both are read per turn and why a feature that must not reach a customer has to be
+behind one of them rather than behind a careful roll.
+
 ## 7. The wave plan
 
 **Closed 2026-09-02: waves 1–5 delivered (`docs/audit-wave1-prompts.md` … `audit-wave5-fixes.md`).
