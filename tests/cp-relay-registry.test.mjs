@@ -187,7 +187,8 @@ test("the included object is pinned field for field, and its id is its model", a
       assert.equal(row.included.key, readProxyKey("acme", plane.config).key);
       assert.equal(row.included.enforced, false, "observe mode is the default this wave ships");
       for (const model of row.included.models) {
-        assert.deepEqual(Object.keys(model).sort(), ["contextWindow", "id", "model", "modelLabel", "name", "servedBy"]);
+        assert.deepEqual(Object.keys(model).sort(),
+          ["contextWindow", "id", "model", "modelLabel", "name", "servedBy", "supportsVision", "visionFallback", "visionFallbackLabel"]);
         assert.equal(model.id, model.model, "id and model have to be one string");
         // The plan- prefix is how the console tells an included row from a customer's own row, so a
         // row that lost it would be indistinguishable from one the customer can edit.

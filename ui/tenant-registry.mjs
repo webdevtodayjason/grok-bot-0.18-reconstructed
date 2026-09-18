@@ -20,8 +20,9 @@
 //   profileDir  /data/titanbot/<slug>/profile -- the job bus token file.
 //   included    PROXY-1. The models this tenant's plan already pays for, and the virtual key that
 //               reaches them: {baseUrl, key, keyId, models: [{id, model, name, contextWindow,
-//               servedBy, modelLabel}], enforced}. Minted per tenant by the control plane and
-//               handed to this relay on the same route as the rest of the row. NULL IS A REAL
+//               servedBy, modelLabel, supportsVision, visionFallback, visionFallbackLabel}],
+//               enforced}. Minted per tenant by the control plane and handed to this relay on the
+//               same route as the rest of the row. NULL IS A REAL
 //               ANSWER meaning the feature is off here, which is what keeps a developer Mac and a
 //               single-box install byte-identical to today: no included section on the console, no
 //               plan rows in the model menu, and every path below behaves exactly as it did before.
@@ -109,6 +110,15 @@ function includedOf(value) {
       servedBy: str(row?.servedBy),
       // What the box tells a person it IS. See the note above this function.
       modelLabel: str(row?.modelLabel),
+      // MODEL-1. Whether a screenshot can go to this model, and where one goes instead.
+      //
+      // THREE STATES AND NOT TWO. true and false are measured answers off the deployment; null is
+      // "nobody asked", which is what a row minted from names alone carries. The customer's own
+      // card draws the "text only" line on false and on false only, because telling somebody a
+      // model cannot see when nothing ever checked is a sentence they would plan around.
+      supportsVision: row?.supportsVision === true ? true : row?.supportsVision === false ? false : null,
+      visionFallback: str(row?.visionFallback),
+      visionFallbackLabel: str(row?.visionFallbackLabel),
     };
   }).filter((row) => row != null);
   if (models.length === 0) return null;

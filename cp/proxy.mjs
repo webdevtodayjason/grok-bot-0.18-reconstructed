@@ -1393,6 +1393,19 @@ export function servedPlanModels({ models = [], deployments = null } = {}) {
  */
 export function includedModelRows({ models = [], windows = {}, deployments = null } = {}) {
   if (Array.isArray(deployments)) {
+    // MODEL-1. WHAT A FALLBACK ALIAS IS CALLED, taken off every deployment before any is dropped.
+    // A vision route is deliberately not customer-visible -- plan-zai-vision has no card and is
+    // never meant to get one -- so the only words that exist for it are on its own row here. A
+    // card that had to say where a screenshot goes without this would print the routing alias at
+    // the customer, which is the one thing every rule in this file is written to stop.
+    const namedBy = new Map();
+    for (const row of deployments) {
+      const alias = String(row?.alias ?? "");
+      if (alias.length === 0 || namedBy.has(alias)) continue;
+      const words = String(row?.customerLabel ?? "") || String(row?.customerName ?? "")
+        || PLAN_MODELS[alias]?.modelLabel || "";
+      if (words.length > 0) namedBy.set(alias, words);
+    }
     const byAlias = new Map();
     for (const row of deployments) {
       const id = String(row?.alias ?? "");
@@ -1420,6 +1433,10 @@ export function includedModelRows({ models = [], windows = {}, deployments = nul
       } else if (known == null) {
         continue;
       }
+      // MODEL-1. Whether a screenshot can go to this model at all, and where one goes instead.
+      // Both travel to the customer's own card, which is the only surface that can say "text only"
+      // before somebody pastes a screenshot into a conversation and watches it refuse.
+      const fallback = visionFallbackTarget(row);
       byAlias.set(id, {
         id,
         model: id,
@@ -1427,6 +1444,9 @@ export function includedModelRows({ models = [], windows = {}, deployments = nul
         contextWindow: numberOrNull(row?.contextWindow) ?? numberOrNull(windows?.[id]) ?? known?.contextWindow ?? null,
         servedBy: String(row?.servedBy ?? "") || known?.servedBy || id,
         modelLabel: label,
+        supportsVision: row?.supportsVision === true,
+        visionFallback: fallback,
+        visionFallbackLabel: namedBy.get(fallback) ?? "",
       });
     }
     return [...byAlias.values()];
@@ -1444,6 +1464,12 @@ export function includedModelRows({ models = [], windows = {}, deployments = nul
       contextWindow: numberOrNull(windows?.[id]) ?? known.contextWindow ?? null,
       servedBy: known.servedBy,
       modelLabel: known.modelLabel,
+      // NULL, NOT FALSE. This branch is a list of NAMES with no deployment behind it, so nothing
+      // here knows whether this model takes an image. A card that read false off this would tell a
+      // customer "text only" about a model that may well see, which is worse than saying nothing.
+      supportsVision: null,
+      visionFallback: "",
+      visionFallbackLabel: "",
     });
   }
   return rows;

@@ -468,8 +468,13 @@ test("an included set is normalised, and anything unusable in it is no set at al
   // SAND_OPENAI_COMPATIBLE_MODEL_LABEL in the box and the console renders as the model itself. The
   // field is normalised in rather than left off precisely so no reader downstream has to ask
   // whether it might be missing -- which is the mistake that lost the label in the first place.
+  //
+  // MODEL-1 adds the three vision fields for the same reason, and supportsVision is normalised to
+  // NULL rather than false: "nobody measured whether this model sees" and "this model cannot see"
+  // are different facts and the customer's Model card draws a line for only one of them.
   assert.deepEqual(registry.get("slash").included.models, [
-    { id: "plan-zai", model: "plan-zai", name: "plan-zai", contextWindow: null, servedBy: "", modelLabel: "" },
+    { id: "plan-zai", model: "plan-zai", name: "plan-zai", contextWindow: null, servedBy: "", modelLabel: "",
+      supportsVision: null, visionFallback: "", visionFallbackLabel: "" },
   ]);
 
   // Absent is a real answer, and every unusable shape lands on it. This is what keeps a developer

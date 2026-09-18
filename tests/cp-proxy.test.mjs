@@ -95,7 +95,12 @@ test("an included row's id equals its model, so there is one string and not two 
   const rows = includedModelRows({ models: ["plan-zai", "plan-minimax"], windows: { "plan-zai": 123_456 } });
   for (const row of rows) {
     assert.equal(row.id, row.model, "id and model have to be the same string");
-    assert.deepEqual(Object.keys(row).sort(), ["contextWindow", "id", "model", "modelLabel", "name", "servedBy"]);
+    assert.deepEqual(Object.keys(row).sort(),
+      ["contextWindow", "id", "model", "modelLabel", "name", "servedBy", "supportsVision", "visionFallback", "visionFallbackLabel"]);
+    // MODEL-1. A row built from NAMES knows nothing about vision, and says so with null rather than
+    // false: a customer's card draws "text only" on false and must not draw it on a guess.
+    assert.equal(row.supportsVision, null);
+    assert.equal(row.visionFallback, "");
     assert.equal(typeof row.name, "string");
     assert.notEqual(row.servedBy, "", "servedBy is what stops a customer's agent naming a container");
   }

@@ -411,6 +411,9 @@ export function createApp(options = {}) {
    *
    *   included = {baseUrl, key, keyId, models: [{id, model, name, contextWindow, servedBy}], enforced}
    *
+   * The models are the ones this workspace's own key may call, which is not the same list as the
+   * one the proxy serves. See the narrowing below.
+   *
    * These names are read by the relay and asserted in tests/cp-relay-pair, which exists precisely
    * so the two halves cannot quietly disagree about a spelling. `id` EQUALS `model`, so there is
    * one string rather than two that can drift.
@@ -445,7 +448,24 @@ export function createApp(options = {}) {
     // than emptying it, which is the difference between a slow minute and a fleet-wide "your plan
     // includes nothing".
     const live = await planModelRows();
-    const models = live.rows ?? (Array.isArray(record.models) ? record.models : []);
+    const stored = Array.isArray(record.models) ? record.models : [];
+    // MODEL-1. NARROWED TO WHAT THIS WORKSPACE'S OWN KEY MAY CALL, which is the entitlement and is
+    // the one thing the line above could not say.
+    //
+    // planModelRows() answers what the PROXY serves, which is the same list for every workspace on
+    // the server. The key is scoped: cp/provision.mjs mints it against the models that existed then,
+    // and the admin console's Models allowed writes a narrower set onto it. So a relay handed the
+    // unnarrowed list offered every customer a card for every plan, and choosing one wrote a model
+    // into their box that their own key refuses -- a switch that reports success and then fails at
+    // the first message, which is the failure this product has the fewest words for.
+    //
+    // A RECORD THAT NAMES NOTHING DOES NOT NARROW. readProxyKey answers [] for a record written
+    // before the field existed, and treating that as "entitled to nothing" would empty a live
+    // customer's plan card on the next registry cycle. Nothing named, nothing removed.
+    const entitled = new Set(stored.map((row) => String(row?.id ?? row?.model ?? row ?? "")).filter((id) => id.length > 0));
+    const models = live.rows == null
+      ? stored
+      : entitled.size === 0 ? live.rows : live.rows.filter((row) => entitled.has(row.id));
     return {
       why: live.why,
       row: {

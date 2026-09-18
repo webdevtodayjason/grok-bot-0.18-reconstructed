@@ -462,6 +462,11 @@ function includedRows(t) {
   return included.models.map((row) => ({
     id: row.id, name: row.name, model: row.model, baseUrl: included.baseUrl,
     contextWindow: row.contextWindow, servedBy: row.servedBy, modelLabel: row.modelLabel,
+    // MODEL-1. Carried so the workspace's own Model card can say "text only" and where a
+    // screenshot goes instead. Null means nobody measured it; see ui/tenant-registry.mjs.
+    supportsVision: row.supportsVision ?? null,
+    visionFallback: row.visionFallback ?? "",
+    visionFallbackLabel: row.visionFallbackLabel ?? "",
     // Set HERE, out of the registry, and stripped from anything a request body carries before a
     // catalog is written. It is the flag probe() reads to skip the tenant guard, so where it can
     // come from is the whole of that bypass's safety.
@@ -2273,6 +2278,103 @@ async function useIncluded(res, t, body, answer) {
     // come back out through this answer.
     wrote: Object.keys(next).filter((name) => name.startsWith("SAND_OPENAI_COMPATIBLE_")).sort()
       .map((name) => evidenceOf(name, next[name])),
+  });
+}
+
+// ---- MODEL-1: a workspace's own model, moved by the person whose workspace it is ---------------
+//
+// THE SUPER ADMIN'S DOOR ALREADY EXISTED AND IT IS THE WRONG DOOR FOR THIS. /admin/tenants/<slug>/
+// use-included sits behind CP_RELAY_TOKEN and takes the workspace as a path segment, which is right
+// for an operator moving somebody else and wrong for a customer moving themselves: a customer holds
+// no such credential, and a route that read a workspace out of a browser would be one session away
+// from writing into a neighbour's box.
+//
+// So these two sit in the signed-in band, below the gate, and the workspace is `t` -- the session's
+// own tenant claim, resolved once at the top of the handler. No request body here names a workspace
+// and none is read. What they DO share with the super admin's door is the door: the switch is
+// useIncluded() unchanged, so the refusal, the rollback snapshot and the seven names written into
+// the box are one implementation that cannot drift into two.
+//
+// THE ENTITLEMENT IS includedRows(t) AND THERE IS NO SECOND LIST. The control plane narrows a
+// workspace's included set to what its own key may call (cp/server.mjs, includedFor), so a plan this
+// workspace is not entitled to is not in that array at all and useIncluded answers 404 for it --
+// the same 404 it has always answered for a model the proxy does not serve. A separate customer-side
+// check would be a second copy of the rule and the copy that goes stale.
+
+// What this box is pointed at RIGHT NOW, resolved the way the host resolves it: the container
+// environment first, the file second. Empty with no docker under this relay, with the sentence
+// saying so, because not knowing and knowing it is unset are different answers.
+async function currentPlanOf(t) {
+  if (!await dockerAvailable()) return { model: "", why: NOT_AVAILABLE.liveModel };
+  const name = "SAND_OPENAI_COMPATIBLE_MODEL";
+  const envOut = await dockerOut(["inspect", t.box, "--format", "{{range .Config.Env}}{{println .}}{{end}}"]);
+  const pinned = (envOut ?? "").split("\n").find((line) => line.startsWith(`${name}=`));
+  if (pinned != null) return { model: pinned.slice(name.length + 1).trim(), why: "" };
+  const secrets = await readSecrets(t);
+  return { model: String(secrets?.[name] ?? "").trim(), why: "" };
+}
+
+// GET /model/plans -- the plans this workspace may run, and which one it is on.
+//
+// Answers 200 with an empty list on a console with no plan at all, rather than a refusal: the
+// settings surface asks for this on every load and a card that is simply not drawn is the right
+// shape for "there is nothing to choose here". Never a 503 in that position.
+async function handleWorkspaceModelPlans(res, t) {
+  const rows = includedRows(t);
+  const [live, pin] = await Promise.all([
+    currentPlanOf(t),
+    dockerAvailable().then((yes) => (yes ? endpointPin(t) : { pinned: false, pinnedBy: null })),
+  ]);
+  res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+  return res.end(JSON.stringify({
+    slug: t.slug,
+    current: live.model.length > 0 ? live.model : null,
+    ...(live.why.length > 0 ? { why: live.why } : {}),
+    ...pin,
+    plans: rows.map((row) => ({
+      model: row.id,
+      name: row.name,
+      // The words a person reads, never the routing alias. `model` above is the string this route
+      // takes back on a switch and is not for printing.
+      modelLabel: row.modelLabel || row.model,
+      servedBy: row.servedBy || "",
+      contextWindow: row.contextWindow ?? null,
+      current: row.id === live.model,
+      // Null supported means nobody measured this model's vision, and the card draws nothing for
+      // it. False with a fallback is the line a customer needs before they paste a screenshot.
+      vision: { supported: row.supportsVision ?? null, fallback: row.visionFallback ?? "", fallbackLabel: row.visionFallbackLabel ?? "" },
+    })),
+    measuredAt: new Date().toISOString(),
+  }));
+}
+
+// POST /model/use {model} -- this workspace onto one of its own plans, from its next message.
+async function handleWorkspaceModelUse(req, res, t) {
+  if (!await dockerAvailable()) return refuseWithoutDocker(res, NOT_AVAILABLE.endpointsUse);
+  let body;
+  try { body = JSON.parse(await readBody(req, 64 * 1024) || "{}"); } catch { return fail(res, 400, "that was not JSON"); }
+  const wanted = String(body?.model ?? "").trim();
+  // NAMED OR NOTHING. useIncluded takes the first row when it is handed an empty string, which is
+  // the right default for `proxy migrate` and a silent wrong answer for a person pressing a button:
+  // a request that lost its choice on the way here would quietly move them to whatever sorts first.
+  if (wanted.length === 0) return fail(res, 400, "name the model this workspace should run");
+  return await useIncluded(res, t, { model: wanted }, (payload) => {
+    const row = includedRows(t).find((one) => one.id === payload.using) ?? null;
+    res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+    // THE CUSTOMER'S OWN WORDS AND NOTHING ELSE. useIncluded's answer carries the rollback file's
+    // path on this server and the seven variable names it wrote, which belong to the operator's
+    // door and to `proxy migrate`. What comes back here is the model, its name, and whether the
+    // write will actually take effect.
+    return res.end(JSON.stringify({
+      model: payload.using,
+      name: row?.name ?? payload.endpointName ?? payload.using,
+      modelLabel: payload.modelLabel || row?.modelLabel || "",
+      servedBy: row?.servedBy ?? "",
+      pinned: payload.pinned === true,
+      pinnedBy: payload.pinnedBy ?? null,
+      appliesFrom: "next message",
+      measuredAt: new Date().toISOString(),
+    }));
   });
 }
 
@@ -4512,6 +4614,17 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/me") {
       if (req.method !== "GET") return fail(res, 405, "GET");
       return await handleMe(req, res, t);
+    }
+    // MODEL-1. The workspace's own model: what it may run, and moving it. Here, in the signed-in
+    // band, because `t` above is the session's own workspace and nothing below may be handed
+    // another one. See the two handlers for why this is not the super admin's door.
+    if (url.pathname === "/model/plans") {
+      if (req.method !== "GET") return fail(res, 405, "GET");
+      return await handleWorkspaceModelPlans(res, t);
+    }
+    if (url.pathname === "/model/use") {
+      if (req.method !== "POST") return fail(res, 405, "POST");
+      return await handleWorkspaceModelUse(req, res, t);
     }
     if (url.pathname === "/allowance") {
       if (req.method !== "GET") return fail(res, 405, "GET");
