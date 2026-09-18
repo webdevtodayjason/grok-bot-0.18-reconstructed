@@ -118,3 +118,19 @@ test("the child's run shell reads its own conversation, not the parent's session
   assert.ok(!/getConversationId: \(\) => session\.id/.test(body),
     "the shell still hands out the parent's conversation id");
 });
+
+test("the child-runner factory belongs to the session, not to a turn", () => {
+  // Another source check, same reason as the one above. What it pins is why the defect could not be
+  // gated at all: while this lived inside the per-turn resource projection, the only way to make a
+  // subagent was to be inside a turn the model had chosen to delegate, and six runs across both
+  // staff boxes never produced one. Nothing in the factory ever needed the turn.
+  const source = readFileSync(path.join(repoRoot, "source/host/host-runner-composition.ts"), "utf8");
+  const lines = source.split("\n");
+  const at = lines.findIndex((line) => line.trimStart().startsWith("function createSubagentRunner("));
+  assert.ok(at > 0, "createSubagentRunner is no longer a declaration; has it gone back inside a turn?");
+  const indent = lines[at].length - lines[at].trimStart().length;
+  assert.ok(indent <= 6, `the factory sits at indent ${indent}, which is turn depth rather than session depth`);
+  assert.ok(!/const createSubagentRunner = \(/.test(source), "an arrow copy of the factory is back");
+  // And the per-turn projection still hands it out, so nothing downstream had to change.
+  assert.match(source, /\n\s+createSubagentRunner,\n/);
+});

@@ -3374,6 +3374,68 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           ...new Set(turnMcpTools.map(tool => tool.providerIdentifier)),
         ];
       };
+
+      /**
+       * SUBAGENT-1. Session scope, not turn scope.
+       *
+       * This built every child runner from inside the per-turn resource projection, so the only way
+       * to make a subagent was to be in the middle of a turn that the model had decided to delegate.
+       * That is why the defect could not be gated: six runs across both staff boxes never produced a
+       * dispatch, because the model judged the work small enough to do itself and nothing else could
+       * ask. Nothing here ever needed the turn; it reads runnerOptions, makeRunShell and the owned-runner
+       * bookkeeping, all of which belong to the session. Moved verbatim, as a declaration so the
+       * projection below still names it.
+       */
+      function createSubagentRunner(
+        agentId: string,
+        args: SubagentAdapterArgs,
+      ): SubagentSession {
+        const child = deps.buildRunner({
+          ...runnerOptions,
+          conversationId: agentId,
+          transcriptId: agentId,
+          isSubagent: true,
+          subagentType: args.subagentType,
+          initialState: {
+            turns: [],
+            summaryArchives: [],
+            turnTimings: [],
+          },
+          // The reconstruction never recovered the original turn engine's
+          // createRunStep, so a child stripped of the run shell has NO turn path at
+          // all: SandAgentRunner.run() hits `runStep == null` and returns undefined,
+          // which surfaces as "production subagent result is not bound". Give the
+          // child the same production run shell the parent runs on; its own
+          // conversationId/transcriptId keep its turns distinct.
+          productionTurnRunShell: makeRunShell(args.subagentType, agentId),
+          // TOOLS-18. The child inherits the parent's hooks through the spread above,
+          // and its "started" would otherwise arrive on the parent's turn boundary.
+          onRunLifecycle: noteRunLifecycleFor(agentId),
+        });
+        bindSessionOwnedRunner(child);
+        ownedRunners.add(child);
+        return {
+          run: async (prompt, options) => {
+            const result = await child.run(prompt, options);
+            if (typeof result !== "object" || result == null) {
+              throw new TypeError("production subagent result is not bound");
+            }
+            const text = Reflect.get(result, "text");
+            const aborted = Reflect.get(result, "aborted");
+            if (typeof text !== "string" || typeof aborted !== "boolean") {
+              throw new TypeError("production subagent result is not bound");
+            }
+            return { text, aborted };
+          },
+          interrupt: reason => {
+            child.interrupt(reason);
+          },
+          getResolvedOutline: () => child.getResolvedOutline(),
+          getObservedToolCallCount: () => child.getObservedToolCallCount(),
+          getActivitySnapshot: () => child.getActivitySnapshot(),
+          getTranscriptPath: () => child.getTranscriptPath(),
+        };
+      }
       return createProductionTurnRunShellHostInput({
         createAgentOwnerInput: ({ requestId, runOptions, context, cancelThisRun, emitUpdate }) => {
           if (session.agentStore == null || typeof session.agentStore.getBlobStore !== "function") {
@@ -3556,56 +3618,6 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
                       callOptions: {},
                     },
                   };
-              const createSubagentRunner = (
-                agentId: string,
-                args: SubagentAdapterArgs,
-              ): SubagentSession => {
-                const child = deps.buildRunner({
-                  ...runnerOptions,
-                  conversationId: agentId,
-                  transcriptId: agentId,
-                  isSubagent: true,
-                  subagentType: args.subagentType,
-                  initialState: {
-                    turns: [],
-                    summaryArchives: [],
-                    turnTimings: [],
-                  },
-                  // The reconstruction never recovered the original turn engine's
-                  // createRunStep, so a child stripped of the run shell has NO turn path at
-                  // all: SandAgentRunner.run() hits `runStep == null` and returns undefined,
-                  // which surfaces as "production subagent result is not bound". Give the
-                  // child the same production run shell the parent runs on; its own
-                  // conversationId/transcriptId keep its turns distinct.
-                  productionTurnRunShell: makeRunShell(args.subagentType, agentId),
-                  // TOOLS-18. The child inherits the parent's hooks through the spread above,
-                  // and its "started" would otherwise arrive on the parent's turn boundary.
-                  onRunLifecycle: noteRunLifecycleFor(agentId),
-                });
-                bindSessionOwnedRunner(child);
-                ownedRunners.add(child);
-                return {
-                  run: async (prompt, options) => {
-                    const result = await child.run(prompt, options);
-                    if (typeof result !== "object" || result == null) {
-                      throw new TypeError("production subagent result is not bound");
-                    }
-                    const text = Reflect.get(result, "text");
-                    const aborted = Reflect.get(result, "aborted");
-                    if (typeof text !== "string" || typeof aborted !== "boolean") {
-                      throw new TypeError("production subagent result is not bound");
-                    }
-                    return { text, aborted };
-                  },
-                  interrupt: reason => {
-                    child.interrupt(reason);
-                  },
-                  getResolvedOutline: () => child.getResolvedOutline(),
-                  getObservedToolCallCount: () => child.getObservedToolCallCount(),
-                  getActivitySnapshot: () => child.getActivitySnapshot(),
-                  getTranscriptPath: () => child.getTranscriptPath(),
-                };
-              };
               const computerUse = runner.computerUse;
               return {
                 subagentSessions: runner.subagents.sessions,
