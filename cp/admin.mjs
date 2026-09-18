@@ -77,7 +77,7 @@ import { createSupport } from "./support.mjs";
 import { createKeptSweep } from "./kept.mjs";
 // SUPPORT-1d. The one answer to "which container is this workspace's box", shared with the registry,
 // the removal, the support desk and the onboarding sequence, and the relay asker the sweep uses.
-import { boxContainerFor, createRelayAsk } from "./provision.mjs";
+import { boxContainerFor, createRelayAsk, writeProxyKey } from "./provision.mjs";
 // PUSH-1. The two push credentials and the two proofs, in their own file for the reason
 // cp/feedback.mjs is in its own file: every function in it is a pure function over a pasted
 // credential and none of them needs a store, a config or a request to be tested.
@@ -98,6 +98,7 @@ import {
   isoDay,
   monthStartDay,
   proxyKeyAlias,
+  includedModelRows,
   planModelTier,
   servedPlanModels,
   visionFallbackTarget,
@@ -1342,6 +1343,13 @@ export function createAdminApi({
     // says what it is pointed at, and the relay is the reader for that file (boxLabels, below).
     // A relay that cannot answer leaves the map empty and the row simply carries no pin.
     const pinsBySlug = new Map();
+    // The entitlement, read once from each workspace's own key record rather than per row.
+    const allowedBySlug = new Map();
+    for (const tenant of store.listTenants()) {
+      const record = proxyKeyOf(tenant.slug);
+      const rows = Array.isArray(record?.models) ? record.models : [];
+      allowedBySlug.set(tenant.slug, rows.map((row) => String(row?.id ?? row?.alias ?? row)).filter(Boolean));
+    }
     for (const row of await boxLabels().catch(() => [])) {
       if (row?.read === true) pinsBySlug.set(row.slug, { model: row.model, label: row.label });
     }
@@ -1482,6 +1490,12 @@ export function createAdminApi({
           slug: tenant.slug, read: false, maxAgents: null, bots: null, pinned: false, pinnedBy: null,
           why: "this control plane did not ask about that workspace",
         },
+        // MODEL-1. WHICH PLANS THIS WORKSPACE MAY RUN, beside which one it is on. The two are
+        // different questions and the console asked only the second: "Runs on" is the operator's
+        // override, and this is the set the customer may choose from in their own Settings. It is
+        // the proxy key's own model list, which is also what the relay's included set is built from,
+        // so nothing here is a second copy of the truth.
+        allowed: (allowedBySlug.get(tenant.slug) ?? []).filter((alias) => isPlanModel(alias)),
         model: {
           current,
           pinned: pinnedModel.length > 0,
@@ -4623,6 +4637,55 @@ export function createAdminApi({
           message: pinned
             ? `${slug} was written, and it will keep running what its container environment pins: ${String(answer.body?.pinnedBy ?? "SAND_OPENAI_COMPATIBLE_* is set on the container")}. Nothing this console does takes effect there until that is gone.`
             : `${slug} runs ${planModel} from its next message, and its Titan says the name that goes with it. Their open page shows the change on its next load.`,
+        });
+        return true;
+      }
+      if (action === "models") {
+        // MODEL-1. The set a workspace may run. Named plans only, and only ones this proxy actually
+        // serves and somebody has named for customers: an alias a customer could be put on without
+        // words on their card is how "plan-zai" once reached a Settings page as its own label.
+        const wanted = Array.isArray(body?.models) ? body.models.map((one) => String(one).trim()).filter(Boolean) : null;
+        if (wanted == null) {
+          json(response, 400, { error: "bad_request", message: "Name the plans this workspace may run." });
+          return true;
+        }
+        if (wanted.length === 0) {
+          json(response, 400, { error: "bad_request", message: "A workspace needs at least one plan it may run." });
+          return true;
+        }
+        const offered = new Set((await clients()).clients.find((row) => row.slug === slug)?.model?.choices?.map((row) => row.alias) ?? []);
+        const unknown = wanted.filter((alias) => !offered.has(alias));
+        if (unknown.length > 0) {
+          json(response, 400, {
+            error: "bad_request",
+            message: `Not a plan this proxy offers a customer: ${unknown.join(", ")}.`,
+          });
+          return true;
+        }
+        const record = proxyKeyOf(slug);
+        if (record?.key == null) {
+          json(response, 409, { error: "conflict", message: `${slug} has no plan key yet; mint one first.` });
+          return true;
+        }
+        const ledger = beginAction(guard, request, { action: "client.models", target: slug, detail: `${slug} may run ${wanted.join(", ")}` });
+        const updated = await proxy.updateKey({ key: record.key, models: wanted });
+        if (!updated.ok) { ledger.failed(updated.why); json(response, 502, { error: "proxy", message: updated.why }); return true; }
+        // The key is the door; the record is what the relay reads to build a customer's choices, so
+        // both move or neither does. Written second on purpose: a record naming a plan the key
+        // refuses would offer a customer a switch that 400s.
+        const served = await proxyShape();
+        const rows = includedModelRows({
+          models: wanted,
+          deployments: served.deployments.ok ? served.deployments.rows.filter((row) => wanted.includes(row.alias)) : null,
+        });
+        writeProxyKey(slug, config, { ...record, models: rows });
+        ledger.done(`${slug} may run ${wanted.length} plan(s)`);
+        json(response, 200, {
+          slug,
+          allowed: wanted,
+          message: wanted.length === 1
+            ? `${slug} may run ${wanted[0]} and nothing else, so their Settings shows it without a switch.`
+            : `${slug} may run ${wanted.join(", ")}. Their Settings offers the switch on its next load.`,
         });
         return true;
       }

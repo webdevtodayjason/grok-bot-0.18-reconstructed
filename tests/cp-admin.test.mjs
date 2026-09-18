@@ -1242,3 +1242,42 @@ test("a box whose file cannot be read carries no pin rather than a guessed one",
     assert.equal(Object.hasOwn(acme.model, "pin"), false);
   });
 });
+
+// MODEL-1. Which plans a workspace MAY run, which is a different question from which one it is on.
+// The console only ever asked the second, so the set was fixed at mint and nothing could change it.
+//
+// This covers the read. The WRITE goes through the guarded admin route and is proven end to end by
+// scripts/verify-model-switch.mjs against a real proxy and a real key, because a refusal that only
+// a stubbed guard ever saw is not evidence the guard refuses.
+test("a workspace row carries the plans its key allows, not only the one it runs", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "acme", name: "Acme", status: "running" });
+    const proxy = await startFakeProxy();
+    try {
+      const config = { dataDir: root, tenantRoot: root, proxyUrl: proxy.url, proxyMasterKey: proxy.masterKey };
+      const client = createProxyClient({ config });
+      const minted = await client.mintKey({ slug: "acme", models: ["plan-zai", "plan-qwen"] });
+      const record = {
+        key: minted.key, keyId: minted.keyId, alias: minted.alias, mintedAt: "", enforced: false,
+        models: [{ id: "plan-zai" }, { id: "plan-qwen" }],
+      };
+      const api = createAdminApi({
+        config, store,
+        client: { base: "", call: async () => ({}) },
+        json: () => {}, noContent: () => {},
+        publicAccount: (a) => a, publicTenant: (t) => t,
+        tenantView: async (row) => ({ slug: row.slug, status: row.status, coolify: { reachable: false } }),
+        tenantPower: async () => {}, tenantProvision: async () => {},
+        currentSession: () => ({ ok: false }),
+        log: () => {},
+        proxy: client,
+        proxyKeyOf: () => record,
+      });
+      const row = (await api.clients()).clients.find((one) => one.slug === "acme");
+      assert.deepEqual(row.allowed, ["plan-zai", "plan-qwen"], "both plans the key allows");
+      // The two questions stay apart: what it may run, and what it is on.
+      assert.ok(Object.hasOwn(row, "allowed") && Object.hasOwn(row.model, "current"));
+      assert.notEqual(row.allowed, row.model.current);
+    } finally { await proxy.close(); }
+  });
+});
