@@ -50,6 +50,11 @@ export interface SubagentRunOptions {
 export interface SubagentSession {
   run(prompt: string, options?: SubagentRunOptions): Promise<SubagentRunResult>;
   interrupt(reason: string): void;
+  /**
+   * SUBAGENT-1. Release everything the child holds, its own store first of all. Called exactly once,
+   * at the moment the subagent stops being one: its final settlement, or a launch that was refused.
+   */
+  dispose?(): Promise<void>;
   getResolvedOutline(): Promise<readonly unknown[]>;
   getObservedToolCallCount(): number;
   getActivitySnapshot(): readonly string[];
@@ -297,6 +302,26 @@ export function createSubagentRuntime(host: SubagentRuntimeHost) {
       return;
     }
 
+    // SUBAGENT-1. Past this line the subagent is finished: the steer lane above is the only way it
+    // runs again, and it returned. Everything the child holds is released in the finally, which is
+    // the one place every path out of this function goes through.
+    try {
+      await finishBackgroundSubagentTurn(subagentAgentId, outcome, runner, meta);
+    } finally {
+      try {
+        await runner?.dispose?.();
+      } catch (error) {
+        host.log?.(`[sand][subagent] could not release ${subagentAgentId}: ${errorMessage(error)}`);
+      }
+    }
+  }
+
+  async function finishBackgroundSubagentTurn(
+    subagentAgentId: string,
+    outcome: RunOutcome,
+    runner: SubagentSession | undefined,
+    meta: RuntimeMeta | undefined,
+  ): Promise<void> {
     pendingSubagentSteers.delete(subagentAgentId);
     const aborted = abortingSubagents.delete(subagentAgentId);
     // SUBAGENT-1. "done" used to mean only that the run promise resolved without aborting, which is

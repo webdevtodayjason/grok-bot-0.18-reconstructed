@@ -33,6 +33,13 @@ export interface OpenAgentSession {
   db: SandAgentDb;
   agentStore: { getFullConversation?(ctx: unknown): Promise<unknown>; dispose(): Promise<void> };
 }
+/**
+ * SUBAGENT-1. A subagent's own storage. Same shape as an open session minus everything that makes a
+ * directory a bot, plus the close that ends its life.
+ */
+export interface OpenSubagentStorage extends OpenAgentSession {
+  close(): Promise<void>;
+}
 export interface SessionMemoryProvider {
   agentHasContent(agentDir: string): boolean;
   createAgentStore?(agentDir: string): unknown;
@@ -46,6 +53,7 @@ export interface MaterializationPort {
   createSession?(profile: Partial<SandAgentProfile>, origin: "user" | "dev", purpose?: string): Promise<OpenAgentSession>;
   createFallbackSession?(open: (agentId: string) => Promise<OpenAgentSession>): Promise<OpenAgentSession>;
   openSession?(agentId: string): Promise<OpenAgentSession>;
+  openSubagentStorage?(agentId: string): Promise<OpenSubagentStorage>;
   requireWorkerPool?(): { collectConversationGarbage(args: Record<string, unknown>): Promise<unknown> };
   isAgentCapReached?(): Promise<boolean>;
 }
@@ -124,6 +132,17 @@ export class SandAgentSessionStore {
   async mintAgent(mint: (agentId: string) => Promise<OpenAgentSession>): Promise<OpenAgentSession> { if (this.materialization?.mintAgent != null) return this.materialization.mintAgent(mint); let id = randomUUID(); while (this.agentDirExists(id)) id = randomUUID(); return mint(id); }
   async createFallbackSession(open: (agentId: string) => Promise<OpenAgentSession>): Promise<OpenAgentSession> { if (this.materialization?.createFallbackSession != null) return this.materialization.createFallbackSession(open); const [agentId] = await this.listAgentIds(); if (agentId == null) throw new Error("No fallback session is available"); return open(agentId); }
   async openSession(agentId: string): Promise<OpenAgentSession> { if (this.materialization?.openSession != null) return this.materialization.openSession(agentId); if (!this.agentExists(agentId)) throw new Error(`Agent missing: ${agentId}`); const dbPath = getAgentDbPath(this.rootDir, agentId); return { id: agentId, dbPath, db: new SandAgentDb(dbPath), agentStore: { dispose: async () => {} } }; }
+  /**
+   * SUBAGENT-1. Open or create a subagent's own storage. Refuses anything that is not a subagent id,
+   * so this can never be the door a bot's directory is minted through: `createSession` stays the
+   * only way to make one, cap and all.
+   */
+  async openSubagentStorage(agentId: string): Promise<OpenSubagentStorage> {
+    if (!isSandSubagentId(agentId)) throw new Error(`Not a subagent id: ${agentId}`);
+    const open = this.materialization?.openSubagentStorage;
+    if (open == null) throw new Error("this host cannot give a subagent a store of its own");
+    return open.call(this.materialization, agentId);
+  }
   /**
    * A deleted agent takes its OWN skills with it. Those were offered to nobody else, so a folder
    * left in the shared library after the owner is gone is invisible on every surface and still

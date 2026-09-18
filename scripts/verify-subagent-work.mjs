@@ -89,6 +89,28 @@ export function judgeSubagentWork({ fileText = "", marker = "", auditToolCalls =
   return { checks, passed: checks.filter((row) => row.ok).length, total: checks.length };
 }
 
+/**
+ * What the parent was told the background task produced.
+ *
+ * This read the transcript only, and a revival can never be there: the host delivers it as a HIDDEN
+ * prompt, which goes into the parent's conversation and not into its transcript rows. So
+ * getAgentTranscript answered "no completion text" on every run whatever the subagent produced, and
+ * the check could not pass even once the child was working. The conversation outline is the one
+ * surface that carries a hidden prompt, and it carries the whole block. The transcript is read after
+ * it, because a parent that repeated the result out loud in its own words also counts.
+ */
+export async function readWhatTheParentWasTold(call, agentId) {
+  const outline = await call("getConversationOutline", { id: agentId }).catch(() => []);
+  const outlineRows = Array.isArray(outline) ? outline : [];
+  const transcript = await call("getAgentTranscript", { id: agentId }).catch(() => []);
+  const entries = Array.isArray(transcript) ? transcript : [];
+  const revival = [
+    ...outlineRows.filter((row) => row?.kind === "user").map((row) => String(row?.text ?? "")),
+    ...entries.map((row) => String(row?.content ?? row?.message?.content ?? "")),
+  ].filter((text) => /background task/i.test(text)).join("\n\n");
+  return { outlineRows, entries, revival };
+}
+
 function boxCall(box) {
   return async (command, body = {}) => {
     const script = `const b=${JSON.stringify(JSON.stringify(body))};`
@@ -138,11 +160,16 @@ async function runOnBox() {
     await call("sendPrompt", { agentId, prompt });
     const deadline = Date.now() + timeoutMs;
     let fileText = "";
+    let told = { outlineRows: [], entries: [], revival: "" };
     while (Date.now() < deadline) {
       await sleep(5_000);
       fileText = (await docker(["exec", box, "sh", "-c",
         `cat ${PROOF_DIR}/Iceland.txt ${PROOF_DIR}/Malta.txt ${PROOF_DIR}/Nepal.txt ${PROOF_DIR}/Uruguay.txt 2>/dev/null || true`])).trim();
-      if (fileText.startsWith(marker)) break;
+      told = await readWhatTheParentWasTold(call, agentId);
+      // Both, not either. The file appears the moment the FIRST subagent writes, and the parent is
+      // told afterwards; breaking on the file alone read the completion text before it could exist
+      // and scored "no completion text at all" on a run that was about to deliver one.
+      if (fileText.startsWith(marker) && told.revival.length > 0) break;
       process.stdout.write(".");
     }
     process.stdout.write("\n");
@@ -163,17 +190,9 @@ async function runOnBox() {
       transcriptEntries += Number(entries.trim()) || 0;
     }
 
-    const outline = await call("getConversationOutline", { id: agentId }).catch(() => []);
-    const outlineRows = Array.isArray(outline) ? outline : [];
+    const { outlineRows, revival } = told;
     const toolNames = outlineRows.filter((row) => row?.kind === "tool-call").map((row) => String(row?.name ?? ""));
     console.log(`the parent called: ${[...new Set(toolNames)].join(", ") || "no tools the outline carries"}`);
-
-    const transcript = await call("getAgentTranscript", { id: agentId }).catch(() => []);
-    const entries = Array.isArray(transcript) ? transcript : [];
-    // What the parent was told the background task produced: the revival prompt the host wrote back
-    // into this conversation, which is where the reporters saw their own words returned.
-    const revival = entries.map((row) => String(row?.content ?? row?.message?.content ?? ""))
-      .filter((text) => /background task/i.test(text)).join("\n\n");
     const verdict = judgeSubagentWork({ fileText, marker, auditToolCalls, transcriptEntries, parentText: revival, prompt, dispatched: wasDispatched(fresh) });
 
     console.log("\n---- the verdict ----\n");

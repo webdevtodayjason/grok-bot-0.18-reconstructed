@@ -20,6 +20,8 @@ import {
   SELF_TALK_CAP_NOTICE,
 } from "./runner/self-talk-cap.js";
 import { evidenceRegistry } from "./extensions/evidence/evidence-registry.js";
+import { nextEntryId } from "./extensions/transcript/transcript-entry-ids.js";
+import type { TranscriptEntry } from "./extensions/transcript/transcript-hub.js";
 import { createSandExecutorSubagentConfig } from "./sand-multitask.js";
 import { SubagentType, SubagentTypeCustom } from "../packages/proto/generated/agent/v1/subagents_pb.js";
 import { createSandComputerUseSubagentConfig } from "./runner/tools/sand-computer-use-subagent.js";
@@ -349,6 +351,30 @@ export interface ProductionSessionBoundRunner {
   setMediaBytesPersister(persistMediaBytes: unknown): void;
 }
 
+/**
+ * SUBAGENT-1. Whose conversation a run shell reads, settles and persists into.
+ *
+ * The chief's shell owns the session's runner and the session's store. A child's shell owns its own
+ * runner and its own store -- which is the entire point of giving a subagent one. Both are resolved
+ * at turn time rather than captured, because a child runner does not exist yet when its shell is
+ * built and its store is opened lazily on its first turn.
+ */
+interface TurnOwner {
+  resolveRunner(): unknown;
+  resolveStore(): DynamicApi | undefined;
+  transcriptId(): string;
+}
+
+/** SUBAGENT-1. The storage handle a child holds: its own database, its own store, its own close. */
+interface SubagentStorageHandle {
+  readonly db: {
+    getTranscriptEntries(): TranscriptEntry[];
+    appendTranscriptEntry(entry: TranscriptEntry): boolean;
+  };
+  readonly agentStore: DynamicApi;
+  close(): Promise<void>;
+}
+
 export interface HostRunnerCompositionDependencies<Runner extends ProductionSessionBoundRunner = ProductionSessionBoundRunner> {
   readonly extensions: HostRunnerExtensions;
   readonly ctx: unknown;
@@ -396,6 +422,47 @@ export interface RecoveredHostRunnerComposition<Runner extends ProductionSession
   canAskLocalToolPermission(agentId: string): boolean;
   forgetLocalToolPermission(agentId: string): void;
   dispose(): Promise<void>;
+}
+
+/**
+ * SUBAGENT-1. One row of a subagent's own conversation, in the shape every other conversation on the
+ * box uses, so `getAgentTranscript` on a subagent id answers with something rather than nothing.
+ *
+ * A child's updates travel on its PARENT's transport by design -- that is how the console shows what
+ * a background task is doing -- so nothing was ever written against the child's own id. These two
+ * rows are the request it was given and the answer it produced, which is the pair the completion
+ * path hands upward; anything finer is already in the checkpoint its store now keeps.
+ */
+function appendSubagentTranscriptEntry(
+  storage: SubagentStorageHandle,
+  role: "user" | "agent",
+  text: string,
+): void {
+  const body = String(text ?? "").trim();
+  if (body.length === 0) return;
+  try {
+    const entries = storage.db.getTranscriptEntries(), timestampMs = Date.now();
+    storage.db.appendTranscriptEntry(
+      role === "user"
+        ? {
+            kind: "message",
+            id: nextEntryId(entries, "user-message"),
+            role: "user",
+            content: body,
+            isStreaming: false,
+            timestampMs,
+          }
+        : {
+            kind: "send-message",
+            id: nextEntryId(entries, "send-message"),
+            message: { type: "text", content: body },
+            timestampMs,
+          },
+    );
+  } catch (error) {
+    // A transcript row is a receipt, never the work. A store that refuses one must not fail the turn.
+    console.error("[sand][subagent] could not record the child's own transcript row:", error);
+  }
 }
 
 function method(api: DynamicApi | undefined, name: string): ((...args: any[]) => any) | undefined {
@@ -1007,6 +1074,12 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
   const localToolPermission = extensions.api("local-tool-permission");
   const localToolPermissionSurfaces = new Map<string, () => void>();
   const ownedRunners = new Set<Runner>();
+  /**
+   * SUBAGENT-1. Every subagent store this composition has open. A child closes its own when it is
+   * stopped, which is the normal path; this set is the other end of the lifetime, so a host that
+   * goes down mid-run does not leave a sqlite handle behind.
+   */
+  const subagentStorageClosers = new Set<() => Promise<void>>();
   let mirrorOffloadPool: TranscriptMirrorOffloadPool | null = null;
 
   const getMirrorOffloadPool = () => {
@@ -1239,6 +1312,21 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
     const remoteBox = foreverBox.box as DynamicApi;
     const transcriptsDir = method(sessionApi, "transcriptsDir")?.() ??
       dirname(dirname(session.dbPath));
+    /**
+     * SUBAGENT-1. The one door to a subagent's own storage. Fails closed: a child with nowhere of its
+     * own to write is the defect, and silently falling back to its parent's store is what made it
+     * look like the subagent had answered with the prompt.
+     */
+    const openSubagentStorage = (agentId: string): Promise<SubagentStorageHandle> => {
+      const store = (sessionApi as {
+        store?: { openSubagentStorage?(id: string): Promise<SubagentStorageHandle> };
+      }).store;
+      const open = store?.openSubagentStorage;
+      if (typeof open !== "function") {
+        return Promise.reject(new TypeError("production subagent store is not bound"));
+      }
+      return open.call(store, agentId);
+    };
 
     /**
      * CODE-1. The box's ONE coding-task watcher, and the seam that tells an agent its task is done.
@@ -3101,8 +3189,15 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
       };
     };
 
-    const createProductionTurnSettleHost = (): TurnSettleHost => {
-      const runner = builtRunner as {
+    const sessionTurnOwner: TurnOwner = {
+      resolveRunner: () => builtRunner,
+      resolveStore: () => session.agentStore,
+      transcriptId: () => session.id,
+    };
+    const createProductionTurnSettleHost = (
+      owner: TurnOwner = sessionTurnOwner,
+    ): TurnSettleHost => {
+      const runner = owner.resolveRunner() as {
         readonly isSubagentRunner?: boolean;
         getBlobStore?: () => unknown;
         getConversationStateStructure?: () => unknown;
@@ -3110,7 +3205,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         currentRunGeneration?: number;
         setAgentConversationStateStructure?: (structure: TurnCheckpoint) => void;
       } | undefined;
-      const store = session.agentStore;
+      const store = owner.resolveStore();
       if (
         store == null
         || typeof store.handleCheckpoint !== "function"
@@ -3122,7 +3217,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         ...(transcriptMirrorForTurn === undefined
           ? {}
           : { transcriptMirror: transcriptMirrorForTurn }),
-        getTranscriptId: () => session.id,
+        getTranscriptId: () => owner.transcriptId(),
         getBlobStore: () => runner?.getBlobStore?.() ?? getAgentBlobStore(
           store as Parameters<typeof getAgentBlobStore>[0],
         ),
@@ -3318,20 +3413,29 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           ? {}
           : { localToolPermission: projectedLocalToolPermission }),
       });
-      const getProductionConversationState = () => {
-        const runner = builtRunner as {
+      /**
+       * SUBAGENT-1. The conversation a turn STARTS from, read per shell rather than per session.
+       *
+       * This closed over `builtRunner` and `session.agentStore` for every shell, so a child's turn
+       * was built on top of the PARENT's conversation and settled back into it. That is the other
+       * half of why a subagent's own store came back empty: there was nothing of its own to read.
+       */
+      const conversationStateReaderFor = (owner: TurnOwner) => () => {
+        const runner = owner.resolveRunner() as {
           getAgentConversationStateStructure?: () => unknown;
         } | undefined;
         if (typeof runner?.getAgentConversationStateStructure === "function") {
           return runner.getAgentConversationStateStructure();
         }
-        const store = session.agentStore;
+        const store = owner.resolveStore();
         if (store != null && typeof store.getConversationStateStructure === "function") {
           return store.getConversationStateStructure();
         }
         throw new TypeError("production Agent conversation state is not bound");
       };
-      conversationStateForEpoch = getProductionConversationState;
+      // The compaction epoch belongs to the session, so it is bound once here and never reassigned
+      // by a child's shell -- makeRunShell runs again for every subagent that is created.
+      conversationStateForEpoch = conversationStateReaderFor(sessionTurnOwner);
       /**
        * One shell per runner identity. A child previously reused the parent's shell, so its turns
        * were built with the parent's toolHost -- which is why a real computerUse subagent still
@@ -3344,7 +3448,12 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
        * child's ledger and let a parent reply that made no tool call of its own be stamped
        * `evidenced` off its child's receipt.
        */
-      const makeRunShell = (shellSubagentKind?: string, shellConversationId: string = session.id) => {
+      const makeRunShell = (
+        shellSubagentKind?: string,
+        shellConversationId: string = session.id,
+        shellTurnOwner: TurnOwner = sessionTurnOwner,
+      ) => {
+      const getProductionConversationState = conversationStateReaderFor(shellTurnOwner);
       const runShellPromptAssembly = createProductionSystemPromptAssembly({
         isSubagentRunner: shellSubagentKind !== undefined,
         isBoxScopedSubagent: isBoxScopedSubagentKind(shellSubagentKind),
@@ -3390,6 +3499,25 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         agentId: string,
         args: SubagentAdapterArgs,
       ): SubagentSession {
+        /**
+         * SUBAGENT-1. The child's own store, and the rules its life runs by.
+         *
+         * Opened once and lazily, on the first turn, because turns are async and a subagent that is
+         * created and never run must not leave a sqlite handle behind. Held through setAgentStore,
+         * which is what makes the child's turn read, settle and persist against ITS conversation
+         * instead of its parent's. Closed exactly once, when the subagent is stopped or deleted, or
+         * when the host goes down -- and the runner drops the handle BEFORE the close, so no write
+         * can follow it.
+         */
+        let storage: SubagentStorageHandle | undefined;
+        let opening: Promise<SubagentStorageHandle> | undefined;
+        let released = false;
+        let childRunner: Runner | undefined;
+        const childTurnOwner: TurnOwner = {
+          resolveRunner: () => childRunner,
+          resolveStore: () => storage?.agentStore,
+          transcriptId: () => agentId,
+        };
         const child = deps.buildRunner({
           ...runnerOptions,
           conversationId: agentId,
@@ -3407,15 +3535,55 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           // which surfaces as "production subagent result is not bound". Give the
           // child the same production run shell the parent runs on; its own
           // conversationId/transcriptId keep its turns distinct.
-          productionTurnRunShell: makeRunShell(args.subagentType, agentId),
+          productionTurnRunShell: makeRunShell(args.subagentType, agentId, childTurnOwner),
           // TOOLS-18. The child inherits the parent's hooks through the spread above,
           // and its "started" would otherwise arrive on the parent's turn boundary.
           onRunLifecycle: noteRunLifecycleFor(agentId),
         });
+        childRunner = child;
+        // The session's stores first, so the child keeps the box's memory, skills and connectors;
+        // its agent store is then replaced below by its own, which is the one thing it must not
+        // share with its parent.
         bindSessionOwnedRunner(child);
         ownedRunners.add(child);
+        const openStorage = (): Promise<SubagentStorageHandle> => {
+          if (released) {
+            return Promise.reject(new Error(`subagent ${agentId} has been stopped`));
+          }
+          opening ??= (async () => {
+            const handle = await openSubagentStorage(agentId);
+            if (released) {
+              await handle.close();
+              throw new Error(`subagent ${agentId} has been stopped`);
+            }
+            storage = handle;
+            child.setAgentStore(handle.agentStore, hooks.agentProfileProvider);
+            return handle;
+          })();
+          return opening;
+        };
+        const release = async (): Promise<void> => {
+          if (released) return;
+          released = true;
+          subagentStorageClosers.delete(release);
+          ownedRunners.delete(child);
+          let handle: SubagentStorageHandle | undefined;
+          try {
+            handle = await opening;
+          } catch {
+            handle = undefined;
+          }
+          if (handle === undefined) return;
+          // Drop the reference first: after this line nothing holds a way to write through it.
+          storage = undefined;
+          child.setAgentStore(undefined, undefined);
+          await handle.close();
+        };
+        subagentStorageClosers.add(release);
         return {
           run: async (prompt, options) => {
+            const handle = await openStorage();
+            appendSubagentTranscriptEntry(handle, "user", prompt);
             const result = await child.run(prompt, options);
             if (typeof result !== "object" || result == null) {
               throw new TypeError("production subagent result is not bound");
@@ -3425,11 +3593,15 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
             if (typeof text !== "string" || typeof aborted !== "boolean") {
               throw new TypeError("production subagent result is not bound");
             }
+            // SUBAGENT-1. The text the parent is handed is the text the child's own store keeps, so
+            // the completion the parent reads and the transcript an operator opens cannot disagree.
+            appendSubagentTranscriptEntry(handle, "agent", text);
             return { text, aborted };
           },
           interrupt: reason => {
             child.interrupt(reason);
           },
+          dispose: () => release(),
           getResolvedOutline: () => child.getResolvedOutline(),
           getObservedToolCallCount: () => child.getObservedToolCallCount(),
           getActivitySnapshot: () => child.getActivitySnapshot(),
@@ -3749,7 +3921,7 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           getExecutor: () => createTextExecutor(owner.runContext.toolSession.getExecutor()),
         }),
         context: () => productionContext,
-        createSettleHost: createProductionTurnSettleHost,
+        createSettleHost: () => createProductionTurnSettleHost(shellTurnOwner),
         profilePromptSnapshots: () => session.db,
         // SUBAGENT-1. These two read the shell's own arguments rather than the parent's session.
         // `shellConversationId` has been a parameter of makeRunShell since it was written and the
@@ -3848,6 +4020,15 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         await candidate.dispose?.();
       }
       ownedRunners.clear();
+      // SUBAGENT-1. Any subagent store still open belongs to a child the host is taking down with it.
+      for (const close of [...subagentStorageClosers]) {
+        try {
+          await close();
+        } catch (error) {
+          console.error("[sand][subagent] could not close a child store at shutdown:", error);
+        }
+      }
+      subagentStorageClosers.clear();
       for (const unsubscribe of localToolPermissionSurfaces.values()) {
         unsubscribe();
       }

@@ -127,6 +127,7 @@ import "./voice-one-way-watchdog.test.mjs";
 import "./turn-tool-budget.test.mjs";
 import "./jev.test.mjs";
 import "./subagent-never-ran.test.mjs";
+import "./subagent-own-store.test.mjs";
 import "./memory-prompt-v2.test.mjs";
 import "./handbook-rubric.test.mjs";
 // KB-1f: the producer that puts an installed skill's name and description in the prompt.

@@ -42,6 +42,17 @@ export interface MaterializedSession {
   workflows: ReturnType<typeof workflowStoreForDbPath>;
   channels: ReturnType<typeof channelStoreForDbPath>;
 }
+/**
+ * SUBAGENT-1. What a subagent gets, and it is exactly a place to keep its conversation: a database,
+ * a blob store composed over it, and a close. No profile, no settings, no automations, no memory.
+ */
+export interface SubagentStorage {
+  readonly id: string;
+  readonly dbPath: string;
+  readonly db: SandAgentDb;
+  readonly agentStore: MaterializedSession["agentStore"];
+  close(): Promise<void>;
+}
 export interface MaterializationHost {
   ctx: unknown;
   rootDir: string;
@@ -129,6 +140,32 @@ export class SandSessionMaterialization {
       const session = this.compose(agentId, dbPath, db);
       for (const spec of DEFAULT_AGENT_AUTOMATIONS) session.automations.upsert(spec as never);
       return session;
+    } catch (error) { db.close(); throw error; }
+  }
+  /**
+   * SUBAGENT-1. A subagent's own storage, opened or created, and nothing a bot gets.
+   *
+   * The only creator of a store was `materializeSession`, and it also writes profile.json and
+   * settings.json and seeds DEFAULT_AGENT_AUTOMATIONS -- the things that make a directory a bot. So
+   * a background subagent, which runs real turns under its own id, had nowhere to put them: it was
+   * bound to its PARENT's store, its turns settled against the parent's conversation, and its own
+   * directory held an audit ledger and nothing else. This composes the store and stops.
+   *
+   * Giving a subagent a database does not make it a bot: `listAgentRecordIds` already skips every
+   * sand-subagent- directory, so neither the roster nor the agent cap can see one.
+   */
+  async openSubagentStorage(agentId: string): Promise<SubagentStorage> {
+    if (!isSandSubagentId(agentId)) throw new Error(`Not a subagent id: ${agentId}`);
+    const dbPath = getAgentDbPath(this.host.rootDir, agentId), db = new SandAgentDb(dbPath);
+    try {
+      db.set("agentId", agentId);
+      const agentStore = this.host.createAgentStore({ pool: this.requireWorkerPool(), agentId, dbPath, db });
+      // A resumed subagent keeps the conversation it already had; a fresh one resets to empty.
+      await agentStore.resetFromDb?.(this.host.ctx);
+      let closed = false;
+      // Checkpointed on close, because a subagent's store is read by people and tools after it has
+      // stopped: a write-ahead log left beside it is invisible to a read-only reader.
+      return { id: agentId, dbPath, db, agentStore, close: async () => { if (closed) return; closed = true; try { await agentStore.dispose(); } finally { db.close({ checkpoint: true }); } } };
     } catch (error) { db.close(); throw error; }
   }
   async openSession(agentId: string): Promise<MaterializedSession> {
