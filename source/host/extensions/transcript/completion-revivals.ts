@@ -30,7 +30,11 @@ export function buildSubagentRevivalPrompt(
 ): string {
   const blocks = completions.map(
       (completion) =>
-        `${completion.status === "error" ? `Background task "${completion.title}" (${completion.subagentType}) failed:` : `Background task "${completion.title}" (${completion.subagentType}) finished:`}\n${completion.result}${completion.quietOrigin != null ? `\n${describeQuietOriginNote(completion.quietOrigin)}` : ""}`,
+        // SUBAGENT-1. The title is the REQUEST, not the outcome, and it is worded so it cannot be
+        // read as one. deriveBackgroundSubagentTitle makes the title the prompt itself, so the old
+        // wording put the prompt on the line above an empty result and two workspaces reported
+        // getting their own words back as the answer.
+        `${completion.status === "error" ? `The background task you asked for ("${completion.title}", ${completion.subagentType}) did not finish. What went wrong:` : `The background task you asked for ("${completion.title}", ${completion.subagentType}) finished. What it produced:`}\n${completion.result}${completion.quietOrigin != null ? `\n${describeQuietOriginNote(completion.quietOrigin)}` : ""}`,
     ),
     intro =
       completions.length === 1
