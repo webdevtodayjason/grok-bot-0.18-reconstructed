@@ -360,7 +360,7 @@ test("the chip says it in plain words and names the decision to disagree with", 
 });
 
 test("the question wording is the harness's wording, not a paraphrase", () => {
-  const harness = readFileSync(path.join(repoRoot, "..", "gb", "scripts", "jev-eval.mjs"), "utf8");
+  const harness = readFileSync(path.join(repoRoot, "scripts", "jev-eval.mjs"), "utf8");
   for (const [id, question] of [...Object.entries(jev.JUDGMENT_1_QUESTIONS), ...Object.entries(jev.JUDGMENT_3_QUESTIONS)]) {
     assert.ok(harness.includes(question.instructions),
       `${id}: the instructions must be the harness's, word for word`);
