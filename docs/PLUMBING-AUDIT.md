@@ -1944,6 +1944,35 @@ per-box setting in `sand-host-settings.json` and the per-box secret are the only
 which is why both are read per turn and why a feature that must not reach a customer has to be
 behind one of them rather than behind a careful roll.
 
+## 6r. SEARCH-2: the route reads healthy and the search still cannot run (2026-09-18)
+
+A subagent on demo answered "Could not run that search. The web search service on this machine did
+not answer. Trying again will not help." Measured as a 2x2, parent and child on demo and on
+titanium: titanium succeeded 16 times out of 16 across both, demo failed 8 out of 8 across both. So
+it is per box, not per subagent, and it is not caused by SUBAGENT-1A.
+
+Everything a reader would check first is identical on the two boxes. `getWebSearchRoute` returns the
+same object byte for byte: route `connector`, `answers: true`, both TinyFish endpoints, key length
+44, `keySha256 9165ce2daa86`. `connectors.json` holds the same entry on both,
+`{"type":"http","url":"https://agent.tinyfish.ai/mcp","headers":{"Authorization":"Bearer
+${TINYFISH_API_KEY}"}}`. The connector secret is stored on both, same field, same length, same hash.
+
+The difference is a process. Titanium runs an `mcp-remote` bridge against that URL and has for ten
+days, and its connector reads `state: connected`. Demo has no such process at all and its connector
+reads `state: initializing`, which `connector-health.ts:119` treats as a handshake in progress. It
+has been in that state through at least eight failed searches over nine minutes, so it is stuck
+rather than connecting, and the host log carries no TinyFish or MCP line explaining why.
+
+**Two things this needs, and neither is a one-liner.** First, WebSearch should fall through to the
+workspace's own proxy route when the connector does not answer, instead of telling the person that
+trying again will not help. The sentence is true of the connector and false of the box: demo can
+reach a search another way, and its subagents proved it by falling back to WebFetch against
+Wikipedia by hand. Second, there is no way to restart one connector. The gateway has
+`addLocalConnector` and `removeLocalConnector` and nothing between them, so the only levers are a
+remove and re-add, which risks the connector secret that cannot be restored without reading the key,
+or a host restart, which on this fleet also swaps the bundle. A wedged bridge should be
+restartable on its own.
+
 ## 7. The wave plan
 
 **Closed 2026-09-02: waves 1–5 delivered (`docs/audit-wave1-prompts.md` … `audit-wave5-fixes.md`).
