@@ -1351,7 +1351,10 @@ export function createAdminApi({
       allowedBySlug.set(tenant.slug, rows.map((row) => String(row?.id ?? row?.alias ?? row)).filter(Boolean));
     }
     for (const row of await boxLabels().catch(() => [])) {
-      if (row?.read === true) pinsBySlug.set(row.slug, { model: row.model, label: row.label });
+      // `env` is the CONTAINER pin and is a different fact from `model`, which is the box's own
+      // file. Only the first one makes a control pointless: a file the console writes takes effect
+      // on the next message, and a container variable wins over it until the box is recreated.
+      if (row?.read === true) pinsBySlug.set(row.slug, { model: row.model, label: row.label, env: row.pinned === true, envBy: row.pinnedBy ?? "" });
     }
     let modelWhy = spending.configured ? "" : spending.why;
     if (spending.configured) {
@@ -1516,6 +1519,14 @@ export function createAdminApi({
           current,
           pinned: pinnedModel.length > 0,
           ...(pinnedModel.length === 0 ? {} : { pin: pinnedModel }),
+          // MODEL-1. FIXED IS NOT PINNED, and the two were one field until the picker vanished.
+          // `pinned` means the box's own file names a plan model, which is true of every workspace
+          // on this fleet and takes effect on the next message. `fixed` means the CONTAINER
+          // environment sets the endpoint, which no write of ours can beat until that box is
+          // recreated. The page drew its no-control branch on the first, so the Runs on select was
+          // on nobody's screen.
+          fixed: pin?.env === true,
+          ...(pin?.env === true && String(pin?.envBy ?? "").length > 0 ? { fixedBy: String(pin.envBy) } : {}),
           label: modelChoices.find((row) => row.alias === current)?.name
             ?? modelChoices.find((row) => row.alias === pinnedModel)?.name
             ?? String(pin?.label ?? ""),
@@ -1929,6 +1940,7 @@ export function createAdminApi({
           label: String(body.modelLabel ?? ""),
           read: body.read === true,
           pinned: body.pinned === true,
+          pinnedBy: String(body.pinnedBy ?? ""),
           why: body.read === true ? "" : String(body.why ?? "that workspace did not answer"),
         });
       }

@@ -1356,3 +1356,59 @@ test("the clients panel draws Models allowed beside Runs on, with the same note 
   assert.match(block, /"row allowedRow"/);
   assert.match(source, /card\.appendChild\(clientAllowedRow\(client\)\);/, "and the card actually draws it");
 });
+
+// MODEL-1b. FIXED IS NOT PINNED, and until this the Runs on picker was on nobody's screen.
+//
+// `pinned` means the box's own FILE names a plan model. That is true of every workspace on the
+// fleet, it is what the pin path itself writes, and it takes effect on the next message. `fixed`
+// means the CONTAINER ENVIRONMENT sets the endpoint, which no write of ours beats until that box is
+// recreated. The page drew its no-control branch on the first of those, so all ten live rows
+// rendered as "fixed in its own environment" with no select and no error anywhere.
+test("a box whose file names a plan still gets a picker; only its container environment takes one away", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "acme", name: "Acme", status: "running" });
+    // The relay's own two facts, kept apart: `model` is the file, `pinned` is the container.
+    const running = (pinned) => async (url) => {
+      const body = new URL(String(url)).pathname.endsWith("/running")
+        ? { read: true, model: "plan-zai", modelLabel: "GLM-5.3", pinned, pinnedBy: pinned ? "container env (SAND_OPENAI_COMPATIBLE_MODEL)" : null }
+        : {};
+      return { ok: true, status: 200, text: async () => JSON.stringify(body), json: async () => body };
+    };
+
+    // A relay this control plane can actually ask: without the pair, boxLabels answers nothing and
+    // neither fact is measured, which would make both halves below pass for the wrong reason.
+    const asRelay = (pinned) => createAdminApi({
+      config: { dataDir: root, tenantRoot: root, relayUrl: "http://relay.invalid", relayToken: "r".repeat(32) },
+      store,
+      client: { base: "", call: async () => ({}) },
+      json: () => {}, noContent: () => {},
+      publicAccount: (account) => account, publicTenant: (tenant) => tenant,
+      tenantView: async (row) => ({ slug: row.slug, status: row.status, coolify: { reachable: false } }),
+      tenantPower: async () => {}, tenantProvision: async () => {},
+      currentSession: () => ({ ok: false }),
+      log: () => {},
+      proxy: null,
+      proxyKeyOf: () => null,
+      fetchImpl: running(pinned),
+    });
+
+    const onFile = (await asRelay(false).clients()).clients[0];
+    assert.equal(onFile.model.pinned, true, "its file names a plan, which is what pinned has always meant");
+    assert.equal(onFile.model.fixed, false, "and that is not a reason to take the control away");
+
+    const inContainer = (await asRelay(true).clients()).clients[0];
+    assert.equal(inContainer.model.fixed, true);
+    assert.match(String(inContainer.model.fixedBy), /container env/, "the row says which names pin it");
+  });
+
+  // And the page keys its no-control branch on the container fact, draws the select over the plans
+  // the workspace MAY run, and marks the one it is pointed at rather than the one it has run.
+  const source = readFileSync(path.join(import.meta.dirname, "../cp/admin/admin.js"), "utf8");
+  const block = /function clientModelRow\(client\)[\s\S]*?\n  }\n/.exec(source)?.[0] ?? "";
+  assert.ok(block.length > 0);
+  assert.match(block, /if \(model\.fixed === true\)/, "only a container pin draws no control");
+  assert.doesNotMatch(block, /if \(model\.pinned === true\)/, "a file naming a plan is every workspace on the fleet");
+  assert.match(block, /client\.allowed/, "the options are the plans this workspace may run");
+  assert.match(block, /const pointedAt = String\(model\.pin \?\? ""\)/, "and the pin is what is marked");
+  assert.match(block, /options\.length < 2/, "one plan is not a picker");
+});

@@ -680,18 +680,44 @@
       return row;
     }
     const label = String(model.label ?? "").length > 0 ? model.label : String(model.current ?? "");
-    if (model.pinned === true) {
+    // FIXED, WHICH IS NOT THE SAME AS PINNED. This branch draws no control, so the only thing that
+    // may reach it is a box whose CONTAINER ENVIRONMENT sets the endpoint: nothing written through
+    // this console beats that until the box is recreated. The box's own FILE naming a plan model is
+    // not that -- it is every workspace on the fleet, it is what the pin path writes, and it takes
+    // effect on the next message. Keying this on `pinned` took the picker off every row on the
+    // page, silently, because a control that is not drawn raises nothing.
+    if (model.fixed === true) {
       row.appendChild(el("strong", null, label || "not measured"));
-      row.appendChild(el("span", "chip locked", "pinned"));
-      row.appendChild(el("span", "clock", model.why
-        || "This workspace's model is fixed in its own environment, so changing it here would record a different answer and change nothing the customer sees. Change it where it is pinned, or unpin it first."));
+      row.appendChild(el("span", "chip locked", "fixed"));
+      row.appendChild(el("span", "clock", model.fixedBy
+        || "This workspace's model is set in its container environment, so changing it here would record a different answer and change nothing the customer sees. Recreate that box without SAND_OPENAI_COMPATIBLE_* first."));
+      return row;
+    }
+    // WHAT IT IS POINTED AT, which is the pin, falling back to what it has run where no box answered.
+    // The select is marked with that rather than with `current`: the two differ the moment somebody
+    // switches and before the next turn, and a picker showing the old answer reads as a failed save.
+    const pointedAt = String(model.pin ?? "") || String(model.current ?? "");
+    const named = (alias) => (model.choices ?? []).find((one) => one.alias === alias)?.name || alias;
+    // THE PLANS THIS WORKSPACE MAY RUN, not every plan the proxy serves. Saving goes through the
+    // relay's use-included door, which since MODEL-1 refuses anything outside the entitlement, so a
+    // wider list would be a picker whose other entries answer 404. An older control plane sends no
+    // `allowed` at all, and the full list is what it had.
+    const allowed = Array.isArray(client.allowed) && client.allowed.length > 0
+      ? client.allowed
+      : (model.choices ?? []).map((one) => one.alias);
+    const options = allowed.map((alias) => ({ value: alias, label: named(alias) }));
+    // Nothing to pick between is not a picker. One allowed plan says so and points at Models
+    // allowed, which is the row directly underneath and the way to give it another.
+    if (options.length < 2) {
+      row.appendChild(el("strong", null, named(pointedAt) || label || "not measured"));
+      row.appendChild(el("span", "clock", options.length === 1
+        ? `${client.slug} may run one plan, so there is nothing to choose between. Allow it another below and this becomes a picker.`
+        : String(model.why || "this proxy serves no plan a customer has been given words for, so there is nothing to put this workspace on")));
       return row;
     }
     const select = document.createElement("select");
     select.className = "clientModel";
-    const options = (model.choices ?? []).map((one) => ({ value: one.alias, label: one.name || one.alias }));
-    if (options.length === 0) options.push({ value: String(model.current ?? ""), label: label || "not measured" });
-    fill(select, options, model.current ?? "");
+    fill(select, options, options.some((one) => one.value === pointedAt) ? pointedAt : options[0].value);
     row.appendChild(select);
     const save = el("button", "ghost small", "Save");
     save.type = "button";
