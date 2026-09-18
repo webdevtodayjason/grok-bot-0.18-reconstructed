@@ -242,6 +242,26 @@
   const press = (text, options = {}) => ({ kind: "button", text, variant: options.variant ?? "ghost", disabled: options.disabled === true, action: options.action, armed: options.armed === true });
 
   /**
+   * MODEL-1. The grey line under one plan on the Model card.
+   *
+   * Who serves it and how much it holds, and then the one fact a person cannot find out any other
+   * way: a model that cannot take a screenshot, and the model one goes to instead. Drawn on a
+   * measured false only. Null means nobody ever checked, and telling somebody a model is text only
+   * on the strength of an unasked question is a sentence they would plan around.
+   */
+  function planDetail(plan) {
+    const facts = [];
+    if (plan?.servedBy) facts.push(`Served by ${plan.servedBy}`);
+    if (Number.isFinite(plan?.contextWindow) && plan.contextWindow > 0) facts.push(`${Math.round(plan.contextWindow / 1000)}k context`);
+    const words = facts.join(" · ");
+    const fallback = plan?.vision?.supported === false
+      ? String(plan.vision.fallbackLabel || plan.vision.fallback || "")
+      : "";
+    if (fallback.length === 0) return words;
+    return `${words}${words.length > 0 ? ". " : ""}Text only, screenshots go to ${fallback}.`;
+  }
+
+  /**
    * Every row of one section, in order, as data.
    *
    * A fact the machine could not answer OMITS its row rather than drawing a zero or the words "not
@@ -408,9 +428,59 @@
           control: { kind: "textarea", value: f.askBefore, placeholder: "e.g. sending email, deleting anything, spending money", save: "Save", action: "ask-before" },
         });
       }
+      // MODEL-1. WHAT THIS WORKSPACE RUNS ON, and the way to move it.
+      //
+      // One entry per plan the workspace may run, which the relay has already narrowed to the set
+      // its own key can reach -- so this list is the entitlement rather than a filtered copy of one,
+      // and a plan that is not on it cannot be reached by pressing anything here.
+      //
+      // A LIST AND NOT A DROPDOWN, which is the whole reason this row exists beside the one below
+      // rather than replacing its control. Each plan carries facts a person needs BEFORE they
+      // choose: who serves it, how much it holds, and whether a screenshot can go to it at all. An
+      // <option> is one string and cannot say any of that, so the fact that plan-nemotron is text
+      // only would have been discoverable by switching to it and watching an image fail.
+      if (f.modelPlans != null && f.modelPlans.plans.length > 0) {
+        const one = f.modelPlans.plans.length === 1;
+        // A model fixed in the computer's own environment cannot be moved from here: the write
+        // would land in a file the computer ignores. Said out loud rather than drawn as a button
+        // that appears to work, which is the rule the operator's own console follows.
+        const fixed = f.modelPlans.pinned === true;
+        add({
+          id: "model", group: "computers",
+          label: "Model",
+          line: fixed
+            ? "What your plan runs Titan on. Your operator has fixed this one, so it cannot be changed here."
+            : one
+              ? "What your plan runs Titan on."
+              : "What your plan runs Titan on. A change takes effect from your next message.",
+          control: {
+            kind: "list",
+            empty: "",
+            items: f.modelPlans.plans.map((plan) => ({
+              id: plan.model,
+              label: plan.modelLabel || plan.name || plan.model,
+              line: planDetail(plan),
+              // The words on this entry are a vendor's and a machine's: the model's own name, who
+              // serves it, and the name of the model a screenshot goes to. The sweep reads the
+              // product's copy, which is the label and the line above, and never these.
+              machine: true,
+              current: plan.current === true,
+              state: plan.current === true ? "In use" : "",
+              // One plan is one entry and no switch. So is a pinned one, and so is the plan that is
+              // already running.
+              button: one || fixed || plan.current === true ? "" : "Use",
+              action: "model-use",
+            })),
+          },
+        });
+      }
       // Drawn ONLY where the plan group has members. pluginGroupSection's own rule: a heading over an
       // empty box is a promise with nothing behind it, and on a console with no plan there is none.
-      if (Array.isArray(f.planChoices) && f.planChoices.length > 0) {
+      //
+      // AND ONLY WHERE THE ROW ABOVE IS NOT. This select and that card change the same thing, and two
+      // controls for one fact on one screen is the shape SETTINGS-2 exists to delete. A relay that
+      // does not serve the plans route leaves modelPlans null and this is what draws, unchanged.
+      if (f.modelPlans == null && Array.isArray(f.planChoices) && f.planChoices.length > 0) {
         add({
           id: "answers", group: "computers",
           label: "How Titan answers",
@@ -613,9 +683,19 @@
         + `<span class="settings-meter-fill" style="width:${share}%"></span></span><small${machine}>${esc(control.text)}</small></div>`;
     }
     if (control.kind === "list") {
-      const items = (control.items ?? []).map((item) =>
-        `<div class="settings-subrow" data-settings-subrow="${esc(item.id)}"><div><strong>${esc(item.label)}</strong>${item.line ? `<small>${esc(item.line)}</small>` : ""}</div>`
-        + `<button class="ghost-button" type="button" data-settings-action="${esc(item.action)}" data-settings-id="${esc(item.id)}">${esc(item.button)}</button></div>`).join("");
+      const items = (control.items ?? []).map((item) => {
+        // An entry with no button is a real entry: the plan already running, and the only plan a
+        // workspace has. It draws what it IS instead of a control that would do nothing.
+        const act = item.button
+          ? `<button class="ghost-button" type="button" data-settings-action="${esc(item.action)}" data-settings-id="${esc(item.id)}">${esc(item.button)}</button>`
+          : item.state ? `<span class="status-pill">${esc(item.state)}</span>` : "";
+        return `<div class="settings-subrow" data-settings-subrow="${esc(item.id)}"${item.current === true ? " data-settings-current" : ""}>`
+          // data-machine-value on the WRAPPER, so it covers the name and the line under it. An
+          // entry's words are a vendor's and a machine's -- a model's name, who serves it -- and the
+          // banned-word sweep is about the copy this product wrote.
+          + `<div${item.machine === true ? " data-machine-value" : ""}><strong>${esc(item.label)}</strong>${item.line ? `<small>${esc(item.line)}</small>` : ""}</div>`
+          + `${act}</div>`;
+      }).join("");
       return `<div class="setting-control setting-control-block">${items.length > 0 ? items : `<p class="settings-note">${esc(control.empty ?? "")}</p>`}</div>`;
     }
     if (control.kind === "mount") return `<div class="setting-control setting-control-block" data-settings-mount="${esc(control.mount)}"></div>`;
@@ -778,6 +858,9 @@
       botName: typeof h.leadName === "function" ? h.leadName() : null,
       askBefore: typeof h.askBefore === "function" ? h.askBefore() : null,
       localToolPermission: typeof h.localToolPermission === "function" ? h.localToolPermission() : null,
+      // MODEL-1. Filled by the read below. Null is the answer on a relay with no plans route and on
+      // a console with no plan at all, and it is what decides which of the two model controls draws.
+      modelPlans: null,
       planChoices: typeof h.planChoices === "function" ? h.planChoices() : null,
       planCurrent: typeof h.planCurrent === "function" ? h.planCurrent() : null,
       canUpdateBox: typeof api?.updateBox === "function",
@@ -857,6 +940,14 @@
         if (mine?.address) next.botEmail = mine.address;
       }).catch(() => {}));
     }
+    // MODEL-1. The plans this workspace may run, and which one it is on. A relay that does not serve
+    // this route leaves the fact null, the Model card is not drawn, and the select that shipped
+    // before it draws instead -- so an older relay under a newer console loses nothing.
+    reads.push(ask("GET", "/model/plans").then((answer) => {
+      const plans = Array.isArray(answer?.plans) ? answer.plans : [];
+      if (plans.length === 0) return;
+      next.modelPlans = { plans, current: answer.current ?? null, pinned: answer.pinned === true };
+    }).catch(() => {}));
     reads.push(ask("GET", "/auth/devices").then((answer) => {
       next.devices = (answer.devices ?? []).filter((device) => device.revokedAt == null).map((device) => ({
         id: device.id,
@@ -1142,6 +1233,24 @@
       finally { node.disabled = false; }
       return;
     }
+    if (action === "model-use") {
+      // MODEL-1. The relay decides whether this workspace may run what was pressed; the button only
+      // carries which one. A refusal is said in the words the route sent rather than swallowed,
+      // because the one refusal a person can actually hit here -- a plan their workspace lost
+      // between this page loading and this press -- is one they need to read.
+      const id = String(node.dataset.settingsId ?? "");
+      if (id.length === 0) return;
+      node.disabled = true;
+      try {
+        const answer = await ask("POST", "/model/use", { model: id });
+        toast(answer?.pinned === true
+          ? "That was saved, and your computer keeps running what your operator fixed it to."
+          : `Titan runs ${answer?.modelLabel || answer?.model || "that"} from your next message.`);
+        await refresh();
+      } catch (error) { toast(`That was not changed: ${error.message}`); }
+      finally { node.disabled = false; }
+      return;
+    }
     if (action === "revoke-device") {
       const id = node.dataset.settingsId;
       node.disabled = true;
@@ -1356,6 +1465,9 @@
     rowsFor,
     accountMenuRows,
     customerCopy,
+    // MODEL-1. A function of one plan row and nothing else, so the "text only" line can be measured
+    // without a document, a fetch or a relay.
+    planDetail,
     BANNED,
     BANNED_WORDS,
     BANNED_VENDORS,
