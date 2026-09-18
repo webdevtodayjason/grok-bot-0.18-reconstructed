@@ -44,11 +44,15 @@ export function buildPrompt(marker) {
   ].join("\n");
 }
 
-/** Tool names the Task dispatch goes out under, which differ by prompt version. */
-const TASK_TOOL = /task|subagent|multitask/i;
-
-export function wasDispatched(toolNames = []) {
-  return toolNames.some((name) => TASK_TOOL.test(String(name)));
+/**
+ * Whether a subagent ran at all. Asking the model to call Task does not work: measured four times
+ * across both staff boxes and three promptings, the parent always judged the work small enough to
+ * do itself, and a run in which nothing was delegated measures nothing. The browser rung dispatches
+ * a subagent through the SAME runtime without the model choosing to, so the gate asks for the
+ * browser and counts the directory that appears.
+ */
+export function wasDispatched(subagentDirs = []) {
+  return subagentDirs.length > 0;
 }
 
 /**
@@ -63,7 +67,7 @@ export function judgeSubagentWork({ fileText = "", marker = "", auditToolCalls =
   // that never dispatched measures nothing, so it is called inconclusive rather than scored.
   if (!dispatched) {
     return {
-      checks: [{ id: "dispatch", ok: false, why: "the parent never called Task, so no subagent ran and this run measures nothing" }],
+      checks: [{ id: "dispatch", ok: false, why: "no subagent directory appeared, so nothing was delegated and this run measures nothing" }],
       passed: 0, total: 1, inconclusive: true,
     };
   }
@@ -153,7 +157,6 @@ async function runOnBox() {
     const outline = await call("getConversationOutline", { id: agentId }).catch(() => []);
     const outlineRows = Array.isArray(outline) ? outline : [];
     const toolNames = outlineRows.filter((row) => row?.kind === "tool-call").map((row) => String(row?.name ?? ""));
-    const dispatched = wasDispatched(toolNames);
     console.log(`the parent called: ${[...new Set(toolNames)].join(", ") || "no tools the outline carries"}`);
 
     const transcript = await call("getAgentTranscript", { id: agentId }).catch(() => []);
@@ -162,7 +165,7 @@ async function runOnBox() {
     // into this conversation, which is where the reporters saw their own words returned.
     const revival = entries.map((row) => String(row?.content ?? row?.message?.content ?? ""))
       .filter((text) => /background task/i.test(text)).join("\n\n");
-    const verdict = judgeSubagentWork({ fileText, marker, auditToolCalls, transcriptEntries, parentText: revival, prompt, dispatched });
+    const verdict = judgeSubagentWork({ fileText, marker, auditToolCalls, transcriptEntries, parentText: revival, prompt, dispatched: wasDispatched(fresh) });
 
     console.log("\n---- the verdict ----\n");
     for (const row of verdict.checks) console.log(`  ${row.ok ? "PASS" : "FAIL"}  ${row.id}: ${row.why}`);
@@ -180,10 +183,10 @@ async function runOnBox() {
 function selftest() {
   const prompt = buildPrompt("SUBAGENT1-AAAA");
   const bad = judgeSubagentWork({ fileText: "", marker: "SUBAGENT1-AAAA", auditToolCalls: 0, transcriptEntries: 0, parentText: `Background task "${prompt.slice(0, 60)}" finished`, prompt });
-  const good = judgeSubagentWork({ fileText: "SUBAGENT1-AAAA Reykjavik", marker: "SUBAGENT1-AAAA", auditToolCalls: 3, transcriptEntries: 7, parentText: "Wrote the file with the capital.", prompt });
-  const none = judgeSubagentWork({ fileText: "SUBAGENT1-AAAA Reykjavik", marker: "SUBAGENT1-AAAA", auditToolCalls: 0, transcriptEntries: 0, parentText: "", prompt, dispatched: false });
+  const good = judgeSubagentWork({ fileText: "SUBAGENT1-AAAA Example Domain", marker: "SUBAGENT1-AAAA", auditToolCalls: 3, transcriptEntries: 7, parentText: "Wrote the file with the capital.", prompt });
+  const none = judgeSubagentWork({ fileText: "SUBAGENT1-AAAA Example Domain", marker: "SUBAGENT1-AAAA", auditToolCalls: 0, transcriptEntries: 0, parentText: "", prompt, dispatched: false });
   const ok = bad.passed === 0 && good.passed === 4 && none.inconclusive === true && none.total === 1
-    && wasDispatched(["webSearchToolCall", "taskToolCall"]) && !wasDispatched(["webSearchToolCall"]);
+    && wasDispatched(["some-subagent-id"]) && !wasDispatched([]);
   console.log(`selftest: the reported shape scores ${bad.passed} of 4, a real run scores ${good.passed} of 4,`
     + ` and a run the parent did itself is ${none.inconclusive ? "inconclusive" : "SCORED, which is wrong"}`);
   console.log(ok ? "selftest OK" : "selftest BROKEN");
