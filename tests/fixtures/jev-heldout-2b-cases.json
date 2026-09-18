@@ -1,0 +1,1017 @@
+[
+  {
+    "id": "heldout-2b-01",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "3/8 in. x 6 in. hot-dip galvanized hex bolt",
+        "pack_sizes": [
+          25,
+          50
+        ],
+        "location": "Cedar Park, TX",
+        "stores_named": [
+          "Home Depot",
+          "Lowe's"
+        ]
+      },
+      "result": {
+        "source": "homedepot.com",
+        "title": "Everbilt 3/8 in. x 6 in. Hot-Dip Galvanized Hex Bolt (25-Pack)",
+        "snippet": "$18.47 /box. 25-Pack. In stock at Cedar Park #6810. Aisle 12, Bay 004."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": true,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_pack_size",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": false
+    },
+    "note": "Hardware: exact size and finish, 25-Pack matches, Home Depot domain, in stock at the named town."
+  },
+  {
+    "id": "heldout-2b-02",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Anker 735 GaN 65W USB-C charger, black",
+        "pack_sizes": [],
+        "location": "Round Rock, TX",
+        "stores_named": [
+          "Best Buy"
+        ]
+      },
+      "result": {
+        "source": "bestbuy.com",
+        "title": "Anker - 735 GaN 65W USB-C Charger - Black",
+        "snippet": "$59.99. Pickup today at Round Rock, TX store. 4 in stock."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": false,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": false
+    },
+    "note": "Electronics: no pack sizes asked, so the missing count is not required and nothing needs fetching."
+  },
+  {
+    "id": "heldout-2b-03",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "ibuprofen 200 mg coated tablets",
+        "pack_sizes": [
+          100
+        ],
+        "location": "Leander, TX",
+        "stores_named": [
+          "CVS"
+        ]
+      },
+      "result": {
+        "source": "cvs.com",
+        "title": "CVS Health Ibuprofen 200 mg Coated Tablets, 100 CT",
+        "snippet": "$8.79. Pack of 100. In stock at Leander, TX #7742, ready in 30 minutes."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": true,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_pack_size",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": false
+    },
+    "note": "Pharmacy: strength and form match, pack of 100 matches, CVS domain, stock named at the town."
+  },
+  {
+    "id": "heldout-2b-04",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Bounty Select-A-Size paper towels, double rolls",
+        "pack_sizes": [
+          8,
+          12
+        ],
+        "location": "Pflugerville, TX",
+        "stores_named": [
+          "H-E-B"
+        ]
+      },
+      "result": {
+        "source": "heb.com",
+        "title": "Bounty Select-A-Size Paper Towels, 12 Double Rolls",
+        "snippet": "$24.98. 12-count. In stock at H-E-B Pflugerville #482, curbside pickup today."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": true,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_pack_size",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": false
+    },
+    "note": "Groceries: 12-count is one of the accepted pack sizes and the named store carries it today."
+  },
+  {
+    "id": "heldout-2b-05",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Bosch ICON 22 in. beam wiper blade",
+        "pack_sizes": [],
+        "location": "Georgetown, TX",
+        "stores_named": [
+          "O'Reilly Auto Parts"
+        ]
+      },
+      "result": {
+        "source": "oreillyauto.com",
+        "title": "Bosch ICON Beam Wiper Blade 22 in.",
+        "snippet": "$32.99 each. In stock at Georgetown, TX store #1284. Ready for pickup in 30 minutes."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": false,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": false
+    },
+    "note": "Auto parts: sold each with no pack constraint, so every required label is confirmed."
+  },
+  {
+    "id": "heldout-2b-06",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Purina Pro Plan Sensitive Skin & Stomach Salmon & Rice dry dog food, 30 lb bag",
+        "pack_sizes": [],
+        "location": "Cedar Park, TX",
+        "stores_named": [
+          "Petco",
+          "PetSmart"
+        ]
+      },
+      "result": {
+        "source": "petsmart.com",
+        "title": "Purina Pro Plan Sensitive Skin & Stomach Salmon & Rice Dry Dog Food, 30 lb",
+        "snippet": "$74.98. In stock at PetSmart Cedar Park #1907, same-day pickup."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": false,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": false
+    },
+    "note": "Pet supplies: recipe and bag weight match, one of two named chains, stock at the town store."
+  },
+  {
+    "id": "heldout-2b-07",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "GE 1.6 cu. ft. over-the-range microwave, stainless steel",
+        "pack_sizes": [],
+        "location": "Austin, TX",
+        "stores_named": [
+          "Lowe's"
+        ]
+      },
+      "result": {
+        "source": "lowes.com",
+        "title": "GE 1.6-cu ft Over-the-Range Microwave (Stainless Steel)",
+        "snippet": "$279.00. In stock at Austin - Brodie Lane, TX. Available for pickup today."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": false,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": false
+    },
+    "note": "Appliances: capacity and finish match and the named branch is inside the requested city."
+  },
+  {
+    "id": "heldout-2b-08",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "1/4 in. x 2 in. zinc-plated lag screw",
+        "pack_sizes": [
+          50
+        ],
+        "location": "Round Rock, TX",
+        "stores_named": []
+      },
+      "result": {
+        "source": "acehardware.com",
+        "title": "Hillman 1/4 in. x 2 in. Zinc-Plated Lag Screw, 50-Pack",
+        "snippet": "$12.99. 50-Pack. In stock at Ace Hardware Round Rock #14238, pick up today."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": true,
+      "confirms_store": false,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_pack_size",
+        "confirms_stock_for_location"
+      ],
+      "fetch": false
+    },
+    "note": "Hardware: no chain was named, so the store label is false but drops out of required."
+  },
+  {
+    "id": "heldout-2b-09",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "SanDisk Extreme 128 GB microSDXC memory card",
+        "pack_sizes": [
+          2
+        ],
+        "location": "Naperville, IL",
+        "stores_named": [
+          "Best Buy",
+          "Target"
+        ]
+      },
+      "result": {
+        "source": "target.com",
+        "title": "SanDisk Extreme 128GB microSDXC Memory Card (2-Pack)",
+        "snippet": "$34.99. 2-pack. In stock at Naperville North, IL. Order pickup ready within 2 hours."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": true,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_pack_size",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": false
+    },
+    "note": "Electronics: 2-pack matches, Target is one of the named chains, pickup at a Naperville branch."
+  },
+  {
+    "id": "heldout-2b-10",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Core Power chocolate protein shake 26 g, 14 fl oz",
+        "pack_sizes": [
+          4,
+          12
+        ],
+        "location": "Tempe, AZ",
+        "stores_named": [
+          "Safeway"
+        ]
+      },
+      "result": {
+        "source": "safeway.com",
+        "title": "Core Power Chocolate Protein Shake 26g, 14 fl oz - 4 Pack",
+        "snippet": "$11.49. 4 pack. In stock at Safeway Tempe #1573, pickup today after 4 PM."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": true,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_pack_size",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": false
+    },
+    "note": "Groceries: 4 pack is one of the two accepted counts and the Tempe store shows stock."
+  },
+  {
+    "id": "heldout-2b-11",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "1/2 in. x 8 in. hot-dip galvanized carriage bolt",
+        "pack_sizes": [
+          10
+        ],
+        "location": "Leander, TX",
+        "stores_named": [
+          "Home Depot"
+        ]
+      },
+      "result": {
+        "source": "homedepot.com",
+        "title": "Everbilt 1/2 in. x 8 in. Hot-Dip Galvanized Carriage Bolt (10-Pack)",
+        "snippet": "$21.98 per pack of 10. Check store availability. Ships free to store."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": true,
+      "confirms_store": true,
+      "confirms_stock_for_location": false,
+      "required": [
+        "confirms_item",
+        "confirms_pack_size",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Hardware: only stock is unconfirmed, since check store availability names no branch."
+  },
+  {
+    "id": "heldout-2b-12",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Duracell CR2032 lithium coin battery",
+        "pack_sizes": [
+          4,
+          6
+        ],
+        "location": "Cedar Park, TX",
+        "stores_named": [
+          "Walgreens"
+        ]
+      },
+      "result": {
+        "source": "walgreens.com",
+        "title": "Duracell CR2032 Lithium Coin Battery",
+        "snippet": "$6.49. 1 each. In stock at Walgreens Cedar Park #11208, ready in 1 hour."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": false,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_pack_size",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Electronics: 1 each is not 4 or 6, so the pack count alone sends this to the page."
+  },
+  {
+    "id": "heldout-2b-13",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Flonase Allergy Relief nasal spray, 0.62 fl oz",
+        "pack_sizes": [],
+        "location": "Round Rock, TX",
+        "stores_named": [
+          "CVS",
+          "Walgreens"
+        ]
+      },
+      "result": {
+        "source": "walmart.com",
+        "title": "Flonase Allergy Relief Nasal Spray, 0.62 fl oz",
+        "snippet": "$21.44. In stock at Round Rock Supercenter #3438. Pickup today."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": false,
+      "confirms_store": false,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Pharmacy: right item and local stock, but Walmart is not one of the two named pharmacies."
+  },
+  {
+    "id": "heldout-2b-14",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Cholula Original hot sauce, 12 fl oz",
+        "pack_sizes": [],
+        "location": "Boise, ID",
+        "stores_named": [
+          "Albertsons"
+        ]
+      },
+      "result": {
+        "source": "albertsons.com",
+        "title": "Cholula Hot Sauce Original - 12 Fl. Oz.",
+        "snippet": "$5.99. Available for delivery or pickup. Sign in to see availability at your store."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": false,
+      "confirms_store": true,
+      "confirms_stock_for_location": false,
+      "required": [
+        "confirms_item",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Groceries: a national listing that defers availability to sign-in confirms no branch stock."
+  },
+  {
+    "id": "heldout-2b-15",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Mobil 1 Extended Performance 5W-30 motor oil, 5 quart jug",
+        "pack_sizes": [],
+        "location": "Pflugerville, TX",
+        "stores_named": [
+          "AutoZone"
+        ]
+      },
+      "result": {
+        "source": "autozone.com",
+        "title": "Mobil 1 Extended Performance 5W-30 Motor Oil 5 Quart",
+        "snippet": "$36.99. Ships in 3 days to your address. Not available for same-day pickup."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": false,
+      "confirms_store": true,
+      "confirms_stock_for_location": false,
+      "required": [
+        "confirms_item",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Auto parts: ships in 3 days is shipping, not stock at a store near the location."
+  },
+  {
+    "id": "heldout-2b-16",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Temptations Classic Tasty Chicken cat treats, 3 oz pouch",
+        "pack_sizes": [
+          4,
+          6
+        ],
+        "location": "Georgetown, TX",
+        "stores_named": [
+          "Petco"
+        ]
+      },
+      "result": {
+        "source": "petco.com",
+        "title": "Temptations Classic Tasty Chicken Cat Treats, 3 oz",
+        "snippet": "$2.49. Sold individually. In stock at Petco Georgetown, TX, curbside pickup today."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": false,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_pack_size",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Pet supplies: sold individually states no multipack count, so only the pack label fails."
+  },
+  {
+    "id": "heldout-2b-17",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "LG 27 cu. ft. side-by-side refrigerator, PrintProof stainless steel",
+        "pack_sizes": [],
+        "location": "Dayton, OH",
+        "stores_named": [
+          "Best Buy"
+        ]
+      },
+      "result": {
+        "source": "lowes.com",
+        "title": "LG 27-cu ft Side-by-Side Refrigerator (PrintProof Stainless Steel)",
+        "snippet": "$1,598.00. In stock at Dayton South, OH. Available for delivery Saturday or store pickup."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": false,
+      "confirms_store": false,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Appliances: exact model and local stock, but the shopper named Best Buy and this is Lowe's."
+  },
+  {
+    "id": "heldout-2b-18",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Gorilla waterproof patch and seal tape, 4 in. x 10 ft., black",
+        "pack_sizes": [
+          2
+        ],
+        "location": "Cedar Park, TX",
+        "stores_named": [
+          "Lowe's"
+        ]
+      },
+      "result": {
+        "source": "lowes.com",
+        "title": "Gorilla Waterproof Patch & Seal Tape 4-in x 10-ft Black, 2-Pack",
+        "snippet": "$27.94 for the 2-pack. Check nearby stores for availability. Free shipping on orders over $45."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": true,
+      "confirms_store": true,
+      "confirms_stock_for_location": false,
+      "required": [
+        "confirms_item",
+        "confirms_pack_size",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Hardware: check nearby stores is an invitation to look, not a statement of stock."
+  },
+  {
+    "id": "heldout-2b-19",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Belkin BoostCharge 240W USB-C to USB-C cable, 2 m, white",
+        "pack_sizes": [],
+        "location": "Austin, TX",
+        "stores_named": [
+          "Micro Center"
+        ]
+      },
+      "result": {
+        "source": "microcenter.com",
+        "title": "Belkin BoostCharge 240W USB-C to USB-C Cable 2m - White",
+        "snippet": "$24.99. Online only, not stocked in stores."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": false,
+      "confirms_store": true,
+      "confirms_stock_for_location": false,
+      "required": [
+        "confirms_item",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Electronics: the listing rules out store stock, so local availability is not confirmed."
+  },
+  {
+    "id": "heldout-2b-20",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Zyrtec 10 mg allergy tablets",
+        "pack_sizes": [
+          30,
+          60
+        ],
+        "location": "Leander, TX",
+        "stores_named": [
+          "H-E-B"
+        ]
+      },
+      "result": {
+        "source": "heb.com",
+        "title": "Zyrtec Allergy Relief Tablets 10 mg",
+        "snippet": "$19.62 each. In stock at H-E-B Leander Crossing #641, aisle 11. Curbside available today."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": false,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_pack_size",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Pharmacy: no tablet count appears anywhere in the title or snippet, so the pack label fails."
+  },
+  {
+    "id": "heldout-2b-21",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "3/8 in. x 6 in. zinc-plated hex bolt",
+        "pack_sizes": [
+          25
+        ],
+        "location": "Round Rock, TX",
+        "stores_named": [
+          "Home Depot"
+        ]
+      },
+      "result": {
+        "source": "homedepot.com",
+        "title": "Everbilt 3/8 in. x 8 in. Zinc-Plated Hex Bolt (25-Pack)",
+        "snippet": "$16.22 per 25-Pack. In stock at Round Rock #6543, aisle 14 bay 012."
+      }
+    },
+    "expected": {
+      "confirms_item": false,
+      "confirms_pack_size": true,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_pack_size",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Hardware variant: an 8 in. bolt is not the 6 in. bolt asked for, even with everything else right."
+  },
+  {
+    "id": "heldout-2b-22",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "1/2 in. x 10 in. hot-dip galvanized hex bolt",
+        "pack_sizes": [],
+        "location": "Cedar Park, TX",
+        "stores_named": [
+          "Ace Hardware"
+        ]
+      },
+      "result": {
+        "source": "acehardware.com",
+        "title": "Hillman 1/2 in. x 10 in. Zinc-Plated Hex Bolt",
+        "snippet": "$4.19 each. In stock at Ace Hardware Cedar Park #14701, pick up today."
+      }
+    },
+    "expected": {
+      "confirms_item": false,
+      "confirms_pack_size": false,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Hardware finish: zinc-plated is not hot-dip galvanized, so the item is a different part."
+  },
+  {
+    "id": "heldout-2b-23",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "5/16 in. x 4 in. stainless steel hex bolt",
+        "pack_sizes": [
+          10
+        ],
+        "location": "Leander, TX",
+        "stores_named": [
+          "Lowe's"
+        ]
+      },
+      "result": {
+        "source": "lowes.com",
+        "title": "Hillman 5/16-in x 4-in Stainless Steel Lag Screw, 10-Pack",
+        "snippet": "$14.98 for a pack of 10. In stock at Leander, TX #2917. Pickup today."
+      }
+    },
+    "expected": {
+      "confirms_item": false,
+      "confirms_pack_size": true,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_pack_size",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Hardware type: a lag screw is a different fastener from the hex bolt requested."
+  },
+  {
+    "id": "heldout-2b-24",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Sony WH-1000XM5 wireless headphones, midnight blue",
+        "pack_sizes": [],
+        "location": "Naperville, IL",
+        "stores_named": [
+          "Best Buy"
+        ]
+      },
+      "result": {
+        "source": "bestbuy.com",
+        "title": "Sony - WH-1000XM5 Wireless Noise Canceling Headphones - Silver",
+        "snippet": "$349.99. In stock at Naperville, IL. Pickup today at 5 PM."
+      }
+    },
+    "expected": {
+      "confirms_item": false,
+      "confirms_pack_size": false,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Electronics colourway: silver is a different colourway from midnight blue, so not the item."
+  },
+  {
+    "id": "heldout-2b-25",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Purolator Boss PBL14459 oil filter",
+        "pack_sizes": [],
+        "location": "Georgetown, TX",
+        "stores_named": [
+          "Advance Auto Parts"
+        ]
+      },
+      "result": {
+        "source": "oreillyauto.com",
+        "title": "Purolator Boss PBL14476 Oil Filter",
+        "snippet": "$11.99. In stock at Georgetown, TX #2210. Ready in 30 minutes."
+      }
+    },
+    "expected": {
+      "confirms_item": false,
+      "confirms_pack_size": false,
+      "confirms_store": false,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Auto parts: a neighbouring filter number at the wrong chain, though the town stock is real."
+  },
+  {
+    "id": "heldout-2b-26",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Chobani Zero Sugar vanilla yogurt, 32 oz tub",
+        "pack_sizes": [],
+        "location": "Pflugerville, TX",
+        "stores_named": [
+          "H-E-B"
+        ]
+      },
+      "result": {
+        "source": "target.com",
+        "title": "Chobani Zero Sugar Vanilla Yogurt - 5.3oz",
+        "snippet": "$1.59. In stock at Pflugerville, TX. Order Pickup ready within 2 hours."
+      }
+    },
+    "expected": {
+      "confirms_item": false,
+      "confirms_pack_size": false,
+      "confirms_store": false,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Groceries: a 5.3 oz cup is not the 32 oz tub, and Target is not the named grocer."
+  },
+  {
+    "id": "heldout-2b-27",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Blue Buffalo Wilderness chicken recipe grain-free dry cat food, 12 lb bag",
+        "pack_sizes": [],
+        "location": "Austin, TX",
+        "stores_named": [
+          "Chewy",
+          "Petco"
+        ]
+      },
+      "result": {
+        "source": "petco.com",
+        "title": "Blue Buffalo Wilderness Salmon Recipe Grain-Free Dry Cat Food, 12 lb",
+        "snippet": "$49.98. Check store availability near you. Free shipping over $35."
+      }
+    },
+    "expected": {
+      "confirms_item": false,
+      "confirms_pack_size": false,
+      "confirms_store": true,
+      "confirms_stock_for_location": false,
+      "required": [
+        "confirms_item",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Pet supplies: salmon is a different recipe and no branch stock is stated either."
+  },
+  {
+    "id": "heldout-2b-28",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Whirlpool 4.5 cu. ft. top-load washer, white",
+        "pack_sizes": [],
+        "location": "Boise, ID",
+        "stores_named": [
+          "Home Depot"
+        ]
+      },
+      "result": {
+        "source": "bestbuy.com",
+        "title": "Whirlpool - 3.8 Cu. Ft. Top Load Washer - White",
+        "snippet": "$649.99. In stock at Boise, ID. Available for store pickup Friday."
+      }
+    },
+    "expected": {
+      "confirms_item": false,
+      "confirms_pack_size": false,
+      "confirms_store": false,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Appliances: a 3.8 cu. ft. drum is a different machine, and the chain is wrong as well."
+  },
+  {
+    "id": "heldout-2b-29",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "Nature Made vitamin D3 2000 IU softgels",
+        "pack_sizes": [
+          90,
+          180
+        ],
+        "location": "Round Rock, TX",
+        "stores_named": [
+          "Walgreens"
+        ]
+      },
+      "result": {
+        "source": "walgreens.com",
+        "title": "Nature Made Vitamin D3 1000 IU (25 mcg) Softgels, 90 Count",
+        "snippet": "$13.99. 90 count bottle. In stock at Walgreens Round Rock #6115, pickup in 1 hour."
+      }
+    },
+    "expected": {
+      "confirms_item": false,
+      "confirms_pack_size": true,
+      "confirms_store": true,
+      "confirms_stock_for_location": true,
+      "required": [
+        "confirms_item",
+        "confirms_pack_size",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Pharmacy strength: 1000 IU is not 2000 IU, though the 90 count matches an accepted size."
+  },
+  {
+    "id": "heldout-2b-30",
+    "judgment": "2b",
+    "state": {
+      "constraints": {
+        "item": "DeWalt 20V MAX 5.0 Ah lithium-ion battery pack",
+        "pack_sizes": [
+          2
+        ],
+        "location": "Cedar Park, TX",
+        "stores_named": [
+          "Home Depot",
+          "Lowe's"
+        ]
+      },
+      "result": {
+        "source": "northerntool.com",
+        "title": "DEWALT 20V MAX 5.0Ah Lithium-Ion Battery Pack",
+        "snippet": "$99.00. 1 each. Ships from warehouse in 2 business days."
+      }
+    },
+    "expected": {
+      "confirms_item": true,
+      "confirms_pack_size": false,
+      "confirms_store": false,
+      "confirms_stock_for_location": false,
+      "required": [
+        "confirms_item",
+        "confirms_pack_size",
+        "confirms_store",
+        "confirms_stock_for_location"
+      ],
+      "fetch": true
+    },
+    "note": "Hardware: the right battery, but a chain nobody named, a single unit and warehouse shipping."
+  }
+]

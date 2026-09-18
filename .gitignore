@@ -72,3 +72,7 @@ undefined/
 # with no state dir set, which is what verify-settings and verify-voice do, and it is 0600 because it
 # carries the realtime key the operator's own workspace falls back to (KEYS-1).
 /ui/voice.json
+
+# The Jev eval output (JEV-1). Synthetic cases, but the results stay internal and are regenerable
+# with `node scripts/jev-eval.mjs`, so they are never committed.
+/tests/fixtures/jev-eval-out*.json

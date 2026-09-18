@@ -1,0 +1,999 @@
+[
+  {
+    "id": "ho-j1-01-hardware-stores-no-place",
+    "judgment": 1,
+    "state": {
+      "request": "Can I pick up exterior primer at Home Depot or Ace Hardware today?",
+      "workspace_location": "Tulsa, Oklahoma"
+    },
+    "expected": {
+      "scope": "local_in_store",
+      "names_stores": true,
+      "names_location": false,
+      "names_quantity": false,
+      "substitutes_ok": false
+    },
+    "note": "Pick up today is shelf or pickup at a physical store, two chains are named in the text, and the city is only in workspace_location so it does not count."
+  },
+  {
+    "id": "ho-j1-02-hardware-place-no-store",
+    "judgment": 1,
+    "state": {
+      "request": "Which shops in Bellingham have copper flashing on the shelf this afternoon?",
+      "workspace_location": "Bellingham, Washington"
+    },
+    "expected": {
+      "scope": "local_in_store",
+      "names_stores": false,
+      "names_location": true,
+      "names_quantity": false,
+      "substitutes_ok": false
+    },
+    "note": "On the shelf this afternoon is local stock, the request text itself names Bellingham, and no chain is named."
+  },
+  {
+    "id": "ho-j1-03-groceries-quantity-near-me",
+    "judgment": 1,
+    "state": {
+      "request": "I need 48 cans of sparkling water for a party Saturday, where can I grab them near me?",
+      "workspace_location": "Des Moines, Iowa"
+    },
+    "expected": {
+      "scope": "local_in_store",
+      "names_stores": false,
+      "names_location": true,
+      "names_quantity": true,
+      "substitutes_ok": false
+    },
+    "note": "Near me counts as a location phrase, 48 cans is a stated quantity, and grabbing them Saturday means a physical store."
+  },
+  {
+    "id": "ho-j1-04-pet-substitutes-neighbourhood",
+    "judgment": 1,
+    "state": {
+      "request": "Looking for Blue Ridge grain free salmon dog food in the 24 pound bag somewhere in the Northgate area, and any similar brand is fine if they are out.",
+      "workspace_location": "Seattle, Washington"
+    },
+    "expected": {
+      "scope": "local_in_store",
+      "names_stores": false,
+      "names_location": true,
+      "names_quantity": true,
+      "substitutes_ok": true
+    },
+    "note": "Northgate is a named neighbourhood, the 24 pound bag is a stated pack size, and any similar brand is fine states that a substitute is acceptable."
+  },
+  {
+    "id": "ho-j1-05-electronics-online-only",
+    "judgment": 1,
+    "state": {
+      "request": "Just order me a USB-C to HDMI adapter and have it shipped, I do not care where it comes from.",
+      "workspace_location": "Boise, Idaho"
+    },
+    "expected": {
+      "scope": "online_ship",
+      "names_stores": false,
+      "names_location": false,
+      "names_quantity": false,
+      "substitutes_ok": false
+    },
+    "note": "Order and ship with an explicit statement that the origin does not matter is the online rung, and not caring where it ships from is about place, not about accepting a different item."
+  },
+  {
+    "id": "ho-j1-06-appliance-price-only",
+    "judgment": 1,
+    "state": {
+      "request": "What does a mid range front load washer usually run these days?",
+      "workspace_location": "Akron, Ohio"
+    },
+    "expected": {
+      "scope": "national_price",
+      "names_stores": false,
+      "names_location": false,
+      "names_quantity": false,
+      "substitutes_ok": false
+    },
+    "note": "Usually run these days asks for a general price with no store and no place, so it is the price rung and nothing else is named."
+  },
+  {
+    "id": "ho-j1-07-pharmacy-informational",
+    "judgment": 1,
+    "state": {
+      "request": "Is cetirizine the same thing as loratadine, and which one makes you less drowsy?",
+      "workspace_location": "Portland, Maine"
+    },
+    "expected": {
+      "scope": "informational",
+      "names_stores": false,
+      "names_location": false,
+      "names_quantity": false,
+      "substitutes_ok": false
+    },
+    "note": "This asks what the drugs are and which to choose, never where to buy, so it is informational even though the items are purchasable."
+  },
+  {
+    "id": "ho-j1-08-unclear-propane",
+    "judgment": 1,
+    "state": {
+      "request": "propane for the weekend?",
+      "workspace_location": "Fargo, North Dakota"
+    },
+    "expected": {
+      "scope": "unclear",
+      "names_stores": false,
+      "names_location": false,
+      "names_quantity": false,
+      "substitutes_ok": false
+    },
+    "note": "Genuinely unclear, since this could mean a tank exchange nearby, a refill appointment, a delivery, or what propane costs, and the text supports none of them over the others."
+  },
+  {
+    "id": "ho-j1-09-unclear-dishwasher",
+    "judgment": 1,
+    "state": {
+      "request": "Can you sort out the dishwasher thing before Friday?",
+      "workspace_location": "Chandler, Arizona"
+    },
+    "expected": {
+      "scope": "unclear",
+      "names_stores": false,
+      "names_location": false,
+      "names_quantity": false,
+      "substitutes_ok": false
+    },
+    "note": "Genuinely unclear, since sorting out the dishwasher could mean booking a repair, buying a part, or buying a replacement unit, and nothing in the text picks one."
+  },
+  {
+    "id": "ho-j1-10-auto-service-near-me",
+    "judgment": 1,
+    "state": {
+      "request": "Who near me can do front brake pads and rotors on a 2016 wagon this week?",
+      "workspace_location": "Madison, Wisconsin"
+    },
+    "expected": {
+      "scope": "local_in_store",
+      "names_stores": false,
+      "names_location": true,
+      "names_quantity": false,
+      "substitutes_ok": false
+    },
+    "note": "A service booking is bound to a physical place near the person, so it lands on the local rung, and near me is the location phrase with no shop named."
+  },
+  {
+    "id": "ho-j1-11-electronics-store-and-place",
+    "judgment": 1,
+    "state": {
+      "request": "Does the Best Buy in Naperville have the Sonata H9 over ear headphones in stock for pickup today?",
+      "workspace_location": "Naperville, Illinois"
+    },
+    "expected": {
+      "scope": "local_in_store",
+      "names_stores": true,
+      "names_location": true,
+      "names_quantity": false,
+      "substitutes_ok": false
+    },
+    "note": "Both a chain and a city appear in the request text, and in stock for pickup today is the definition of the local rung."
+  },
+  {
+    "id": "ho-j1-12-pharmacy-zip-quantity",
+    "judgment": 1,
+    "state": {
+      "request": "Which pharmacy in 15213 has a 90 count bottle of famotidine 20 mg on the shelf?",
+      "workspace_location": "Pittsburgh, Pennsylvania"
+    },
+    "expected": {
+      "scope": "local_in_store",
+      "names_stores": false,
+      "names_location": true,
+      "names_quantity": true,
+      "substitutes_ok": false
+    },
+    "note": "A ZIP counts as a named location, 90 count is a stated pack size, pharmacy is a category and not a chain name, and on the shelf is local stock."
+  },
+  {
+    "id": "ho-j1-13-groceries-online-case-substitute",
+    "judgment": 1,
+    "state": {
+      "request": "Order a case of 12 jars of Mariposa chipotle salsa online and ship it to the house, any heat level works.",
+      "workspace_location": "Lexington, Kentucky"
+    },
+    "expected": {
+      "scope": "online_ship",
+      "names_stores": false,
+      "names_location": false,
+      "names_quantity": true,
+      "substitutes_ok": true
+    },
+    "note": "Order online and ship is the online rung, a case of 12 is a stated pack size, and any heat level works accepts a different variant of the item."
+  },
+  {
+    "id": "ho-j1-14-appliance-part-online-store-named",
+    "judgment": 1,
+    "state": {
+      "request": "Can I get a replacement ice maker for a Whirlpool fridge from Repair Clinic shipped out this week?",
+      "workspace_location": "Reno, Nevada"
+    },
+    "expected": {
+      "scope": "online_ship",
+      "names_stores": true,
+      "names_location": false,
+      "names_quantity": false,
+      "substitutes_ok": false
+    },
+    "note": "Shipped out this week is the online rung even though a retailer is named, and Whirlpool is the appliance brand rather than a place to shop."
+  },
+  {
+    "id": "ho-j1-15-national-price-with-pack-size",
+    "judgment": 1,
+    "state": {
+      "request": "What should a 50 pound bag of water softener salt cost these days?",
+      "workspace_location": "Green Bay, Wisconsin"
+    },
+    "expected": {
+      "scope": "national_price",
+      "names_stores": false,
+      "names_location": false,
+      "names_quantity": true,
+      "substitutes_ok": false
+    },
+    "note": "What should it cost with no store and no place is the price rung, and the 50 pound bag is still a stated pack size."
+  },
+  {
+    "id": "ho-j1-16-electronics-advice",
+    "judgment": 1,
+    "state": {
+      "request": "Should I get an NVMe drive or a SATA solid state drive for editing 4K video?",
+      "workspace_location": "Austin, Texas"
+    },
+    "expected": {
+      "scope": "informational",
+      "names_stores": false,
+      "names_location": false,
+      "names_quantity": false,
+      "substitutes_ok": false
+    },
+    "note": "This asks which kind of thing to choose rather than where to buy it, so it is advice, and no store, place, quantity or substitute appears."
+  },
+
+  {
+    "id": "ho-j2-01-fully-store-level-pickup",
+    "judgment": 2,
+    "state": {
+      "constraints": {
+        "item": "Ridgeline 20V 5.0Ah battery, 2 pack",
+        "pack_sizes": [2],
+        "location": "Round Rock, Texas",
+        "stores_named": ["Home Depot"]
+      },
+      "tool_used": "web_search",
+      "results": [
+        {
+          "source": "homedepot.com",
+          "title": "Ridgeline 20V MAX 5.0Ah Lithium Ion Battery (2 Pack)",
+          "snippet": "$199.00. In stock at Round Rock, TX. Pick up today, aisle 12, bay 004. 2 pack.",
+          "pack_size_seen": "2 pack",
+          "store_level": true
+        },
+        {
+          "source": "lowes.com",
+          "title": "Ridgeline 20V Battery Two Pack",
+          "snippet": "$209.00. Ship to store in 3 days. Not carried at Round Rock.",
+          "pack_size_seen": "2 pack",
+          "store_level": true
+        }
+      ]
+    },
+    "expected": {
+      "satisfies": "fully",
+      "can_answer_now": true,
+      "needs_more_sources": false,
+      "needs_page_fetch": false,
+      "needs_tinyfish": false,
+      "needs_desktop_browser": false,
+      "cheapest_rung": "answer_now"
+    },
+    "note": "The named store, the stated 2 pack and same day pickup for the stated city all appear in one snippet, so nothing further is needed."
+  },
+  {
+    "id": "ho-j2-02-fully-two-pharmacies",
+    "judgment": 2,
+    "state": {
+      "constraints": {
+        "item": "famotidine 20 mg tablets",
+        "pack_sizes": [90],
+        "location": "Pittsburgh, Pennsylvania 15213",
+        "stores_named": ["CVS", "Walgreens"]
+      },
+      "tool_used": "web_search",
+      "results": [
+        {
+          "source": "cvs.com",
+          "title": "Famotidine 20 mg Tablets, 90 ct",
+          "snippet": "$14.29. In stock at CVS Forbes Ave, Pittsburgh PA 15213. Ready for pickup in 2 hours.",
+          "pack_size_seen": "90 ct",
+          "store_level": true
+        },
+        {
+          "source": "walgreens.com",
+          "title": "Walgreens Famotidine 20 mg, 90 count",
+          "snippet": "$15.49. In stock at the Centre Ave store, Pittsburgh. Pickup today after 11am.",
+          "pack_size_seen": "90 count",
+          "store_level": true
+        },
+        {
+          "source": "goodrx.com",
+          "title": "Famotidine prices",
+          "snippet": "Average retail price around $18 for 90 tablets.",
+          "pack_size_seen": "90 tablets",
+          "store_level": false
+        }
+      ]
+    },
+    "expected": {
+      "satisfies": "fully",
+      "can_answer_now": true,
+      "needs_more_sources": false,
+      "needs_page_fetch": false,
+      "needs_tinyfish": false,
+      "needs_desktop_browser": false,
+      "cheapest_rung": "answer_now"
+    },
+    "note": "Both named stores show the stated 90 count with pickup in the stated ZIP, which is the full standard, so the third result only adds price context."
+  },
+  {
+    "id": "ho-j2-03-partially-named-store-missing",
+    "judgment": 2,
+    "state": {
+      "constraints": {
+        "item": "Blue Ridge grain free salmon dry dog food",
+        "pack_sizes": [24],
+        "location": "Seattle, Washington",
+        "stores_named": ["PetSmart", "Mud Bay"]
+      },
+      "tool_used": "web_search",
+      "results": [
+        {
+          "source": "petsmart.com",
+          "title": "Blue Ridge Grain Free Salmon Recipe Dry Dog Food",
+          "snippet": "24 lb bag, $64.99. Online price. Select a store to see in store availability.",
+          "pack_size_seen": "24 lb",
+          "store_level": false
+        },
+        {
+          "source": "chewy.com",
+          "title": "Blue Ridge Salmon Recipe, 24 lb",
+          "snippet": "$62.48, free shipping over $49. Usually ships in 1 business day.",
+          "pack_size_seen": "24 lb",
+          "store_level": false
+        }
+      ]
+    },
+    "expected": {
+      "satisfies": "partially",
+      "can_answer_now": false,
+      "needs_more_sources": true,
+      "needs_page_fetch": false,
+      "needs_tinyfish": false,
+      "needs_desktop_browser": true,
+      "cheapest_rung": "search_more_sources"
+    },
+    "note": "The stated pack size shows but never for a store near Seattle, Mud Bay returned nothing at all, and the PetSmart page asks for a store selection, so another search is the cheaper of the two next steps."
+  },
+  {
+    "id": "ho-j2-04-partially-page-carries-pickup",
+    "judgment": 2,
+    "state": {
+      "constraints": {
+        "item": "Bosch 800 Series dishwasher SHP78CM5N",
+        "pack_sizes": [],
+        "location": "Chandler, Arizona",
+        "stores_named": ["Best Buy"]
+      },
+      "tool_used": "web_search",
+      "results": [
+        {
+          "source": "bestbuy.com",
+          "title": "Bosch 800 Series 24 in Built In Dishwasher, Stainless",
+          "snippet": "Model SHP78CM5N. $1,099.00. Pickup and delivery options for Chandler, AZ are listed on this product page.",
+          "pack_size_seen": null,
+          "store_level": false
+        },
+        {
+          "source": "abt.com",
+          "title": "Bosch SHP78CM5N 800 Series Dishwasher",
+          "snippet": "$1,149.00, ships in 5 business days. Nationwide delivery.",
+          "pack_size_seen": null,
+          "store_level": false
+        }
+      ]
+    },
+    "expected": {
+      "satisfies": "partially",
+      "can_answer_now": false,
+      "needs_more_sources": false,
+      "needs_page_fetch": true,
+      "needs_tinyfish": false,
+      "needs_desktop_browser": false,
+      "cheapest_rung": "fetch_pages"
+    },
+    "note": "The item and price show but not local pickup, and the snippet says outright that the Chandler options are on the page, so one fetch of that page should close the gap."
+  },
+  {
+    "id": "ho-j2-05-partially-store-selector",
+    "judgment": 2,
+    "state": {
+      "constraints": {
+        "item": "Emerald interior eggshell paint in Alabaster",
+        "pack_sizes": [1],
+        "location": "Bellingham, Washington",
+        "stores_named": ["Sherwin-Williams"]
+      },
+      "tool_used": "web_fetch",
+      "results": [
+        {
+          "source": "sherwin-williams.com",
+          "title": "Emerald Interior Acrylic Latex, Eggshell, 1 Gallon",
+          "snippet": "$94.99 per gallon. Choose your store to see availability and local pricing. Availability is shown only after a store is selected.",
+          "pack_size_seen": "1 gallon",
+          "store_level": false
+        },
+        {
+          "source": "paintreviewcorner.com",
+          "title": "Emerald eggshell hands on review",
+          "snippet": "We bought a gallon of Alabaster last spring. Coverage was excellent over primed drywall.",
+          "pack_size_seen": "1 gallon",
+          "store_level": false
+        }
+      ]
+    },
+    "expected": {
+      "satisfies": "partially",
+      "can_answer_now": false,
+      "needs_more_sources": false,
+      "needs_page_fetch": false,
+      "needs_tinyfish": false,
+      "needs_desktop_browser": true,
+      "cheapest_rung": "desktop_browser"
+    },
+    "note": "The gallon size and price are shown but the page states that stock appears only after a store is picked, so a fetch of the same URL cannot carry it and a driven browser is required."
+  },
+  {
+    "id": "ho-j2-06-cannot-tell-render-wall",
+    "judgment": 2,
+    "state": {
+      "constraints": {
+        "item": "Ironwood 885 pellet grill",
+        "pack_sizes": [],
+        "location": "Des Moines, Iowa",
+        "stores_named": ["Ace Hardware"]
+      },
+      "tool_used": "web_fetch",
+      "results": [
+        {
+          "source": "acehardware.com",
+          "title": "Access to this page requires JavaScript",
+          "snippet": "This site requires JavaScript to continue. Enable JavaScript and reload the page. Automated request blocked.",
+          "pack_size_seen": null,
+          "store_level": false
+        },
+        {
+          "source": "traegerbrand.com",
+          "title": "Ironwood 885",
+          "snippet": "Find a dealer near you. Enter a ZIP to see authorised dealers.",
+          "pack_size_seen": null,
+          "store_level": false
+        }
+      ]
+    },
+    "expected": {
+      "satisfies": "cannot_tell",
+      "can_answer_now": false,
+      "needs_more_sources": false,
+      "needs_page_fetch": false,
+      "needs_tinyfish": true,
+      "needs_desktop_browser": false,
+      "cheapest_rung": "tinyfish"
+    },
+    "note": "The one page that would answer refused a plain fetch and says it needs rendering, so repeating the fetch is pointless and a rendering fetch is the next rung."
+  },
+  {
+    "id": "ho-j2-07-no-case-pack-anywhere-seen",
+    "judgment": 2,
+    "state": {
+      "constraints": {
+        "item": "Mariposa chipotle salsa",
+        "pack_sizes": [12],
+        "location": "Lexington, Kentucky",
+        "stores_named": []
+      },
+      "tool_used": "web_search",
+      "results": [
+        {
+          "source": "krogergrocery.com",
+          "title": "Mariposa Chipotle Salsa, 16 oz",
+          "snippet": "$4.49, 1 each. In stock at Nicholasville Rd, Lexington.",
+          "pack_size_seen": "1 each",
+          "store_level": true
+        },
+        {
+          "source": "instacart.com",
+          "title": "Mariposa Chipotle Salsa 16 oz jar",
+          "snippet": "$5.29 per jar, delivery in 2 hours from local stores.",
+          "pack_size_seen": "1 jar",
+          "store_level": false
+        },
+        {
+          "source": "mariposafoods.com",
+          "title": "Chipotle Salsa",
+          "snippet": "Our chipotle salsa in the 16 oz jar. Where to buy.",
+          "pack_size_seen": "1 jar",
+          "store_level": false
+        }
+      ]
+    },
+    "expected": {
+      "satisfies": "no",
+      "can_answer_now": false,
+      "needs_more_sources": true,
+      "needs_page_fetch": false,
+      "needs_tinyfish": false,
+      "needs_desktop_browser": false,
+      "cheapest_rung": "search_more_sources"
+    },
+    "note": "Every result is a single jar so nothing shows the stated 12 pack, and case packs typically sit with wholesalers that were never searched, so a wider search comes before any fetch."
+  },
+  {
+    "id": "ho-j2-08-no-variant-does-not-exist",
+    "judgment": 2,
+    "state": {
+      "constraints": {
+        "item": "Sonata H9 headphones in Midnight Blue",
+        "pack_sizes": [],
+        "location": "Naperville, Illinois",
+        "stores_named": ["Best Buy"]
+      },
+      "tool_used": "web_search",
+      "results": [
+        {
+          "source": "bestbuy.com",
+          "title": "Sonata H9 Wireless Over Ear Headphones",
+          "snippet": "Choose a colour: Black, Silver, Smoky Pink. $399.99. In stock at Naperville for pickup today.",
+          "pack_size_seen": null,
+          "store_level": true
+        },
+        {
+          "source": "sonataaudio.com",
+          "title": "H9 specifications and colours",
+          "snippet": "The H9 is offered in three finishes: Black, Silver and Smoky Pink.",
+          "pack_size_seen": null,
+          "store_level": false
+        }
+      ]
+    },
+    "expected": {
+      "satisfies": "no",
+      "can_answer_now": true,
+      "needs_more_sources": false,
+      "needs_page_fetch": false,
+      "needs_tinyfish": false,
+      "needs_desktop_browser": false,
+      "cheapest_rung": "answer_now"
+    },
+    "note": "No result shows the asked colourway, and because the maker enumerates the full colour list the answer that it does not exist can be given now."
+  },
+  {
+    "id": "ho-j2-09-cannot-tell-aggregator-junk",
+    "judgment": 2,
+    "state": {
+      "constraints": {
+        "item": "Rust Guard galvanised flashing sealant, 10 oz tube",
+        "pack_sizes": [1],
+        "location": "Tulsa, Oklahoma",
+        "stores_named": ["Lowe's"]
+      },
+      "tool_used": "web_search",
+      "results": [
+        {
+          "source": "couponstacker.net",
+          "title": "Save on sealants and caulk this month",
+          "snippet": "Deals on roofing and flashing products from major retailers. Prices vary by region.",
+          "pack_size_seen": null,
+          "store_level": false
+        },
+        {
+          "source": "shopcompare-price.io",
+          "title": "Flashing sealant price comparison",
+          "snippet": "Compare 40 sealants. Lowest price found. Results update daily.",
+          "pack_size_seen": null,
+          "store_level": false
+        }
+      ]
+    },
+    "expected": {
+      "satisfies": "cannot_tell",
+      "can_answer_now": false,
+      "needs_more_sources": true,
+      "needs_page_fetch": false,
+      "needs_tinyfish": false,
+      "needs_desktop_browser": false,
+      "cheapest_rung": "search_more_sources"
+    },
+    "note": "Neither snippet names the product, a pack size or a store, so the snippets do not say enough either way, and no retailer page has been reached yet for a fetch to help."
+  },
+  {
+    "id": "ho-j2-10-no-pack-sold-individually",
+    "judgment": 2,
+    "state": {
+      "constraints": {
+        "item": "Clearview ICON 26 inch wiper blade",
+        "pack_sizes": [2],
+        "location": "Madison, Wisconsin",
+        "stores_named": ["O'Reilly", "AutoZone"]
+      },
+      "tool_used": "web_search",
+      "results": [
+        {
+          "source": "oreillyauto.com",
+          "title": "Clearview ICON Wiper Blade, 26 in",
+          "snippet": "$32.99, 1 each. Sold individually. In stock at the East Washington Ave store, Madison.",
+          "pack_size_seen": "1 each",
+          "store_level": true
+        },
+        {
+          "source": "autozone.com",
+          "title": "Clearview ICON 26A Wiper Blade",
+          "snippet": "$34.99 each. Sold individually. In stock at Madison, ready in 30 minutes.",
+          "pack_size_seen": "1 each",
+          "store_level": true
+        },
+        {
+          "source": "rockauto.com",
+          "title": "Clearview ICON 26A",
+          "snippet": "$27.16 each. Ships from Wisconsin warehouse. Quantity sold: 1.",
+          "pack_size_seen": "1 each",
+          "store_level": false
+        }
+      ]
+    },
+    "expected": {
+      "satisfies": "no",
+      "can_answer_now": true,
+      "needs_more_sources": false,
+      "needs_page_fetch": false,
+      "needs_tinyfish": false,
+      "needs_desktop_browser": false,
+      "cheapest_rung": "answer_now"
+    },
+    "note": "Nothing shows the stated 2 pack because all three sources say sold individually, which is itself a complete answer with both named stores holding stock in Madison."
+  },
+
+  {
+    "id": "ho-j3-01-un-contradicts-in-stock",
+    "judgment": 3,
+    "state": {
+      "claim": "No store sells the 24 pound bag of that salmon formula anymore.",
+      "evidence": [
+        {
+          "source": "chewy.com",
+          "text": "Blue Ridge Grain Free Salmon Recipe, 24 lb bag. $62.48. In stock, ships free over $49."
+        },
+        {
+          "source": "petsmart.com",
+          "text": "Blue Ridge Salmon Recipe Dry Dog Food, 24 lb, $64.99. Available online and in select stores."
+        }
+      ],
+      "sources_checked": ["chewy.com", "petsmart.com"],
+      "sources_named_in_request": ["PetSmart", "Mud Bay"]
+    },
+    "expected": {
+      "support": "contradicts",
+      "is_universal_negative": true
+    },
+    "note": "No store sells it is a claim about every store, and two listings show the exact 24 pound bag in stock, which is the opposite."
+  },
+  {
+    "id": "ho-j3-02-un-no-evidence-case-pack",
+    "judgment": 3,
+    "state": {
+      "claim": "Nobody carries the 12 jar case of that chipotle salsa.",
+      "evidence": [
+        {
+          "source": "krogergrocery.com",
+          "text": "Mariposa Chipotle Salsa, 16 oz. $4.49, 1 each. In stock at Nicholasville Rd."
+        },
+        {
+          "source": "mariposafoods.com",
+          "text": "Our chipotle salsa comes in a 16 oz jar. See the where to buy page for retailers."
+        }
+      ],
+      "sources_checked": ["krogergrocery.com", "mariposafoods.com"],
+      "sources_named_in_request": []
+    },
+    "expected": {
+      "support": "no_evidence",
+      "is_universal_negative": true
+    },
+    "note": "Nobody carries it is universal, and single jar listings say nothing either way about case packs, so the evidence does not speak to the claim."
+  },
+  {
+    "id": "ho-j3-03-un-supports-colour-never-made",
+    "judgment": 3,
+    "state": {
+      "claim": "The Midnight Blue finish is not available anywhere because it was never produced.",
+      "evidence": [
+        {
+          "source": "sonataaudio.com",
+          "text": "The H9 is offered in three finishes: Black, Silver and Smoky Pink. No other finish has been produced for this model."
+        },
+        {
+          "source": "audiodeskreview.com",
+          "text": "Sonata confirmed to us that the H9 shipped in Black, Silver and Smoky Pink only, across its whole production run."
+        }
+      ],
+      "sources_checked": ["sonataaudio.com", "audiodeskreview.com"],
+      "sources_named_in_request": ["Best Buy"]
+    },
+    "expected": {
+      "support": "supports",
+      "is_universal_negative": true
+    },
+    "note": "The claim says not available anywhere, and the maker states no other finish was produced, which directly implies no store can have one."
+  },
+  {
+    "id": "ho-j3-04-un-contradicts-local-stock",
+    "judgment": 3,
+    "state": {
+      "claim": "That flashing sealant is not available anywhere in Oklahoma.",
+      "evidence": [
+        {
+          "source": "acehardware.com",
+          "text": "Rust Guard Galvanised Flashing Sealant, 10 oz. In stock at Ace Hardware Tulsa Hills, 2 on hand. Pickup today."
+        }
+      ],
+      "sources_checked": ["acehardware.com"],
+      "sources_named_in_request": ["Lowe's"]
+    },
+    "expected": {
+      "support": "contradicts",
+      "is_universal_negative": true
+    },
+    "note": "Not available anywhere in the state rules out every Oklahoma store, and one Tulsa store showing units on hand is exactly the case it rules out."
+  },
+  {
+    "id": "ho-j3-05-un-no-evidence-count-not-addressed",
+    "judgment": 3,
+    "state": {
+      "claim": "No pharmacy has the 90 count bottle.",
+      "evidence": [
+        {
+          "source": "cvs.com",
+          "text": "Famotidine 20 mg Tablets, 30 ct. $7.99. In stock at Forbes Ave."
+        },
+        {
+          "source": "walgreens.com",
+          "text": "Famotidine 20 mg, 30 count, $8.49. Also sold in other counts. See size options."
+        }
+      ],
+      "sources_checked": ["cvs.com", "walgreens.com"],
+      "sources_named_in_request": ["CVS", "Walgreens"]
+    },
+    "expected": {
+      "support": "no_evidence",
+      "is_universal_negative": true
+    },
+    "note": "No pharmacy is universal, and pages showing a 30 count while mentioning other counts exist do not state anything about the 90 count either way."
+  },
+  {
+    "id": "ho-j3-06-un-supports-discontinued",
+    "judgment": 3,
+    "state": {
+      "claim": "Nobody sells that battery two pack any longer.",
+      "evidence": [
+        {
+          "source": "ridgelinetools.com",
+          "text": "This two pack was discontinued in March and is no longer sold through any retail channel. Remaining service stock is not for sale."
+        },
+        {
+          "source": "homedepot.com",
+          "text": "Ridgeline 20V 5.0Ah Battery 2 Pack. This item is no longer available."
+        }
+      ],
+      "sources_checked": ["ridgelinetools.com", "homedepot.com"],
+      "sources_named_in_request": ["Home Depot"]
+    },
+    "expected": {
+      "support": "supports",
+      "is_universal_negative": true
+    },
+    "note": "The maker states outright that it is no longer sold through any retail channel, which is the claim itself rather than a gap in what was checked."
+  },
+  {
+    "id": "ho-j3-07-un-contradicts-sunday-hours",
+    "judgment": 3,
+    "state": {
+      "claim": "Nobody in town does propane refills on a Sunday.",
+      "evidence": [
+        {
+          "source": "prairiehardware.com",
+          "text": "Propane refill and tank exchange at our Fargo store. Open Sunday 9am to 5pm."
+        },
+        {
+          "source": "fargogaslog.com",
+          "text": "Weekend propane fills available at the 13th Ave location, Saturday and Sunday."
+        }
+      ],
+      "sources_checked": ["prairiehardware.com", "fargogaslog.com"],
+      "sources_named_in_request": []
+    },
+    "expected": {
+      "support": "contradicts",
+      "is_universal_negative": true
+    },
+    "note": "Nobody in town covers every local seller, and two Fargo businesses advertise Sunday refills, which is the opposite of the claim."
+  },
+  {
+    "id": "ho-j3-08-un-no-evidence-pickup-time",
+    "judgment": 3,
+    "state": {
+      "claim": "There is no source anywhere that lists a pickup time for that dishwasher.",
+      "evidence": [
+        {
+          "source": "abt.com",
+          "text": "Shipping FAQ: most large appliances leave our warehouse within 5 business days."
+        },
+        {
+          "source": "appliancereviewhub.com",
+          "text": "Our test of the 800 Series found the third rack usable and the dry cycle quiet."
+        }
+      ],
+      "sources_checked": ["abt.com", "appliancereviewhub.com"],
+      "sources_named_in_request": ["Best Buy"]
+    },
+    "expected": {
+      "support": "no_evidence",
+      "is_universal_negative": true
+    },
+    "note": "No source anywhere is universal, and a shipping FAQ plus a product review say nothing about whether pickup times are published, so the evidence is silent."
+  },
+  {
+    "id": "ho-j3-09-scoped-supports-three-stores",
+    "judgment": 3,
+    "state": {
+      "claim": "None of the three stores checked showed the 24 pound bag in stock.",
+      "evidence": [
+        {
+          "source": "petsmart.com",
+          "text": "24 lb bag. Out of stock at Northgate. Not available for pickup at this store."
+        },
+        {
+          "source": "petco.com",
+          "text": "24 lb bag. Out of stock at Ballard. Check nearby stores."
+        },
+        {
+          "source": "mudbay.com",
+          "text": "We do not carry this formula in the 24 lb size at any Seattle location."
+        }
+      ],
+      "sources_checked": ["petsmart.com", "petco.com", "mudbay.com"],
+      "sources_named_in_request": ["PetSmart", "Mud Bay"]
+    },
+    "expected": {
+      "support": "supports",
+      "is_universal_negative": false
+    },
+    "note": "The claim is scoped to the three stores that were checked, and all three pages say out of stock or not carried, so the evidence states it."
+  },
+  {
+    "id": "ho-j3-10-scoped-contradicts-one-had-it",
+    "judgment": 3,
+    "state": {
+      "claim": "None of the pharmacies checked had it on the shelf.",
+      "evidence": [
+        {
+          "source": "cvs.com",
+          "text": "Famotidine 20 mg, 90 ct. In stock at CVS Forbes Ave. Ready for pickup in 2 hours."
+        },
+        {
+          "source": "walgreens.com",
+          "text": "Famotidine 20 mg, 90 count. Out of stock at Centre Ave."
+        }
+      ],
+      "sources_checked": ["cvs.com", "walgreens.com"],
+      "sources_named_in_request": ["CVS", "Walgreens"]
+    },
+    "expected": {
+      "support": "contradicts",
+      "is_universal_negative": false
+    },
+    "note": "The claim is scoped to the checked pharmacies, and one of those two shows stock ready for pickup, so the evidence shows a case the claim rules out."
+  },
+  {
+    "id": "ho-j3-11-scoped-no-evidence-pickup-option",
+    "judgment": 3,
+    "state": {
+      "claim": "Neither of the two stores checked listed a pickup option.",
+      "evidence": [
+        {
+          "source": "shopcompare-price.io",
+          "text": "Compare 40 flashing sealants from major retailers. Prices update daily. Shipping terms vary."
+        }
+      ],
+      "sources_checked": ["shopcompare-price.io"],
+      "sources_named_in_request": ["Lowe's", "Ace Hardware"]
+    },
+    "expected": {
+      "support": "no_evidence",
+      "is_universal_negative": false
+    },
+    "note": "The claim is scoped to two stores, and the only evidence is a comparison stub from neither of them, so nothing here speaks to their pickup options."
+  },
+  {
+    "id": "ho-j3-12-positive-supports-exact-listing",
+    "judgment": 3,
+    "state": {
+      "claim": "The Round Rock store has the two pack for $199.00 with pickup today.",
+      "evidence": [
+        {
+          "source": "homedepot.com",
+          "text": "Ridgeline 20V 5.0Ah Battery (2 Pack). $199.00. In stock at Round Rock, TX. Pick up today, aisle 12."
+        }
+      ],
+      "sources_checked": ["homedepot.com"],
+      "sources_named_in_request": ["Home Depot"]
+    },
+    "expected": {
+      "support": "supports",
+      "is_universal_negative": false
+    },
+    "note": "The listing states the store, the pack, the price and same day pickup, which is every part of the claim."
+  },
+  {
+    "id": "ho-j3-13-positive-contradicts-sold-each",
+    "judgment": 3,
+    "state": {
+      "claim": "The wiper blades come in a two pack.",
+      "evidence": [
+        {
+          "source": "oreillyauto.com",
+          "text": "Clearview ICON Wiper Blade, 26 in. $32.99, 1 each. Sold individually."
+        },
+        {
+          "source": "autozone.com",
+          "text": "Clearview ICON 26A. $34.99 each. Sold individually, quantity 1 per package."
+        }
+      ],
+      "sources_checked": ["oreillyauto.com", "autozone.com"],
+      "sources_named_in_request": ["O'Reilly", "AutoZone"]
+    },
+    "expected": {
+      "support": "contradicts",
+      "is_universal_negative": false
+    },
+    "note": "Both sellers state one per package and sold individually, which is the opposite of a two pack."
+  },
+  {
+    "id": "ho-j3-14-positive-no-evidence-local-price",
+    "judgment": 3,
+    "state": {
+      "claim": "The Green Bay store has it for under $60.",
+      "evidence": [
+        {
+          "source": "menards.com",
+          "text": "Grill covers and accessories. Browse our selection. Prices and availability vary by store."
+        },
+        {
+          "source": "grillforumcentral.com",
+          "text": "I picked up a cover for the older Genesis II last year and it fit fine."
+        }
+      ],
+      "sources_checked": ["menards.com", "grillforumcentral.com"],
+      "sources_named_in_request": ["Menards", "Ace Hardware"]
+    },
+    "expected": {
+      "support": "no_evidence",
+      "is_universal_negative": false
+    },
+    "note": "A category page with no price and a forum post about a different model say nothing about the price at that store, so neither supports nor contradicts."
+  }
+]

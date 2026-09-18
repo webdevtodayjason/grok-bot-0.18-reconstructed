@@ -1,0 +1,2032 @@
+{
+  "about": "Synthetic labelled cases for the JEV-1 offline eval. Every request, result, claim and evidence string below was written for this file. No customer, tester or Discord data appears anywhere, and no real person is named. Retail chain names are used only as generic stand-ins for named stores. Question definitions live in scripts/jev-eval.mjs and follow docs/JEV-1.md.",
+  "judgments": {
+    "1": "Request interpretation. State is {request, workspace_location}. Questions: scope (choice), names_stores, names_location, names_quantity, substitutes_ok (nouls).",
+    "2": "Result sufficiency and next step. State is {constraints, tool_used, results}. Questions: satisfies (choice), one noul per rung (can_answer_now, answerable_now, needs_more_sources, needs_page_fetch, needs_tinyfish, needs_desktop_browser), one noul per entry of constraints.stores_named keyed has_result_<slug>. Jev never orders the rungs. Code holds the order answer_now, search_more_sources, fetch_pages, tinyfish, desktop_browser and picks the cheapest rung whose noul is at or above 0.6. Each judgment 2 case carries cheapest_rung, the rung that order picks from the labelled nouls, which is what the code-picked rung is scored against.",
+    "3": "Claim check. State is {claim, evidence, sources_checked, sources_named_in_request}. Questions: support (choice), is_universal_negative (noul).",
+    "2b": "Constraint confirmation, one result at a time. State is {constraints, result}. Questions: confirms_item, confirms_pack_size, confirms_store, confirms_stock_for_location, one noul each, all asked about `result.title`, `result.snippet` and `result.source` by path. expected.required is the subset the constraints make required: item and stock always, pack size only when constraints.pack_sizes is non-empty, store only when constraints.stores_named is non-empty. expected.fetch is true when any required confirmation is false. Code decides fetch when any required noul is under 0.6, and derives the required set from the constraints rather than reading the label."
+  },
+  "store_slug_rule": "lowercase, then every run of characters outside a-z0-9 becomes a single underscore, then trim underscores. Home Depot becomes home_depot, Lowe's becomes lowe_s, Best Buy becomes best_buy.",
+  "cases": [
+    {
+      "id": "j1-bolt-base",
+      "judgment": 1,
+      "note": "The plan's case verbatim: a local, quantity-constrained request that names no retailer.",
+      "state": {
+        "request": "Who carries 3/8 in. x 8 in. hot-dip galvanized hex bolts in packs of 10 or 25 in Leander or Cedar Park, TX, at local stores?",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "local_in_store",
+        "names_stores": false,
+        "names_location": true,
+        "names_quantity": true,
+        "substitutes_ok": false
+      }
+    },
+    {
+      "id": "j1-bolt-stores-named",
+      "judgment": 1,
+      "note": "Three retailers named, so the store noul must flip while the rest of the reading holds.",
+      "state": {
+        "request": "Do Home Depot, Lowe's or Ace in Leander or Cedar Park, TX carry 3/8 in. x 8 in. hot-dip galvanized hex bolts in packs of 10 or 25?",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "local_in_store",
+        "names_stores": true,
+        "names_location": true,
+        "names_quantity": true,
+        "substitutes_ok": false
+      }
+    },
+    {
+      "id": "j1-bolt-one-store",
+      "judgment": 1,
+      "note": "One named retailer is still a named retailer.",
+      "state": {
+        "request": "Does the Lowe's in Cedar Park, TX have 3/8 in. x 8 in. hot-dip galvanized hex bolts in a 25 pack on the shelf today?",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "local_in_store",
+        "names_stores": true,
+        "names_location": true,
+        "names_quantity": true,
+        "substitutes_ok": false
+      }
+    },
+    {
+      "id": "j1-bolt-local-no-city",
+      "judgment": 1,
+      "note": "No city is named, but near me and local are the implied place the scope rubric allows.",
+      "state": {
+        "request": "Who carries 3/8 in. x 8 in. hot-dip galvanized hex bolts in packs of 10 or 25 at local stores near me?",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "local_in_store",
+        "names_stores": false,
+        "names_location": true,
+        "names_quantity": true,
+        "substitutes_ok": false
+      }
+    },
+    {
+      "id": "j1-bolt-no-location",
+      "judgment": 1,
+      "note": "Location dropped entirely: nothing in the request says local, online or price, so the honest scope is unclear.",
+      "state": {
+        "request": "Who carries 3/8 in. x 8 in. hot-dip galvanized hex bolts in packs of 10 or 25?",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "local_in_store",
+        "names_stores": false,
+        "names_location": false,
+        "names_quantity": true,
+        "substitutes_ok": false
+      }
+    },
+    {
+      "id": "j1-bolt-pack-50",
+      "judgment": 1,
+      "note": "Pack size moved to 50 so the quantity noul cannot be keying on the numbers 10 and 25.",
+      "state": {
+        "request": "Who carries 3/8 in. x 8 in. hot-dip galvanized hex bolts in a pack of 50 in Leander or Cedar Park, TX, at local stores?",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "local_in_store",
+        "names_stores": false,
+        "names_location": true,
+        "names_quantity": true,
+        "substitutes_ok": false
+      }
+    },
+    {
+      "id": "j1-bolt-substitutes",
+      "judgment": 1,
+      "note": "Explicit permission to substitute, which is the only noul that should move from the base case.",
+      "state": {
+        "request": "Who near Leander, TX has 3/8 in. x 8 in. hot-dip galvanized hex bolts in packs of 10 or 25 on the shelf? A similar finish or any pack size is fine if that is what they have.",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "local_in_store",
+        "names_stores": false,
+        "names_location": true,
+        "names_quantity": true,
+        "substitutes_ok": true
+      }
+    },
+    {
+      "id": "j1-bolt-online",
+      "judgment": 1,
+      "note": "Online-only phrasing with the place called out as irrelevant.",
+      "state": {
+        "request": "Where can I order 3/8 in. x 8 in. hot-dip galvanized hex bolts in packs of 10 or 25 online and have them shipped? It does not matter where they ship from.",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "online_ship",
+        "names_stores": false,
+        "names_location": false,
+        "names_quantity": true,
+        "substitutes_ok": false
+      }
+    },
+    {
+      "id": "j1-bolt-national-price",
+      "judgment": 1,
+      "note": "National price phrasing: a price comparison with no store and no place.",
+      "state": {
+        "request": "What do 3/8 in. x 8 in. hot-dip galvanized hex bolts usually cost, and is one brand cheaper than another?",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "national_price",
+        "names_stores": false,
+        "names_location": false,
+        "names_quantity": false,
+        "substitutes_ok": false
+      }
+    },
+    {
+      "id": "j1-bolt-informational",
+      "judgment": 1,
+      "note": "Informational phrasing: advice about the item, not about where to buy it.",
+      "state": {
+        "request": "What is the difference between hot-dip galvanized and zinc-plated hex bolts, and which one should I use on a deck?",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "informational",
+        "names_stores": false,
+        "names_location": false,
+        "names_quantity": false,
+        "substitutes_ok": false
+      }
+    },
+    {
+      "id": "j1-tv-local",
+      "judgment": 1,
+      "note": "Non-hardware local case whose only numbers are a screen size and a price, neither of which is a quantity.",
+      "state": {
+        "request": "Which stores near Round Rock, TX have a 65 inch OLED TV in stock under $1,200 today?",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "local_in_store",
+        "names_stores": false,
+        "names_location": true,
+        "names_quantity": false,
+        "substitutes_ok": false
+      }
+    },
+    {
+      "id": "j1-tv-substitutes",
+      "judgment": 1,
+      "note": "A different size or panel type is allowed, in a domain where pack size never appears.",
+      "state": {
+        "request": "I want a 65 inch OLED TV under $1,200 in stock near Leander, TX today, but a 55 inch or a QLED panel is fine too.",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "local_in_store",
+        "names_stores": false,
+        "names_location": true,
+        "names_quantity": false,
+        "substitutes_ok": true
+      }
+    },
+    {
+      "id": "j1-oil-change",
+      "judgment": 1,
+      "note": "A local service rather than a product on a shelf, which is the wording the scope rubric is weakest on.",
+      "state": {
+        "request": "Which shops near me can do a same-day oil change this afternoon?",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "local_in_store",
+        "names_stores": false,
+        "names_location": true,
+        "names_quantity": false,
+        "substitutes_ok": false
+      }
+    },
+    {
+      "id": "j1-pharmacy-local",
+      "judgment": 1,
+      "note": "A 30 count bottle is a pack size in a non-hardware domain.",
+      "state": {
+        "request": "Which pharmacies in Cedar Park, TX have amoxicillin 500 mg capsules in a 30 count bottle in stock right now?",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "local_in_store",
+        "names_stores": false,
+        "names_location": true,
+        "names_quantity": true,
+        "substitutes_ok": false
+      }
+    },
+    {
+      "id": "j1-pharmacy-online",
+      "judgment": 1,
+      "note": "A dose in milligrams is not a count, so the quantity noul should stay low while scope moves to shipping.",
+      "state": {
+        "request": "Can I get amoxicillin 500 mg capsules shipped to me from an online pharmacy?",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "online_ship",
+        "names_stores": false,
+        "names_location": false,
+        "names_quantity": false,
+        "substitutes_ok": false
+      }
+    },
+    {
+      "id": "j1-restaurant",
+      "judgment": 1,
+      "note": "A booking, where the only count is the party size, which tests whether the quantity question reads counts of people.",
+      "state": {
+        "request": "Can I get a table for four at a steakhouse in downtown Austin, TX on Friday at 7pm?",
+        "workspace_location": "Leander, TX"
+      },
+      "expected": {
+        "scope": "local_in_store",
+        "names_stores": false,
+        "names_location": true,
+        "names_quantity": true,
+        "substitutes_ok": false
+      }
+    },
+    {
+      "id": "j2-bolt-base",
+      "judgment": 2,
+      "note": "The plan's result set: two named stores answered, Ace has no result at all, which is the cheapest gap to close.",
+      "state": {
+        "constraints": {
+          "item": "3/8 x 8 in hot-dip galvanized hex bolt",
+          "pack_sizes": [
+            10,
+            25
+          ],
+          "location": "Leander or Cedar Park, TX",
+          "stores_named": [
+            "Home Depot",
+            "Lowe's",
+            "Ace"
+          ]
+        },
+        "tool_used": "web_search",
+        "results": [
+          {
+            "source": "homedepot.com",
+            "title": "3/8 in.-16 x 8 in. Hot Dipped Galvanized Hex Bolt (10-Pack)",
+            "snippet": "Hot dipped galvanized hex bolt, sold as a 10 pack. Check availability at your store.",
+            "pack_size_seen": "10",
+            "store_level": false
+          },
+          {
+            "source": "lowes.com",
+            "title": "Hillman 3/8-in x 8-in Hot-Dipped Galvanized Hex Bolt",
+            "snippet": "Hillman 3/8-in x 8-in hex bolt, sold 1 each. Ship to store available.",
+            "pack_size_seen": "1",
+            "store_level": false
+          }
+        ]
+      },
+      "expected": {
+        "satisfies": "partially",
+        "can_answer_now": false,
+        "answerable_now": false,
+        "needs_more_sources": true,
+        "needs_page_fetch": true,
+        "needs_tinyfish": false,
+        "needs_desktop_browser": true,
+        "has_result_home_depot": true,
+        "has_result_lowe_s": true,
+        "has_result_ace": false
+      },
+      "cheapest_rung": "search_more_sources"
+    },
+    {
+      "id": "j2-bolt-lowes-added",
+      "judgment": 2,
+      "note": "A Lowe's result in a stated pack size is added and no named store is missing, so the pages are the cheap next step.",
+      "state": {
+        "constraints": {
+          "item": "3/8 x 8 in hot-dip galvanized hex bolt",
+          "pack_sizes": [
+            10,
+            25
+          ],
+          "location": "Leander or Cedar Park, TX",
+          "stores_named": [
+            "Home Depot",
+            "Lowe's"
+          ]
+        },
+        "tool_used": "web_search",
+        "results": [
+          {
+            "source": "homedepot.com",
+            "title": "3/8 in.-16 x 8 in. Hot Dipped Galvanized Hex Bolt (10-Pack)",
+            "snippet": "Hot dipped galvanized hex bolt, sold as a 10 pack. Check availability at your store.",
+            "pack_size_seen": "10",
+            "store_level": false
+          },
+          {
+            "source": "lowes.com",
+            "title": "Hillman 3/8-in x 8-in Hot-Dipped Galvanized Hex Bolt, 25-Pack",
+            "snippet": "Hillman 3/8-in x 8-in hex bolt, 25 pack. Check availability at your store.",
+            "pack_size_seen": "25",
+            "store_level": false
+          }
+        ]
+      },
+      "expected": {
+        "satisfies": "partially",
+        "can_answer_now": false,
+        "answerable_now": false,
+        "needs_more_sources": false,
+        "needs_page_fetch": true,
+        "needs_tinyfish": false,
+        "needs_desktop_browser": true,
+        "has_result_home_depot": true,
+        "has_result_lowe_s": true
+      },
+      "cheapest_rung": "fetch_pages"
+    },
+    {
+      "id": "j2-bolt-hd-removed",
+      "judgment": 2,
+      "note": "Home Depot was named and dropped out of the results, which code catches through the per-store nouls rather than by counting.",
+      "state": {
+        "constraints": {
+          "item": "3/8 x 8 in hot-dip galvanized hex bolt",
+          "pack_sizes": [
+            10,
+            25
+          ],
+          "location": "Leander or Cedar Park, TX",
+          "stores_named": [
+            "Home Depot",
+            "Lowe's",
+            "Ace"
+          ]
+        },
+        "tool_used": "web_search",
+        "results": [
+          {
+            "source": "lowes.com",
+            "title": "Hillman 3/8-in x 8-in Hot-Dipped Galvanized Hex Bolt",
+            "snippet": "Hillman 3/8-in x 8-in hex bolt, sold 1 each. Ship to store available.",
+            "pack_size_seen": "1",
+            "store_level": false
+          },
+          {
+            "source": "boltdepot.com",
+            "title": "Hex bolts, hot dipped galvanized, 3/8 in. x 8 in., 25 pack",
+            "snippet": "Hot dipped galvanized hex bolts, 3/8 in. x 8 in., sold in a 25 pack. Ships in 1 business day.",
+            "pack_size_seen": "25",
+            "store_level": false
+          }
+        ]
+      },
+      "expected": {
+        "satisfies": "partially",
+        "can_answer_now": false,
+        "answerable_now": false,
+        "needs_more_sources": true,
+        "needs_page_fetch": true,
+        "needs_tinyfish": false,
+        "needs_desktop_browser": false,
+        "has_result_home_depot": false,
+        "has_result_lowe_s": true,
+        "has_result_ace": false
+      },
+      "cheapest_rung": "search_more_sources"
+    },
+    {
+      "id": "j2-bolt-fully",
+      "judgment": 2,
+      "note": "One result is a named store, a stated pack size and pickup for the place, which is the full bar.",
+      "state": {
+        "constraints": {
+          "item": "3/8 x 8 in hot-dip galvanized hex bolt",
+          "pack_sizes": [
+            10,
+            25
+          ],
+          "location": "Leander or Cedar Park, TX",
+          "stores_named": [
+            "Home Depot",
+            "Lowe's"
+          ]
+        },
+        "tool_used": "web_search",
+        "results": [
+          {
+            "source": "homedepot.com",
+            "title": "3/8 in.-16 x 8 in. Hot Dipped Galvanized Hex Bolt (10-Pack)",
+            "snippet": "Cedar Park, TX store: 24 in stock, free pickup today. Sold as a 10 pack.",
+            "pack_size_seen": "10",
+            "store_level": true
+          },
+          {
+            "source": "lowes.com",
+            "title": "Hillman 3/8-in x 8-in Hot-Dipped Galvanized Hex Bolt",
+            "snippet": "Hillman 3/8-in x 8-in hex bolt, sold 1 each. Ship to store available.",
+            "pack_size_seen": "1",
+            "store_level": false
+          }
+        ]
+      },
+      "expected": {
+        "satisfies": "fully",
+        "can_answer_now": false,
+        "answerable_now": true,
+        "needs_more_sources": false,
+        "needs_page_fetch": true,
+        "needs_tinyfish": false,
+        "needs_desktop_browser": false,
+        "has_result_home_depot": true,
+        "has_result_lowe_s": true
+      },
+      "cheapest_rung": "answer_now"
+    },
+    {
+      "id": "j2-bolt-no-match",
+      "judgment": 2,
+      "note": "Both named stores answered but neither result is the item, so the gap is the item and not the store coverage.",
+      "state": {
+        "constraints": {
+          "item": "3/8 x 8 in hot-dip galvanized hex bolt",
+          "pack_sizes": [
+            10,
+            25
+          ],
+          "location": "Leander or Cedar Park, TX",
+          "stores_named": [
+            "Home Depot",
+            "Lowe's"
+          ]
+        },
+        "tool_used": "web_search",
+        "results": [
+          {
+            "source": "homedepot.com",
+            "title": "3/8 in. x 8 in. Zinc Plated Hex Lag Screw",
+            "snippet": "Zinc plated hex lag screw for wood framing. Sold individually.",
+            "pack_size_seen": null,
+            "store_level": false
+          },
+          {
+            "source": "lowes.com",
+            "title": "Deck screws, 1 lb box",
+            "snippet": "Coated deck screws sold by the pound. For exterior decking.",
+            "pack_size_seen": null,
+            "store_level": false
+          }
+        ]
+      },
+      "expected": {
+        "satisfies": "no",
+        "can_answer_now": false,
+        "answerable_now": true,
+        "needs_more_sources": false,
+        "needs_page_fetch": false,
+        "needs_tinyfish": false,
+        "needs_desktop_browser": false,
+        "has_result_home_depot": true,
+        "has_result_lowe_s": true
+      },
+      "cheapest_rung": "answer_now"
+    },
+    {
+      "id": "j2-bolt-cannot-tell",
+      "judgment": 2,
+      "note": "Category pages whose snippets say nothing about the size or the pack, so the snippets cannot settle it.",
+      "state": {
+        "constraints": {
+          "item": "3/8 x 8 in hot-dip galvanized hex bolt",
+          "pack_sizes": [
+            10,
+            25
+          ],
+          "location": "Leander or Cedar Park, TX",
+          "stores_named": [
+            "Home Depot",
+            "Lowe's"
+          ]
+        },
+        "tool_used": "web_search",
+        "results": [
+          {
+            "source": "homedepot.com",
+            "title": "Hex Bolts at The Home Depot",
+            "snippet": "Get free shipping on qualified hex bolts or buy online and pick up in store today in the hardware department.",
+            "pack_size_seen": null,
+            "store_level": false
+          },
+          {
+            "source": "lowes.com",
+            "title": "Hex Bolts at Lowes.com",
+            "snippet": "Shop hex bolts and a variety of hardware products online at Lowes.com.",
+            "pack_size_seen": null,
+            "store_level": false
+          }
+        ]
+      },
+      "expected": {
+        "satisfies": "cannot_tell",
+        "can_answer_now": false,
+        "answerable_now": false,
+        "needs_more_sources": false,
+        "needs_page_fetch": true,
+        "needs_tinyfish": false,
+        "needs_desktop_browser": false,
+        "has_result_home_depot": true,
+        "has_result_lowe_s": true
+      },
+      "cheapest_rung": "fetch_pages"
+    },
+    {
+      "id": "j2-tv-store-select",
+      "judgment": 2,
+      "note": "Non-hardware: the price fits at one named store, but store stock needs a store selected on the site.",
+      "state": {
+        "constraints": {
+          "item": "65 inch OLED TV under $1,200",
+          "pack_sizes": [],
+          "location": "Round Rock, TX",
+          "stores_named": [
+            "Best Buy",
+            "Walmart"
+          ]
+        },
+        "tool_used": "web_search",
+        "results": [
+          {
+            "source": "bestbuy.com",
+            "title": "65 inch Class OLED 4K Smart TV",
+            "snippet": "$1,099.99. Check availability at your local store. Pickup: select a store to see stock.",
+            "pack_size_seen": null,
+            "store_level": false
+          },
+          {
+            "source": "walmart.com",
+            "title": "65 inch OLED 4K TV",
+            "snippet": "$1,299.00. Shipping, arrives in 3 days.",
+            "pack_size_seen": null,
+            "store_level": false
+          }
+        ]
+      },
+      "expected": {
+        "satisfies": "partially",
+        "can_answer_now": false,
+        "answerable_now": false,
+        "needs_more_sources": false,
+        "needs_page_fetch": false,
+        "needs_tinyfish": false,
+        "needs_desktop_browser": true,
+        "has_result_best_buy": true,
+        "has_result_walmart": true
+      },
+      "cheapest_rung": "desktop_browser"
+    },
+    {
+      "id": "j2-pharmacy-blocked",
+      "judgment": 2,
+      "note": "The page that carries the answer refused a plain fetch, which is the rung tinyfish exists for.",
+      "state": {
+        "constraints": {
+          "item": "amoxicillin 500 mg capsules, 30 count bottle",
+          "pack_sizes": [
+            30
+          ],
+          "location": "Cedar Park, TX",
+          "stores_named": [
+            "Walgreens",
+            "CVS"
+          ]
+        },
+        "tool_used": "web_fetch",
+        "results": [
+          {
+            "source": "walgreens.com",
+            "title": "Pharmacy stock lookup",
+            "snippet": "",
+            "pack_size_seen": null,
+            "store_level": false,
+            "fetch_status": "refused the fetch with 403"
+          },
+          {
+            "source": "cvs.com",
+            "title": "Amoxicillin capsules",
+            "snippet": "Sign in to see pharmacy stock at your store.",
+            "pack_size_seen": null,
+            "store_level": false,
+            "fetch_status": "ok"
+          }
+        ]
+      },
+      "expected": {
+        "satisfies": "cannot_tell",
+        "can_answer_now": false,
+        "answerable_now": false,
+        "needs_more_sources": false,
+        "needs_page_fetch": false,
+        "needs_tinyfish": true,
+        "needs_desktop_browser": true,
+        "has_result_walgreens": true,
+        "has_result_cvs": true
+      },
+      "cheapest_rung": "tinyfish"
+    },
+    {
+      "id": "j2-bolt-all-stores-answered",
+      "judgment": 2,
+      "note": "Every named store answers at store level in a stated pack size, which is the only shape that makes can_answer_now true as the plan words it.",
+      "state": {
+        "constraints": {
+          "item": "3/8 x 8 in hot-dip galvanized hex bolt",
+          "pack_sizes": [
+            10,
+            25
+          ],
+          "location": "Leander or Cedar Park, TX",
+          "stores_named": [
+            "Home Depot",
+            "Lowe's"
+          ]
+        },
+        "tool_used": "web_search",
+        "results": [
+          {
+            "source": "homedepot.com",
+            "title": "3/8 in.-16 x 8 in. Hot Dipped Galvanized Hex Bolt (10-Pack)",
+            "snippet": "Cedar Park, TX store: 24 in stock, free pickup today. Sold as a 10 pack.",
+            "pack_size_seen": "10",
+            "store_level": true
+          },
+          {
+            "source": "lowes.com",
+            "title": "Hillman 3/8-in x 8-in Hot-Dipped Galvanized Hex Bolt, 25-Pack",
+            "snippet": "Leander, TX store: 8 in stock, pickup today. Sold as a 25 pack.",
+            "pack_size_seen": "25",
+            "store_level": true
+          }
+        ]
+      },
+      "expected": {
+        "satisfies": "fully",
+        "can_answer_now": true,
+        "answerable_now": true,
+        "needs_more_sources": false,
+        "needs_page_fetch": false,
+        "needs_tinyfish": false,
+        "needs_desktop_browser": false,
+        "has_result_home_depot": true,
+        "has_result_lowe_s": true
+      },
+      "cheapest_rung": "answer_now"
+    },
+    {
+      "id": "j2-bolt-render-required",
+      "judgment": 2,
+      "note": "The store is already selected and the page came back as an empty shell, so rendering is the only thing missing.",
+      "state": {
+        "constraints": {
+          "item": "3/8 x 8 in hot-dip galvanized hex bolt",
+          "pack_sizes": [
+            10,
+            25
+          ],
+          "location": "Leander, TX",
+          "stores_named": [
+            "Ace"
+          ]
+        },
+        "tool_used": "web_fetch",
+        "results": [
+          {
+            "source": "acehardware.com",
+            "title": "Store inventory, Leander, TX",
+            "snippet": "Inventory for the Leander, TX store. This page requires JavaScript to show stock.",
+            "pack_size_seen": null,
+            "store_level": false,
+            "fetch_status": "returned an empty shell that needs rendering"
+          }
+        ]
+      },
+      "expected": {
+        "satisfies": "cannot_tell",
+        "can_answer_now": false,
+        "answerable_now": false,
+        "needs_more_sources": false,
+        "needs_page_fetch": false,
+        "needs_tinyfish": true,
+        "needs_desktop_browser": false,
+        "has_result_ace": true
+      },
+      "cheapest_rung": "tinyfish"
+    },
+    {
+      "id": "j3-bolt-universal-no-evidence",
+      "judgment": 3,
+      "note": "The plan's claim verbatim: the evidence is about 10 packs and singles, so it says nothing either way about a 25 pack.",
+      "state": {
+        "claim": "Nobody in Leander or Cedar Park stocks a 25-pack of this bolt.",
+        "evidence": [
+          {
+            "source": "homedepot.com",
+            "text": "3/8 in.-16 x 8 in. Hot Dipped Galvanized Hex Bolt (10-Pack). Cedar Park store: in stock."
+          },
+          {
+            "source": "lowes.com",
+            "text": "Hillman 3/8-in x 8-in hex bolt, 1 each."
+          }
+        ],
+        "sources_checked": [
+          "Home Depot",
+          "Lowe's"
+        ],
+        "sources_named_in_request": [
+          "Home Depot",
+          "Lowe's",
+          "Ace"
+        ]
+      },
+      "expected": {
+        "support": "no_evidence",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-bolt-universal-contradicted",
+      "judgment": 3,
+      "note": "One in-stock listing in a named town breaks a claim about every store there.",
+      "state": {
+        "claim": "No store in Leander or Cedar Park carries this bolt at all.",
+        "evidence": [
+          {
+            "source": "homedepot.com",
+            "text": "3/8 in.-16 x 8 in. Hot Dipped Galvanized Hex Bolt (10-Pack). Cedar Park, TX store: 24 in stock, free pickup today."
+          },
+          {
+            "source": "lowes.com",
+            "text": "Hillman 3/8-in x 8-in hex bolt, 1 each."
+          }
+        ],
+        "sources_checked": [
+          "Home Depot",
+          "Lowe's"
+        ],
+        "sources_named_in_request": [
+          "Home Depot",
+          "Lowe's",
+          "Ace"
+        ]
+      },
+      "expected": {
+        "support": "contradicts",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-bolt-scoped-supported",
+      "judgment": 3,
+      "note": "The same facts as the universal case, scoped to the sources checked, which is the softened form the host should ask for.",
+      "state": {
+        "claim": "Neither of the two stores I checked, Home Depot and Lowe's, lists a 25-pack of this bolt.",
+        "evidence": [
+          {
+            "source": "homedepot.com",
+            "text": "3/8 in.-16 x 8 in. Hot Dipped Galvanized Hex Bolt (10-Pack). Cedar Park store: in stock."
+          },
+          {
+            "source": "lowes.com",
+            "text": "Hillman 3/8-in x 8-in hex bolt, 1 each."
+          }
+        ],
+        "sources_checked": [
+          "Home Depot",
+          "Lowe's"
+        ],
+        "sources_named_in_request": [
+          "Home Depot",
+          "Lowe's",
+          "Ace"
+        ]
+      },
+      "expected": {
+        "support": "supports",
+        "is_universal_negative": false
+      }
+    },
+    {
+      "id": "j3-bolt-positive-supported",
+      "judgment": 3,
+      "note": "A plain positive claim that the evidence states outright.",
+      "state": {
+        "claim": "Home Depot in Cedar Park shows this bolt in stock as a 10-pack.",
+        "evidence": [
+          {
+            "source": "homedepot.com",
+            "text": "3/8 in.-16 x 8 in. Hot Dipped Galvanized Hex Bolt (10-Pack). Cedar Park, TX store: 24 in stock, free pickup today."
+          }
+        ],
+        "sources_checked": [
+          "Home Depot"
+        ],
+        "sources_named_in_request": [
+          "Home Depot",
+          "Lowe's",
+          "Ace"
+        ]
+      },
+      "expected": {
+        "support": "supports",
+        "is_universal_negative": false
+      }
+    },
+    {
+      "id": "j3-bolt-positive-contradicted",
+      "judgment": 3,
+      "note": "A positive claim the evidence reverses, with no negative wording to key on.",
+      "state": {
+        "claim": "Home Depot in Cedar Park shows this bolt as out of stock.",
+        "evidence": [
+          {
+            "source": "homedepot.com",
+            "text": "3/8 in.-16 x 8 in. Hot Dipped Galvanized Hex Bolt (10-Pack). Cedar Park, TX store: 24 in stock, free pickup today."
+          }
+        ],
+        "sources_checked": [
+          "Home Depot"
+        ],
+        "sources_named_in_request": [
+          "Home Depot",
+          "Lowe's",
+          "Ace"
+        ]
+      },
+      "expected": {
+        "support": "contradicts",
+        "is_universal_negative": false
+      }
+    },
+    {
+      "id": "j3-bolt-price-no-evidence",
+      "judgment": 3,
+      "note": "A price claim against evidence that carries no price at all.",
+      "state": {
+        "claim": "The 10-pack is under $15 at Home Depot.",
+        "evidence": [
+          {
+            "source": "homedepot.com",
+            "text": "3/8 in.-16 x 8 in. Hot Dipped Galvanized Hex Bolt (10-Pack). Cedar Park store: in stock."
+          },
+          {
+            "source": "lowes.com",
+            "text": "Hillman 3/8-in x 8-in hex bolt, 1 each."
+          }
+        ],
+        "sources_checked": [
+          "Home Depot",
+          "Lowe's"
+        ],
+        "sources_named_in_request": [
+          "Home Depot",
+          "Lowe's"
+        ]
+      },
+      "expected": {
+        "support": "no_evidence",
+        "is_universal_negative": false
+      }
+    },
+    {
+      "id": "j3-bolt-none-phrasing",
+      "judgment": 3,
+      "note": "The same universal claim in different words, to check the noul is not keying on the word nobody.",
+      "state": {
+        "claim": "None of the hardware stores in the area stock a 25 count box of these bolts.",
+        "evidence": [
+          {
+            "source": "homedepot.com",
+            "text": "3/8 in.-16 x 8 in. Hot Dipped Galvanized Hex Bolt (10-Pack). Cedar Park store: in stock."
+          },
+          {
+            "source": "lowes.com",
+            "text": "Hillman 3/8-in x 8-in hex bolt, 1 each."
+          }
+        ],
+        "sources_checked": [
+          "Home Depot",
+          "Lowe's"
+        ],
+        "sources_named_in_request": [
+          "Home Depot",
+          "Lowe's",
+          "Ace"
+        ]
+      },
+      "expected": {
+        "support": "no_evidence",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-ace-positive-supported",
+      "judgment": 3,
+      "note": "The third named store answers with the exact pack size, so the claim is stated by the evidence.",
+      "state": {
+        "claim": "Ace Hardware in Leander has the 25-pack in stock for pickup today.",
+        "evidence": [
+          {
+            "source": "acehardware.com",
+            "text": "3/8 in. x 8 in. Hot Dipped Galvanized Hex Bolt, 25 pack. Leander, TX: 6 in stock, ready for pickup today."
+          }
+        ],
+        "sources_checked": [
+          "Ace"
+        ],
+        "sources_named_in_request": [
+          "Home Depot",
+          "Lowe's",
+          "Ace"
+        ]
+      },
+      "expected": {
+        "support": "supports",
+        "is_universal_negative": false
+      }
+    },
+    {
+      "id": "j3-tv-universal-no-evidence",
+      "judgment": 3,
+      "note": "Two listings above the price do not establish a claim about every store in a metro area.",
+      "code_rule": "Jev misses this one: it answers supports, at confidence 0.36, with is_universal_negative 0.82. The plan's code rule catches it. A universal negative whose support answer is supports below 0.6 confidence is read as no_evidence, so the claim lands on the is_universal_negative >= 0.7 and support is not supports branch and is returned to the model as an unsupported claim to soften. The same rule fires on no other case in this file: every claim scoped to the sources checked answers is_universal_negative at 0.05 or below, so nothing correct is dragged in with it.",
+      "state": {
+        "claim": "No store in the Austin area has a 65 inch OLED TV under $1,200.",
+        "evidence": [
+          {
+            "source": "bestbuy.com",
+            "text": "65 inch Class OLED 4K Smart TV. $1,499.99."
+          },
+          {
+            "source": "walmart.com",
+            "text": "65 inch OLED 4K TV. $1,699.00."
+          }
+        ],
+        "sources_checked": [
+          "Best Buy",
+          "Walmart"
+        ],
+        "sources_named_in_request": [
+          "Best Buy",
+          "Walmart",
+          "Costco"
+        ]
+      },
+      "expected": {
+        "support": "no_evidence",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-tv-universal-contradicted",
+      "judgment": 3,
+      "note": "A single qualifying listing at a named store breaks the universal claim.",
+      "state": {
+        "claim": "Nobody around Austin has that TV under $1,200 right now.",
+        "evidence": [
+          {
+            "source": "bestbuy.com",
+            "text": "65 inch Class OLED 4K Smart TV. $1,099.99. Austin, TX store: 3 in stock, pickup today."
+          }
+        ],
+        "sources_checked": [
+          "Best Buy"
+        ],
+        "sources_named_in_request": [
+          "Best Buy",
+          "Walmart"
+        ]
+      },
+      "expected": {
+        "support": "contradicts",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-oil-change-scoped",
+      "judgment": 3,
+      "note": "A scoped negative about a service, supported by both pages that were checked.",
+      "state": {
+        "claim": "Neither of the two shops I checked has a same-day slot this afternoon.",
+        "evidence": [
+          {
+            "source": "first-shop.example",
+            "text": "Oil change scheduling. Next available appointment: tomorrow at 9:00 am."
+          },
+          {
+            "source": "second-shop.example",
+            "text": "Service booking. Next available appointment: tomorrow at 11:30 am."
+          }
+        ],
+        "sources_checked": [
+          "First Shop",
+          "Second Shop"
+        ],
+        "sources_named_in_request": [
+          "First Shop",
+          "Second Shop"
+        ]
+      },
+      "expected": {
+        "support": "supports",
+        "is_universal_negative": false
+      }
+    },
+    {
+      "id": "j3-restaurant-no-evidence",
+      "judgment": 3,
+      "note": "A negative scoped to one business, so the universal noul should stay low even though the claim is negative.",
+      "state": {
+        "claim": "That steakhouse has no tables left on Friday at 7pm.",
+        "evidence": [
+          {
+            "source": "steakhouse.example",
+            "text": "Hours: Tuesday to Sunday, 5pm to 10pm. Menu: dry aged ribeye, bone-in strip, sides."
+          }
+        ],
+        "sources_checked": [
+          "Steakhouse"
+        ],
+        "sources_named_in_request": [
+          "Steakhouse"
+        ]
+      },
+      "expected": {
+        "support": "no_evidence",
+        "is_universal_negative": false
+      }
+    },
+    {
+      "id": "j3-pharmacy-universal-contradicted",
+      "judgment": 3,
+      "note": "A universal negative in a third domain, broken by one in-stock listing.",
+      "state": {
+        "claim": "No pharmacy carries amoxicillin 500 mg capsules in a 30 count bottle.",
+        "evidence": [
+          {
+            "source": "walgreens.com",
+            "text": "Amoxicillin 500 mg capsules, 30 count bottle. In stock at the Cedar Park, TX pharmacy."
+          }
+        ],
+        "sources_checked": [
+          "Walgreens"
+        ],
+        "sources_named_in_request": [
+          "Walgreens",
+          "CVS"
+        ]
+      },
+      "expected": {
+        "support": "contradicts",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-pharmacy-scoped-supported",
+      "judgment": 3,
+      "note": "Both checked pages list a different count, which is exactly what the scoped claim says.",
+      "state": {
+        "claim": "The two pharmacies I checked did not list a 30 count bottle.",
+        "evidence": [
+          {
+            "source": "walgreens.com",
+            "text": "Amoxicillin 500 mg capsules, 20 count bottle."
+          },
+          {
+            "source": "cvs.com",
+            "text": "Amoxicillin 500 mg capsules, 100 count bottle."
+          }
+        ],
+        "sources_checked": [
+          "Walgreens",
+          "CVS"
+        ],
+        "sources_named_in_request": [
+          "Walgreens",
+          "CVS"
+        ]
+      },
+      "expected": {
+        "support": "supports",
+        "is_universal_negative": false
+      }
+    },
+    {
+      "id": "j3-un-bolt-discontinued-supported",
+      "judgment": 3,
+      "note": "Hardware: the evidence is itself universal, which is the only way a universal negative can be supported.",
+      "state": {
+        "claim": "Nobody sells this bolt anymore.",
+        "evidence": [
+          {
+            "source": "fastener-maker.example",
+            "text": "This part was discontinued in 2024 and is no longer sold by any retailer or distributor."
+          }
+        ],
+        "sources_checked": [
+          "Fastener Maker"
+        ],
+        "sources_named_in_request": [
+          "Fastener Maker"
+        ]
+      },
+      "expected": {
+        "support": "supports",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-un-tv-recall-supported",
+      "judgment": 3,
+      "note": "Electronics: a recall notice that speaks for every retail channel.",
+      "state": {
+        "claim": "No store has that TV model in stock anywhere.",
+        "evidence": [
+          {
+            "source": "tv-maker.example",
+            "text": "All units of this model were recalled and pulled from every retail channel. No retailer holds stock."
+          }
+        ],
+        "sources_checked": [
+          "TV Maker"
+        ],
+        "sources_named_in_request": [
+          "TV Maker",
+          "Best Buy"
+        ]
+      },
+      "expected": {
+        "support": "supports",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-un-drug-shortage-supported",
+      "judgment": 3,
+      "note": "Pharmacy: a shortage bulletin covering every manufacturer.",
+      "state": {
+        "claim": "That medication is not available anywhere right now.",
+        "evidence": [
+          {
+            "source": "shortage-bulletin.example",
+            "text": "Every manufacturer reports this product on shortage. No supply is available from any distributor in the country."
+          }
+        ],
+        "sources_checked": [
+          "Shortage Bulletin"
+        ],
+        "sources_named_in_request": [
+          "Shortage Bulletin",
+          "Walgreens"
+        ]
+      },
+      "expected": {
+        "support": "supports",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-un-autopart-supported",
+      "judgment": 3,
+      "note": "Auto parts: the catalogue says there is no supply anywhere and no equivalent.",
+      "state": {
+        "claim": "Nobody stocks that alternator for this model.",
+        "evidence": [
+          {
+            "source": "parts-catalogue.example",
+            "text": "This alternator has no remaining supply at any warehouse or store, and no aftermarket equivalent is listed."
+          }
+        ],
+        "sources_checked": [
+          "Parts Catalogue"
+        ],
+        "sources_named_in_request": [
+          "Parts Catalogue"
+        ]
+      },
+      "expected": {
+        "support": "supports",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-un-appliance-supported",
+      "judgment": 3,
+      "note": "Appliances: a parts page that rules out the manufacturer and every authorised dealer.",
+      "state": {
+        "claim": "No retailer carries that dishwasher control panel anymore.",
+        "evidence": [
+          {
+            "source": "appliance-maker.example",
+            "text": "Part number discontinued. Not available from the manufacturer or from any authorised dealer."
+          }
+        ],
+        "sources_checked": [
+          "Appliance Maker"
+        ],
+        "sources_named_in_request": [
+          "Appliance Maker"
+        ]
+      },
+      "expected": {
+        "support": "supports",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-un-bolt-two-stores-no-evidence",
+      "judgment": 3,
+      "note": "Hardware: two listings cannot establish a claim about every store anywhere.",
+      "state": {
+        "claim": "No store anywhere sells a 50 pack of this bolt.",
+        "evidence": [
+          {
+            "source": "homedepot.com",
+            "text": "Hot Dipped Galvanized Hex Bolt (10-Pack). Cedar Park store: in stock."
+          },
+          {
+            "source": "lowes.com",
+            "text": "Hillman 3/8-in x 8-in hex bolt, 10 pack."
+          }
+        ],
+        "sources_checked": [
+          "Home Depot",
+          "Lowe's"
+        ],
+        "sources_named_in_request": [
+          "Home Depot",
+          "Lowe's",
+          "Ace"
+        ]
+      },
+      "expected": {
+        "support": "no_evidence",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-un-tv-price-no-evidence",
+      "judgment": 3,
+      "note": "Electronics: two prices above the line say nothing about everyone.",
+      "state": {
+        "claim": "Nobody sells that TV under $900.",
+        "evidence": [
+          {
+            "source": "bestbuy.com",
+            "text": "65 inch Class OLED 4K Smart TV. $1,199.00."
+          },
+          {
+            "source": "walmart.com",
+            "text": "65 inch OLED 4K TV. $1,249.00."
+          }
+        ],
+        "sources_checked": [
+          "Best Buy",
+          "Walmart"
+        ],
+        "sources_named_in_request": [
+          "Best Buy",
+          "Walmart"
+        ]
+      },
+      "expected": {
+        "support": "no_evidence",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-un-drug-count-no-evidence",
+      "judgment": 3,
+      "note": "Pharmacy: two counts that are not the one claimed, from two pharmacies out of many.",
+      "state": {
+        "claim": "No pharmacy in the country has the 30 count bottle.",
+        "evidence": [
+          {
+            "source": "walgreens.com",
+            "text": "Amoxicillin 500 mg capsules, 20 count bottle."
+          },
+          {
+            "source": "cvs.com",
+            "text": "Amoxicillin 500 mg capsules, 100 count bottle."
+          }
+        ],
+        "sources_checked": [
+          "Walgreens",
+          "CVS"
+        ],
+        "sources_named_in_request": [
+          "Walgreens",
+          "CVS"
+        ]
+      },
+      "expected": {
+        "support": "no_evidence",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-un-grocery-no-evidence",
+      "judgment": 3,
+      "note": "Groceries: the evidence is a store page that never mentions the item.",
+      "state": {
+        "claim": "That gluten free bread is not available anywhere in town.",
+        "evidence": [
+          {
+            "source": "grocer.example",
+            "text": "Store hours: 7am to 10pm daily. Our in-store bakery department bakes fresh loaves every morning."
+          }
+        ],
+        "sources_checked": [
+          "Grocer"
+        ],
+        "sources_named_in_request": [
+          "Grocer"
+        ]
+      },
+      "expected": {
+        "support": "no_evidence",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-un-autopart-no-evidence",
+      "judgment": 3,
+      "note": "Auto parts: a page for a different model year, and a catalogue entry with no stock line.",
+      "state": {
+        "claim": "Nobody has that brake rotor in stock.",
+        "evidence": [
+          {
+            "source": "parts-store.example",
+            "text": "Front brake rotor, fits the 2016 model year. Sold individually."
+          },
+          {
+            "source": "parts-catalogue.example",
+            "text": "Catalogue entry: front brake rotor, cast iron, vented."
+          }
+        ],
+        "sources_checked": [
+          "Parts Store",
+          "Parts Catalogue"
+        ],
+        "sources_named_in_request": [
+          "Parts Store",
+          "Parts Catalogue"
+        ]
+      },
+      "expected": {
+        "support": "no_evidence",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-un-bolt-contradicted",
+      "judgment": 3,
+      "note": "Hardware: one in-stock listing inside the claimed area breaks it.",
+      "state": {
+        "claim": "No store in Texas carries this bolt in a 25 pack.",
+        "evidence": [
+          {
+            "source": "acehardware.com",
+            "text": "Hot Dipped Galvanized Hex Bolt, 25 pack. Austin, TX store: 12 in stock."
+          }
+        ],
+        "sources_checked": [
+          "Ace"
+        ],
+        "sources_named_in_request": [
+          "Ace",
+          "Home Depot"
+        ]
+      },
+      "expected": {
+        "support": "contradicts",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-un-tv-contradicted",
+      "judgment": 3,
+      "note": "Electronics: a live listing breaks a claim that nobody sells it.",
+      "state": {
+        "claim": "Nobody sells that TV anymore.",
+        "evidence": [
+          {
+            "source": "bestbuy.com",
+            "text": "65 inch Class OLED 4K Smart TV. $999.00. In stock, ships tomorrow."
+          }
+        ],
+        "sources_checked": [
+          "Best Buy"
+        ],
+        "sources_named_in_request": [
+          "Best Buy"
+        ]
+      },
+      "expected": {
+        "support": "contradicts",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-un-drug-contradicted",
+      "judgment": 3,
+      "note": "Pharmacy: one filled prescription breaks a claim about every pharmacy.",
+      "state": {
+        "claim": "No pharmacy anywhere can fill that prescription this week.",
+        "evidence": [
+          {
+            "source": "walgreens.com",
+            "text": "Prescription ready for pickup today at the Round Rock, TX pharmacy."
+          }
+        ],
+        "sources_checked": [
+          "Walgreens"
+        ],
+        "sources_named_in_request": [
+          "Walgreens",
+          "CVS"
+        ]
+      },
+      "expected": {
+        "support": "contradicts",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-un-appliance-contradicted",
+      "judgment": 3,
+      "note": "Appliances: warehouse stock with a delivery date breaks the claim.",
+      "state": {
+        "claim": "No retailer has that dishwasher in stock.",
+        "evidence": [
+          {
+            "source": "appliance-store.example",
+            "text": "In stock in the Austin, TX warehouse. Delivery Friday."
+          }
+        ],
+        "sources_checked": [
+          "Appliance Store"
+        ],
+        "sources_named_in_request": [
+          "Appliance Store"
+        ]
+      },
+      "expected": {
+        "support": "contradicts",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "j3-un-grocery-contradicted",
+      "judgment": 3,
+      "note": "Groceries: an aisle listing in the named town breaks the claim.",
+      "state": {
+        "claim": "Nobody in town sells that brand of olive oil.",
+        "evidence": [
+          {
+            "source": "grocer.example",
+            "text": "In stock at the Leander, TX store, aisle 7."
+          }
+        ],
+        "sources_checked": [
+          "Grocer"
+        ],
+        "sources_named_in_request": [
+          "Grocer"
+        ]
+      },
+      "expected": {
+        "support": "contradicts",
+        "is_universal_negative": true
+      }
+    },
+    {
+      "id": "2b-bolt-all-confirmed",
+      "judgment": "2b",
+      "note": "Every required constraint is confirmed on one result, so there is nothing to fetch.",
+      "state": {
+        "constraints": {
+          "item": "3/8 x 8 in hot-dip galvanized hex bolt",
+          "pack_sizes": [
+            10,
+            25
+          ],
+          "location": "Cedar Park, TX",
+          "stores_named": [
+            "Home Depot",
+            "Lowe's"
+          ]
+        },
+        "result": {
+          "source": "homedepot.com",
+          "title": "3/8 in.-16 x 8 in. Hot Dipped Galvanized Hex Bolt (10-Pack)",
+          "snippet": "Cedar Park, TX store: 24 in stock, free pickup today."
+        }
+      },
+      "expected": {
+        "confirms_item": true,
+        "confirms_pack_size": true,
+        "confirms_store": true,
+        "confirms_stock_for_location": true,
+        "required": [
+          "confirms_item",
+          "confirms_pack_size",
+          "confirms_store",
+          "confirms_stock_for_location"
+        ],
+        "fetch": false
+      }
+    },
+    {
+      "id": "2b-bolt-wrong-pack",
+      "judgment": "2b",
+      "note": "The pack count is stated and is not one of the two asked for.",
+      "state": {
+        "constraints": {
+          "item": "3/8 x 8 in hot-dip galvanized hex bolt",
+          "pack_sizes": [
+            10,
+            25
+          ],
+          "location": "Cedar Park, TX",
+          "stores_named": [
+            "Home Depot",
+            "Lowe's"
+          ]
+        },
+        "result": {
+          "source": "homedepot.com",
+          "title": "3/8 in.-16 x 8 in. Hot Dipped Galvanized Hex Bolt (50-Pack)",
+          "snippet": "Cedar Park, TX store: in stock, free pickup today."
+        }
+      },
+      "expected": {
+        "confirms_item": true,
+        "confirms_pack_size": false,
+        "confirms_store": true,
+        "confirms_stock_for_location": true,
+        "required": [
+          "confirms_item",
+          "confirms_pack_size",
+          "confirms_store",
+          "confirms_stock_for_location"
+        ],
+        "fetch": true
+      }
+    },
+    {
+      "id": "2b-bolt-no-pack-stated",
+      "judgment": "2b",
+      "note": "No package count anywhere in the title or the snippet.",
+      "state": {
+        "constraints": {
+          "item": "3/8 x 8 in hot-dip galvanized hex bolt",
+          "pack_sizes": [
+            10,
+            25
+          ],
+          "location": "Cedar Park, TX",
+          "stores_named": [
+            "Home Depot",
+            "Lowe's"
+          ]
+        },
+        "result": {
+          "source": "homedepot.com",
+          "title": "3/8 in.-16 x 8 in. Hot Dipped Galvanized Hex Bolt",
+          "snippet": "Cedar Park, TX store: in stock, pickup today."
+        }
+      },
+      "expected": {
+        "confirms_item": true,
+        "confirms_pack_size": false,
+        "confirms_store": true,
+        "confirms_stock_for_location": true,
+        "required": [
+          "confirms_item",
+          "confirms_pack_size",
+          "confirms_store",
+          "confirms_stock_for_location"
+        ],
+        "fetch": true
+      }
+    },
+    {
+      "id": "2b-bolt-variant-finish",
+      "judgment": "2b",
+      "note": "Right size, wrong finish, which is the variant trap.",
+      "state": {
+        "constraints": {
+          "item": "3/8 x 8 in hot-dip galvanized hex bolt",
+          "pack_sizes": [
+            10,
+            25
+          ],
+          "location": "Cedar Park, TX",
+          "stores_named": [
+            "Home Depot",
+            "Lowe's"
+          ]
+        },
+        "result": {
+          "source": "homedepot.com",
+          "title": "3/8 in. x 8 in. Zinc Plated Hex Bolt (10-Pack)",
+          "snippet": "Cedar Park, TX store: in stock, pickup today."
+        }
+      },
+      "expected": {
+        "confirms_item": false,
+        "confirms_pack_size": true,
+        "confirms_store": true,
+        "confirms_stock_for_location": true,
+        "required": [
+          "confirms_item",
+          "confirms_pack_size",
+          "confirms_store",
+          "confirms_stock_for_location"
+        ],
+        "fetch": true
+      }
+    },
+    {
+      "id": "2b-bolt-unnamed-store",
+      "judgment": "2b",
+      "note": "The item and the pack are right but the seller is not one of the named stores and only ships.",
+      "state": {
+        "constraints": {
+          "item": "3/8 x 8 in hot-dip galvanized hex bolt",
+          "pack_sizes": [
+            10,
+            25
+          ],
+          "location": "Cedar Park, TX",
+          "stores_named": [
+            "Home Depot",
+            "Lowe's"
+          ]
+        },
+        "result": {
+          "source": "boltdepot.com",
+          "title": "Hex bolts, hot dipped galvanized, 3/8 in. x 8 in., 25 pack",
+          "snippet": "Ships in 1 business day."
+        }
+      },
+      "expected": {
+        "confirms_item": true,
+        "confirms_pack_size": true,
+        "confirms_store": false,
+        "confirms_stock_for_location": false,
+        "required": [
+          "confirms_item",
+          "confirms_pack_size",
+          "confirms_store",
+          "confirms_stock_for_location"
+        ],
+        "fetch": true
+      }
+    },
+    {
+      "id": "2b-bolt-no-local-stock",
+      "judgment": "2b",
+      "note": "A named store and the right pack, but the snippet offers shipping and a store check rather than stock.",
+      "state": {
+        "constraints": {
+          "item": "3/8 x 8 in hot-dip galvanized hex bolt",
+          "pack_sizes": [
+            10,
+            25
+          ],
+          "location": "Cedar Park, TX",
+          "stores_named": [
+            "Home Depot",
+            "Lowe's"
+          ]
+        },
+        "result": {
+          "source": "homedepot.com",
+          "title": "3/8 in.-16 x 8 in. Hot Dipped Galvanized Hex Bolt (10-Pack)",
+          "snippet": "Free shipping on orders over $45. Check availability at your store."
+        }
+      },
+      "expected": {
+        "confirms_item": true,
+        "confirms_pack_size": true,
+        "confirms_store": true,
+        "confirms_stock_for_location": false,
+        "required": [
+          "confirms_item",
+          "confirms_pack_size",
+          "confirms_store",
+          "confirms_stock_for_location"
+        ],
+        "fetch": true
+      }
+    },
+    {
+      "id": "2b-bolt-nearby-town",
+      "judgment": "2b",
+      "note": "Stock at a store in the next town over, which the location question counts as near.",
+      "state": {
+        "constraints": {
+          "item": "3/8 x 8 in hot-dip galvanized hex bolt",
+          "pack_sizes": [
+            25
+          ],
+          "location": "Leander, TX",
+          "stores_named": [
+            "Ace"
+          ]
+        },
+        "result": {
+          "source": "acehardware.com",
+          "title": "3/8 in. x 8 in. Hot Dipped Galvanized Hex Bolt, 25 pack",
+          "snippet": "Cedar Park, TX store, 8 miles away: 6 in stock, ready for pickup."
+        }
+      },
+      "expected": {
+        "confirms_item": true,
+        "confirms_pack_size": true,
+        "confirms_store": true,
+        "confirms_stock_for_location": true,
+        "required": [
+          "confirms_item",
+          "confirms_pack_size",
+          "confirms_store",
+          "confirms_stock_for_location"
+        ],
+        "fetch": false
+      }
+    },
+    {
+      "id": "2b-tv-no-pack-constraint",
+      "judgment": "2b",
+      "note": "No pack size was asked for, so an unconfirmed pack count must not trigger a fetch.",
+      "state": {
+        "constraints": {
+          "item": "65 inch OLED TV",
+          "pack_sizes": [],
+          "location": "Round Rock, TX",
+          "stores_named": [
+            "Best Buy"
+          ]
+        },
+        "result": {
+          "source": "bestbuy.com",
+          "title": "65 inch Class OLED 4K Smart TV",
+          "snippet": "Round Rock, TX store: 3 in stock, pickup today."
+        }
+      },
+      "expected": {
+        "confirms_item": true,
+        "confirms_pack_size": false,
+        "confirms_store": true,
+        "confirms_stock_for_location": true,
+        "required": [
+          "confirms_item",
+          "confirms_store",
+          "confirms_stock_for_location"
+        ],
+        "fetch": false
+      }
+    },
+    {
+      "id": "2b-tv-wrong-size",
+      "judgment": "2b",
+      "note": "A different screen size is a different item.",
+      "state": {
+        "constraints": {
+          "item": "65 inch OLED TV",
+          "pack_sizes": [],
+          "location": "Round Rock, TX",
+          "stores_named": [
+            "Best Buy"
+          ]
+        },
+        "result": {
+          "source": "bestbuy.com",
+          "title": "55 inch Class OLED 4K Smart TV",
+          "snippet": "Round Rock, TX store: 5 in stock, pickup today."
+        }
+      },
+      "expected": {
+        "confirms_item": false,
+        "confirms_pack_size": false,
+        "confirms_store": true,
+        "confirms_stock_for_location": true,
+        "required": [
+          "confirms_item",
+          "confirms_store",
+          "confirms_stock_for_location"
+        ],
+        "fetch": true
+      }
+    },
+    {
+      "id": "2b-pharmacy-all-confirmed",
+      "judgment": "2b",
+      "note": "A count in a non-hardware domain, confirmed along with everything else.",
+      "state": {
+        "constraints": {
+          "item": "amoxicillin 500 mg capsules",
+          "pack_sizes": [
+            30
+          ],
+          "location": "Cedar Park, TX",
+          "stores_named": [
+            "Walgreens",
+            "CVS"
+          ]
+        },
+        "result": {
+          "source": "walgreens.com",
+          "title": "Amoxicillin 500 mg capsules, 30 count bottle",
+          "snippet": "In stock at the Cedar Park, TX pharmacy."
+        }
+      },
+      "expected": {
+        "confirms_item": true,
+        "confirms_pack_size": true,
+        "confirms_store": true,
+        "confirms_stock_for_location": true,
+        "required": [
+          "confirms_item",
+          "confirms_pack_size",
+          "confirms_store",
+          "confirms_stock_for_location"
+        ],
+        "fetch": false
+      }
+    },
+    {
+      "id": "2b-pharmacy-sign-in",
+      "judgment": "2b",
+      "note": "Everything confirms except stock, which sits behind a sign-in.",
+      "state": {
+        "constraints": {
+          "item": "amoxicillin 500 mg capsules",
+          "pack_sizes": [
+            30
+          ],
+          "location": "Cedar Park, TX",
+          "stores_named": [
+            "Walgreens",
+            "CVS"
+          ]
+        },
+        "result": {
+          "source": "cvs.com",
+          "title": "Amoxicillin 500 mg capsules, 30 count bottle",
+          "snippet": "Sign in to see pharmacy stock at your store."
+        }
+      },
+      "expected": {
+        "confirms_item": true,
+        "confirms_pack_size": true,
+        "confirms_store": true,
+        "confirms_stock_for_location": false,
+        "required": [
+          "confirms_item",
+          "confirms_pack_size",
+          "confirms_store",
+          "confirms_stock_for_location"
+        ],
+        "fetch": true
+      }
+    },
+    {
+      "id": "2b-grocery-no-store-constraint",
+      "judgment": "2b",
+      "note": "No retailer was named, so the store confirmation is false and not required.",
+      "state": {
+        "constraints": {
+          "item": "gluten free sourdough loaf",
+          "pack_sizes": [],
+          "location": "Leander, TX",
+          "stores_named": []
+        },
+        "result": {
+          "source": "grocer.example",
+          "title": "Gluten Free Sourdough Loaf",
+          "snippet": "In stock at the Leander, TX store, aisle 4."
+        }
+      },
+      "expected": {
+        "confirms_item": true,
+        "confirms_pack_size": false,
+        "confirms_store": false,
+        "confirms_stock_for_location": true,
+        "required": [
+          "confirms_item",
+          "confirms_stock_for_location"
+        ],
+        "fetch": false
+      }
+    },
+    {
+      "id": "2b-autopart-wrong-item",
+      "judgment": "2b",
+      "note": "Front and rear are different parts, and everything else confirms.",
+      "state": {
+        "constraints": {
+          "item": "front brake rotor for a 2019 model",
+          "pack_sizes": [
+            2
+          ],
+          "location": "Austin, TX",
+          "stores_named": [
+            "Parts Store"
+          ]
+        },
+        "result": {
+          "source": "parts-store.example",
+          "title": "Rear brake rotor, 2019 model, 2 pack",
+          "snippet": "Austin, TX store: 4 in stock."
+        }
+      },
+      "expected": {
+        "confirms_item": false,
+        "confirms_pack_size": true,
+        "confirms_store": true,
+        "confirms_stock_for_location": true,
+        "required": [
+          "confirms_item",
+          "confirms_pack_size",
+          "confirms_store",
+          "confirms_stock_for_location"
+        ],
+        "fetch": true
+      }
+    },
+    {
+      "id": "2b-appliance-no-stock-line",
+      "judgment": "2b",
+      "note": "A marketing snippet with a delivery offer and no stock anywhere near the place.",
+      "state": {
+        "constraints": {
+          "item": "24 inch stainless dishwasher",
+          "pack_sizes": [],
+          "location": "Austin, TX",
+          "stores_named": [
+            "Appliance Store"
+          ]
+        },
+        "result": {
+          "source": "appliance-store.example",
+          "title": "24 inch Stainless Steel Dishwasher",
+          "snippet": "Free delivery on orders over $399. Compare models and read reviews."
+        }
+      },
+      "expected": {
+        "confirms_item": true,
+        "confirms_pack_size": false,
+        "confirms_store": true,
+        "confirms_stock_for_location": false,
+        "required": [
+          "confirms_item",
+          "confirms_store",
+          "confirms_stock_for_location"
+        ],
+        "fetch": true
+      }
+    }
+  ],
+  "set": "tuned",
+  "label_corrections": [
+    {
+      "case_id": "j1-bolt-no-location",
+      "question": "scope",
+      "old": "unclear",
+      "new": "local_in_store",
+      "why": "The scope criteria allow an implied place and the state supplies one in workspace_location, so local_in_store is the right reading of this state. The original label read the request field alone, which is not what the scope question is asked about."
+    }
+  ],
+  "rung_label_notes": [
+    "cheapest_rung follows the new answerable_now noul, j2-bolt-fully: fetch_pages -> answer_now",
+    "cheapest_rung follows the new answerable_now noul, j2-bolt-no-match: none -> answer_now"
+  ]
+}
