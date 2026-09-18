@@ -310,11 +310,24 @@ async function main() {
     "the session is that customer's and is not the operator's", `${who.body?.workspace?.slug ?? "?"}, operator ${String(who.body?.operator)}`);
 
   step("what that customer is offered in their own Settings");
-  const plans = await asCustomer("GET", "/model/plans");
+  // POLLED, AND THE WAIT IS THE MEASUREMENT. The entitlement is written at the proxy and into the
+  // key record on the control plane; the relay learns it on its own registry refresh, which is a
+  // minute. So a read taken straight after the admin action truthfully answers the OLD set, and a
+  // gate that asserted on the first read would be asserting that a cache is instant.
+  const startedWaiting = Date.now();
+  let plans = await asCustomer("GET", "/model/plans");
+  let offered = (plans.body.plans ?? []).map((one) => one.model);
+  const matches = () => offered.length === WANTED.length && WANTED.every((one) => offered.includes(one));
+  while (!matches() && Date.now() - startedWaiting < 150_000) {
+    await sleep(6000);
+    plans = await asCustomer("GET", "/model/plans");
+    offered = (plans.body.plans ?? []).map((one) => one.model);
+  }
+  const waited = Math.round((Date.now() - startedWaiting) / 1000);
   check(plans.status === 200, "GET /model/plans answers the signed-in customer", `HTTP ${plans.status}`);
-  const offered = (plans.body.plans ?? []).map((one) => one.model);
-  check(offered.length === WANTED.length && WANTED.every((one) => offered.includes(one)),
-    "and it offers exactly the plans this workspace may run", offered.join(", ") || "(none)");
+  check(matches(), "and it offers exactly the plans this workspace may run",
+    `${offered.join(", ") || "(none)"} · ${waited}s after the entitlement was written`);
+  note(`the relay reads the entitlement off its own registry, which refreshes every 60 s: a customer whose Settings is already open sees the new set on a load after that.`);
   check(!offered.includes(DENIED), `and ${DENIED} is not among them`, offered.join(", ") || "(none)");
   check(!/sk-/.test(plans.text), "and no credential is in that answer");
   for (const one of plans.body.plans ?? []) {

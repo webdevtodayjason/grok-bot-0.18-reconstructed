@@ -4699,9 +4699,13 @@ export function createAdminApi({
         json(response, 200, {
           slug,
           allowed: wanted,
+          // WITHIN A MINUTE, NOT ON THE NEXT LOAD. The relay builds a customer's choices from its own
+          // registry, which refreshes every 60 seconds (ui/tenant-registry.mjs), so a customer who
+          // reloads Settings the second after this is answered truthfully sees the old set. Measured
+          // by scripts/verify-model-switch.mjs, which had to learn to wait for exactly this.
           message: wanted.length === 1
-            ? `${slug} may run ${wanted[0]} and nothing else, so their Settings shows it without a switch.`
-            : `${slug} may run ${wanted.join(", ")}. Their Settings offers the switch on its next load.`,
+            ? `${slug} may run ${wanted[0]} and nothing else, so their Settings shows it without a switch within a minute.`
+            : `${slug} may run ${wanted.join(", ")}. Their Settings offers the switch within a minute, on the next load after that.`,
         });
         return true;
       }
