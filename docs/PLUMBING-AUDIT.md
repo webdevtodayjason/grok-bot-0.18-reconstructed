@@ -1963,6 +1963,14 @@ reads `state: initializing`, which `connector-health.ts:119` treats as a handsha
 has been in that state through at least eight failed searches over nine minutes, so it is stuck
 rather than connecting, and the host log carries no TinyFish or MCP line explaining why.
 
+**Fixed on 2026-09-18 by restarting demo's host**, which is the only lever that exists. The
+connector went from `initializing` to `connected` in the same minute, `cloudflare-docs` came up with
+it, and a real search through a throwaway bot answered with Valletta. So the bridge was stuck from a
+previous boot and nothing short of restarting the host could clear it. Note for anyone reading the
+process evidence above: titanium runs an `mcp-remote` process and demo now serves the same connector
+without one, so a bridge process is not the test of whether this connector is alive; the reported
+state is.
+
 **Two things this needs, and neither is a one-liner.** First, WebSearch should fall through to the
 workspace's own proxy route when the connector does not answer, instead of telling the person that
 trying again will not help. The sentence is true of the connector and false of the box: demo can
@@ -1972,6 +1980,24 @@ Wikipedia by hand. Second, there is no way to restart one connector. The gateway
 remove and re-add, which risks the connector secret that cannot be restored without reading the key,
 or a host restart, which on this fleet also swaps the bundle. A wedged bridge should be
 restartable on its own.
+
+## 6s. CONNECTOR-4: a connector cannot be restarted, and a stuck one reports healthy (2026-09-18)
+
+Two gaps that SEARCH-2 walked into, filed on their own because they will be walked into again.
+
+**There is no way to restart a single connector bridge.** The gateway offers `addLocalConnector` and
+`removeLocalConnector` and nothing between them. When demo's TinyFish connector sat in
+`initializing` through nine minutes of failed searches, the only choices were a remove and re-add,
+which puts a connector secret at risk that cannot be restored without reading the key, or a host
+restart, which on this fleet also swaps the bundle. A wedged connector should be restartable by
+itself, and the restart should be reachable from the console rather than by hand on the box.
+
+**A stuck connector is reported as healthy by the route.** `getWebSearchRoute` answered
+`route: connector, answers: true` on demo throughout, because it reads a stored record rather than
+asking whether anything is listening. A route that says "answers" while every search fails is the
+single most misleading thing in this incident: it sent the first look at the vendor and the key,
+both of which were identical to the working box. The route read should carry the connector's live
+state, or say plainly that it is describing configuration and not reachability.
 
 ## 7. The wave plan
 
