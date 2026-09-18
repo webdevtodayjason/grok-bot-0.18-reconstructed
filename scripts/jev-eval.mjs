@@ -204,6 +204,10 @@ function pickRung(answers) {
   return "none";
 }
 
+// Receipts that are incomplete or self-contradictory are code's to detect before Jev is asked, so
+// a case can mark one answer code-owned. It is still asked, it is just not graded.
+const CODE_OWNED_MARKER = "computed_by_code";
+
 // A universal negative answered "supports" below this confidence reads as no_evidence in code.
 const UNIVERSAL_NEGATIVE_FLOOR = 0.6;
 
@@ -261,6 +265,68 @@ function decideFetch(answers, required) {
   return { fetch: unconfirmed.length > 0, unconfirmed };
 }
 
+// Judgment 5, completion check. The receipts are built in code from the run record, so the state
+// never takes the agent's word for what it did. Jev judges whether the claim matches the receipts.
+const JUDGMENT_5_QUESTIONS = {
+  result_is_echo: {
+    type: "noul",
+    instructions: "Is `claimed_result` a restatement of `task` rather than a report of an outcome?",
+    criteria: {
+      true: "`claimed_result` repeats the task's own words or its instructions back, with no outcome of its own",
+      false: "`claimed_result` reports what happened, what was produced, or what was found",
+    },
+  },
+};
+
+// One noul per entry of task_parts. Jev judges each part against the receipts alone; code does the
+// aggregating, so no ordering, counting or comparison is asked of the model.
+function partQuestion(part) {
+  if (part.kind === "reply") {
+    return {
+      type: "noul",
+      instructions: `Does \`claimed_result\` contain ${part.text}, stated as an outcome rather than a plan?`,
+      criteria: {
+        true: "`claimed_result` carries that content itself, written as something already produced or found",
+        false: "`claimed_result` does not carry it, or only says it will be produced",
+      },
+    };
+  }
+  return {
+    type: "noul",
+    instructions: `Do \`receipts\` show that this part was carried out: ${part.text}? Count a file written, a search run, a page fetched, or a tool call that produces it; do not count \`claimed_result\` saying so.`,
+    criteria: {
+      true: "`receipts` carry a file, a search, a fetched page or a tool call that carries out this part",
+      false: "nothing in `receipts` carries out this part, whatever `claimed_result` says about it",
+    },
+  };
+}
+
+// A file part is code's alone: the exact path, written and not empty. Jev is never asked.
+function filePartPasses(part, receipts) {
+  return (receipts?.files_written ?? []).some((written) => written.path === part.path && written.bytes > 0);
+}
+
+const COMPLETION_PART_FLOOR = 0.7;
+const COMPLETION_OVERCLAIM_FLOOR = 0.3;
+
+function aggregateCompletion(answers, parts, receipts, claimedParts) {
+  const outcomes = parts.map((part, i) => {
+    if (part.kind === "file") {
+      const passes = filePartPasses(part, receipts);
+      return { kind: "file", passes, evidence: passes ? "file written" : "no such file" };
+    }
+    const noul = answers?.[`part_${i}_done`]?.noul ?? 0;
+    return { kind: part.kind, passes: noul >= COMPLETION_PART_FLOOR, noul };
+  });
+  const passed = outcomes.filter((o) => o.passes).length;
+  const done = passed === outcomes.length ? "done" : passed === 0 ? "not_done" : "partial";
+  const overclaimed = (claimedParts ?? []).filter((i) => {
+    const outcome = outcomes[i];
+    return outcome && (outcome.kind === "file" ? !outcome.passes : outcome.noul < COMPLETION_OVERCLAIM_FLOOR);
+  });
+  return { done, outcomes, overclaim: overclaimed.length > 0, overclaimed_parts: overclaimed };
+}
+
 const JUDGMENT_3_QUESTIONS = {
   support: {
     type: "choice",
@@ -293,6 +359,14 @@ function questionsFor(testCase) {
   if (testCase.judgment === 1) return { ...JUDGMENT_1_QUESTIONS };
   if (testCase.judgment === 3) return { ...JUDGMENT_3_QUESTIONS };
   if (testCase.judgment === "2b") return { ...JUDGMENT_2B_QUESTIONS };
+  if (testCase.judgment === 5) {
+    const questions = { ...JUDGMENT_5_QUESTIONS };
+    (testCase.state?.task_parts ?? []).forEach((part, i) => {
+      if (part.kind === "file") return;
+      questions[`part_${i}_done`] = partQuestion(part);
+    });
+    return questions;
+  }
   if (testCase.judgment === 2) {
     const questions = { ...JUDGMENT_2_BASE_QUESTIONS };
     const named = testCase.state?.constraints?.stores_named ?? [];
@@ -385,8 +459,12 @@ function truncate(text, max = 600) {
 // ungraded. cheapest_rung is a labelled outcome of the rung nouls, not a question, so it is skipped.
 function gradeCase(testCase, answers) {
   const grades = [];
+  const parts = testCase.state?.task_parts ?? [];
   for (const [questionId, expected] of Object.entries(testCase.expected ?? {})) {
     if (questionId === "cheapest_rung" || questionId === "required" || questionId === "fetch") continue;
+    if (expected === CODE_OWNED_MARKER) continue;
+    const partMatch = /^part_(\d+)_done$/.exec(questionId);
+    if (partMatch && parts[Number(partMatch[1])]?.kind === "file") continue;
     const answer = answers?.[questionId];
     if (!answer) {
       grades.push({
@@ -537,6 +615,20 @@ async function worker() {
           record.rung_pick_correct = record.code_picked_rung === labelled;
         }
       }
+      if (testCase.judgment === 5) {
+        const parts = testCase.state?.task_parts ?? [];
+        const aggregate = aggregateCompletion(outcome.response.answers, parts, testCase.state?.receipts, testCase.code_expectations?.claimed_parts);
+        aggregate.file_part_grades = parts
+          .map((part, i) => ({ part: i, kind: part.kind, passes: aggregate.outcomes[i].passes, expected: testCase.expected?.[`part_${i}_done`] }))
+          .filter((row) => row.kind === "file" && row.expected !== undefined)
+          .map((row) => ({ ...row, correct: row.passes === row.expected }));
+        const labelled = testCase.code_expectations?.done;
+        record.completion = {
+          ...aggregate,
+          done_labelled: labelled,
+          done_correct: labelled === undefined || labelled === CODE_OWNED_MARKER ? null : aggregate.done === labelled,
+        };
+      }
       if (testCase.judgment === "2b") {
         const required = requiredConfirmations(testCase.state?.constraints);
         const decision = decideFetch(outcome.response.answers, required);
@@ -593,7 +685,9 @@ const perQuestion = new Map();
 for (const grade of allGrades) {
   const key = grade.question.startsWith("has_result_")
     ? `j${grade.judgment}.has_result_<store>`
-    : `j${grade.judgment}.${grade.question}`;
+    : /^part_\d+_done$/.test(grade.question)
+      ? `j${grade.judgment}.part_<i>_done`
+      : `j${grade.judgment}.${grade.question}`;
   const row = perQuestion.get(key) ?? { correct: 0, total: 0 };
   row.total += 1;
   if (grade.correct) row.correct += 1;
@@ -684,6 +778,40 @@ if (corrections.length > 0 || WORDING_CHANGES.length > 0) {
       `    ${change.question_key} accuracy: ${change.previous_accuracy} under the old wording, ${pct(after, grades.length)} (${after} of ${grades.length}) now`,
     );
   }
+  lines.push("");
+}
+
+const completionCases = records.filter((r) => r.ok && r.completion);
+if (completionCases.length > 0) {
+  const kindOf = (caseId, question) => {
+    const index = Number(/^part_(\d+)_done$/.exec(question)[1]);
+    return fixture.cases.find((c) => c.id === caseId).state.task_parts[index].kind;
+  };
+  const partGrades = allGrades.filter((g) => g.judgment === 5 && /^part_\d+_done$/.test(g.question));
+  const partCorrect = partGrades.filter((g) => g.correct).length;
+  const fileGrades = completionCases.flatMap((r) => r.completion.file_part_grades ?? []);
+  const fileCorrect = fileGrades.filter((row) => row.correct).length;
+  const actionGrades = partGrades.filter((g) => kindOf(g.case_id, g.question) === "action");
+  const replyGrades = partGrades.filter((g) => kindOf(g.case_id, g.question) === "reply");
+  const echoGrades = allGrades.filter((g) => g.judgment === 5 && g.question === "result_is_echo");
+  const echoCorrect = echoGrades.filter((g) => g.correct).length;
+  const scored = completionCases.filter((r) => r.completion.done_correct !== null);
+  const doneCorrect = scored.filter((r) => r.completion.done_correct).length;
+  const codeOwned = completionCases.filter((r) => r.completion.done_correct === null);
+  lines.push("judgment 5, completion check (one noul per task part, code aggregates)");
+  lines.push(`  file parts, checked in code    ${padLeft(pct(fileCorrect, fileGrades.length), 7)}  (${fileCorrect} of ${fileGrades.length})`);
+  lines.push(`  action parts, noul vs receipts ${padLeft(pct(actionGrades.filter((g) => g.correct).length, actionGrades.length), 7)}  (${actionGrades.filter((g) => g.correct).length} of ${actionGrades.length})`);
+  lines.push(`  reply parts, noul vs claim     ${padLeft(pct(replyGrades.filter((g) => g.correct).length, replyGrades.length), 7)}  (${replyGrades.filter((g) => g.correct).length} of ${replyGrades.length})`);
+  lines.push(`  every part judged by Jev       ${padLeft(pct(partCorrect, partGrades.length), 7)}  (${partCorrect} of ${partGrades.length})`);
+  lines.push(`  result_is_echo                 ${padLeft(pct(echoCorrect, echoGrades.length), 7)}  (${echoCorrect} of ${echoGrades.length})`);
+  lines.push(`  code-computed done, part floor ${COMPLETION_PART_FLOOR}:  ${pct(doneCorrect, scored.length)}  (${doneCorrect} of ${scored.length})`);
+  for (const record of scored.filter((r) => !r.completion.done_correct)) {
+    const shown = record.completion.outcomes.map((o) => (o.kind === "file" ? `${o.kind}:${o.passes ? "pass" : "fail"}` : `${o.kind}:${o.noul.toFixed(2)}`)).join(" ");
+    lines.push(`    ${pad(record.id, 30)} labelled ${pad(record.completion.done_labelled, 10)} computed ${pad(record.completion.done, 10)} ${shown}`);
+  }
+  lines.push(`  done not scored on ${codeOwned.length} cases whose receipts code rejects first: ${codeOwned.map((r) => r.id).join(", ")}`);
+  const overclaimed = completionCases.filter((r) => r.completion.overclaim);
+  lines.push(`  overclaim computed in code on ${overclaimed.length} of ${completionCases.length} cases`);
   lines.push("");
 }
 

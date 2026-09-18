@@ -132,3 +132,13 @@ Agreement: flag SAND_JEV off by default in code; it goes on per box by Jason or 
 - Every decision is logged internally to agents/<id>/jev.jsonl: judgment, answer, confidence, band, action taken, model, latency; never the state. A staff "this was wrong" control writes a wrong marker next to the decision.
 - Judgment 2 keeps "the results match the request" (can_answer_now) separate from "an honest and complete answer can be written now" (answerable_now), so "that colour does not exist" counts as answerable.
 - Scope: flag off by default in code, on per box by Jason or at his instruction. Staff workspaces only until 2026-09-18; every workspace from that date, on his decision.
+
+## 5b. Completion check (added 2026-09-18, Jason: "we need Jev for: is it done, did the agent do it")
+
+Where it hooks: the subagent completion path (subagent-runtime.ts, where status becomes done) and, later, Titan's own "done" claims on a final send. Code gathers receipts first: tool calls by name and count, files written with size and first line, searches, pages fetched, transcript entries, elapsed time. A subagent with zero receipts is failed by code alone, no model needed. Jev judges the semantic match between task, claimed result and receipts.
+
+State: {"task", "claimed_result", "receipts": {"tool_calls": [...], "files_written": [...], "searches", "pages_fetched", "transcript_entries", "elapsed_s"}}.
+
+Questions: `done` (choice: done, partial, not_done, cannot_tell as the no-match outcome), `result_is_echo` (noul: the claimed result restates the task instead of reporting an outcome), `claims_unreceipted_work` (noul: the claimed result names a file, search or finding the receipts do not show).
+
+Code rules: `done` at confidence >= 0.9 marks the completion done; partial or not_done, or either noul >= 0.7, marks it "not done" with the reason shown to the person and the parent, and the parent may redispatch once. cannot_tell or low confidence falls back to today's behaviour with the receipts attached to the completion. Eval first: tuned set by the harness owner, blind set by a separate agent, numbers reported separately; no wiring until both are in.
