@@ -1281,3 +1281,78 @@ test("a workspace row carries the plans its key allows, not only the one it runs
     } finally { await proxy.close(); }
   });
 });
+
+// MODEL-1. THE VISION FACTS ON THE CHOICES, so the operator entitling a workspace to a plan reads
+// the same sentence the customer will read on their own Model card.
+//
+// The words for the fallback are the interesting half. A vision route is deliberately not
+// customer-visible -- plan-zai-vision has no card and is never meant to get one -- so its name is
+// only on its own deployment row, and it has to be read BEFORE the customer-visible filter drops it
+// or the operator's note would carry the routing alias.
+test("a plan choice says whether a screenshot can go to it, and names where one goes instead", async () => {
+  await withStore(async (store, root) => {
+    store.createTenant({ slug: "acme", name: "Acme", status: "running" });
+    const proxy = await startFakeProxy({
+      models: [
+        {
+          model_name: "plan-zai",
+          model_info: {
+            max_input_tokens: 200_000, supports_vision: true,
+            tb_customer_visible: true, tb_customer_name: "GLM-5.3", tb_customer_label: "GLM-5.3", tb_served_by: "Z.AI GLM",
+          },
+        },
+        {
+          model_name: "plan-nemotron",
+          model_info: {
+            max_input_tokens: 128_000, supports_vision: false,
+            tb_customer_visible: true, tb_customer_name: "NVIDIA Nemotron (local fleet)",
+            tb_customer_label: "Nemotron 3.5 Lightning", tb_served_by: "NVIDIA Nemotron",
+            tb_vision_fallback: "plan-zai-vision",
+          },
+        },
+        {
+          // The route itself: a real model the key must be allowed to call, with words on it and
+          // customer-visible deliberately absent, which is what keeps it off every card.
+          model_name: "plan-zai-vision",
+          model_info: { max_input_tokens: 200_000, supports_vision: true, tb_customer_label: "GLM-4.6V" },
+        },
+      ],
+    });
+    try {
+      const api = makeApi({ store, root, proxy });
+      const row = (await api.clients()).clients.find((one) => one.slug === "acme");
+      const byAlias = Object.fromEntries((row.model.choices ?? []).map((one) => [one.alias, one]));
+
+      // The routing target is not a choice, which is the rule that predates this and still holds.
+      assert.deepEqual(Object.keys(byAlias).sort(), ["plan-nemotron", "plan-zai"]);
+
+      assert.equal(byAlias["plan-zai"].supportsVision, true);
+      assert.equal(byAlias["plan-zai"].visionFallback, "");
+
+      assert.equal(byAlias["plan-nemotron"].supportsVision, false);
+      assert.equal(byAlias["plan-nemotron"].visionFallback, "plan-zai-vision");
+      assert.equal(byAlias["plan-nemotron"].visionFallbackLabel, "GLM-4.6V",
+        "the words somebody gave that route, read before the customer-visible filter dropped the row");
+    } finally { await proxy.close(); }
+  });
+});
+
+// MODEL-1. The row that presses the action a52cad5 added, which until now had nothing to press it.
+test("the clients panel draws Models allowed beside Runs on, with the same note the customer reads", () => {
+  const source = readFileSync(path.join(import.meta.dirname, "../cp/admin/admin.js"), "utf8");
+  const block = /function clientAllowedRow\(client\)[\s\S]*?\n  }\n/.exec(source)?.[0] ?? "";
+  assert.ok(block.length > 0, "there is a Models allowed row");
+
+  assert.match(block, /"Models allowed"/);
+  assert.match(block, /\/models`/, "it saves through the admin action and not through the Runs on one");
+  assert.match(block, /type = "checkbox"/, "ticks, because each plan carries a note an <option> cannot");
+  // THE KEY'S OWN LIST, not the picker above it. A row that pre-ticked what the workspace is RUNNING
+  // would ask the operator to confirm a guess.
+  assert.match(block, /client\.allowed/);
+  assert.match(block, /text only, screenshots go to/, "the same sentence the customer's Model card draws");
+  assert.match(block, /visionFallbackLabel \|\| choice\.visionFallback/, "the words where there are words, the alias where there are not");
+  // Its own class. The gate selects `.client .modelRow` in strict mode and a second element under
+  // that name is a red gate on a correct page.
+  assert.match(block, /"row allowedRow"/);
+  assert.match(source, /card\.appendChild\(clientAllowedRow\(client\)\);/, "and the card actually draws it");
+});

@@ -799,3 +799,112 @@ test("BG-PICKER-1: settings.css uncaps the gallery in a sub-view and caps it onl
     "the gallery is the body here, so it keeps no card of its own");
   assert.match(rules, /\.settings-back \{ align-self: flex-start; \}/);
 });
+
+// ================================================================================================
+// MODEL-1. The Model card: the plans this workspace may run, and the one it is on.
+//
+// The surface has had a model control since this wave shipped and it is a dropdown. That is the
+// right control for a choice between things a person already understands, and the wrong one here:
+// whether a model can take a screenshot at all is not on an <option>, so the way to find out that a
+// workspace's second plan is text only was to switch to it and watch an image fail.
+// ================================================================================================
+
+// Two plans, one of which cannot see, in the shape GET /model/plans answers.
+const MODEL_PLANS = {
+  current: "plan-zai",
+  pinned: false,
+  plans: [
+    {
+      model: "plan-zai", name: "GLM-5.3", modelLabel: "GLM-5.3", servedBy: "Z.AI GLM",
+      contextWindow: 200_000, current: true,
+      vision: { supported: true, fallback: "", fallbackLabel: "" },
+    },
+    {
+      model: "plan-nemotron", name: "NVIDIA Nemotron (local fleet)", modelLabel: "Nemotron 3.5 Lightning",
+      servedBy: "NVIDIA Nemotron", contextWindow: 128_000, current: false,
+      vision: { supported: false, fallback: "plan-zai-vision", fallbackLabel: "GLM-4.6V" },
+    },
+  ],
+};
+const withPlans = (plans = MODEL_PLANS) => ({ ...FULL_FACTS, modelPlans: plans });
+const modelRow = (facts) => pure().rowsFor("computer", facts).find((one) => one.id === "model") ?? null;
+
+test("the Model card lists the plans this workspace may run, and marks the one it is on", () => {
+  const row = modelRow(withPlans());
+  assert.ok(row != null, "the Computer section draws a Model row");
+  assert.equal(row.control.kind, "list", "a list and not a dropdown: each entry carries facts an <option> cannot");
+  assert.deepEqual(row.control.items.map((one) => one.id), ["plan-zai", "plan-nemotron"]);
+
+  // The words a person reads are the model's own label, never the routing alias. `plan-zai` is a
+  // string that exists so the proxy can pick a pool, and printing it hands a customer a fact about
+  // our plumbing and calls it the name of their model.
+  assert.deepEqual(row.control.items.map((one) => one.label), ["GLM-5.3", "Nemotron 3.5 Lightning"]);
+
+  // The one it is on has no button and says what it is. The other has the switch.
+  const [on, off] = row.control.items;
+  assert.equal(on.button, "", "the plan already running is not offered as a choice");
+  assert.equal(on.state, "In use");
+  assert.equal(off.button, "Use");
+  assert.equal(off.action, "model-use");
+
+  // Every entry's words are a vendor's and a machine's, so the banned-word sweep must skip them and
+  // the markup must say so.
+  assert.ok(row.control.items.every((one) => one.machine === true));
+});
+
+test("a plan that cannot take a screenshot says so, and says where one goes instead", () => {
+  const { planDetail } = pure();
+  const [seeing, blind] = MODEL_PLANS.plans;
+
+  assert.equal(planDetail(seeing), "Served by Z.AI GLM · 200k context",
+    "a model that sees carries no extra sentence");
+  assert.equal(planDetail(blind), "Served by NVIDIA Nemotron · 128k context. Text only, screenshots go to GLM-4.6V.",
+    "and one that does not names the model a screenshot goes to");
+
+  // THE WORDS, NOT THE ALIAS, where there are words. A vision route is deliberately not
+  // customer-visible and has no card of its own, so the alias is the fallback's fallback.
+  assert.match(planDetail({ ...blind, vision: { supported: false, fallback: "plan-zai-vision", fallbackLabel: "" } }),
+    /screenshots go to plan-zai-vision\.$/);
+
+  // NULL IS NOT FALSE. A row nobody measured draws no line at all: telling somebody a model is text
+  // only on the strength of a question that was never asked is a sentence they would plan around.
+  assert.equal(planDetail({ ...blind, vision: { supported: null, fallback: "plan-zai-vision", fallbackLabel: "GLM-4.6V" } }),
+    "Served by NVIDIA Nemotron · 128k context");
+});
+
+test("one plan is one entry and no switch, and so is a model the computer's own environment fixes", () => {
+  const one = modelRow(withPlans({ ...MODEL_PLANS, plans: [MODEL_PLANS.plans[1]], current: null }));
+  assert.equal(one.control.items.length, 1);
+  assert.equal(one.control.items[0].button, "", "with nothing to switch to there is no switch");
+  assert.doesNotMatch(one.line, /next message/, "and nothing is said about when a change applies");
+
+  // Fixed in the container environment: the write would land in a file the computer ignores, so the
+  // row says so rather than drawing a button that appears to work.
+  const fixed = modelRow(withPlans({ ...MODEL_PLANS, pinned: true }));
+  assert.ok(fixed.control.items.every((item) => item.button === ""));
+  assert.match(fixed.line, /cannot be changed here/);
+});
+
+test("the select that shipped before it draws only where the Model card does not", () => {
+  // A relay with no plans route leaves modelPlans null, and the console loses nothing.
+  const older = pure().rowsFor("computer", FULL_FACTS);
+  assert.ok(older.some((one) => one.id === "answers"), "the old select is what draws on an older relay");
+  assert.ok(!older.some((one) => one.id === "model"));
+
+  // And with the card on screen the select is gone: they change the same fact, and two controls for
+  // one fact on one screen is the shape this surface exists to delete.
+  const newer = pure().rowsFor("computer", withPlans());
+  assert.ok(newer.some((one) => one.id === "model"));
+  assert.ok(!newer.some((one) => one.id === "answers"), "two model controls on one section is the old panel again");
+});
+
+test("the Model card's own copy passes the same sweep every other row does", () => {
+  const mr = pure();
+  const offenders = mr.customerCopy(withPlans()).filter((entry) => mr.BANNED.test(entry.text));
+  assert.deepEqual(offenders, [], "a customer's rows may not carry key, endpoint, relay, proxy or a vendor name");
+  // The row's own label and line are in that sweep, which is what makes the assertion above mean
+  // something for this card rather than for the rows around it.
+  const mine = mr.customerCopy(withPlans()).filter((entry) => entry.where.startsWith("computer/model"));
+  assert.equal(mine.length, 2, "a label and one line, like every other row");
+  assert.equal(mine[0].text, "Model");
+});

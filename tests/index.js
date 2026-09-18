@@ -87,6 +87,7 @@ import "./forever-box-auto-update.test.mjs";
 import "./agent-delete-prompt-report.test.mjs";
 import "./relay-auth.test.mjs";
 import "./relay-login-guards.test.mjs";
+import "./relay-model-switch.test.mjs";
 import "./relay-door.test.mjs";
 import "./auth-device.test.mjs";
 import "./relay-device-bearer.test.mjs";
