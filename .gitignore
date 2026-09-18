@@ -72,3 +72,5 @@ undefined/
 # with no state dir set, which is what verify-settings and verify-voice do, and it is 0600 because it
 # carries the realtime key the operator's own workspace falls back to (KEYS-1).
 /ui/voice.json
+# MEM-2: a gate run is a measurement of one box on one day, not a fixture to diff.
+tests/fixtures/memory-gate-out.json
