@@ -1919,6 +1919,18 @@ prompt's persona, not knowledge: nothing tells the model which backend it is on.
 prompt addition naming the live endpoint and model would make that answer truthful; filed as
 the next small host item, not done here.
 
+## 6q. MEM-2: the memory prompt, measured before and after (2026-09-18)
+
+`scripts/verify-memory-recall.mjs` seeds a throwaway bot's memory files by hand and asks sixteen
+questions in sixteen fresh turns. On demo, on plan-qwen so runs compare with each other, the floor
+and the V2 prompt both scored **16 of 16** (verbatim 5/5, paraphrase 5/5, corrections 3/3, stale
+baits 2/2, secret 1/1); V2 cost 2,420,865 input tokens and 425 s against the floor's 2,377,814 and
+392 s, about 1.8% more input for three more prompt lines that are cached after the first call
+(`3c4a9b2`, bundle `3c4a9b25fe8e`). The gate therefore cannot tell the two prompts apart, so
+`SAND_MEMORY_PROMPT_V2` is on for the two staff boxes only and **no tester box gets it until a
+harder gate can**. Worth knowing for anyone reading the first run's 14 of 16: that was the gate's
+own scoring, not the product, and the rules were corrected before the comparison was run.
+
 ## 7. The wave plan
 
 **Closed 2026-09-02: waves 1–5 delivered (`docs/audit-wave1-prompts.md` … `audit-wave5-fixes.md`).
