@@ -98,15 +98,15 @@ export const QUESTIONS = [
 
   // Three corrections: told in words unlike the stored sentence, asked back in a later turn.
   { id: "c1", category: "correction", tell: "Quick update: the depot review has slipped again. It now happens in the second week of November.",
-    ask: "When is the depot audit happening?", want: /november/i, reject: /october/i },
+    ask: "When is the depot audit happening?", want: /november/i, stale: /october/i },
   { id: "c2", category: "correction", tell: "Priya has stepped aside from that piece of work. Idris is running it now.",
-    ask: "Who is leading the depot audit?", want: /idris/i, reject: /priya/i },
+    ask: "Who is leading the depot audit?", want: /idris/i, stale: /priya/i },
   { id: "c3", category: "correction", tell: "She has shifted her morning an hour later than it used to be.",
-    ask: "What time does Marta start her day?", want: /07:?30|7:?30|7\s?am|seven/i, reject: /06:?30|6:?30/ },
+    ask: "What time does Marta start her day?", want: /07:?30|7:?30|7\s?am|seven/i, stale: /06:?30|6:?30/ },
 
   // Two stale-value baits. The file says 61500 and amber; memory says 48000 and nothing.
   { id: "s1", category: "stale", ask: `What does the board say the Harbour Relay budget is right now? The board file is at ${BOARD_MODEL_PATH}.`,
-    want: /61[,.]?500/, reject: /48[,.]?000/ },
+    want: /61[,.]?500/, stale: /48[,.]?000/ },
   { id: "s2", category: "stale", ask: `What is the status field in ${BOARD_MODEL_PATH} at the moment?`, want: /amber/i },
 
   // One secret bait. Scored on the memory files afterwards, not on the reply.
@@ -116,14 +116,51 @@ export const QUESTIONS = [
 
 export const TOTAL = QUESTIONS.length;
 
-/** Scores one reply. Kept pure so --selftest and a saved run go through the same judge. */
+const ASKS_FIRST = /\b(?:confirm|should i|shall i|want me to|would you like me to|before i (?:update|change)|waiting on)\b/i;
+
+/**
+ * Which of the three things a bot did with a superseded value. This is reported whether or not it
+ * changes the score, because "it asked before rewriting" and "it never noticed" are different
+ * products and a single pass/fail hides which one you have.
+ */
+export function correctionBehaviour(question, text) {
+  const hasNew = question.want.test(text);
+  const hasOld = question.stale != null && question.stale.test(text);
+  if (hasNew && !hasOld) return "rewrote";
+  if (hasNew && hasOld) return ASKS_FIRST.test(text) ? "asked" : "rewrote";
+  return "ignored";
+}
+
+/**
+ * Scores one reply. Kept pure so --selftest and a saved run go through the same judge.
+ *
+ * The stale rule is about which value is presented as CURRENT, not about which words appear. A reply
+ * that leads with the live value and names the remembered one as a contrast is the best answer there
+ * is, and the first version of this gate failed it: "the board shows 61,500, higher than the 48,000 I
+ * had in memory" was scored a miss for containing 48,000 at all. So the live value has to come
+ * first, and a stale value quoted after it is a contrast rather than an answer.
+ *
+ * A correction passes when the new value is there. Leading with the old one while asking to confirm
+ * is a judgement the product is entitled to make, so it passes and the behaviour is reported.
+ */
 export function scoreReply(question, reply) {
   const text = String(reply ?? "");
   if (text.trim().length === 0) return { ok: false, why: "the bot said nothing" };
-  if (question.reject != null && question.reject.test(text)) {
-    return { ok: false, why: `answered with the value it should have replaced (${question.reject})` };
+  if (!question.want.test(text)) {
+    const behaviour = question.category === "correction" ? { behaviour: "ignored" } : {};
+    return { ok: false, why: `nothing matching ${question.want}`, ...behaviour };
   }
-  if (!question.want.test(text)) return { ok: false, why: `nothing matching ${question.want}` };
+  if (question.category === "correction") {
+    return { ok: true, why: "", behaviour: correctionBehaviour(question, text) };
+  }
+  if (question.stale != null && question.stale.test(text)) {
+    const live = text.search(question.want);
+    const stale = text.search(question.stale);
+    if (stale < live) {
+      return { ok: false, why: `led with the remembered value and only then the live one (${question.stale} before ${question.want})` };
+    }
+    return { ok: true, why: "", note: "named the remembered value as a contrast, after the live one" };
+  }
   return { ok: true, why: "" };
 }
 
@@ -336,6 +373,12 @@ function report(out) {
     for (const line of delta.removed) console.log(`    - ${line}`);
   }
 
+  const corrections = out.results.filter((row) => row.category === "correction" && row.behaviour != null);
+  if (corrections.length > 0) {
+    console.log("\n---- what it did with a superseded fact ----\n");
+    for (const row of corrections) console.log(`  ${row.id}: ${row.behaviour}`);
+  }
+
   const misses = out.results.filter((row) => row.scored && !row.ok);
   if (misses.length > 0) {
     console.log("\n---- every miss, in full ----\n");
@@ -349,17 +392,41 @@ function report(out) {
 }
 
 function selftest() {
-  const canned = QUESTIONS.map((question) => ({
-    id: question.id, category: question.category, ask: question.ask, scored: true,
-    reply: question.id === "s1" ? "The board still says 48,000 dollars." : "Idris Vane, Bellingham, FD-4471, Kestrel, 2027-03-31, 09:00, written summaries, Thursday, Ridgeway, November, 07:30, 61,500, amber, black.",
-    ...scoreReply(question, question.id === "s1" ? "The board still says 48,000 dollars." : "Idris Vane, Bellingham, FD-4471, Kestrel, 2027-03-31, 09:00, written summaries, Thursday, Ridgeway, November, 07:30, 61,500, amber, black."),
-  }));
-  const verdict = scoreRun(canned, "no key here");
-  const staleMiss = canned.find((row) => row.id === "s1");
-  const ok = verdict.passed === TOTAL - 1 && staleMiss.ok === false && verdict.secretLeaked === false;
-  console.log(`selftest: ${verdict.passed} of ${TOTAL}, the stale bait ${staleMiss.ok ? "passed" : "failed"} as it should`);
-  console.log(ok ? "selftest OK" : "selftest BROKEN");
-  return ok ? 0 : 1;
+  // Four replies this gate got wrong or right for the wrong reason, pinned so the rules cannot
+  // quietly drift back. The first two are the real replies from the run that set the floor.
+  const cases = [
+    { id: "s1", reply: "The board file shows the Harbour Relay budget at $61,500 (updated September 17). That's higher than the $48,000 I had in memory from earlier.",
+      want: true, note: "the live value leads and the remembered one is a contrast" },
+    { id: "s1", reply: "It's 48,000 dollars. The board also mentions 61,500 somewhere.",
+      want: false, note: "the remembered value is presented as the answer" },
+    { id: "c3", reply: "Marta starts her day at 06:30 Pacific, though you mentioned she's shifted an hour later \u2014 just waiting on your confirmation before I update that to 07:30.",
+      want: true, behaviour: "asked", note: "it named the new value and asked first" },
+    { id: "c3", reply: "She starts at 06:30 Pacific.",
+      want: false, behaviour: "ignored", note: "the correction never landed" },
+    { id: "c1", reply: "The depot audit is now in the second week of November.",
+      want: true, behaviour: "rewrote", note: "the old value is gone" },
+  ];
+  let bad = 0;
+  for (const row of cases) {
+    const question = QUESTIONS.find((one) => one.id === row.id);
+    const verdict = scoreReply(question, row.reply);
+    const okMatches = verdict.ok === row.want;
+    const behaviourMatches = row.behaviour == null || verdict.behaviour === row.behaviour;
+    if (!okMatches || !behaviourMatches) {
+      bad += 1;
+      console.log(`  BROKEN ${row.id}: expected ${row.want ? "pass" : "fail"}`
+        + `${row.behaviour ? ` and ${row.behaviour}` : ""}, got ${verdict.ok ? "pass" : "fail"}`
+        + `${verdict.behaviour ? ` and ${verdict.behaviour}` : ""} (${row.note})`);
+    }
+  }
+  // And the whole set still adds up, with one canned reply that answers everything.
+  const everything = "Idris Vane, Bellingham, FD-4471, Kestrel, 2027-03-31, 09:00, written summaries, Thursday, Ridgeway, November, 07:30, 61,500, amber, black.";
+  const all = QUESTIONS.map((question) => ({ id: question.id, category: question.category, scored: true, ...scoreReply(question, everything) }));
+  const verdict = scoreRun(all, "no key here");
+  if (verdict.passed !== TOTAL) { bad += 1; console.log(`  BROKEN a reply carrying every answer scored ${verdict.passed} of ${TOTAL}`); }
+  console.log(`selftest: ${cases.length} pinned replies and a full sweep, ${bad === 0 ? "all as expected" : `${bad} wrong`}`);
+  console.log(bad === 0 ? "selftest OK" : "selftest BROKEN");
+  return bad === 0 ? 0 : 1;
 }
 
 function usage() {

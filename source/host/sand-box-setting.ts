@@ -368,3 +368,15 @@ export const SAND_JEV_SETTING = "SAND_JEV";
 export function isJevEnabled(): boolean {
   return isSandBoxSettingEnabled(SAND_JEV_SETTING);
 }
+
+/**
+ * MEM-2. Three extra lines in the memory prompt, and one in the extraction prompt. Off unless a box
+ * sets it, read per turn like every other switch here, so turning it off stops the next turn.
+ * Behind a flag because it changes what every agent on a box is told, and the gate that measures
+ * whether it helped has to be able to run both ways on the same box within a few minutes.
+ */
+export const SAND_MEMORY_PROMPT_V2_SETTING = "SAND_MEMORY_PROMPT_V2";
+
+export function isMemoryPromptV2Enabled(): boolean {
+  return isSandBoxSettingEnabled(SAND_MEMORY_PROMPT_V2_SETTING);
+}

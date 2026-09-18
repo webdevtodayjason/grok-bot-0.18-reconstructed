@@ -1,3 +1,5 @@
+import { isMemoryPromptV2Enabled } from "../sand-box-setting.js";
+
 export const MEMORY_RECENT_PROMPT_LIMIT = 30;
 export const MEMORY_RECENT_PROMPT_CHAR_BUDGET = 4_000;
 export const MEMORY_PROFILE_PROMPT_LIMIT = 100;
@@ -98,8 +100,24 @@ export function renderMemorySystemPrompt(value: MemoryRecall | readonly MemoryRe
     if (omitted > 0) lines.push(location == null ? `(${omitted} more log facts not shown.)` : `(${omitted} more log facts on disk \u2014 grep the log/ folder for them.)`);
   }
   if (profile.length === 0 && recent.length === 0) lines.push("No facts recorded yet.");
+  // MEM-2. What memory is NOT for, and what beats it. The gate that set the floor showed the first
+  // two are already mostly right and the third has no way to be: nothing told the model what wins
+  // when two remembered facts disagree. Behind a flag, and appended rather than woven in, so the
+  // prompt with the flag off is byte-identical to the one that set the floor.
+  if (isMemoryPromptV2Enabled()) lines.push(...MEMORY_PROMPT_V2_LINES);
   return lines.join("\n");
 }
+
+/** The three lines MEM-2 adds. Plain sentences: a prefixed, underlined line reads as an error. */
+export const MEMORY_PROMPT_V2_LINES: readonly string[] = [
+  "Files, tickets, queues and settings on this machine or in a connected system are the current truth; re-read them when asked about current state, and never present a remembered value as current.",
+  "Never write keys, passwords, tokens or credential material into memory, even if the person says them.",
+  "When facts conflict: your own profile facts win over shared profile facts for your role, profile wins over log, memory wins over chat history, and a live board wins over all of them for current state.",
+];
+
+/** The one line MEM-2 adds to extraction, which is the half that does the writing. */
+export const MEMORY_EXTRACTION_V2_LINE =
+  "Never write keys, passwords, tokens or credential material into memory, even if the person says them.";
 
 export function buildExtractionSystemPrompt(): string {
   return [
@@ -117,6 +135,9 @@ export function buildExtractionSystemPrompt(): string {
     "",
     `Write each fact as a self-contained statement, one per line: "profile: <fact>", "log: <fact>", or "note: <fact>" to add (e.g. "profile: The user's name is Ian", "log: Planning a trip to Tokyo in October 2025"), or "remove: <existing fact>" to drop a superseded one.`,
     `Output exactly ${MEMORY_EXTRACTION_NONE_SENTINEL} (and nothing else) when there is nothing to add or remove.`,
+    // MEM-2, under the same flag: the prompt that decides what gets written is the only place that
+    // can stop a credential being written at all.
+    ...(isMemoryPromptV2Enabled() ? ["", MEMORY_EXTRACTION_V2_LINE] : []),
   ].join("\n");
 }
 
