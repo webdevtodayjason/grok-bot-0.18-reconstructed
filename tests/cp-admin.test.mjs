@@ -1411,4 +1411,6 @@ test("a box whose file names a plan still gets a picker; only its container envi
   assert.match(block, /client\.allowed/, "the options are the plans this workspace may run");
   assert.match(block, /const pointedAt = String\(model\.pin \?\? ""\)/, "and the pin is what is marked");
   assert.match(block, /options\.length < 2/, "one plan is not a picker");
+  assert.match(block, /not among its allowed plans/,
+    "a workspace pointed at something outside its allowed set is still marked with what it is on");
 });

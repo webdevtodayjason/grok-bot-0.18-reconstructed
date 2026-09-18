@@ -706,6 +706,14 @@
       ? client.allowed
       : (model.choices ?? []).map((one) => one.alias);
     const options = allowed.map((alias) => ({ value: alias, label: named(alias) }));
+    // WHAT IT IS ON IS ALWAYS ON THE LIST, even when it is not a plan this workspace may choose.
+    // MEASURED on the R750 2026-09-18: beta-36-2 is pointed at plan-zai-talk, which is the talk
+    // tier and is on nobody's allowed set, so without this the picker fell back to the first entry
+    // and marked a plan that box is not running. A control that misreports the current state is
+    // worse than no control, which is the whole of what this row was just fixed for.
+    if (pointedAt.length > 0 && !options.some((one) => one.value === pointedAt)) {
+      options.unshift({ value: pointedAt, label: `${named(pointedAt)} (not among its allowed plans)` });
+    }
     // Nothing to pick between is not a picker. One allowed plan says so and points at Models
     // allowed, which is the row directly underneath and the way to give it another.
     if (options.length < 2) {
@@ -717,7 +725,7 @@
     }
     const select = document.createElement("select");
     select.className = "clientModel";
-    fill(select, options, options.some((one) => one.value === pointedAt) ? pointedAt : options[0].value);
+    fill(select, options, pointedAt.length > 0 ? pointedAt : options[0].value);
     row.appendChild(select);
     const save = el("button", "ghost small", "Save");
     save.type = "button";
