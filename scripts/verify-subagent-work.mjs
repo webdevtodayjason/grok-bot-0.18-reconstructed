@@ -103,9 +103,18 @@ function boxCall(box) {
   };
 }
 
+/**
+ * Every agent directory, INCLUDING the sand-subagent-<uuid> ones.
+ *
+ * This matched a bare uuid only, which no subagent directory has ever been named: the prefix is
+ * SAND_SUBAGENT_ID_PREFIX, "sand-subagent-". Six runs of this gate therefore reported that no
+ * subagent appeared while the box held directories for them, and the conclusion drawn from those
+ * runs, that the model refuses to delegate, was the gate's blindness rather than the model's
+ * behaviour.
+ */
 const agentDirs = async (box) => {
   const out = await docker(["exec", box, "sh", "-c",
-    "ls /home/box/sand-data/agents/ 2>/dev/null | grep -E '^[0-9a-f-]{36}$' || true"]);
+    "ls /home/box/sand-data/agents/ 2>/dev/null | grep -E '^(sand-subagent-)?[0-9a-f-]{36}$' || true"]);
   return new Set(out.split("\n").map((one) => one.trim()).filter(Boolean));
 };
 
