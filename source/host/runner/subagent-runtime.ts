@@ -58,6 +58,14 @@ export interface SubagentSession {
   getComputerUseAuditActionCounts?(): ReadonlyMap<string, number>;
 }
 
+/**
+ * SUBAGENT-1. What the parent is told when a subagent finished without running. It says the task
+ * produced no output and never quotes the prompt: a result that echoes the request back reads as
+ * an answer, which is exactly what two workspaces reported seeing.
+ */
+export const NEVER_RAN_RESULT =
+  "This background task produced no output: it ended without running a single step, so nothing was researched, written or decided. Treat it as not done. If the work still matters, do it yourself or start it again.";
+
 export interface SubagentRecord {
   readonly subagentType: string;
   readonly title: string;
@@ -291,11 +299,19 @@ export function createSubagentRuntime(host: SubagentRuntimeHost) {
 
     pendingSubagentSteers.delete(subagentAgentId);
     const aborted = abortingSubagents.delete(subagentAgentId);
+    // SUBAGENT-1. "done" used to mean only that the run promise resolved without aborting, which is
+    // true of a turn that never reached a model at all: reports 46-50 and 53 are subagents that
+    // reported completed having run nothing. A turn counts as having run if it produced text or
+    // called a tool; text alone is enough, because a subagent asked a question it can answer from
+    // what it already knows is entitled to finish without touching a tool.
+    const neverRan = outcome.status === "completed"
+      && outcome.text.trim().length === 0
+      && (subagentSessions.get(subagentAgentId)?.getObservedToolCallCount() ?? 0) === 0;
     const record = subagentRegistry.get(subagentAgentId);
     if (record != null) {
       record.status = aborted || outcome.status === "aborted"
         ? "aborted"
-        : outcome.status === "completed"
+        : outcome.status === "completed" && !neverRan
           ? "done"
           : "error";
       logLifecycle("settled", subagentAgentId, record.status);
@@ -379,11 +395,16 @@ export function createSubagentRuntime(host: SubagentRuntimeHost) {
       subagentType: meta.subagentType,
       toolCallId: meta.toolCallId,
       title: meta.title,
-      status: outcome.status === "completed" ? "completed" : "error",
+      status: outcome.status === "completed" && !neverRan ? "completed" : "error",
       result: outcome.status === "completed"
         ? outcome.text.trim().length > 0
           ? outcome.text.trim()
-          : "(the task finished without producing any text output)"
+          // Two different silences. A subagent that called tools and said nothing did the work and
+          // simply did not narrate it; one that did neither never ran, and only that one is told to
+          // the parent as not done.
+          : neverRan
+            ? NEVER_RAN_RESULT
+            : "(the task finished without producing any text output)"
         : outcome.status === "aborted"
           ? "The background task was interrupted before it finished."
           : outcome.error,

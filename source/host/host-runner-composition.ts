@@ -3739,9 +3739,14 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
         context: () => productionContext,
         createSettleHost: createProductionTurnSettleHost,
         profilePromptSnapshots: () => session.db,
-        isSubagentRunner: false,
+        // SUBAGENT-1. These two read the shell's own arguments rather than the parent's session.
+        // `shellConversationId` has been a parameter of makeRunShell since it was written and the
+        // body ignored it, so every child turn was built, settled and persisted against the
+        // PARENT's conversation. That is why a subagent's own store came back empty and why its
+        // prompt came back to the parent as if it were the result.
+        isSubagentRunner: shellSubagentKind !== undefined,
         subagents: { sessions: new Map() },
-        getConversationId: () => session.id,
+        getConversationId: () => shellConversationId,
         runGeneration: () => (builtRunner as { currentRunGeneration?: number } | undefined)?.currentRunGeneration ?? 0,
         setActiveTurnRequestSource: () => {},
         beginAutoReviewUserMessageEpoch: () => {},
