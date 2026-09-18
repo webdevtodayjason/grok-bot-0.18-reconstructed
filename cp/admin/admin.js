@@ -712,6 +712,72 @@
     return row;
   }
 
+  /**
+   * MODEL-1. WHICH PLANS THIS WORKSPACE MAY RUN, beside the one it is on.
+   *
+   * "Runs on" above is the operator's own override: it points a box at one model. This is a
+   * different question and the console never asked it -- the set a customer may choose between in
+   * their own Settings. The two were one thing for as long as a key was minted once and never
+   * moved, so entitling a workspace to a second plan meant reaching for the proxy API by hand.
+   *
+   * TICKS AND NOT A MULTI-SELECT, and the reason is the note. Each plan carries whether a
+   * screenshot can go to it, which is the fact an operator most needs before putting somebody on a
+   * text-only model and the one thing an <option> cannot say. It is the same sentence the
+   * customer's own Model card draws, off the same field.
+   *
+   * SAVE IS ALL OR NOTHING. The route takes the whole set, refuses an empty one, and moves the key
+   * before the record, so a workspace is never recorded as allowed something its own key refuses.
+   */
+  function clientAllowedRow(client) {
+    const row = el("div", "row allowedRow");
+    row.appendChild(el("span", "quiet", "Models allowed"));
+    const choices = client.model?.choices ?? [];
+    if (choices.length === 0) {
+      row.appendChild(measured(null, client.model == null
+        ? "this control plane did not report a model for this workspace"
+        : "this proxy serves no plan a customer has been given words for, so there is nothing to allow"));
+      return row;
+    }
+    const allowed = new Set(Array.isArray(client.allowed) ? client.allowed : []);
+    const ticks = [];
+    for (const choice of choices) {
+      const label = document.createElement("label");
+      label.className = "check";
+      const tick = document.createElement("input");
+      tick.type = "checkbox";
+      tick.value = choice.alias;
+      // WHAT THE KEY SAYS, not what the picker above is set to. A workspace whose record names
+      // nothing is entitled to nothing by this row's reading, and the operator ticks what it should
+      // have rather than being shown a set somebody guessed.
+      tick.checked = allowed.has(choice.alias);
+      label.appendChild(tick);
+      label.appendChild(text(` ${choice.name || choice.alias}`));
+      // The same note the customer reads, in the same words and off the same field.
+      const words = choice.supportsVision === true ? ""
+        : String(choice.visionFallbackLabel || choice.visionFallback || "").length > 0
+          ? `text only, screenshots go to ${choice.visionFallbackLabel || choice.visionFallback}`
+          : "";
+      if (words.length > 0) label.appendChild(el("span", "clock", words));
+      ticks.push(tick);
+      row.appendChild(label);
+    }
+    const save = el("button", "ghost small", "Save");
+    save.type = "button";
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      try {
+        const models = ticks.filter((one) => one.checked).map((one) => one.value);
+        const result = await api("POST", `/v1/admin/clients/${encodeURIComponent(client.slug)}/models`, { models });
+        banner(String(result.message || `${client.slug} may run ${models.join(", ")}.`), true);
+        await Promise.all([loadClients(), loadProviders()]);
+      } catch (error) { banner(String(error.message)); }
+      finally { save.disabled = false; }
+    });
+    row.appendChild(save);
+    row.appendChild(el("span", "clock", "Their own Settings offers these on its next load, and a change there takes effect on their next message."));
+    return row;
+  }
+
   function clientRouterPinRow(client) {
     const row = el("div", "row routerPinRow");
     row.appendChild(el("span", "quiet", "Model router"));
@@ -1158,6 +1224,10 @@
       // gets said out loud rather than a select that appears to work: a control that silently does
       // nothing is worse than no control.
       card.appendChild(clientModelRow(client));
+      // MODEL-1. Beside it, because "which one is it on" and "which may it be on" are the two halves
+      // of one question and reading either without the other is how a workspace ends up entitled to
+      // a plan nobody meant to give it.
+      card.appendChild(clientAllowedRow(client));
       card.appendChild(clientRouterPinRow(client));
       card.appendChild(clientAllowanceRow(client, answer.allowanceLevels));
       // AGENTS-CAP-2. And how many bots it may hold, read off the box the same way.

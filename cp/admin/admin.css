@@ -320,6 +320,14 @@ tbody tr.gateRow:hover td { background: #0E151E; }
 .modelRow, .routerPinRow, .capRow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
 .modelRow select, .routerPinRow select, .capRow input { padding: 5px 9px; font-size: 13px; }
 .modelRow .clock, .routerPinRow .clock, .capRow .clock { flex-basis: 100%; margin-top: 0; }
+/* MODEL-1. The same row shape, with ticks instead of a picker. The per-plan note sits INSIDE its
+   own label rather than taking a line of its own, which is what keeps one plan to a line; the
+   row's own closing sentence is the one that spans. */
+.allowedRow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 8px; }
+.allowedRow label.check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--quiet); }
+.allowedRow label.check input { margin: 0; }
+.allowedRow label.check .clock { flex-basis: auto; margin: 0 0 0 2px; }
+.allowedRow > .clock { flex-basis: 100%; margin-top: 0; }
 /* AGENTS-CAP-2. Wide enough for four digits and no wider: this is a ceiling, not a paragraph. */
 .capRow input.clientCeiling { width: 84px; }
 

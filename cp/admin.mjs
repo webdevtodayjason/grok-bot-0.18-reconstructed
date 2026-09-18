@@ -1358,13 +1358,29 @@ export function createAdminApi({
       const shape = await proxyShape();
       const sweep = await askProxySpend();
       const seen = new Set();
+      // MODEL-1. What every alias is CALLED, taken before the customer-visible filter below. A
+      // vision route carries no customer name of its own by design, so the words for the model a
+      // screenshot falls back to exist only here.
+      const namedBy = new Map();
+      for (const row of (shape.deployments.ok ? shape.deployments.rows : [])) {
+        const words = String(row.customerLabel ?? "") || String(row.customerName ?? "");
+        if (String(row.alias ?? "").length > 0 && words.length > 0 && !namedBy.has(row.alias)) namedBy.set(row.alias, words);
+      }
       for (const row of (shape.deployments.ok ? shape.deployments.rows : [])) {
         if (!isPlanModel(row.alias) || seen.has(row.alias)) continue;
         seen.add(row.alias);
         // Only what a customer could be told they are on. A routing target with no customer name
         // is not a choice: putting a workspace on one is how "plan-zai" reached a Settings card.
         if (row.customerVisible !== true || String(row.customerLabel ?? "").length === 0 || String(row.customerName ?? "").length === 0) continue;
-        modelChoices.push({ alias: row.alias, name: row.customerName, label: row.customerLabel });
+        // MODEL-1. Whether a screenshot can go to this plan, so the operator entitling a workspace
+        // to it reads the same sentence the customer will read on their own card.
+        const fallback = visionFallbackTarget(row);
+        modelChoices.push({
+          alias: row.alias, name: row.customerName, label: row.customerLabel,
+          supportsVision: row.supportsVision === true,
+          visionFallback: fallback,
+          visionFallbackLabel: namedBy.get(fallback) ?? "",
+        });
       }
       modelChoices.sort((a, b) => a.alias.localeCompare(b.alias));
       if (sweep?.month?.ok) {
