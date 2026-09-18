@@ -59,10 +59,14 @@ function fakeAgentStore() {
 function makeMaterialization() {
   const root = mkdtempSync(path.join(stage, "agents-"));
   const stores = new Map();
+  const closedBlobStores = [];
   const materialization = new mod.SandSessionMaterialization({
     ctx: {},
     rootDir: root,
-    createBlobWorkerPool: () => ({ closeAll: async () => {} }),
+    createBlobWorkerPool: () => ({
+      closeAll: async () => {},
+      closeStore: async (blobDbPath) => { closedBlobStores.push(blobDbPath); },
+    }),
     createAgentStore: ({ agentId }) => {
       const store = fakeAgentStore();
       stores.set(agentId, store);
@@ -74,7 +78,7 @@ function makeMaterialization() {
     getAgentDir: (id) => path.join(root, id),
     readActiveAgentId: () => null,
   });
-  return { root, stores, materialization };
+  return { root, stores, closedBlobStores, materialization };
 }
 
 test("a subagent gets a store and nothing else a bot gets", async () => {
@@ -166,7 +170,7 @@ test("two children opened at once each get their own handle", async () => {
 });
 
 test("the open-handle count before and after N children is the same", async () => {
-  const { root, materialization } = makeMaterialization();
+  const { root, materialization, closedBlobStores } = makeMaterialization();
   const ids = Array.from({ length: 5 }, subagentId);
   const before = ids.map((id) => mod.liveDbHandleCount(path.resolve(dbPathOf(root, id))));
   assert.deepEqual(before, [0, 0, 0, 0, 0]);
@@ -177,6 +181,12 @@ test("the open-handle count before and after N children is the same", async () =
   const after = ids.map((id) => mod.liveDbHandleCount(path.resolve(dbPathOf(root, id))));
   assert.deepEqual(after, before, "a stopped subagent left a sqlite handle open");
   for (const storage of open) assert.equal(storage.agentStore.disposals, 1, "the blob store was not disposed exactly once");
+  // And each child's blob worker went with it, rather than waiting for the pool's idle sweep.
+  assert.deepEqual(
+    closedBlobStores.sort(),
+    ids.map((id) => path.join(root, id, "conversation-blobs.db")).sort(),
+    "a stopped subagent left its blob worker in the pool",
+  );
 });
 
 test("a write cannot follow a close", async () => {

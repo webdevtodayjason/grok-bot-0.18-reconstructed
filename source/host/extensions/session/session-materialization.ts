@@ -15,6 +15,7 @@ import { getSandProfilePath, writeSandProfileFile, type SandAgentProfile } from 
 import { getSandSettingsPath, writeSandSettingsFile } from "../../agents/settings-file.js";
 import { SandAgentDb } from "./agent-db.js";
 import { getAgentDbPath } from "./session-paths.js";
+import { conversationBlobsPath } from "./conversation-blobs-path.js";
 import { automationStoreForDbPath, channelStoreForDbPath, workflowStoreForDbPath } from "./session-store-factories.js";
 import { writeLeadAgentId } from "../../runner/standing-persona.js";
 import type { AgentWorkerPool } from "../../agent-isolation/agent-worker-pool.js";
@@ -156,16 +157,25 @@ export class SandSessionMaterialization {
    */
   async openSubagentStorage(agentId: string): Promise<SubagentStorage> {
     if (!isSandSubagentId(agentId)) throw new Error(`Not a subagent id: ${agentId}`);
-    const dbPath = getAgentDbPath(this.host.rootDir, agentId), db = new SandAgentDb(dbPath);
+    const dbPath = getAgentDbPath(this.host.rootDir, agentId), db = new SandAgentDb(dbPath), pool = this.requireWorkerPool();
     try {
       db.set("agentId", agentId);
-      const agentStore = this.host.createAgentStore({ pool: this.requireWorkerPool(), agentId, dbPath, db });
+      const agentStore = this.host.createAgentStore({ pool, agentId, dbPath, db });
       // A resumed subagent keeps the conversation it already had; a fresh one resets to empty.
       await agentStore.resetFromDb?.(this.host.ctx);
       let closed = false;
       // Checkpointed on close, because a subagent's store is read by people and tools after it has
-      // stopped: a write-ahead log left beside it is invisible to a read-only reader.
-      return { id: agentId, dbPath, db, agentStore, close: async () => { if (closed) return; closed = true; try { await agentStore.dispose(); } finally { db.close({ checkpoint: true }); } } };
+      // stopped: a write-ahead log left beside it is invisible to a read-only reader. The blob
+      // worker goes with it -- the pool would reclaim it on its idle sweep, but a subagent is short
+      // and there can be four at once, and a stopped one should hold nothing.
+      return { id: agentId, dbPath, db, agentStore, close: async () => {
+        if (closed) return;
+        closed = true;
+        try { await agentStore.dispose(); } finally {
+          db.close({ checkpoint: true });
+          try { await pool.closeStore?.(conversationBlobsPath(dbPath)); } catch {}
+        }
+      } };
     } catch (error) { db.close(); throw error; }
   }
   async openSession(agentId: string): Promise<MaterializedSession> {
