@@ -99,6 +99,23 @@ Reranking: score per result, "How likely is this result to be the item, at a nam
 - `scripts/jev-eval.mjs`: runs every case, one request per case per judgment set, reads TYPESAFE_API_KEY from the environment (exits with a plain message if unset), retries 429/529 with backoff, and prints: accuracy per judgment, accuracy by confidence bucket (0.5-0.7, 0.7-0.9, 0.9-1.0) with the count per bucket, latency p50 and p95, input tokens total and cost at $0.042 per million, and the model id that answered. Output is written to `tests/fixtures/jev-eval-out.json`, which is gitignored: results stay internal.
 - Nothing in the harness imports host code, so it cannot reach a tester.
 
+## Scope changed on 2026-09-18: every workspace, not only staff
+
+The three statements below ("no external beta tester workspace gets the flag", "never an external
+tester", "only on Titanium staff workspaces") were the agreement of 2026-09-17 and are kept as
+written, because the reasoning behind them is still the reasoning. They no longer describe the
+fleet. Jason decided on the morning of 2026-09-18 that every workspace gets judgments 1 and 3, and
+`SAND_JEV` plus `TYPESAFE_API_KEY` were rolled to all ten boxes that day: the eight testers and
+customer workspaces (beta-33, beta-34, beta-35, beta-36, beta-36-2, web-dev-today, titanium-2,
+richard-avery) alongside demo and titanium.
+
+What that means in plain terms, because it is the part worth being precise about: a tester's
+request text now leaves their box for api.typesafe.ai on any turn that reads as a question, and a
+claim sentence plus the page text it was judged against leaves on any turn that sends one. That is
+customer data reaching a third party. The flag is still read per turn, so removing the key from
+`sand-host-settings.json` on a box stops it from that box's next turn onward; nothing already sent
+comes back.
+
 ## Constraints honoured
 
 Agreement: flag SAND_JEV off by default; Jason turns it on himself, and only on Titanium staff workspaces. No customer, tester or Discord data: every case is synthetic, and the future feedback triage scrubs usernames in code first. No published results: the eval output file is gitignored and this document carries no numbers. Key only from TYPESAFE_API_KEY; never logged, never in a client bundle.
