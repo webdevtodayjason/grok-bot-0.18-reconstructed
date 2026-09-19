@@ -3375,7 +3375,12 @@
             ? { state: "sent", text: "Taken by the gateway (this host keeps no acceptance ledger)" }
             : acceptanceOf(clientNonce)))
           .then((acceptance) => {
-            if (acceptance.state === "accepted" || acceptance.state === "sent") r.composer = { ...acceptance, nonce: clientNonce, at: Date.now() };
+            // FOOTER-1. THE FOOTER LINE IS FOR REFUSALS ONLY. A send the host took needs no words:
+            // the message is on screen, which is the evidence. "Accepted by the host" was a chip
+            // that appeared above the composer on EVERY turn, took a line of the screen for a fact
+            // the person could already see, and moved the composer under their hands as it came and
+            // went. An acceptance now clears the line instead of writing one.
+            if (acceptance.state === "accepted" || acceptance.state === "sent") r.composer = null;
             else refused(acceptance.text);
             emit("message:created", { context });
             // The refresh runs after the verdict is on screen and fails on its own: a refresh that

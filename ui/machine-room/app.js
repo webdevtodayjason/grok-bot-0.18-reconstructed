@@ -2321,11 +2321,22 @@
     if (!status) return;
     const record = contextRecord();
     const composer = record?.composer ?? null;
-    status.hidden = !composer;
-    if (!composer) { status.textContent = ""; status.removeAttribute("data-client-nonce"); status.dataset.composerState = "idle"; return; }
-    status.textContent = composer.text;
-    status.dataset.composerState = composer.state;
-    if (composer.nonce) status.dataset.clientNonce = composer.nonce; else status.removeAttribute("data-client-nonce");
+    // WRITTEN ONLY WHEN IT CHANGED. This runs on every render, and every render is a poll landing,
+    // a frame arriving or a person typing. Assigning textContent replaces the node's text node
+    // whether or not the string moved, which is a write the browser can show as a flicker right
+    // above the composer and which a whole-page observer counts as churn on every tick.
+    const set = (name, value) => { if (status.dataset[name] !== value) status.dataset[name] = value; };
+    if (status.hidden !== !composer) status.hidden = !composer;
+    if (!composer) {
+      if (status.textContent !== "") status.textContent = "";
+      if (status.hasAttribute("data-client-nonce")) status.removeAttribute("data-client-nonce");
+      set("composerState", "idle");
+      return;
+    }
+    if (status.textContent !== composer.text) status.textContent = composer.text;
+    set("composerState", composer.state);
+    if (composer.nonce) set("clientNonce", composer.nonce);
+    else if (status.hasAttribute("data-client-nonce")) status.removeAttribute("data-client-nonce");
   }
 
   function contextChipMarkup(context) {
