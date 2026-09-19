@@ -78,3 +78,59 @@ test("the request shape is the one OpenAI-compatible vision endpoints accept", (
   assert.match(source, /type: "image_url"/);
   assert.match(source, /data:\$\{image\.mediaType\};base64,/);
 });
+
+// ================================================================================================
+// MODEL-1c. A SCREENSHOT GOES WHERE IT CAN BE READ, rather than to a model with no eyes.
+//
+// MEASURED ON THE R750 2026-09-19: a turn carrying a picture on plan-nemotron, which is text only,
+// cost the refused hop, a learned refusal flag, the picture being replaced by a sentence and the
+// same question asked again. Three round trips to arrive somewhere that cannot see, with the route
+// sitting in the deployment's own record the whole time.
+//
+// The rule is lifted out of the shipped file the same way the three helpers above are, so what is
+// measured is what runs rather than a copy of it.
+function loadRouting() {
+  const start = source.indexOf("export function modelForRequest");
+  const end = source.indexOf("export function noteAnsweredModel");
+  assert.ok(start > 0 && end > start, "modelForRequest must be findable in the shipped file");
+  const carries = source.slice(source.indexOf("export function carriesImageParts"), source.indexOf("export function withoutImageParts"));
+  const guard = source.slice(source.indexOf("function record(value: unknown)"), source.indexOf("function safeJson"));
+  const js = `${guard}\n${carries}\n${source.slice(start, end)}`
+    .replace(/export function /g, "function ")
+    .replace(/\(value: unknown\): Loose \| null \{/g, "(value) {")
+    .replace(/\(messages: readonly Loose\[\]\): boolean \{/g, "(messages) {")
+    .replace(/\(part: unknown\) =>/g, "(part) =>")
+    .replace(/\(pin: string, messages: readonly Loose\[\], visionFallback: string\): string \{/g, "(pin, messages, visionFallback) {")
+    .replace(/ as Loose/g, "");
+  assert.doesNotMatch(js, /:\s*(readonly|Loose|unknown|boolean)/, "an unstripped annotation means the source shape changed");
+  return new Function(`${js}\nreturn { modelForRequest, carriesImageParts };`)();
+}
+const { modelForRequest } = loadRouting();
+
+const withPicture = [{ role: "user", content: [{ type: "text", text: "what is this" }, { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] }];
+const textOnly = [{ role: "user", content: "what is this" }];
+
+test("a request carrying a picture on a text-only pin goes to the vision route", () => {
+  assert.equal(modelForRequest("plan-nemotron", withPicture, "plan-zai-vision"), "plan-zai-vision");
+});
+
+test("the same pin answers its own text turns", () => {
+  assert.equal(modelForRequest("plan-nemotron", textOnly, "plan-zai-vision"), "plan-nemotron",
+    "only a picture reroutes; everything else is the plan the customer chose");
+});
+
+test("a pin that can see is never rerouted, whatever is configured beside it", () => {
+  // The relay writes the route ONLY for a plan measured text-only, so an empty value is what a
+  // seeing model carries and the rule has to answer the pin for it.
+  assert.equal(modelForRequest("plan-qwen", withPicture, ""), "plan-qwen");
+  // And a row that names itself is "images stop here", not a second model to route to.
+  assert.equal(modelForRequest("plan-minimax", withPicture, "plan-minimax"), "plan-minimax");
+});
+
+test("the rule reads the picture out of the messages rather than being told", () => {
+  // A tool result carrying a screenshot is an image part like any other, which is the shape a
+  // computerUse turn actually arrives in.
+  const toolShot = [{ role: "tool", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,BBBB" } }] }];
+  assert.equal(modelForRequest("plan-nemotron", toolShot, "plan-zai-vision"), "plan-zai-vision");
+  assert.equal(modelForRequest("plan-nemotron", [], "plan-zai-vision"), "plan-nemotron");
+});

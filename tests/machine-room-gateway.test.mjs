@@ -96,9 +96,11 @@ test("GW-03: a send carries a nonce and the composer state is the ledger's answe
   const asked = only(calls, "promptAcceptanceStatus");
   assert.ok(asked.length >= 1, "promptAcceptanceStatus was polled after the send");
   assert.deepEqual(asked[0].args, { accountSlot: "host", clientNonce: "nonce-0001" });
-  assert.equal(w.composer.state, "accepted");
-  assert.equal(w.composer.text, "Accepted by the host");
-  assert.equal(w.composer.nonce, "nonce-0001");
+  // FOOTER-1. THE FOOTER LINE IS FOR REFUSALS ONLY, so a send the host took clears it rather than
+  // writing "Accepted by the host" above the composer on every turn. The ledger is still asked and
+  // its answer still decides; what changed is that agreement is silent. The refusal cases below
+  // are where the line has words, and they are unchanged.
+  assert.equal(w.composer, null, "an acceptance says nothing: the message on screen is the evidence");
   // The dots stay up: the send was taken, the reply is what clears them.
   assert.ok(w.messages.some((m) => m.type === "working"));
   assert.equal(only(calls, "getAgentTranscript").length, 0, "the refresh after a send reads the tail, never the whole transcript");
@@ -190,7 +192,7 @@ test("GW-03: a send the gateway threw on is 'Sending failed', not 'not wired', a
   const adapter2 = second.createGatewayAdapter(state2);
   adapter2.sendMessage({ kind: "worker", id: "w1" }, "hello");
   await settle(120);
-  assert.equal(state2.workers[0].composer.state, "accepted");
+  assert.equal(state2.workers[0].composer, null, "the acceptance stands and says nothing; FOOTER-1");
   assert.equal(state2.workers[0].messages.filter((m) => m.type === "system").length, 0);
   adapter2.destroy();
 });
@@ -486,9 +488,10 @@ test("review: a host whose capabilities list no acceptance ledger gets 'taken by
   adapter.sendMessage({ kind: "worker", id: "w1" }, "hello", []);
   await settle(40);
   assert.equal(only(calls, "promptAcceptanceStatus").length, 0, "a host without the ledger is not asked for one");
+  // A host with no ledger is the other kind of agreement: the gateway took it and nothing here can
+  // say more than that. FOOTER-1 makes that silent too, for the same reason an acceptance is.
   const composer = adapter.getSnapshot().workers.find((w) => w.id === "w1").composer;
-  assert.equal(composer?.state, "sent");
-  assert.match(composer?.text ?? "", /keeps no acceptance ledger/);
+  assert.equal(composer, null, "taken by the gateway is not a refusal, so the line stays empty");
   adapter.destroy();
 });
 

@@ -132,10 +132,13 @@ async function loadPanel({ adapter = {} } = {}) {
   const escaper = between(source, "  function escapeHtml(value) {", "  function sameContext(", "escapeHtml");
   const pill = between(source, "  // ---- BOX-6b: an agent whose conversation store needs repair", "  // ---- end BOX-6b", "the pill block");
   const body = between(source, "  function agentProfilePanel(worker) {", "\n  // The two async fills the panel above leaves placeholders for.", "agentProfilePanel");
+  // MODEL-1c: the panel's endpoint line goes through endpointWords, which resolves the menu entry
+  // and adds what last answered when that is not the pin. Handed in as a seam like modelById, so
+  // this file keeps measuring the Repair control and not the endpoint sentence.
   return new Function(
-    "adapter", "modelById", "routinesForContext", "avatarMarkup", "statusClass",
+    "adapter", "modelById", "routinesForContext", "avatarMarkup", "statusClass", "endpointWords",
     `${escaper}\n${pill}\n${body}\nreturn agentProfilePanel;`,
-  )(adapter, () => ({ name: "gate-model" }), () => [], () => "", () => "ready");
+  )(adapter, () => ({ name: "gate-model" }), () => [], () => "", () => "ready", () => "gate-model");
 }
 
 async function loadRepairPress({ adapter = {}, worker = null } = {}) {

@@ -852,11 +852,37 @@
   }
 
   let hostBuildValue = null;
+  // MODEL-1c. What actually answered this box's last call, refreshed on the same read as the
+  // version. Empty on a box that has taken no call and on a bundle that predates the field, and
+  // the Endpoint line draws no second half for either.
+  let answeredModelValue = "";
   function loadHostBuild() {
     if (typeof adapter.getHostStatus !== "function") return Promise.resolve(null);
     return Promise.resolve(adapter.getHostStatus())
-      .then((status) => { hostBuildValue = status?.hostVersion ?? null; return hostBuildValue; })
+      .then((status) => {
+        hostBuildValue = status?.hostVersion ?? null;
+        answeredModelValue = String(status?.answeredModel ?? "");
+        return hostBuildValue;
+      })
       .catch(() => null);
+  }
+
+  /**
+   * MODEL-1c. The Endpoint line's words: what this box is pinned to, and what last answered when
+   * that is something else.
+   *
+   * They differ whenever a screenshot is routed past a text-only plan. The line named the pin
+   * either way, so a person reading it was told a model that had not spoken on the turn in front of
+   * them. Silent when they agree, which is every ordinary turn.
+   */
+  function endpointWords(worker) {
+    const model = modelById(worker.model);
+    const pinned = model ? model.name : worker.model;
+    const answered = answeredModelValue;
+    if (answered.length === 0 || answered === worker.model) return pinned;
+    // The answering model by its own id: it is a routing target, so no card names it and there are
+    // no customer words to reach for.
+    return `pinned to ${pinned}, last answered by ${answered}`;
   }
 
   let problemOffers = [];
@@ -1457,7 +1483,7 @@
       <div class="island-heading"><div><span class="status-dot ${statusClass(worker.status)}"></span><strong>Agent</strong></div></div>
       <div class="context-profile-header">${avatarMarkup(worker, "context-profile-avatar")}<div class="context-profile-copy"><span class="context-kind-label">Direct conversation</span><strong>${escapeHtml(worker.name)}</strong><small>${escapeHtml(worker.statusText)}</small></div></div>
       <div class="context-divider"></div>
-      <div class="context-detail-list">${worker.role ? `<div class="context-detail-row"><span>Role</span><strong>${escapeHtml(worker.role)}</strong></div>` : ""}<div class="context-detail-row"><span>Endpoint (box-wide)</span><strong>${escapeHtml(model ? model.name : worker.model)}</strong></div></div>
+      <div class="context-detail-list">${worker.role ? `<div class="context-detail-row"><span>Role</span><strong>${escapeHtml(worker.role)}</strong></div>` : ""}<div class="context-detail-row"><span>Endpoint (box-wide)</span><strong>${escapeHtml(endpointWords(worker))}</strong></div></div>
       <button class="context-action-row" type="button" data-context-action="profile"><span>Agent details</span><b>›</b></button>
       <button class="context-action-row" type="button" data-context-action="routines"><span>Routines</span><b>${routineCount}</b></button>
       ${typeof adapter.getSkills === "function" ? `<button class="context-action-row" type="button" data-context-action="skills"><span>Skills enabled</span><b>${(worker.skills ?? []).filter((skill) => skill.enabled).length} of ${(worker.skills ?? []).length}</b></button>` : ""}
@@ -4249,7 +4275,7 @@
           || "This agent's conversation store needs repair, so every turn ends without an answer. Repairing turns the stuck state off and sets aside anything unreadable so the next message can rebuild the conversation. Nothing is deleted.",
       )}</small></div><button class="primary-button" type="button" data-repair-transcript="${escapeHtml(worker.id)}">Repair</button></div><p class="field-hint" data-repair-note hidden></p></section>`
       : "";
-    return `<div class="panel-grid"><section class="panel-card"><div class="panel-card-header">${avatarMarkup(worker, "context-profile-avatar")}<span class="status-pill ${worker.status === "working" ? "working" : worker.status === "attention" ? "" : "success"}">${escapeHtml(worker.statusText)}</span></div><h3>${escapeHtml(worker.name)}</h3><p>${escapeHtml(worker.role || "No role set on the host.")}</p><div class="tag-list"><span class="tag">endpoint (box-wide) · ${escapeHtml(model ? model.name : worker.model)}</span><span class="tag">${worker.files.length} files</span><span class="tag">${routines.length} routines</span></div></section>${repair}<section class="settings-section"><h3>Agent-owned context</h3><p>The direct transcript, the role and the routines shown here belong to this agent. The endpoint and the box's screens belong to the whole box and are shared with every other agent on it.</p>${identity}${role}${avatar}${switches}<div class="setting-row"><div><strong>Direct conversation</strong><small>Operator-to-agent thread</small></div><span class="status-pill ${worker.status === "working" ? "working" : ""}">${escapeHtml(worker.statusText)}</span></div>${browser}${hygiene}</section>${memories}${audit}</div>`;
+    return `<div class="panel-grid"><section class="panel-card"><div class="panel-card-header">${avatarMarkup(worker, "context-profile-avatar")}<span class="status-pill ${worker.status === "working" ? "working" : worker.status === "attention" ? "" : "success"}">${escapeHtml(worker.statusText)}</span></div><h3>${escapeHtml(worker.name)}</h3><p>${escapeHtml(worker.role || "No role set on the host.")}</p><div class="tag-list"><span class="tag">endpoint (box-wide) · ${escapeHtml(endpointWords(worker))}</span><span class="tag">${worker.files.length} files</span><span class="tag">${routines.length} routines</span></div></section>${repair}<section class="settings-section"><h3>Agent-owned context</h3><p>The direct transcript, the role and the routines shown here belong to this agent. The endpoint and the box's screens belong to the whole box and are shared with every other agent on it.</p>${identity}${role}${avatar}${switches}<div class="setting-row"><div><strong>Direct conversation</strong><small>Operator-to-agent thread</small></div><span class="status-pill ${worker.status === "working" ? "working" : ""}">${escapeHtml(worker.statusText)}</span></div>${browser}${hygiene}</section>${memories}${audit}</div>`;
   }
 
   // The two async fills the panel above leaves placeholders for. Both are real host reads: the

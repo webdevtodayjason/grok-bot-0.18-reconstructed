@@ -3676,6 +3676,9 @@
           latestHostVersion: status?.latestHostVersion ?? null,
           hostUpdateAvailable: status?.hostUpdateAvailable ?? null,
           isBusy: Boolean(status?.isBusy),
+          // MODEL-1c. What actually answered this box's last call. A box on a bundle that predates
+          // this says nothing, which reads as an empty string and draws no second half.
+          answeredModel: String(status?.answeredModel ?? ""),
           capabilities: Array.isArray(status?.capabilities) ? status.capabilities : [],
         }));
       },

@@ -54,6 +54,13 @@ export type OpenAiCompatibleSettings = {
    */
   readonly servedBy?: string | null;
   /**
+   * MODEL-1c. The model a screenshot goes to when THIS one cannot read one, or absent.
+   *
+   * Present only when the relay measured the pinned plan as text-only with a route to fall back to,
+   * so its presence is the whole of "this pin is text only". See modelForRequest.
+   */
+  readonly visionFallback?: string | null;
+  /**
    * PROXY-1. What this model is CALLED to the person, when its routing id is not a name they own.
    *
    * On the plan the model id is `plan-zai`: a string that exists so the proxy can pick a pool and
@@ -72,6 +79,48 @@ export const OPENAI_COMPATIBLE_ACCOUNT_ID_ENV = "SAND_OPENAI_COMPATIBLE_ACCOUNT_
 export const OPENAI_COMPATIBLE_ORIGINATOR_ENV = "SAND_OPENAI_COMPATIBLE_ORIGINATOR";
 export const OPENAI_COMPATIBLE_SERVED_BY_ENV = "SAND_OPENAI_COMPATIBLE_SERVED_BY";
 export const OPENAI_COMPATIBLE_MODEL_LABEL_ENV = "SAND_OPENAI_COMPATIBLE_MODEL_LABEL";
+/**
+ * MODEL-1c. WHERE A SCREENSHOT GOES WHEN THIS MODEL CANNOT SEE ONE.
+ *
+ * Set by the relay, and set ONLY when the pinned plan was measured as text-only with a route to
+ * fall back to. Its presence is therefore the whole of "this pin is text-only": one variable that
+ * cannot disagree with itself, rather than a flag and an alias that can.
+ *
+ * MEASURED ON THE R750 2026-09-19: a turn carrying a screenshot on plan-nemotron cost the refused
+ * hop, a learned refusal, the picture being replaced by a sentence and the same question asked
+ * again -- three round trips to arrive somewhere with no eyes. The route was there the whole time.
+ */
+export const OPENAI_COMPATIBLE_VISION_FALLBACK_ENV = "SAND_OPENAI_COMPATIBLE_VISION_FALLBACK";
+
+/**
+ * Which model this ONE request goes to: the pin, or the vision route when the request carries a
+ * picture and the pin cannot take one.
+ *
+ * A function of its arguments and nothing else, so the rule can be read without a socket. The pin
+ * is the answer in every case but one, including a pin that CAN see -- a model with eyes is never
+ * rerouted, whatever is configured beside it.
+ */
+export function modelForRequest(pin: string, messages: readonly Loose[], visionFallback: string): string {
+  const route = visionFallback.trim();
+  if (route.length === 0 || route === pin) return pin;
+  return carriesImageParts(messages) ? route : pin;
+}
+
+/**
+ * MODEL-1c. THE MODEL THAT ACTUALLY ANSWERED, read off the completion rather than off the pin.
+ *
+ * The two are the same on every ordinary turn and differ exactly when this file reroutes one, or
+ * when the proxy resolves a pool to something else. Titan answers "which model are you" from the
+ * pin, so without this it would keep naming a model that did not speak on the turn the customer is
+ * reading. One string for the box, because one box answers through one endpoint.
+ */
+let answeredModel = "";
+export function noteAnsweredModel(model: string): void {
+  const said = String(model ?? "").trim();
+  if (said.length > 0) answeredModel = said;
+}
+export function lastAnsweredModel(): string { return answeredModel; }
+export function forgetAnsweredModel(): void { answeredModel = ""; }
 
 export type OpenAiCompatibleEvent =
   | { readonly type: "text-delta"; readonly delta: string }
@@ -91,6 +140,8 @@ export type OpenAiCompatibleOptions = {
   readonly transport?: "chat" | "responses";
   readonly accountId?: string | null;
   readonly originator?: string | null;
+  /** MODEL-1c. The vision route for a text-only pin, or empty. See modelForRequest. */
+  readonly visionFallback?: string | null;
 };
 
 type PendingToolCall = { id: string; name: string; arguments: string };
@@ -123,6 +174,7 @@ export function resolveOpenAiCompatibleSettings(env: Readonly<Record<string, str
     ...(configured(OPENAI_COMPATIBLE_ENDPOINT_NAME_ENV).length > 0 ? { endpointName: configured(OPENAI_COMPATIBLE_ENDPOINT_NAME_ENV) } : {}),
     ...(configured(OPENAI_COMPATIBLE_SERVED_BY_ENV).length > 0 ? { servedBy: configured(OPENAI_COMPATIBLE_SERVED_BY_ENV) } : {}),
     ...(configured(OPENAI_COMPATIBLE_MODEL_LABEL_ENV).length > 0 ? { modelLabel: configured(OPENAI_COMPATIBLE_MODEL_LABEL_ENV) } : {}),
+    ...(configured(OPENAI_COMPATIBLE_VISION_FALLBACK_ENV).length > 0 ? { visionFallback: configured(OPENAI_COMPATIBLE_VISION_FALLBACK_ENV) } : {}),
   };
 }
 
@@ -696,7 +748,21 @@ export async function* streamOpenAiCompatibleChat(options: OpenAiCompatibleOptio
   let text = "";
   let usage: OpenAiCompatibleUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 
-  const post = (payload: readonly Loose[]) => options.fetch(endpoint, {
+  // MODEL-1c. The vision route for a text-only pin. Read once: the env is written by the relay when
+  // the box is pointed at a plan, and it does not change under a turn.
+  const visionFallback = (options.visionFallback ?? process.env[OPENAI_COMPATIBLE_VISION_FALLBACK_ENV] ?? "").trim();
+  let rerouted = "";
+  const post = (payload: readonly Loose[]) => {
+    // THE MODEL IS CHOSEN PER REQUEST, not per turn: a turn can carry a picture in its first step
+    // and nothing but tool results afterwards, and each of those goes where it can actually be
+    // answered. One wire line per reroute, naming both, because "which model answered this" is the
+    // question every one of these routes exists to keep answerable.
+    const model = modelForRequest(options.model, payload, visionFallback);
+    if (model !== options.model && rerouted !== model) {
+      rerouted = model;
+      console.info(`[sand-host][wire] this request carries a picture and ${options.model} is text only, so it goes to ${model} instead`);
+    }
+    return options.fetch(endpoint, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -706,7 +772,7 @@ export async function* streamOpenAiCompatibleChat(options: OpenAiCompatibleOptio
       ...(apiKey.length === 0 ? {} : { authorization: `Bearer ${apiKey}` }),
     },
     body: JSON.stringify({
-      model: options.model,
+      model,
       messages: payload,
       ...(declaredTools == null ? {} : { tools: declaredTools, tool_choice: "auto" }),
       // Reasoning models burn the whole budget thinking unless told not to, and the switch
@@ -717,19 +783,26 @@ export async function* streamOpenAiCompatibleChat(options: OpenAiCompatibleOptio
       stream: true,
       stream_options: { include_usage: true },
     }),
-  });
+    });
+  };
 
   for (let step = 0; step < maxSteps; step += 1) {
     // Known refusal: skip the bytes with no round trip. The picture is replaced by the sentence
     // before the request is built, so the model still knows a file was attached.
-    if (endpointRefusesImages(options.baseUrl, options.model) && carriesImageParts(messages)) messages = withoutImageParts(messages);
+    // A pin with a vision route is never stripped: the picture is going somewhere that can read it,
+    // and throwing it away first would make the reroute pointless.
+    if (modelForRequest(options.model, messages, visionFallback) === options.model
+      && endpointRefusesImages(options.baseUrl, options.model) && carriesImageParts(messages)) messages = withoutImageParts(messages);
     let response = await post(messages);
     if (!response.ok) {
       const detail = await bodyText(response);
       // The turn does not get to die because the endpoint has no eyes. Remember the refusal, put the
       // sentence where the picture was, and ask the same question again -- once.
       if (carriesImageParts(messages) && looksLikeImageRefusal(response.status, detail)) {
-        noteEndpointRefusesImages(options.baseUrl, options.model);
+        // The refusal is remembered against the model that actually refused, which after a reroute
+        // is the vision route and not the pin. Noting it against the pin would teach this box that
+        // the plan it runs on has no eyes on the strength of an answer the plan never gave.
+        noteEndpointRefusesImages(options.baseUrl, modelForRequest(options.model, messages, visionFallback));
         console.info(`[sand-host] ${options.model} refused an attached picture, so it travels as a sentence from here on (${detail.slice(0, 200)})`);
         messages = withoutImageParts(messages);
         response = await post(messages);
@@ -749,6 +822,9 @@ export async function* streamOpenAiCompatibleChat(options: OpenAiCompatibleOptio
       if (failure != null) throw new Error(`OpenAI-compatible response failed: ${safeJson(failure).slice(0, 4_096)}`);
       const reported = usageOf(chunk);
       if (reported != null) stepUsage = reported;
+      // MODEL-1c. What the completion says answered it, which is the only honest source: the pin is
+      // what we asked for and a pool, a reroute or a fallback can all answer as something else.
+      if (typeof chunk.model === "string") noteAnsweredModel(chunk.model);
       const choice = record(Array.isArray(chunk.choices) ? chunk.choices[0] : null);
       if (choice == null) continue;
       const delta = record(choice.delta) ?? record(choice.message) ?? {};

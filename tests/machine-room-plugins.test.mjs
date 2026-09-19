@@ -269,12 +269,18 @@ test("the model menu entry, the agent context card and the agent profile panel a
   // A customer's own row has no label and keeps naming its own model, exactly as it always did.
   assert.equal(models.available[2].name, "my own provider · glm-4.6");
 
-  // And the two app.js surfaces read that entry rather than the raw model id.
+  // And the two app.js surfaces read that entry rather than the raw model id. Both go through
+  // endpointWords since MODEL-1c, which resolves the menu entry exactly as they used to and then
+  // adds what last answered when it was not the pin, so the alias rule below still holds for both.
   const app = await readFile(path.join(repoRoot, "ui/machine-room/app.js"), "utf8");
-  const reads = app.split("\n").filter((line) => line.includes("model ? model.name : worker.model"));
+  const reads = app.split("\n").filter((line) => line.includes("endpointWords(worker)") && line.includes("escapeHtml"));
   assert.equal(reads.length, 2, "the agent context card and the agent profile panel, and only those two");
   assert.equal(reads.some((line) => line.includes("Endpoint (box-wide)")), true, "the agent context card");
   assert.equal(reads.some((line) => line.includes("endpoint (box-wide) ·")), true, "the agent profile panel");
+  // And endpointWords itself is what resolves the menu entry, so neither surface can drift back to
+  // printing the routing alias on its own.
+  assert.match(app, /function endpointWords\(worker\) \{[\s\S]*?model \? model\.name : worker\.model/,
+    "endpointWords resolves the menu entry the two surfaces used to resolve themselves");
 });
 
 test("the endpoint menu carries the plan rows, so Currently answering matches when the box is on one", () => {

@@ -16,7 +16,7 @@ import { isSandBoxSettingEnabled, SAND_TOOL_TRACE_SETTING } from "../../sand-box
 import { SandSettingsStore } from "../../../shared/node/settings/sand-settings-store.js";
 import { getBoxSecretsStorePath } from "../secrets/secrets-service.js";
 import { streamCodexDirectResponses, type CodexDirectTool } from "./codex-direct-responses.js";
-import { DEFAULT_OPENAI_COMPATIBLE_CONTEXT_WINDOW, IMAGE_PART_BYTES_MAX, OPENAI_COMPATIBLE_CONTEXT_WINDOW_ENV, endpointRefusesImages, fetchOpenAiCompatibleContextWindow, fetchOpenAiCompatibleModelIds, openAiCompatibleTools, resolveOpenAiCompatibleSettings, streamOpenAiCompatibleChat, type OpenAiCompatibleSettings } from "./openai-compatible-chat.js";
+import { DEFAULT_OPENAI_COMPATIBLE_CONTEXT_WINDOW, IMAGE_PART_BYTES_MAX, OPENAI_COMPATIBLE_CONTEXT_WINDOW_ENV, endpointRefusesImages, fetchOpenAiCompatibleContextWindow, fetchOpenAiCompatibleModelIds, lastAnsweredModel, openAiCompatibleTools, resolveOpenAiCompatibleSettings, streamOpenAiCompatibleChat, type OpenAiCompatibleSettings } from "./openai-compatible-chat.js";
 import { ModelTierTurnRouter, talkModelFor, type ModelTierTurnContext } from "./model-tier-router.js";
 import type { LabelMessage, PromptExecutor } from "./sand-labeling.js";
 
@@ -592,7 +592,16 @@ function withBackendNote(instructions: string, settings: OpenAiCompatibleSetting
   // own key.
   const called = (settings.modelLabel ?? "").length > 0 ? settings.modelLabel : settings.model;
   const through = settings.endpointName ? `"${settings.endpointName}"` : "an OpenAI-compatible endpoint";
-  return `${instructions}\n\n## Your backend\nYou are Titanbot. Right now you are answering through ${through}, model '${called}' at ${where}. If asked which model, provider or company is behind you, say exactly that; never claim to be Grok, xAI, or any other model or vendor.`;
+  // MODEL-1c. WHAT ACTUALLY ANSWERED LAST, when it was not what this box is pinned to. A screenshot
+  // on a text-only plan is routed to the vision model, and without this sentence Titan would go on
+  // naming the pin on the very turn a different model read the picture -- which is the one thing
+  // this note exists to stop, in a new place. Silent when they agree, which is every ordinary turn,
+  // so the sentence is byte-equal for every box that has never been rerouted.
+  const answered = lastAnsweredModel();
+  const alsoAnswered = answered.length > 0 && answered !== settings.model
+    ? ` Your last call was answered by '${answered}' rather than the model you are pinned to; if asked, say you are pinned to '${called}' and that '${answered}' answered the most recent call.`
+    : "";
+  return `${instructions}\n\n## Your backend\nYou are Titanbot. Right now you are answering through ${through}, model '${called}' at ${where}.${alsoAnswered} If asked which model, provider or company is behind you, say exactly that; never claim to be Grok, xAI, or any other model or vendor.`;
 }
 
 /**
@@ -806,6 +815,9 @@ function withJsonSchemaParameters(definitions: readonly Loose[] | undefined): re
         ...(settings.transport == null ? {} : { transport: settings.transport }),
         ...(settings.accountId == null ? {} : { accountId: settings.accountId }),
         ...(settings.originator == null ? {} : { originator: settings.originator }),
+        // MODEL-1c. The vision route travels with the request so a screenshot skips a pin that
+        // cannot read one, rather than paying the refusal and being turned into a sentence.
+        ...(settings.visionFallback == null ? {} : { visionFallback: settings.visionFallback }),
         instructions: withBackendNote(conversation.instructions, settings),
         input: conversation.input,
         ...(tools == null ? {} : { tools }),

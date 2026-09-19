@@ -2259,6 +2259,14 @@ async function useIncluded(res, t, body, answer) {
   if (plan.modelLabel) next.SAND_OPENAI_COMPATIBLE_MODEL_LABEL = plan.modelLabel;
   else delete next.SAND_OPENAI_COMPATIBLE_MODEL_LABEL;
   if (plan.contextWindow) next.SAND_OPENAI_COMPATIBLE_CONTEXT_WINDOW = String(plan.contextWindow);
+  // MODEL-1c. WHERE A SCREENSHOT GOES when this plan cannot read one, and written ONLY then: the
+  // host reads the presence of this name as "the pin is text only", so a plan with eyes must not
+  // carry it and neither must one whose fallback nobody measured. With it the host sends an
+  // image-bearing request straight to the route; without it that turn pays a refusal, a learned
+  // flag and the same question asked again with the picture replaced by a sentence.
+  if (plan.supportsVision === false && String(plan.visionFallback ?? "").length > 0) {
+    next.SAND_OPENAI_COMPATIBLE_VISION_FALLBACK = String(plan.visionFallback);
+  } else delete next.SAND_OPENAI_COMPATIBLE_VISION_FALLBACK;
   await writeSecrets(t, next);
   // PROVIDERS-1. Read AFTER the write, so nothing is refused over it: the file is the right place
   // for these values whether or not the container also carries them, and a rollback still needs
@@ -5064,11 +5072,16 @@ const server = createServer(async (req, res) => {
       // refusals, so a box moving BACK to a customer's own key must not keep either.
       // MODEL_LABEL travels with SERVED_BY for the same reason: it is a plan-only name, and a box
       // moving back to a customer's own key must say that key's model, not the plan's.
-      for (const key of ["SAND_OPENAI_COMPATIBLE_API_KEY", "SAND_OPENAI_COMPATIBLE_TRANSPORT", "SAND_OPENAI_COMPATIBLE_ACCOUNT_ID", "SAND_OPENAI_COMPATIBLE_ORIGINATOR", "SAND_OPENAI_COMPATIBLE_SERVED_BY", "SAND_OPENAI_COMPATIBLE_MODEL_LABEL"]) delete next[key];
+      // MODEL-1c joins the list: the vision route is a plan-only name, and a box moving back to a
+      // customer's own key must not keep one pointing at our proxy's routing target.
+      for (const key of ["SAND_OPENAI_COMPATIBLE_API_KEY", "SAND_OPENAI_COMPATIBLE_TRANSPORT", "SAND_OPENAI_COMPATIBLE_ACCOUNT_ID", "SAND_OPENAI_COMPATIBLE_ORIGINATOR", "SAND_OPENAI_COMPATIBLE_SERVED_BY", "SAND_OPENAI_COMPATIBLE_MODEL_LABEL", "SAND_OPENAI_COMPATIBLE_VISION_FALLBACK"]) delete next[key];
       if (plan != null) {
         next.SAND_OPENAI_COMPATIBLE_API_KEY = t.entry.included.key;
         if (plan.servedBy) next.SAND_OPENAI_COMPATIBLE_SERVED_BY = plan.servedBy;
         if (plan.modelLabel) next.SAND_OPENAI_COMPATIBLE_MODEL_LABEL = plan.modelLabel;
+        if (plan.supportsVision === false && String(plan.visionFallback ?? "").length > 0) {
+          next.SAND_OPENAI_COMPATIBLE_VISION_FALLBACK = String(plan.visionFallback);
+        }
       } else if (chosen.subscription) {
         // A subscription row names a credential in the OPERATOR's own home directory, so only the
         // operator's console can resolve one. A tenant never has such a row: the scan that writes

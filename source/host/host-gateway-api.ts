@@ -7,6 +7,10 @@ import { buildHostShellArgs } from "./box/box-shell-command.js";
 import { getSandRootDir } from "./host-paths.js";
 import { isConnectorEnvFieldName, readConnectorEnvSecrets } from "./extensions/mcp/connector-secrets.js";
 import { readLocalConnectorFile } from "./extensions/mcp/local-connectors.js";
+// MODEL-1c. The model that actually answered this box's last call, which only the inference route
+// can know: the pin is what was asked for and a reroute, a pool or a fallback can answer as
+// something else.
+import { lastAnsweredModel } from "./extensions/inference/openai-compatible-chat.js";
 import { writeConnectorEnvSecret } from "./extensions/mcp/connector-secrets.js";
 import {
   WEB_SEARCH_ROUTE_FIELDS,
@@ -1098,6 +1102,12 @@ export function createHostGatewayApi(
     getHostStatus: async () => ({
       ...method(deps.extensions.api("host-upgrade"), "getVersionState")(),
       isBusy: deps.getHealth().isBusy,
+      // MODEL-1c. WHAT LAST ANSWERED, beside what this box is pinned to. The two differ whenever a
+      // screenshot is routed past a text-only plan, and the console's Endpoint line named the pin
+      // either way -- so a person reading it was told a model that had not spoken on the turn in
+      // front of them. Empty until this box has taken one call, which is the honest answer for a
+      // box that has just come up.
+      answeredModel: lastAnsweredModel(),
       capabilities: HOST_CAPABILITIES
     }),
     setBoxMigrating: async (args: any) => {
