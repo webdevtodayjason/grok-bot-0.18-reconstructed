@@ -1401,12 +1401,21 @@ export const planModelBase = (alias) => {
  *   the fallback chain        where a screenshot on each of those goes, and where it goes from
  *                             there, guarded against a cycle and against a row naming itself.
  *
- * `keep` is the key's CURRENT list and is the safety net: an alias already on it that no customer
- * can see is a routing target somebody put there on purpose, and a write that narrows a key has no
- * business deciding it was a mistake. Customer-visible aliases in `keep` are NOT kept, because
- * removing those is the whole point of narrowing an entitlement.
+ * `keep` is the key's CURRENT list, and NOTHING ON IT IS EVER REMOVED except by name. That is the
+ * second half of this defect and it cost a second outage: the first fix kept routing targets and
+ * still dropped plan-nemotron off demo, a customer plan an operator had put on that key by hand,
+ * because it was not among the ticked ones. A save is not an inventory.
+ *
+ * `drop` is the only thing that takes an alias off: the plans the operator was SHOWN as ticked and
+ * turned off. That is what "unticked" has to mean -- a plan nobody saw on the form was never turned
+ * off by anybody, and reading the difference against the whole offered list is how a hand
+ * entitlement gets deleted by somebody saving an unrelated row.
+ *
+ *   new list = (what the key has now, minus what was explicitly unticked)
+ *              union (the plans that were ticked)
+ *              union (every routing alias and fallback those plans need)
  */
-export function keyModelsFor({ chosen = [], deployments = [], keep = [] } = {}) {
+export function keyModelsFor({ chosen = [], deployments = [], keep = [], drop = [] } = {}) {
   const byAlias = new Map();
   for (const row of (Array.isArray(deployments) ? deployments : [])) {
     const alias = String(row?.alias ?? "");
@@ -1431,10 +1440,12 @@ export function keyModelsFor({ chosen = [], deployments = [], keep = [] } = {}) 
       if (alias !== base && planModelBase(alias) === base) addChain(alias);
     }
   }
+  // WHAT THE KEY ALREADY HAD. Everything, routing target and customer plan alike, minus the ones
+  // that were explicitly turned off. A plan that was never on the form cannot have been unticked.
+  const removed = new Set(drop.map((one) => String(one ?? "")).filter((one) => !chosen.map(String).includes(one)));
   for (const one of keep) {
     const id = String(one ?? "");
-    if (!isPlanModel(id) || !byAlias.has(id)) continue;
-    if (byAlias.get(id)?.customerVisible === true) continue;
+    if (!isPlanModel(id) || !byAlias.has(id) || removed.has(id)) continue;
     out.add(id);
   }
   return [...out];

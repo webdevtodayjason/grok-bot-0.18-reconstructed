@@ -4712,10 +4712,19 @@ export function createAdminApi({
         // tier and a screenshot to the vision route, and neither is a thing anybody ticks. Sending
         // the ticked list alone is what answered "key not allowed to access model" on the next turn
         // (keyModelsFor, cp/proxy.mjs).
+        // WHAT THE OPERATOR ACTUALLY TURNED OFF, which is the difference against the set the form
+        // SHOWED as ticked -- this workspace's own record -- and never against every plan the proxy
+        // offers. A plan nobody saw on that form was not unticked by anybody, and reading it as one
+        // is how plan-nemotron came off demo's key while somebody saved an unrelated row.
+        const shown = (Array.isArray(record.models) ? record.models : [])
+          .map((row) => String(row?.id ?? row?.model ?? row ?? ""))
+          .filter((alias) => alias.length > 0);
+        const unticked = shown.filter((alias) => !wanted.includes(alias));
         const keyModels = keyModelsFor({
           chosen: wanted,
           deployments: served.deployments.rows,
           keep: live.ok ? live.models : [],
+          drop: unticked,
         });
         if (keyModels.length === 0) {
           ledger.failed("the proxy serves none of those plans");
@@ -4740,6 +4749,9 @@ export function createAdminApi({
           // The routing targets that travelled with them, so an operator reading this sees that the
           // talk tier and the vision route are still on the key rather than taking it on trust.
           keyModels,
+          // And what this save took OFF, by name. Empty on a save that only added, which is most of
+          // them, and the one line that says a removal was asked for rather than computed.
+          unticked,
           // WITHIN A MINUTE, NOT ON THE NEXT LOAD. The relay builds a customer's choices from its own
           // registry, which refreshes every 60 seconds (ui/tenant-registry.mjs), so a customer who
           // reloads Settings the second after this is answered truthfully sees the old set. Measured

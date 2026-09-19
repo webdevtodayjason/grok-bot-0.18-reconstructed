@@ -214,17 +214,30 @@ const base = String(process.env.CP_PROXY_URL ?? "").replace(/\\/+$/, "").replace
   return inControlPlane(source);
 }
 
-/** The plans this workspace's own key record names, which is the entitlement the relay reads. */
+/**
+ * The two lists this workspace has, which are different questions and were one field until a live
+ * turn stopped. The RECORD is what the relay narrows a customer's choices to. The KEY is what the
+ * proxy will actually answer on, routing targets and all, and the only way to read it is to ask.
+ */
 async function entitlementOf() {
   const source = `
 const fs = require("node:fs");
-try {
+(async () => {
   const record = JSON.parse(fs.readFileSync("/data/titanbot/${SLUG}/profile/model-proxy.json", "utf8"));
   const models = (Array.isArray(record.models) ? record.models : []).map((row) => String(row?.id ?? row?.model ?? row));
-  console.log(JSON.stringify({ ok: true, models, keyId: String(record.keyId ?? "").slice(0, 12) }));
-} catch (error) { console.log(JSON.stringify({ ok: false, why: String(error?.message ?? error) })); }
+  const base = String(process.env.CP_PROXY_URL ?? "").replace(/\\/+$/, "").replace(/\\/v1$/, "");
+  let keyModels = null;
+  try {
+    const info = await (await fetch(base + "/key/info?key=" + encodeURIComponent(record.key), {
+      headers: { authorization: "Bearer " + process.env.CP_PROXY_MASTER_KEY, accept: "application/json" },
+    })).json();
+    const list = info?.info?.models ?? info?.models ?? null;
+    if (Array.isArray(list)) keyModels = list.map(String);
+  } catch { keyModels = null; }
+  console.log(JSON.stringify({ ok: true, models, keyModels, keyId: String(record.keyId ?? "").slice(0, 12) }));
+})().catch((error) => console.log(JSON.stringify({ ok: false, why: String(error?.message ?? error) })));
 `;
-  return inControlPlane(source, 45_000);
+  return inControlPlane(source, 60_000);
 }
 
 /**
@@ -309,6 +322,7 @@ async function waitForSpend(plan, since) {
 // ---- the run --------------------------------------------------------------------------------------
 
 let restoreEntitlement = null;
+let keyBefore = null;
 let restoreModel = null;
 let throwaway = null;
 
@@ -324,8 +338,12 @@ async function main() {
   step(`what ${SLUG} is entitled to and what it is running, before anything moves`);
   const before = await entitlementOf();
   check(before.ok === true, `${SLUG} has a plan key with a model list`, before.ok ? before.models.join(", ") : String(before.why));
+  if (before.ok === true) note(`its key answers on ${Array.isArray(before.keyModels) ? before.keyModels.join(", ") : "(the proxy did not say)"}`);
   if (before.ok !== true) return;
   restoreEntitlement = before.models;
+  // What the KEY carried before this run, so the restore can be judged on the key and not only on
+  // the record. It is a list of alias names and carries nothing secret.
+  keyBefore = before.keyModels ?? null;
   const running = await boxSays();
   check(running.status === 200 && running.body.read === true, `${SLUG}'s box says what it is pointed at`,
     `${running.body.model ?? "?"}${running.body.pinned ? " (pinned by its container environment)" : ""}`);
@@ -359,6 +377,16 @@ async function main() {
   const scoped = Array.isArray(entitled.body.keyModels) ? entitled.body.keyModels : [];
   check(scoped.length > WANTED.length,
     "the key carries more than the plans that were ticked", scoped.join(", ") || "(the answer named none)");
+  // MODEL-1d. A SAVE TAKES OFF ONLY WHAT WAS UNTICKED. Everything else on that key stays, routing
+  // target and hand-entitled plan alike: the first version of this fix kept the routing targets and
+  // still dropped a customer plan an operator had put on by hand, which was a second outage.
+  const untickedNow = Array.isArray(entitled.body.unticked) ? entitled.body.unticked : [];
+  const survivors = (before.models ?? []).filter((one) => !untickedNow.includes(one));
+  const lost = survivors.filter((one) => !scoped.includes(one));
+  check(lost.length === 0, "and nothing it already had was taken off except what was unticked",
+    lost.length === 0
+      ? `unticked ${untickedNow.join(", ") || "nothing"}; kept ${survivors.join(", ") || "nothing"}`
+      : `lost ${lost.join(", ")}`);
   const routes = scoped.filter((one) => /-(talk|vision|code)$/.test(one));
   if (routes.length === 0) {
     skip("the talk tier and the vision route still answer on that key", "this proxy serves no routing alias for those plans");
@@ -497,6 +525,13 @@ try {
   if (restoreEntitlement != null && ADMIN_TOKEN.length > 0) {
     const back = await admin("POST", `/v1/admin/clients/${encodeURIComponent(SLUG)}/models`, { models: restoreEntitlement });
     check(back.status === 200, "the entitlement is back to what it was", `${restoreEntitlement.join(", ")} (HTTP ${back.status})`);
+    // AND THE KEY IS BACK WHERE IT WAS TOO, which the record alone cannot say. A run that put the
+    // entitlement back and left the key short would have taken a workspace off a plan it had
+    // before, quietly, which is the whole class of defect this gate now exists to catch.
+    const keyBack = Array.isArray(back.body.keyModels) ? back.body.keyModels : [];
+    const missing = (keyBefore ?? []).filter((one) => !keyBack.includes(one));
+    check(missing.length === 0, "and so is its key, alias for alias",
+      missing.length === 0 ? keyBack.join(", ") : `missing ${missing.join(", ")}`);
   }
   const roster = COOKIE.length > 0 ? await gw("listAgents").catch(() => null) : null;
   if (roster != null) note(`the roster is ${(Array.isArray(roster) ? roster : roster?.agents ?? []).length} again`);

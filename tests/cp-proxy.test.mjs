@@ -625,12 +625,12 @@ test("a key's scope carries the family and the fallback chain of every plan that
   assert.ok(!zai.includes("plan-qwen"));
   assert.ok(!zai.includes("plan-minimax"));
 
-  // An alias already on the key that no customer can see is kept, whatever was chosen: a write that
-  // narrows an entitlement has no business deciding somebody's routing target was a mistake. A
-  // customer-visible one in the same list is not kept, or nothing would ever narrow.
+  // Everything already on the key survives a save that did not name it. Narrowing happens by
+  // `drop`, which is the next test; this one is the rule that a save nobody meant as a removal
+  // removes nothing, routing target and customer plan alike.
   const kept = keyModelsFor({ chosen: ["plan-qwen"], deployments, keep: ["plan-zai-code", "plan-minimax"] });
   assert.ok(kept.includes("plan-zai-code"), "a routing target somebody added by hand survives");
-  assert.ok(!kept.includes("plan-minimax"), "a plan the customer no longer has does not");
+  assert.ok(kept.includes("plan-minimax"), "and so does a plan this save was never shown");
 
   // Nothing the proxy does not serve reaches a key, whichever source it came from.
   const unserved = keyModelsFor({ chosen: ["plan-zai", "plan-gone"], deployments, keep: ["plan-also-gone"] });
@@ -640,4 +640,46 @@ test("a key's scope carries the family and the fallback chain of every plan that
   assert.equal(planModelBase("plan-zai-talk"), "plan-zai");
   assert.equal(planModelBase("plan-zai-vision"), "plan-zai");
   assert.equal(planModelBase("plan-qwen"), "plan-qwen");
+});
+
+// MODEL-1d. A SAVE IS NOT AN INVENTORY, and the first fix to the one above cost a second outage.
+//
+// Keeping the routing targets was half of it. The write still dropped plan-nemotron off demo -- a
+// customer plan an operator had put on that key by hand -- because it was not among the ticked
+// ones. Nothing comes off a key now except a plan the operator was SHOWN as ticked and turned off.
+test("a save takes off only what was unticked, and never an alias or a plan it was not shown", () => {
+  const deployments = [
+    { alias: "plan-zai", customerVisible: true, visionFallback: "plan-zai-vision" },
+    { alias: "plan-zai-talk", customerVisible: true, visionFallback: "" },
+    { alias: "plan-zai-code", customerVisible: false, visionFallback: "" },
+    { alias: "plan-zai-vision", customerVisible: false, visionFallback: "" },
+    { alias: "plan-qwen", customerVisible: true, visionFallback: "" },
+    { alias: "plan-minimax", customerVisible: true, visionFallback: "plan-minimax" },
+    { alias: "plan-nemotron", customerVisible: true, visionFallback: "plan-zai-vision" },
+  ];
+  // The fleet's own shape: everything the proxy serves, on the key.
+  const onTheKey = ["plan-zai", "plan-zai-vision", "plan-zai-talk", "plan-zai-code", "plan-qwen", "plan-minimax", "plan-nemotron"];
+
+  // A save that changes nothing takes nothing off. This is the common case and the one that was
+  // quietly destructive: an operator saving a row they had not touched.
+  const untouched = keyModelsFor({ chosen: ["plan-zai", "plan-qwen", "plan-minimax"], deployments, keep: onTheKey, drop: [] });
+  assert.deepEqual(untouched.sort(), [...onTheKey].sort(), "a save that unticked nothing removed nothing");
+
+  // UNTICKING ONE PLAN REMOVES THAT PLAN. And only that plan.
+  const off = keyModelsFor({ chosen: ["plan-zai", "plan-qwen"], deployments, keep: onTheKey, drop: ["plan-minimax"] });
+  assert.ok(!off.includes("plan-minimax"), "the plan that was turned off comes off");
+  assert.ok(off.includes("plan-nemotron"), "a plan the form never showed is not turned off by saving it");
+  for (const alias of ["plan-zai-vision", "plan-zai-talk", "plan-zai-code"]) {
+    assert.ok(off.includes(alias), `${alias} is a routing target and never comes off a save`);
+  }
+
+  // Unticking cannot remove something that was also ticked: the two lists are one form and the
+  // ticked half wins, so a caller that sends both does not end up with a key missing a plan the
+  // customer can see on their own card.
+  const both = keyModelsFor({ chosen: ["plan-minimax"], deployments, keep: onTheKey, drop: ["plan-minimax"] });
+  assert.ok(both.includes("plan-minimax"));
+
+  // And the chain still arrives for a plan added on a key that had nothing.
+  const fresh = keyModelsFor({ chosen: ["plan-nemotron"], deployments, keep: [], drop: [] });
+  assert.deepEqual(fresh.sort(), ["plan-nemotron", "plan-zai-vision"]);
 });
