@@ -49,14 +49,16 @@
 // In --url mode nothing is created and nothing is sent: the leg types into the box and never
 // presses Send. CONSOLE_BEARER is read from the environment, sent as an Authorization header, and
 // never printed. A tenant console asks for a sign-in rather than a bearer: set GATE_EMAIL and
-// GATE_PASSWORD for a throwaway customer minted outside this file, which is what the R750 leg uses.
+// GATE_PASSWORD for a throwaway customer minted outside this file, which is what the R750 leg uses,
+// or GATE_SSO carrying a single-use sign-in link the operator minted through the admin door, which
+// is how a run reaches a workspace whose password this gate is not allowed to hold.
 // Neither is printed, and with neither set the run opens the local relay the way it always has.
 import { createRequire } from "node:module";
 import { mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { gateUserAgent } from "./gate-agent.mjs";
 
-const LEGS = ["typing", "modal", "corners"];
+const LEGS = ["typing", "idle", "modal", "corners"];
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(`--${name}`);
 const value = (name) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : null; };
@@ -64,8 +66,9 @@ const value = (name) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? a
 const URL_TARGET = value("url");
 const chosen = flag("all") ? [...LEGS] : LEGS.filter((leg) => flag(leg));
 if (chosen.length === 0) {
-  console.log("usage: node scripts/verify-console-flicker.mjs (--typing | --modal | --corners | --all) [--url https://console.titanium.bot]");
+  console.log("usage: node scripts/verify-console-flicker.mjs (--typing | --idle | --modal | --corners | --all) [--url https://console.titanium.bot]");
   console.log("  --typing   fifteen seconds of typing: the caret stays in the box and every character lands");
+  console.log("  --idle     twenty seconds with nobody touching it: nothing is taken out of the page on a loop");
   console.log("  --modal    the first-run dialog's chat area is not rebuilt under the person");
   console.log("  --corners  the composer is a rounded rectangle at both widths, empty and four lines deep");
   process.exit(2);
@@ -125,7 +128,17 @@ async function newPage({ w = 1440, h = 900 } = {}) {
 // credentials in the environment this is a no-op and the local relay opens as it always has.
 const EMAIL = process.env.GATE_EMAIL ?? "";
 const PASSWORD = process.env.GATE_PASSWORD ?? "";
+// A SIGN-IN LINK INSTEAD OF A PASSWORD, which is how a run reaches a live workspace whose password
+// this gate may not hold. The operator mints one through the admin door, single use, and hands it
+// over in the environment; clicking it lands the ordinary session cookie. It is never printed and
+// never written, the rule scripts/verify-model-switch.mjs already follows for the same reason.
+const SSO = process.env.GATE_SSO ?? "";
 const signIn = async (page, ms = 60_000) => {
+  if (SSO) {
+    await page.goto(SSO, { waitUntil: "domcontentloaded", timeout: within(ms) });
+    await page.waitForLoadState("domcontentloaded").catch(() => {});
+    return true;
+  }
   if (!EMAIL || !PASSWORD) return false;
   await page.goto(`${ORIGIN}/login`, { waitUntil: "domcontentloaded", timeout: within(ms) });
   await page.fill('input[type="email"], input[name="email"]', EMAIL).catch(() => {});
@@ -421,6 +434,110 @@ const READ_COMPOSER = () => {
   };
 };
 
+/**
+ * CONSOLE-6b. THE CONSOLE WITH NOBODY TOUCHING IT, which is the shape of the second complaint.
+ *
+ * Jason, 2026-09-19: "the whole console is flickering irregularly". The typing leg cannot see that.
+ * It watches four nodes a typist is using, for fifteen seconds, with a finger on the keyboard the
+ * whole time, and a module rebuilding a panel nobody is in passes it untouched.
+ *
+ * So this one opens the console, does NOTHING for twenty seconds, and counts every element taken
+ * out of the document, grouped by what it was. A page at rest writes strings -- the screen tile's
+ * age caption, a clock, a status pill -- and takes nothing out. Anything being REMOVED and put back
+ * on a cadence while nobody is there is a poll that writes whether or not its value changed, which
+ * is what a person sees as a flicker.
+ *
+ * The ceiling is per NODE KIND rather than a total, because that is what names the module: twenty
+ * seconds of rest may remove a handful of things as a fetch lands, and one thing removed twenty
+ * times is a loop. The worst offenders are printed whatever the verdict, so a run that passes still
+ * says what the page was doing.
+ */
+const INSTALL_IDLE_WATCH = () => {
+  const seen = { records: 0, removals: 0, byKind: {}, iframes: 0 };
+  const describe = (node) => {
+    if (!(node instanceof Element)) return node?.nodeType === 3 ? "#text" : "#other";
+    const id = node.id ? `#${node.id}` : "";
+    const cls = typeof node.className === "string" && node.className.length > 0
+      ? `.${node.className.trim().split(/\s+/).slice(0, 2).join(".")}`
+      : "";
+    const data = [...node.attributes ?? []].map((one) => one.name).find((one) => one.startsWith("data-")) ?? "";
+    return `${node.tagName.toLowerCase()}${id}${cls}${data ? `[${data}]` : ""}`;
+  };
+  const observer = new MutationObserver((records) => {
+    seen.records += records.length;
+    for (const record of records) {
+      for (const node of record.removedNodes) {
+        if (!(node instanceof Element)) continue;
+        seen.removals += 1;
+        if (node.tagName === "IFRAME") seen.iframes += 1;
+        const kind = describe(node);
+        seen.byKind[kind] = (seen.byKind[kind] ?? 0) + 1;
+      }
+    }
+  });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  window.__idleWatch = seen;
+};
+
+async function idleLeg() {
+  const seconds = 20;
+  step(`the idle run: ${seconds} seconds on ${ORIGIN} with nobody touching it`);
+  const page = await newPage({ w: 1440, h: 900 });
+  const live = await boot(page);
+  if (!live) { skip("the idle run", "the console never published its adapter"); await page.context().close(); return; }
+  await page.waitForSelector("#message-input", { timeout: within(30_000) }).catch(() => {});
+  // Let the boot settle first. Everything a console does on its way up -- the roster landing, the
+  // first transcript, the connector sweep -- is a page building itself and not a page flickering.
+  await sleep(4000);
+
+  await page.evaluate(INSTALL_IDLE_WATCH);
+  await sleep(seconds * 1000);
+  const read = await page.evaluate(() => ({ ...window.__idleWatch, byKind: { ...window.__idleWatch.byKind } }));
+
+  const worst = Object.entries(read.byKind).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const perSecond = read.records / seconds;
+  info(`${read.records} mutation record(s) in ${seconds}s (${perSecond.toFixed(1)} a second), ${read.removals} element(s) taken out, ${read.iframes} iframe(s)`);
+  for (const [kind, count] of worst) info(`  removed ${count}x  ${kind}`);
+  if (worst.length === 0) info("  nothing was taken out of the document at all");
+
+  // A string rewritten in place is not a flicker and is not counted above; these two are about
+  // things LEAVING the page while nobody asked for anything.
+  const loudest = worst[0] ?? [null, 0];
+  check(loudest[1] <= 8, "nothing is being taken out of the page on a loop while it sits idle",
+    loudest[0] == null ? "nothing was removed" : `${loudest[0]} removed ${loudest[1]}x in ${seconds}s`);
+  check(perSecond <= 20, "the page is not being repainted on a loop while it sits idle", `${perSecond.toFixed(1)} record(s) a second`);
+  await shoot(page, "idle-run");
+
+  // MODEL-1. THE SAME MEASUREMENT WITH THE MODEL CARD ON SCREEN. That card is the newest thing on
+  // this surface and it is the only row here that reads a route of its own, so it is the first
+  // place to look when a console starts flickering after a relay ship. A section that repainted
+  // itself on its own read would show up here as its own rows being removed over and over.
+  const opened = await page.evaluate(() => {
+    if (typeof window.__mrUi?.openSettings !== "function") return false;
+    window.__mrUi.openSettings("computer");
+    return true;
+  }).catch(() => false);
+  if (!opened) {
+    skip("the Model card does not repaint itself while it sits open", "this console does not publish the settings surface");
+  } else {
+    await page.waitForSelector("[data-settings-body]", { timeout: within(20_000) }).catch(() => {});
+    await sleep(3000);
+    const drawn = await page.evaluate(() => document.querySelectorAll('[data-setting-row="model"] [data-settings-subrow]').length);
+    info(`the Model card is drawn with ${drawn} plan(s) on it`);
+    await page.evaluate(INSTALL_IDLE_WATCH);
+    await sleep(seconds * 1000);
+    const settings = await page.evaluate(() => ({ ...window.__idleWatch, byKind: { ...window.__idleWatch.byKind } }));
+    const top = Object.entries(settings.byKind).sort((a, b) => b[1] - a[1]).slice(0, 6);
+    info(`${settings.records} record(s) in ${seconds}s with Settings open (${(settings.records / seconds).toFixed(1)} a second), ${settings.removals} element(s) taken out`);
+    for (const [kind, count] of top) info(`  removed ${count}x  ${kind}`);
+    const loud = top[0] ?? [null, 0];
+    check(loud[1] <= 8, "the Model card does not repaint itself while it sits open",
+      loud[0] == null ? "nothing was removed" : `${loud[0]} removed ${loud[1]}x in ${seconds}s`);
+    await shoot(page, "idle-settings");
+  }
+  await page.context().close();
+}
+
 async function cornersLeg() {
   step("the composer's corners and box, empty and four lines deep");
   const four = "line one of a pasted answer\nline two of a pasted answer\nline three of a pasted answer\nline four of a pasted answer";
@@ -467,6 +584,7 @@ async function cornersLeg() {
   browser = await chromium.launch({ executablePath: CHROME, headless: !flag("headed") });
   try {
     if (chosen.includes("typing")) await typingLeg();
+    if (chosen.includes("idle")) await idleLeg();
     if (chosen.includes("modal")) await modalLeg();
     if (chosen.includes("corners")) await cornersLeg();
   } finally {
