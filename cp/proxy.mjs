@@ -1368,6 +1368,79 @@ export function servedPlanModels({ models = [], deployments = null } = {}) {
 }
 
 /**
+ * The tier suffixes this product routes with. A plan is a family, not one alias: the work tier is
+ * the bare name, and the host reaches for a sibling when a turn is spoken, when it is code, or when
+ * it carries a screenshot.
+ */
+export const PLAN_TIER_SUFFIXES = Object.freeze(["-talk", "-code", "-vision"]);
+
+/** The family name of an alias: plan-zai-talk and plan-zai-vision are both plan-zai's. */
+export const planModelBase = (alias) => {
+  const id = String(alias ?? "");
+  const suffix = PLAN_TIER_SUFFIXES.find((one) => id.endsWith(one));
+  return suffix == null ? id : id.slice(0, -suffix.length);
+};
+
+/**
+ * WHAT A KEY MUST BE ALLOWED TO CALL so a workspace on these plans keeps working.
+ *
+ * MEASURED ON THE R750 2026-09-19 00:12Z, and it took a live turn down. The entitlement write set
+ * a key's models to the customer-visible plans somebody ticked, which is the right list for a
+ * Settings card and the wrong one for a key: the host routes a spoken turn to `plan-zai-talk` and a
+ * screenshot to `plan-zai-vision`, neither of which anybody ticks, and the proxy answered "key not
+ * allowed to access model" on the next turn. A card and a key are different questions and this
+ * function is the second one.
+ *
+ * Three sources, unioned, and every one of them filtered to what the proxy actually serves:
+ *
+ *   the plans themselves      what was chosen, plus each one's family name, so a workspace put on a
+ *                             tier can still run the work tier it belongs to;
+ *   their family              every sibling the proxy serves under the same base -- talk, code,
+ *                             vision, and whatever the next one is called, because the rule is the
+ *                             family and not a list of three suffixes to keep in step;
+ *   the fallback chain        where a screenshot on each of those goes, and where it goes from
+ *                             there, guarded against a cycle and against a row naming itself.
+ *
+ * `keep` is the key's CURRENT list and is the safety net: an alias already on it that no customer
+ * can see is a routing target somebody put there on purpose, and a write that narrows a key has no
+ * business deciding it was a mistake. Customer-visible aliases in `keep` are NOT kept, because
+ * removing those is the whole point of narrowing an entitlement.
+ */
+export function keyModelsFor({ chosen = [], deployments = [], keep = [] } = {}) {
+  const byAlias = new Map();
+  for (const row of (Array.isArray(deployments) ? deployments : [])) {
+    const alias = String(row?.alias ?? "");
+    if (alias.length === 0 || byAlias.has(alias)) continue;
+    byAlias.set(alias, row);
+  }
+  const out = new Set();
+  const addChain = (alias, depth = 0) => {
+    const id = String(alias ?? "");
+    if (!isPlanModel(id) || !byAlias.has(id) || out.has(id) || depth > 8) return;
+    out.add(id);
+    const next = visionFallbackTarget(byAlias.get(id));
+    if (next.length > 0) addChain(next, depth + 1);
+  };
+  for (const one of chosen) {
+    const id = String(one ?? "");
+    if (!isPlanModel(id)) continue;
+    addChain(id);
+    const base = planModelBase(id);
+    addChain(base);
+    for (const alias of byAlias.keys()) {
+      if (alias !== base && planModelBase(alias) === base) addChain(alias);
+    }
+  }
+  for (const one of keep) {
+    const id = String(one ?? "");
+    if (!isPlanModel(id) || !byAlias.has(id)) continue;
+    if (byAlias.get(id)?.customerVisible === true) continue;
+    out.add(id);
+  }
+  return [...out];
+}
+
+/**
  * The rows the registry hands the relay, built from the proxy's own deployments.
  *
  * PINNED. These field names are read by the relay (ui/) and asserted by tests/cp-relay-pair.

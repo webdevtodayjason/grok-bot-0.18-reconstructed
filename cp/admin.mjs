@@ -99,6 +99,7 @@ import {
   monthStartDay,
   proxyKeyAlias,
   includedModelRows,
+  keyModelsFor,
   planModelTier,
   servedPlanModels,
   visionFallbackTarget,
@@ -4695,22 +4696,50 @@ export function createAdminApi({
           json(response, 409, { error: "conflict", message: `${slug} has no plan key yet; mint one first.` });
           return true;
         }
+        // READ BEFORE ANYTHING IS WRITTEN. The key's scope is computed from what the proxy serves,
+        // so a proxy that cannot be asked means this write does not happen at all: an empty
+        // deployment list would compute an empty scope and take the workspace off inference.
+        const served = await proxyShape();
+        if (!served.deployments.ok) {
+          json(response, 502, { error: "proxy", message: `the proxy could not be asked what it serves (${served.deployments.why}), so nothing was changed.` });
+          return true;
+        }
+        // And what this key may call TODAY, which is the one thing that says which of its aliases
+        // are routing targets somebody added by hand rather than ones this console put there.
+        const live = await proxy.keyInfo(record.key);
         const ledger = beginAction(guard, request, { action: "client.models", target: slug, detail: `${slug} may run ${wanted.join(", ")}` });
-        const updated = await proxy.updateKey({ key: record.key, models: wanted });
+        // A KEY IS NOT A CARD. The customer picks plans; the host routes a spoken turn to the talk
+        // tier and a screenshot to the vision route, and neither is a thing anybody ticks. Sending
+        // the ticked list alone is what answered "key not allowed to access model" on the next turn
+        // (keyModelsFor, cp/proxy.mjs).
+        const keyModels = keyModelsFor({
+          chosen: wanted,
+          deployments: served.deployments.rows,
+          keep: live.ok ? live.models : [],
+        });
+        if (keyModels.length === 0) {
+          ledger.failed("the proxy serves none of those plans");
+          json(response, 502, { error: "proxy", message: "the proxy serves none of those plans right now, so nothing was changed." });
+          return true;
+        }
+        const updated = await proxy.updateKey({ key: record.key, models: keyModels });
         if (!updated.ok) { ledger.failed(updated.why); json(response, 502, { error: "proxy", message: updated.why }); return true; }
         // The key is the door; the record is what the relay reads to build a customer's choices, so
         // both move or neither does. Written second on purpose: a record naming a plan the key
         // refuses would offer a customer a switch that 400s.
-        const served = await proxyShape();
-        const rows = includedModelRows({
-          models: wanted,
-          deployments: served.deployments.ok ? served.deployments.rows.filter((row) => wanted.includes(row.alias)) : null,
-        });
+        //
+        // Every row is built from the WHOLE deployment list and the chosen ones kept afterwards,
+        // rather than from a pre-filtered list: the words for a vision fallback live on a row no
+        // customer sees, and filtering first left the stored copy naming the routing alias.
+        const rows = includedModelRows({ deployments: served.deployments.rows }).filter((row) => wanted.includes(row.id));
         writeProxyKey(slug, config, { ...record, models: rows });
         ledger.done(`${slug} may run ${wanted.length} plan(s)`);
         json(response, 200, {
           slug,
           allowed: wanted,
+          // The routing targets that travelled with them, so an operator reading this sees that the
+          // talk tier and the vision route are still on the key rather than taking it on trust.
+          keyModels,
           // WITHIN A MINUTE, NOT ON THE NEXT LOAD. The relay builds a customer's choices from its own
           // registry, which refreshes every 60 seconds (ui/tenant-registry.mjs), so a customer who
           // reloads Settings the second after this is answered truthfully sees the old set. Measured

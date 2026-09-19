@@ -31,6 +31,8 @@ import {
   monthStartDay,
   proxyKeyAlias,
   planModelTier,
+  keyModelsFor,
+  planModelBase,
   MCP_SERVERS,
 } from "../cp/proxy.mjs";
 import {
@@ -582,4 +584,60 @@ test("a proxy that fails one call does not leave a half written key file", async
     assert.equal(retried.ok, true);
     assert.equal(retried.minted, true);
   });
+});
+
+// MODEL-1c. A KEY IS NOT A CARD, and the day this was one list a live turn stopped.
+//
+// MEASURED ON THE R750 2026-09-19 00:12Z: the entitlement write set a key's models to the
+// customer-visible plans somebody had ticked. The host routes a spoken turn to plan-zai-talk and a
+// screenshot to plan-zai-vision, neither of which anybody ticks, so the proxy answered "key not
+// allowed to access model" on the very next turn. What a customer chooses between and what their
+// key may call are different questions.
+test("a key's scope carries the family and the fallback chain of every plan that was chosen", () => {
+  // The R750's own aliases, with the two that no customer ever sees.
+  const deployments = [
+    { alias: "plan-zai", customerVisible: true, visionFallback: "plan-zai-vision" },
+    { alias: "plan-zai-talk", customerVisible: true, visionFallback: "" },
+    { alias: "plan-zai-code", customerVisible: false, visionFallback: "" },
+    { alias: "plan-zai-vision", customerVisible: false, visionFallback: "" },
+    { alias: "plan-qwen", customerVisible: true, visionFallback: "" },
+    { alias: "plan-minimax", customerVisible: true, visionFallback: "plan-minimax" },
+    { alias: "plan-nemotron", customerVisible: true, visionFallback: "plan-zai-vision" },
+  ];
+
+  // One plan chosen brings its whole family: the tiers the host reaches for without being asked,
+  // and the route a screenshot on it goes to.
+  const zai = keyModelsFor({ chosen: ["plan-zai"], deployments });
+  assert.deepEqual(zai.sort(), ["plan-zai", "plan-zai-code", "plan-zai-talk", "plan-zai-vision"]);
+
+  // A plan whose vision route belongs to ANOTHER family still carries it, which is the case that
+  // makes this a chain rather than a suffix list.
+  assert.ok(keyModelsFor({ chosen: ["plan-nemotron"], deployments }).includes("plan-zai-vision"));
+
+  // A row naming itself as its own fallback is "images stop here" and not a second model.
+  assert.deepEqual(keyModelsFor({ chosen: ["plan-minimax"], deployments }), ["plan-minimax"]);
+
+  // Choosing a TIER brings the work tier it belongs to, so a workspace put on the talk tier can
+  // still answer an ordinary turn.
+  assert.ok(keyModelsFor({ chosen: ["plan-zai-talk"], deployments }).includes("plan-zai"));
+
+  // NARROWING STILL NARROWS. What is dropped is the other customer plans, which is the whole point.
+  assert.ok(!zai.includes("plan-qwen"));
+  assert.ok(!zai.includes("plan-minimax"));
+
+  // An alias already on the key that no customer can see is kept, whatever was chosen: a write that
+  // narrows an entitlement has no business deciding somebody's routing target was a mistake. A
+  // customer-visible one in the same list is not kept, or nothing would ever narrow.
+  const kept = keyModelsFor({ chosen: ["plan-qwen"], deployments, keep: ["plan-zai-code", "plan-minimax"] });
+  assert.ok(kept.includes("plan-zai-code"), "a routing target somebody added by hand survives");
+  assert.ok(!kept.includes("plan-minimax"), "a plan the customer no longer has does not");
+
+  // Nothing the proxy does not serve reaches a key, whichever source it came from.
+  const unserved = keyModelsFor({ chosen: ["plan-zai", "plan-gone"], deployments, keep: ["plan-also-gone"] });
+  assert.ok(!unserved.some((one) => one.endsWith("-gone")));
+
+  // And the family name is the family name.
+  assert.equal(planModelBase("plan-zai-talk"), "plan-zai");
+  assert.equal(planModelBase("plan-zai-vision"), "plan-zai");
+  assert.equal(planModelBase("plan-qwen"), "plan-qwen");
 });

@@ -227,6 +227,64 @@ try {
   return inControlPlane(source, 45_000);
 }
 
+/**
+ * MODEL-1c. WHAT THE KEY MAY ACTUALLY CALL after an entitlement write, asked with the key itself.
+ *
+ * The defect this exists for took a live turn down on 2026-09-19 00:12Z: the write set a key's
+ * models to the customer-visible plans that were ticked, and the host routes a spoken turn to the
+ * talk tier and a screenshot to the vision route, neither of which anybody ticks. The proxy then
+ * answers "key not allowed to access model" and the customer sees a turn fail.
+ *
+ * So this asks the box's own door -- the relay's model proxy, carrying that workspace's virtual key
+ * -- for one token on each routing alias, with a real image part on the vision one. It runs inside
+ * the control plane's container because that is where the key record is, so the key never reaches
+ * this Mac. What must not come back is the key-scope refusal; an upstream that is busy or slow is
+ * a different answer and is reported as itself.
+ */
+async function routingReach(aliases) {
+  const source = `
+const fs = require("node:fs");
+const record = JSON.parse(fs.readFileSync("/data/titanbot/${SLUG}/profile/model-proxy.json", "utf8"));
+// The relay's model proxy, which is the address every box is pointed at. Resolved the way
+// cp/provision.mjs resolves it, because CP_RELAY_MODEL_URL is a default on this server and only
+// CP_RELAY_HOST is actually set.
+const relayBase = String(process.env.CP_RELAY_MODEL_URL || process.env.CP_RELAY_URL
+  || ("http://" + String(process.env.CP_RELAY_HOST ?? "") + ":7777")).replace(/\\/+$/, "");
+const base = relayBase + "/model-proxy/v1";
+const PIXEL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+(async () => {
+  const out = [];
+  for (const alias of ${JSON.stringify(aliases)}) {
+    const vision = alias.endsWith("-vision");
+    const body = {
+      model: alias,
+      max_tokens: 1,
+      messages: [{
+        role: "user",
+        content: vision ? [{ type: "text", text: "hi" }, { type: "image_url", image_url: { url: PIXEL } }] : "hi",
+      }],
+    };
+    let status = 0;
+    let said = "";
+    try {
+      const res = await fetch(base + "/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer " + record.key, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      status = res.status;
+      said = (await res.text()).slice(0, 300);
+    } catch (error) { said = String(error?.message ?? error); }
+    // The one refusal this leg is about, in the words LiteLLM uses for it.
+    const scoped = /not allowed to access model|API Key not allowed to access model/i.test(said);
+    out.push({ alias, status, scoped, said: scoped ? said.slice(0, 160) : "" });
+  }
+  console.log(JSON.stringify({ ok: true, rows: out }));
+})().catch((error) => console.log(JSON.stringify({ ok: false, why: String(error?.message ?? error) })));
+`;
+  return inControlPlane(source, 120_000);
+}
+
 /** One plan, chosen as the customer, with the chosen row's own words back. */
 const chooseAsCustomer = (model) => asCustomer("POST", "/model/use", { model });
 
@@ -293,6 +351,26 @@ async function main() {
   const mine = (row.body.clients ?? []).find((one) => one.slug === SLUG) ?? null;
   check(Array.isArray(mine?.allowed) && WANTED.every((one) => mine.allowed.includes(one)),
     "and the clients panel reads it back on that workspace's row", JSON.stringify(mine?.allowed ?? null));
+
+  // MODEL-1c. THE KEY KEPT THE ROUTES THE HOST USES WITHOUT BEING ASKED. A narrowing that sent the
+  // ticked plans alone answered "key not allowed to access model" the moment a turn was spoken or
+  // carried a screenshot, which is what took a live turn down on 2026-09-19 00:12Z. Measured with
+  // the key itself, on the relay's own model door, one token each.
+  const scoped = Array.isArray(entitled.body.keyModels) ? entitled.body.keyModels : [];
+  check(scoped.length > WANTED.length,
+    "the key carries more than the plans that were ticked", scoped.join(", ") || "(the answer named none)");
+  const routes = scoped.filter((one) => /-(talk|vision|code)$/.test(one));
+  if (routes.length === 0) {
+    skip("the talk tier and the vision route still answer on that key", "this proxy serves no routing alias for those plans");
+  } else {
+    const reach = await routingReach(routes);
+    check(reach.ok === true, "the key was asked on each routing alias", reach.ok ? routes.join(", ") : String(reach.why));
+    for (const one of reach.rows ?? []) {
+      check(one.scoped === false,
+        `${one.alias} is not refused as outside this key's scope`,
+        one.scoped ? one.said : `HTTP ${one.status}, which is the upstream's own answer and not a refusal of the key`);
+    }
+  }
 
   step(`a customer session for ${SLUG}, minted as a sign-in link and never written down`);
   const link = await admin("POST", `/v1/admin/clients/${encodeURIComponent(SLUG)}/sign-in-link`, {});
