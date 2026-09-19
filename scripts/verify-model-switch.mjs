@@ -63,6 +63,10 @@ const CP_URL = String(value("cp", process.env.TITANBOT_CP_URL ?? "https://api.ti
 const CONSOLE_URL = String(value("console", process.env.TITANBOT_CONSOLE_URL ?? "https://console.titanium.bot")).replace(/\/+$/, "");
 const WANTED = String(value("plans", "plan-zai,plan-qwen")).split(",").map((one) => one.trim()).filter(Boolean);
 const DENIED = String(value("denied", "plan-nemotron")).trim();
+// MODEL-1c. A plan this proxy serves that CANNOT take a picture, and the route one goes to instead.
+// Empty skips that leg rather than inventing a pin, because a plan with eyes proves nothing here.
+const VISION_PIN = String(value("vision-pin", "plan-nemotron")).trim();
+const VISION_FALLBACK = String(value("vision-fallback", "plan-zai-vision")).trim();
 // How long to wait for the proxy's own row. /spend/logs is batch written -- ten seconds on this
 // install -- so a read straight after a turn is how an assertion flakes.
 const SPEND_WAIT_MS = Number(value("spend-wait-ms", "120000"));
@@ -298,6 +302,28 @@ const PIXEL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcS
   return inControlPlane(source, 120_000);
 }
 
+/**
+ * The plans this workspace is offered right now, or an empty list when the read did not answer.
+ * Callers that WAIT on this treat empty as "not yet", never as "none".
+ */
+async function offeredPlans() {
+  const seen = await asCustomer("GET", "/model/plans").catch(() => ({ status: 0, body: {} }));
+  return seen.status === 200 && Array.isArray(seen.body.plans) ? seen.body.plans.map((one) => String(one.model)) : [];
+}
+
+/** Wait for a bot to stop working, so the next prompt is a turn rather than a queue entry. */
+async function waitForIdle(agentId, maxMs) {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    const roster = await gw("listAgents").catch(() => null);
+    const rows = Array.isArray(roster) ? roster : roster?.agents ?? [];
+    const mine = rows.find((one) => one?.id === agentId);
+    if (mine == null || mine.isRunning !== true) return true;
+    await sleep(4000);
+  }
+  return false;
+}
+
 /** One plan, chosen as the customer, with the chosen row's own words back. */
 const chooseAsCustomer = (model) => asCustomer("POST", "/model/use", { model });
 
@@ -492,6 +518,79 @@ async function main() {
     }
   }
 
+  // ---- MODEL-1c: a picture skips a pin that cannot read one -------------------------------------
+  //
+  // The defect: a screenshot on a text-only plan cost the refused hop, a learned refusal and the
+  // same question asked again with the picture turned into a sentence. Measured here on the one
+  // thing that cannot be argued with -- the proxy's own spend log -- because a wire line proves
+  // what this host INTENDED and a spend row proves where the tokens went.
+  if (VISION_PIN.length > 0) {
+    step(`a picture on ${VISION_PIN}, which cannot read one`);
+    const entitled2 = await admin("POST", `/v1/admin/clients/${encodeURIComponent(SLUG)}/models`, { models: [...WANTED, VISION_PIN] });
+    check(entitled2.status === 200, `${SLUG} is entitled to ${VISION_PIN} for this leg`, `HTTP ${entitled2.status}`);
+    if (entitled2.status === 200) {
+      // THE SWITCH WAITS FOR THE REGISTRY. The entitlement is true at the proxy the moment the
+      // action answers and reaches the relay on its own sixty second refresh, so a switch fired
+      // straight afterwards is refused for a plan the workspace already has.
+      const armedAt = Date.now();
+      let offers = [];
+      while (!offers.includes(VISION_PIN) && Date.now() - armedAt < 150_000) {
+        offers = await offeredPlans();
+        if (!offers.includes(VISION_PIN)) await sleep(6000);
+      }
+      check(offers.includes(VISION_PIN), `${VISION_PIN} reached this workspace's own choices`,
+        `${offers.join(", ") || "(none)"} · ${Math.round((Date.now() - armedAt) / 1000)}s`);
+      // The relay writes the vision route into the box only for a plan it measured text-only, so
+      // the switch itself is what arms this. Read the box back rather than assuming it.
+      const onPin = await chooseAsCustomer(VISION_PIN);
+      check(onPin.status === 200, `the box is pointed at ${VISION_PIN}`, `HTTP ${onPin.status}`);
+      const wrote = await relayAdmin(`/admin/tenants/${encodeURIComponent(SLUG)}/running`);
+      check(String(wrote.body.model ?? "") === VISION_PIN, "and its own file says so", String(wrote.body.model ?? "?"));
+
+      const at = new Date(Date.now() - 2000).toISOString();
+      // A picture in the conversation: the bot takes a screenshot of its own screen, which is the
+      // shape a computerUse turn arrives in and the one that used to pay the refused hop.
+      const said = await gw("sendPrompt", {
+        agentId: throwaway,
+        prompt: "Take one screenshot of your screen with your computer tool, then tell me in one short line what is on it.",
+      }).then(() => true).catch((error) => { note(`sendPrompt: ${String(error.message).slice(0, 160)}`); return false; });
+      check(said, "one turn carrying a screenshot was sent");
+      const landed = await waitForSpend(VISION_FALLBACK, at);
+      check(landed.ok === true, `the picture was answered by ${VISION_FALLBACK} rather than the pin`,
+        landed.ok
+          ? `${landed.row.group} · ${landed.row.model} · ${landed.row.tokens} tokens`
+          : `${landed.why}; rows since: ${landed.rows.map((one) => one.group).join(", ") || "none"}`);
+      // AND THE PIN STILL ANSWERS ITS OWN TEXT. A reroute that took every turn would be a customer
+      // silently moved off the plan they chose.
+      // AFTER THE PICTURE TURN HAS FINISHED. A second prompt sent while the bot is still working
+      // queues behind it, and the window this leg waits in expires on a turn that never started.
+      await waitForIdle(throwaway, 180_000);
+      const textAt = new Date(Date.now() - 1000).toISOString();
+      await gw("sendPrompt", { agentId: throwaway, prompt: "Reply with the single word OK and nothing else." }).catch(() => {});
+      const text = await waitForSpend(VISION_PIN, textAt);
+      check(text.ok === true, `and a turn with no picture still goes to ${VISION_PIN}`,
+        text.ok ? `${text.row.group} · ${text.row.tokens} tokens` : text.why);
+
+      // PUT THE ENTITLEMENT BACK BEFORE THE REFUSAL LEG. That leg proves this workspace cannot
+      // reach a plan it is not entitled to, and this one just entitled it to exactly that plan:
+      // leaving it on would make the next refusal a pass for the wrong reason.
+      await chooseAsCustomer(WANTED[1]).catch(() => {});
+      const narrowed = await admin("POST", `/v1/admin/clients/${encodeURIComponent(SLUG)}/models`, { models: WANTED });
+      check(narrowed.status === 200, `${VISION_PIN} is taken off again before the refusal is measured`, `HTTP ${narrowed.status}`);
+      const backAt = Date.now();
+      let back = [];
+      // AN EMPTY ANSWER IS NOT A NARROWED ONE. A read that failed carries no plans either, and
+      // taking that for "the plan is gone" is how the refusal leg below came to run against a
+      // workspace that was still entitled.
+      while ((back.length === 0 || back.includes(VISION_PIN)) && Date.now() - backAt < 150_000) {
+        back = await offeredPlans();
+        if (back.length === 0 || back.includes(VISION_PIN)) await sleep(6000);
+      }
+      check(back.length > 0 && !back.includes(VISION_PIN), "and this workspace's own choices no longer offer it",
+        `${back.join(", ") || "(the read answered nothing)"} · ${Math.round((Date.now() - backAt) / 1000)}s`);
+    }
+  }
+
   step(`a plan this workspace is not entitled to`);
   const refused = await chooseAsCustomer(DENIED);
   check(refused.status === 404, `POST /model/use ${DENIED} is refused`, `HTTP ${refused.status} ${String(refused.body.error ?? "").slice(0, 120)}`);
@@ -533,8 +632,15 @@ try {
     check(missing.length === 0, "and so is its key, alias for alias",
       missing.length === 0 ? keyBack.join(", ") : `missing ${missing.join(", ")}`);
   }
+  // THE ROSTER, AND ONLY THIS GATE'S OWN ROWS IN IT. demo is shared with other gates, so a count
+  // is not evidence: what this file is answerable for is that nothing it created is still there.
   const roster = COOKIE.length > 0 ? await gw("listAgents").catch(() => null) : null;
-  if (roster != null) note(`the roster is ${(Array.isArray(roster) ? roster : roster?.agents ?? []).length} again`);
+  if (roster != null) {
+    const rows = Array.isArray(roster) ? roster : roster?.agents ?? [];
+    const mine = rows.filter((one) => String(one?.name ?? "").startsWith("verify-model-switch"));
+    check(mine.length === 0, "no bot this gate made is left on that box",
+      mine.length === 0 ? `${rows.length} on the roster, none of them this gate's` : mine.map((one) => one.id).join(", "));
+  }
   console.log(`\nverify-model-switch: ${passes} pass, ${failures} fail, ${skips} skip · ${SLUG} on ${SSH_HOST} · ${CONSOLE_URL}`);
   process.exit(failures > 0 ? 1 : 0);
 }
