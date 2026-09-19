@@ -170,6 +170,21 @@ async function readPin(box) {
   return out.trim();
 }
 
+/**
+ * The pin is written by the relay and reaches the box within about a minute, so a three second wait
+ * scored one plan and skipped another for no reason but impatience. This waits and then re-reads,
+ * and a plan the box never actually moved to is skipped rather than attributed.
+ */
+async function waitForPin(box, plan, waitMs = 60_000) {
+  const deadline = Date.now() + waitMs;
+  let seen = await readPin(box);
+  while (seen !== plan && Date.now() < deadline) {
+    await sleep(3_000);
+    seen = await readPin(box);
+  }
+  return seen;
+}
+
 const said = (entries) => entries.filter((e) =>
   (e?.kind === "send-message" && String(e.message?.content ?? "").trim().length > 0)
   || (e?.kind === "message" && e?.role === "assistant" && String(e.content ?? "").trim().length > 0));
@@ -199,6 +214,7 @@ async function runOnBox() {
   const call = boxCall(box);
   const timeoutMs = Number(argOf("--timeout-ms", "420000")) || 420_000;
   const plans = argOf("--plans", "plan-qwen,plan-zai,plan-minimax,plan-nemotron").split(",").map((p) => p.trim()).filter(Boolean);
+  const wanted = argOf("--scans", "A,B").split(",").map((one) => one.trim().toUpperCase()).filter((one) => one === "A" || one === "B");
 
   const beforePin = await readPin(box);
   console.log(`${slug} is on ${beforePin}; it will be put back there`);
@@ -206,20 +222,26 @@ async function runOnBox() {
   try {
     for (const plan of plans) {
       await setPlan(cp, slug, plan);
-      await sleep(3_000);
-      const now = await readPin(box);
-      if (now !== plan) { console.log(`SKIP ${plan}: the pin reads ${now}`); continue; }
-      const agent = await call("createAgent", { name: `Scan gate ${plan}`, description: "throwaway for NETSEC-1", origin: "operator" });
-      const agentId = String(agent?.id ?? agent?.agent?.id ?? "");
+      const now = await waitForPin(box, plan);
+      if (now !== plan) { console.log(`SKIP ${plan}: the pin still reads ${now} after a minute`); continue; }
       const startedAt = new Date();
-      const a = await askOnce(call, agentId, `${PROMPT}\n\n${SCAN_A}`, timeoutMs);
-      const b = await askOnce(call, agentId, `${PROMPT}\n\n${SCAN_B}`, timeoutMs);
+      const runs = {};
+      // ONE CONVERSATION PER SCAN. Asked back to back in the same one, the second scan is correctly
+      // read as a diff -- "round two, the diff is where the story is" -- so the bot names only what
+      // changed and every "did it list this port" check fails for a port it listed minutes earlier.
+      // That scored the prompt, not the model.
+      for (const which of wanted) {
+        const agent = await call("createAgent", { name: `Scan gate ${plan} ${which}`, description: "throwaway for NETSEC-1", origin: "operator" });
+        const agentId = String(agent?.id ?? agent?.agent?.id ?? "");
+        runs[which] = await askOnce(call, agentId, `${PROMPT}\n\n${which === "A" ? SCAN_A : SCAN_B}`, timeoutMs);
+        await call("deleteAgent", { id: agentId }).catch(() => {});
+      }
       const endedAt = new Date();
-      await call("deleteAgent", { id: agentId }).catch(() => {});
-      const scoreA = scoreScan("A", a.reply);
-      const scoreB = scoreScan("B", b.reply);
-      results.push({ plan, scoreA, scoreB, a, b, window: { from: startedAt.toISOString(), to: endedAt.toISOString() } });
-      console.log(`${plan}: A ${scoreA.passed}/${scoreA.total}, B ${scoreB.passed}/${scoreB.total}, ${a.seconds + b.seconds} s`);
+      const scoreA = runs.A ? scoreScan("A", runs.A.reply) : null;
+      const scoreB = runs.B ? scoreScan("B", runs.B.reply) : null;
+      const seconds = Object.values(runs).reduce((sum, r) => sum + r.seconds, 0);
+      results.push({ plan, scoreA, scoreB, a: runs.A, b: runs.B, seconds, window: { from: startedAt.toISOString(), to: endedAt.toISOString() } });
+      console.log(`${plan}: A ${scoreA ? `${scoreA.passed}/12` : "-"}, B ${scoreB ? `${scoreB.passed}/12` : "-"}, ${seconds} s`);
     }
   } finally {
     await setPlan(cp, slug, beforePin);
@@ -229,18 +251,18 @@ async function runOnBox() {
   console.log("\n---- the table ----\n");
   console.log(`  ${"plan".padEnd(15)}${"A".padEnd(6)}${"B".padEnd(6)}seconds   window (for the token read)`);
   for (const row of results) {
-    console.log(`  ${row.plan.padEnd(15)}${`${row.scoreA.passed}/12`.padEnd(6)}${`${row.scoreB.passed}/12`.padEnd(6)}`
-      + `${String(row.a.seconds + row.b.seconds).padEnd(10)}${row.window.from} .. ${row.window.to}`);
+    console.log(`  ${row.plan.padEnd(15)}${(row.scoreA ? `${row.scoreA.passed}/12` : "-").padEnd(6)}${(row.scoreB ? `${row.scoreB.passed}/12` : "-").padEnd(6)}`
+      + `${String(row.seconds).padEnd(10)}${row.window.from} .. ${row.window.to}`);
   }
   console.log("\n---- what each plan missed, worst first ----\n");
   for (const row of results) {
-    const missed = [...row.scoreA.checks.filter(([, ok]) => !ok).map(([id]) => `A:${id}`),
-      ...row.scoreB.checks.filter(([, ok]) => !ok).map(([id]) => `B:${id}`)];
+    const missed = [...(row.scoreA?.checks ?? []).filter(([, ok]) => !ok).map(([id]) => `A:${id}`),
+      ...(row.scoreB?.checks ?? []).filter(([, ok]) => !ok).map(([id]) => `B:${id}`)];
     console.log(`  ${row.plan}: ${missed.join(", ") || "nothing"}`);
-    const worst = row.scoreB.passed <= row.scoreA.passed ? row.b.reply : row.a.reply;
+    const worst = (row.scoreB?.passed ?? 99) <= (row.scoreA?.passed ?? 99) ? (row.b?.reply ?? "") : (row.a?.reply ?? "");
     console.log(`    it said: ${worst.replace(/\n/g, " ").slice(0, 300) || "(nothing)"}\n`);
   }
-  return results.every((r) => r.scoreA.passed === 12 && r.scoreB.passed === 12) ? 0 : 1;
+  return results.every((r) => (r.scoreA?.passed ?? 12) === 12 && (r.scoreB?.passed ?? 12) === 12) ? 0 : 1;
 }
 
 function selftest() {
