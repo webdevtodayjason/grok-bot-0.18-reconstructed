@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isJevEnabled } from "../sand-box-setting.js";
 import { createJevRefusalCounter, type JevEvidence, type JevRefusalCounter } from "./judgment-3.js";
 import type { JevDecisionRow } from "./ledger.js";
 import type { JevSource } from "./sources.js";
@@ -30,6 +31,17 @@ export interface JevTurn {
    */
   readonly sources: JevSource[];
   readonly counter: JevRefusalCounter;
+  /**
+   * SOURCES-1b. Whether the JUDGE may run this turn, which is what SAND_JEV gates. The state
+   * itself is no longer gated, because the two things it holds are not the same kind of thing:
+   * the evidence and the decisions exist to send text to a third party, and the sources record is
+   * collected locally from our own tool calls and never leaves the host. An honesty feature that
+   * only Titanium staff could see was the wrong shape -- the tester who asked "their website or
+   * internet search?" is on a box that will never carry the flag.
+   *
+   * Read once per turn at creation, which keeps the flag a kill switch and not a deploy.
+   */
+  readonly judge: boolean;
   /** What this turn's judge decided, in order, so the console can say it in one quiet line. */
   readonly decisions: JevDecisionRow[];
   /** The sources the request named, filled by judgment 1 when it read them out of the request. */
@@ -53,6 +65,7 @@ export function startJevTurn(agentId: string, turnId?: string, provisional = fal
     evidence: [],
     sources: [],
     counter: createJevRefusalCounter(),
+    judge: isJevEnabled(),
     decisions: [],
     sourcesNamedInRequest: [],
     provisional,

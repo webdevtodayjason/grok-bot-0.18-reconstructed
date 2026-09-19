@@ -278,15 +278,23 @@ test("jevMarkWrong refuses arguments it cannot attribute", () => {
 
 // --------------------------------------------------------------------------- the flag
 
-test("with SAND_JEV off nothing runs and no request is made", async () => {
+test("with SAND_JEV off no judgement runs and no request is made", async () => {
   delete process.env.SAND_JEV;
+  jev.forgetAllJevTurns();
   assert.equal(jev.isJevEnabled(), false, "off unless a box says otherwise");
   let called = false;
   const note = await jev.buildJevTurnNote("jev-off-agent", "Who carries this locally?", "m-1",
     { ...quiet, apiKey: KEY, fetchImpl: async () => { called = true; return new Response("{}"); } });
   assert.equal(note, undefined);
-  assert.equal(called, false, "the flag is read before anything is sent anywhere");
-  assert.equal(jev.currentJevTurn("jev-off-agent"), undefined, "and no turn state is left behind");
+  assert.equal(called, false, "nothing is sent anywhere");
+  // SOURCES-1b changed this line deliberately. The turn state IS started with the flag off, because
+  // the sources record is collected on every box; what the flag gates is the judge, and the judge
+  // wrote nothing here.
+  const turn = jev.currentJevTurn("jev-off-agent");
+  assert.notEqual(turn, undefined, "the turn state exists so a source has somewhere to land");
+  assert.equal(turn.judge, false, "and it says the judge may not speak");
+  assert.deepEqual(turn.decisions, [], "no decision was written");
+  assert.deepEqual(turn.evidence, [], "and no evidence was collected for a judge that will not run");
 });
 
 test("with SAND_JEV on a question is judged and a statement is not", async () => {
@@ -601,4 +609,72 @@ test("a throw from the tool travels untouched through the tee", async () => {
     /the site refused/,
   );
   assert.deepEqual(turn.sources, [], "a call that failed reached nothing");
+});
+
+// --------------------------------------------------------- SOURCES-1b: the record is not the judge
+//
+// The flag exists because the judgements send the turn's text to a third party. The sources record
+// is collected from this host's own tool calls, stays on this host, and is shown to the person whose
+// turn it was, so it is not the flag's business. A tester asked "their website or internet search?"
+// on a box that will never carry SAND_JEV, and he is the person this answers.
+
+test("with SAND_JEV off a turn still records its sources and the reply is still stamped", async () => {
+  delete process.env.SAND_JEV;
+  jev.forgetAllJevTurns();
+  jev.forgetWebFetchRoutes();
+  let called = false;
+  const fetchImpl = async () => { called = true; return new Response("{}"); };
+
+  // The turn starts the way a real one does: through the prompt assembly, with the flag off.
+  const note = await jev.buildJevTurnNote("off-box", "Who carries a 25 pack locally?", "m-1", { ...quiet, apiKey: KEY, fetchImpl });
+  assert.equal(note, undefined, "no host note, because no judgement ran");
+  const turn = jev.currentJevTurn("off-box");
+  assert.equal(turn.judge, false);
+
+  // The turn searches and fetches, exactly as it would on any box.
+  jev.noteJevSource(turn, "WebSearch", [{ search_term: "1/4-20 bolt 25 pack" }, { toolCallId: "t" }], {});
+  jev.noteJevSource(turn, "WebFetch", [{ url: "https://acehardware.com/p/1" }, { toolCallId: "t" }], {
+    result: { case: "success", value: { url: "https://acehardware.com/p/1", markdown: "# Hex bolts" } },
+  });
+
+  const stamped = jev.withJevSources("off-box", { kind: "send-message", message: { type: "text", content: "Two of three carry it." } });
+  assert.equal(stamped.sources.pageCount, 1, "the page is counted with the flag off");
+  assert.equal(stamped.sources.searchCount, 1, "and so is the search");
+  assert.deepEqual(stamped.sources.pages, [{ kind: "page", domain: "acehardware.com", route: "fetch", title: "Hex bolts" }]);
+  assert.equal(called, false, "and not one request was made to the judge");
+
+  // The chip is the judge's, so it stays away: nothing was judged, so nothing is claimed.
+  const chipped = jev.withJevChip("off-box", { kind: "send-message", message: { type: "text", content: "Two of three carry it." } });
+  assert.equal(chipped.jev, undefined, "no judgement, no chip");
+});
+
+test("with SAND_JEV off the claim check is not built and evidence is not collected", async () => {
+  delete process.env.SAND_JEV;
+  jev.forgetAllJevTurns();
+  const turn = jev.startJevTurn("off-box-2", "turn-1");
+  assert.equal(turn.judge, false, "the flag is read when the turn starts");
+
+  // The outgoing claim check is what would send the reply to the judge. With the flag off the
+  // toolset does not build one, and this asserts the value the toolset keys off.
+  assert.equal(turn.judge === true, false, "a box with the flag off builds today's send tool");
+
+  // And a turn whose judge will not run keeps no page text: evidence exists for the judge alone.
+  const tool = { name: "WebSearch", async execute() { return { documents: [{ url: "https://x.example", text: "a page" }] }; } };
+  const wrapped = jev.collectJevSources(tool, turn);
+  await wrapped.execute({ search_term: "bolts" }, { toolCallId: "t" });
+  assert.deepEqual(turn.evidence, [], "the sources collector never writes evidence");
+  assert.equal(turn.sources.length, 1, "and the source is recorded all the same");
+});
+
+test("with SAND_JEV on the judge still runs and the turn still records its sources", async () => {
+  process.env.SAND_JEV = "1";
+  try {
+    jev.forgetAllJevTurns();
+    const turn = jev.startJevTurn("on-box", "turn-1");
+    assert.equal(turn.judge, true, "the flag is read when the turn starts");
+    jev.noteJevSource(turn, "WebSearch", [{ search_term: "bolts" }, { toolCallId: "t" }], {});
+    assert.equal(jev.describeJevSources(turn.sources).searchCount, 1, "both halves live on one turn");
+  } finally {
+    delete process.env.SAND_JEV;
+  }
 });

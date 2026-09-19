@@ -16,8 +16,11 @@ export async function buildJevTurnNote(
   messageId: string | undefined,
   options: AskJevOptions = {},
 ): Promise<string | undefined> {
-  if (!isJevEnabled()) return undefined;
+  // SOURCES-1b. The turn's state is started whatever the flag says, because the sources record is
+  // collected on every box and has nowhere else to live. Only the JUDGE is gated: with the flag
+  // off this returns here, having made no request and written no decision.
   const turn = adoptOrStartJevTurn(agentId, messageId);
+  if (!turn.judge) return undefined;
   const workspaceLocation = readSandBoxSetting(SAND_WORKSPACE_LOCATION_SETTING);
   const note = await runRequestInterpretation({
     agentId,

@@ -102,6 +102,7 @@ import { repairAgentTranscript } from "./extensions/transcript/repair-agent-tran
 import { GatewayCommandError } from "./gateway-command-error.js";
 import { checkJevMarkWrong } from "./jev/mark-wrong.js";
 import { markJevDecisionWrong } from "./jev/ledger.js";
+import { forgetJevTurn } from "./jev/turn-state.js";
 import {
   JOB_BUS_API_VERSION,
   createJobStore,
@@ -302,6 +303,10 @@ export function createHostGatewayApi(
     await deps.releaseAgentBox(agentId);
     deps.hostEvents.emit({ kind: "notification-agent-forgotten", agentId });
     deps.forgetLocalToolPermission(agentId);
+    // SOURCES-1b. The per-turn state exists on every box now rather than only on a staff one, so
+    // the entry a deleted agent leaves behind is released here rather than kept for a name that
+    // will never run another turn.
+    forgetJevTurn(agentId);
     return result;
   };
   const jobWorker = createJobWorker({

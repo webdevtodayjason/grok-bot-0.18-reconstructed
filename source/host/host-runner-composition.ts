@@ -2663,7 +2663,9 @@ export function createHostRunnerComposition<Runner extends ProductionSessionBoun
           : { turnSendBudget: turn.sendBudget };
         // JEV-2. The claim check rides the same per-turn state the evidence collection writes into,
         // and is absent unless the box carries the flag, so a box without it builds today's tool.
-        const claims = turn.jev === undefined
+        // SOURCES-1b: the state is on every turn now, so the claim check keys off the judge rather
+        // than the state's presence. A box without SAND_JEV builds today's tool, as before.
+        const claims = turn.jev?.judge !== true
           ? {}
           : { checkOutgoingClaims: createOutgoingClaimCheck(turn.jev) };
         return {

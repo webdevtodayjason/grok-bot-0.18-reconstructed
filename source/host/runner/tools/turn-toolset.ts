@@ -2142,13 +2142,18 @@ export function buildTurnTools(
     // JEV-2. What this turn actually retrieved is what a negative claim gets judged against, so
     // every search and fetch result is kept, trimmed, with its domain. Off unless the box has the
     // flag, and a failure to read a result is simply evidence this turn does not have.
-    if (turn.jev !== undefined && isJevWebToolName(tool.name)) {
+    // Only when the judge may run: evidence exists to be sent to Jev and to nothing else, so
+    // collecting it on a box whose judge is off would trim and keep page text for no reader.
+    if (turn.jev?.judge === true && isJevWebToolName(tool.name)) {
       inner = collectJevEvidence(inner, turn.jev);
     }
     // SOURCES-1. And where it went, which is a wider set than the evidence one: a page opened in
     // Titan's browser is a source the person should see named, and it is deliberately NOT evidence
     // -- a browser result carries a screenshot, and feeding one to the claim check would spend the
     // judge's whole window on a picture. Recorded separately for that reason, never merged.
+    //
+    // SOURCES-1b: and NOT behind the judge's flag. This is collected from our own tool calls, kept
+    // on this host and shown to the person whose turn it was; nothing here is sent anywhere.
     if (turn.jev !== undefined && isJevSourceToolName(tool.name)) {
       inner = collectJevSources(inner, turn.jev);
     }

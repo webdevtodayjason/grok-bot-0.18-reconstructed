@@ -13,7 +13,6 @@ import {
   resolveTurnShellAutoReviewInputs,
 } from "./tools/turn-toolset.js";
 import { createTurnSendBudget } from "./tools/send-message-tool.js";
-import { isJevEnabled } from "../sand-box-setting.js";
 import { currentJevTurn, startJevTurn } from "../jev/turn-state.js";
 import type { Context } from "../../packages/context/core.js";
 import { requestIdKey } from "../../packages/chat-inference-proto/client.js";
@@ -335,10 +334,13 @@ export function createTurnAgentToolsHandoff(input: {
     // stops the next turn rather than needing a restart. The turn state itself is started by the
     // prompt assembly, which is where the request text is; a turn that reached the toolset without
     // going through it (a subagent, say) gets its own so the two halves never share by accident.
-    ...(isJevEnabled()
-      ? { jev: input.turn.jev ?? currentJevTurn(input.toolHost.getConversationId())
-          ?? startJevTurn(input.toolHost.getConversationId(), undefined, true) }
-      : {}),
+    // SOURCES-1b. Present on every turn now, not only on a box carrying SAND_JEV. What the flag
+    // gates moved onto the state itself as `judge`: the judgements read it, the sources record
+    // does not. The turn state is started by the prompt assembly, which is where the request text
+    // is; a turn that reached the toolset without going through it (a subagent, say) gets its own
+    // so the two halves never share by accident.
+    jev: input.turn.jev ?? currentJevTurn(input.toolHost.getConversationId())
+      ?? startJevTurn(input.toolHost.getConversationId(), undefined, true),
     ...(input.turnScope === undefined
       ? {}
       : createTurnScopeToolHooks(input.turnScope)),
