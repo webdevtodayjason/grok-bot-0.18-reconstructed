@@ -3431,6 +3431,87 @@ button.evidence-chip[data-verdict]:hover { border-color: var(--glass-edge); colo
   background: rgba(58, 41, 16, 0.72);
 }
 
+/* SOURCES-1. Where a research answer came from, under the answer.
+
+   Quiet on purpose and in the same key as .evidence-chip beside it: tertiary text, the soft glass
+   edge, no fill, no colour and no underline. A tester asked whether an answer came from a shop's
+   own site or a search; this answers that and says nothing about whether the answer was good, so
+   anything that reads as a verdict -- a colour, a rule under the text, a prefixed status word --
+   would be a different sentence than the one intended (host-notes-read-as-errors).
+
+   It is a block, not a chip: it opens, and an inline element that grows a list pushes the chips on
+   its row around as it does. Bounded the same way the chip is, so a long page name ellipses inside
+   the message column rather than widening it -- at 390 the column is the screen. */
+.sources-note {
+  margin: 6px 0 0 4px;
+  max-width: 100%;
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.sources-note > summary,
+.sources-note.is-flat {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
+  padding: 2px 9px;
+  overflow: hidden;
+  border: 1px solid var(--glass-edge-soft);
+  border-radius: var(--radius-pill);
+  background: rgba(20, 29, 34, 0.6);
+  backdrop-filter: blur(var(--blur-soft));
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  list-style: none;
+}
+
+/* Safari draws its own disclosure triangle through a pseudo-element the display rule above does
+   not reach, and it sat outside the pill. */
+.sources-note > summary::-webkit-details-marker { display: none; }
+.sources-note.is-flat { cursor: default; }
+.sources-note > summary:hover { border-color: var(--glass-edge); color: var(--text-secondary); }
+
+/* --glass-edge is near-white in mist, which erases a light edge instead of raising it. */
+[data-theme="mist"] .sources-note > summary:hover { border-color: rgba(30, 39, 43, 0.34); }
+[data-theme="mist"] .sources-note > summary,
+[data-theme="mist"] .sources-note.is-flat { background: rgba(255, 255, 255, 0.55); }
+
+.sources-list {
+  margin: 6px 0 0;
+  padding: 0 0 0 13px;
+  list-style: none;
+}
+
+/* Each source on its own line, wrapping inside the column rather than widening it. The parts wrap
+   as a group so a page's name never separates from the address it belongs to. */
+.sources-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 5px;
+  min-width: 0;
+  padding: 1px 0;
+  overflow-wrap: anywhere;
+}
+
+.sources-row .sources-domain { color: var(--text-secondary); }
+.sources-row .sources-title { min-width: 0; overflow-wrap: anywhere; }
+.sources-row .sources-dot { opacity: 0.55; }
+.sources-row.is-search { display: block; }
+
+/* At a phone width the message column is the screen, and the first try gave each part its own line
+   there. That fit, and it read wrong: three stacked lines per page with nothing between pages, so
+   "fetched" and the next address sat a line apart and a reader could not tell which title belonged
+   to which site. The row keeps its separators and wraps only where it must, and the pages get air
+   between them instead. */
+@media (max-width: 640px) {
+  .sources-row { padding: 4px 0; }
+}
+
 .evidence-view { display: flex; flex-direction: column; gap: 10px; }
 .evidence-view .panel-card { display: grid; gap: 8px; }
 .evidence-head { margin: 0; padding: 8px 10px; border-radius: 10px; background: rgba(0, 0, 0, 0.28); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow: auto; }

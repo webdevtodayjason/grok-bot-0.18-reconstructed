@@ -17,6 +17,7 @@ import { SAND_UPDATE_STATE_TOOL_NAME } from "./sand-state-tool.js";
 import { SAND_SEND_MESSAGE_TOOL_NAME } from "./send-message-tool.js";
 import type { JevTurn } from "../../jev/turn-state.js";
 import { collectJevEvidence, isJevWebToolName } from "../../jev/evidence.js";
+import { collectJevSources, isJevSourceToolName } from "../../jev/sources.js";
 import { createTaskTool } from "../../../packages/agent/tools/task.js";
 import type { ToolSetHandle } from "../../../packages/agent/tools/core.js";
 import { sandLocalToolScopeKey, sandTurnDirectionEpochKey } from "../../../shared/local-tool-permission-machinery.js";
@@ -2143,6 +2144,13 @@ export function buildTurnTools(
     // flag, and a failure to read a result is simply evidence this turn does not have.
     if (turn.jev !== undefined && isJevWebToolName(tool.name)) {
       inner = collectJevEvidence(inner, turn.jev);
+    }
+    // SOURCES-1. And where it went, which is a wider set than the evidence one: a page opened in
+    // Titan's browser is a source the person should see named, and it is deliberately NOT evidence
+    // -- a browser result carries a screenshot, and feeding one to the claim check would spend the
+    // judge's whole window on a picture. Recorded separately for that reason, never merged.
+    if (turn.jev !== undefined && isJevSourceToolName(tool.name)) {
+      inner = collectJevSources(inner, turn.jev);
     }
     // TOOLS-33. SendMessage is how a turn talks, so it is neither counted nor refused. A turn that
     // spends its budget still has to deliver the answer the refusal just told it to write, and a

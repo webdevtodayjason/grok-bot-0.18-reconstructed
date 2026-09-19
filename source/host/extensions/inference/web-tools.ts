@@ -467,6 +467,49 @@ async function resolveFallbackSafely(options: SandWebToolsOptions): Promise<WebF
   catch { return null; }
 }
 
+/* ------------------------------------------------------------------ *
+ * SOURCES-1. Which of the two roads a page actually came down.
+ * ------------------------------------------------------------------ */
+
+/**
+ * The fetch tool hands back page text and nothing about how it was got, and the fallback happens
+ * here, under the tool, so nothing above this file can tell a page this machine read itself from
+ * one the backup service read for us. A reply that says "fetched" about a page TinyFish fetched is
+ * a small untruth in exactly the place this feature exists to stop being untruthful.
+ *
+ * So the road is left here, keyed by the address that was asked for, and the caller takes it. Keyed
+ * by URL rather than kept as "the last one" because several fetches run at once inside one turn and
+ * a single slot would hand the wrong road to whichever finished second. Taken rather than read, so
+ * one note answers one caller and a note nobody comes back for cannot be mistaken for a later
+ * fetch of the same page.
+ *
+ * Bounded: a note nobody collects is dropped once the map is full, oldest first. This never grows.
+ */
+export type WebFetchRoute = "direct" | "backup";
+
+const ROUTE_NOTES_MAX = 64;
+const routeNotes = new Map<string, WebFetchRoute>();
+
+export function noteWebFetchRoute(url: string, route: WebFetchRoute): void {
+  if (routeNotes.size >= ROUTE_NOTES_MAX) {
+    const oldest = routeNotes.keys().next();
+    if (!oldest.done) routeNotes.delete(oldest.value);
+  }
+  routeNotes.set(url, route);
+}
+
+/** The road this address came down, if one was noted. Reading it clears it. */
+export function takeWebFetchRoute(url: string): WebFetchRoute | undefined {
+  const route = routeNotes.get(url);
+  if (route !== undefined) routeNotes.delete(url);
+  return route;
+}
+
+/** Only a test needs this. */
+export function forgetWebFetchRoutes(): void {
+  routeNotes.clear();
+}
+
 export function createSandWebFetchService(options: SandWebToolsOptions) {
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
   const timeoutMs = options.timeoutMs ?? WEB_FETCH_TIMEOUT_MS;
@@ -474,7 +517,10 @@ export function createSandWebFetchService(options: SandWebToolsOptions) {
   const resolveAddresses = options.resolveAddresses ?? lookupHostAddresses;
   return async (_context: unknown, url: string): Promise<WebFetchOutcome> => {
     const direct = await readPageDirectly(url, { fetchImpl, timeoutMs, maxBytes, resolveAddresses });
-    if (direct.ok && !direct.wall) return { content: direct.text };
+    if (direct.ok && !direct.wall) {
+      noteWebFetchRoute(url, "direct");
+      return { content: direct.text };
+    }
     // An address on this machine or this network is not a page the backup should be asked to read
     // on our behalf either. It is refused here, and the person is told which address was refused.
     if (!direct.ok && direct.why === "private") return { error: webFetchPrivateAddressMessage(direct.detail) };
@@ -482,14 +528,20 @@ export function createSandWebFetchService(options: SandWebToolsOptions) {
     if (fallback != null) {
       try {
         const text = await fallback.fetchPage(url);
-        if (text.trim().length > 0) return { content: text };
+        if (text.trim().length > 0) {
+          noteWebFetchRoute(url, "backup");
+          return { content: text };
+        }
       } catch {
         // The backup's own reason is not the person's problem; what they can do about it is.
       }
     }
     // A wall still said something. Handing back a sign-in page is worse than an article and better
     // than an error, and it is what lets the model tell the person the page wants an account.
-    if (direct.ok) return { content: direct.text };
+    if (direct.ok) {
+      noteWebFetchRoute(url, "direct");
+      return { content: direct.text };
+    }
     return { error: webFetchFailureMessage({ why: direct.why, fallback: fallback == null ? "missing" : "failed" }) };
   };
 }

@@ -329,6 +329,7 @@ import "./relay-purge.test.mjs";
 
 // SETTINGS-2: the settings surface, its rows, its words, and who is shown what.
 import "./machine-room-settings.test.mjs";
+import "./machine-room-sources.test.mjs";
 
 // ALLOWANCE-1: five-day token accounting, relay enforcement, and the console meter/drawer.
 import "./cp-allowance.test.mjs";

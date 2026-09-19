@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createJevRefusalCounter, type JevEvidence, type JevRefusalCounter } from "./judgment-3.js";
 import type { JevDecisionRow } from "./ledger.js";
+import type { JevSource } from "./sources.js";
 
 /**
  * JEV-2. One turn's Jev state: the id both judgements stamp their ledger lines with, the evidence
@@ -22,6 +23,12 @@ export interface JevTurn {
   readonly turnId: string;
   /** Appended to by the search and fetch wrappers as the turn retrieves things. */
   readonly evidence: JevEvidence[];
+  /**
+   * SOURCES-1. Where the turn went, as against what it read. It is a second list rather than a
+   * field on `evidence` because the claim check's prompt is built from `evidence` and tuned on its
+   * shape; the judge must not start reading a field added for the console.
+   */
+  readonly sources: JevSource[];
   readonly counter: JevRefusalCounter;
   /** What this turn's judge decided, in order, so the console can say it in one quiet line. */
   readonly decisions: JevDecisionRow[];
@@ -44,6 +51,7 @@ export function startJevTurn(agentId: string, turnId?: string, provisional = fal
     agentId,
     turnId: turnId ?? randomUUID(),
     evidence: [],
+    sources: [],
     counter: createJevRefusalCounter(),
     decisions: [],
     sourcesNamedInRequest: [],
@@ -65,6 +73,7 @@ export function adoptOrStartJevTurn(agentId: string, turnId?: string): JevTurn {
     existing.provisional = false;
     existing.counter.refusals = 0;
     existing.evidence.length = 0;
+    existing.sources.length = 0;
     existing.decisions.length = 0;
     return existing;
   }

@@ -2155,6 +2155,75 @@
       + `<button type="button" class="jev-wrong" data-jev-wrong="${escapeHtml(stamp.decisionId)}">wrong</button></span>`;
   }
 
+  /**
+   * SOURCES-1. Where a research answer came from, under the answer.
+   *
+   * A tester read a reply and asked "not sure if it was their website or internet search". The
+   * counts are the whole line until someone wants the list, so this is one quiet sentence that
+   * opens; <details> opens and closes on its own, so there is no handler behind it and nothing to
+   * lose when a working turn rebuilds the transcript.
+   *
+   * Plain words throughout. No prefix that reads as a status, no colour, no underline: the reply
+   * was delivered and this says nothing about whether it was good (host-notes-read-as-errors).
+   * The page text is not here and never was -- the host stamps a domain, the page's own name and
+   * how it was reached, and nothing else.
+   */
+  const SOURCE_ROUTE_WORDS = {
+    fetch: "fetched",
+    tinyfish: "through TinyFish",
+    browser: "in Titan's browser",
+  };
+
+  function sourcesCountWords(n, one, many) {
+    return `${n} ${n === 1 ? one : many}`;
+  }
+
+  // The summary counts what the host counted, not what this list shows: a turn that read forty
+  // pages says forty and shows the first twelve, and a summary recomputed from the shown rows
+  // would quietly turn it into a turn that read twelve.
+  function sourcesSummary(stamp) {
+    const pages = Number(stamp.pageCount) || 0;
+    const searches = Number(stamp.searchCount) || 0;
+    const parts = [];
+    if (pages > 0) parts.push(sourcesCountWords(pages, "page", "pages"));
+    if (searches > 0) parts.push(sourcesCountWords(searches, "search", "searches"));
+    return parts.length ? `Sources: ${parts.join(", ")}` : "";
+  }
+
+  function sourceRowMarkup(source) {
+    if (!source || typeof source !== "object") return "";
+    if (source.kind === "search") {
+      const query = String(source.query || "").trim();
+      if (!query) return "";
+      return `<li class="sources-row is-search">Searched for \u201c${escapeHtml(query)}\u201d</li>`;
+    }
+    const domain = String(source.domain || "").trim();
+    if (!domain) return "";
+    const title = String(source.title || "").trim();
+    // A route this console does not have words for is left unsaid rather than printed as its code
+    // name: a person reading "browser" would not know whose browser it meant.
+    const route = SOURCE_ROUTE_WORDS[source.route] || "";
+    const parts = [`<span class="sources-domain">${escapeHtml(domain)}</span>`];
+    if (title) parts.push(`<span class="sources-title">${escapeHtml(title)}</span>`);
+    if (route) parts.push(`<span class="sources-route">${escapeHtml(route)}</span>`);
+    return `<li class="sources-row">${parts.join('<span class="sources-dot" aria-hidden="true">\u00b7</span>')}</li>`;
+  }
+
+  function sourcesLineMarkup(message) {
+    const stamp = message.sources;
+    if (!stamp || typeof stamp !== "object") return "";
+    const summary = sourcesSummary(stamp);
+    if (!summary) return "";
+    const pages = Array.isArray(stamp.pages) ? stamp.pages : [];
+    const searches = Array.isArray(stamp.searches) ? stamp.searches : [];
+    const rows = pages.concat(searches).map(sourceRowMarkup).join("");
+    // Counts with no list behind them still tell the person what the turn did, so the line stays
+    // and simply does not open.
+    if (!rows) return `<div class="sources-note is-flat" data-sources="1">${escapeHtml(summary)}</div>`;
+    return `<details class="sources-note" data-sources="1"><summary>${escapeHtml(summary)}</summary>`
+      + `<ul class="sources-list">${rows}</ul></details>`;
+  }
+
   /** Writes the marker through the relay, which is what decides whether this viewer may. */
   async function markJevWrong(decisionId, control) {
     const context = activeContext();
@@ -2228,7 +2297,7 @@
       : message.type === "attachment" && message.attachment
         ? `${paragraphMarkup(message.text)}${(message.attachments ?? [message.attachment]).map((a) => attachmentMarkup({ ...message, attachment: a })).join("")}`
       : `${paragraphMarkup(message.text)}${specialMessageMarkup(message)}`;
-    return `<article class="message-row${isUser ? " is-user" : ""}${isWorking ? " working-message" : ""}" data-message-id="${escapeHtml(message.id)}">${!isUser ? roomSpeakerMarkup(author, message) : ""}<div class="message-block"><div class="message-meta"><strong>${escapeHtml(message.authorName || (author && author.name) || "Worker")}</strong><time>${escapeHtml(message.time || "now")}</time></div><div class="message-bubble">${body}</div>${message.spoken ? `<span class="voice-spoken-chip">Spoken</span>` : ""}${evidenceChipMarkup(message)}${jevChipMarkup(message)}</div></article>`;
+    return `<article class="message-row${isUser ? " is-user" : ""}${isWorking ? " working-message" : ""}" data-message-id="${escapeHtml(message.id)}">${!isUser ? roomSpeakerMarkup(author, message) : ""}<div class="message-block"><div class="message-meta"><strong>${escapeHtml(message.authorName || (author && author.name) || "Worker")}</strong><time>${escapeHtml(message.time || "now")}</time></div><div class="message-bubble">${body}</div>${message.spoken ? `<span class="voice-spoken-chip">Spoken</span>` : ""}${evidenceChipMarkup(message)}${jevChipMarkup(message)}${sourcesLineMarkup(message)}</div></article>`;
   }
 
   // The transcript is a tail window; the row above it says the host holds more and offers to

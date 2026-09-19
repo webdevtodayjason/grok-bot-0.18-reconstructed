@@ -26,9 +26,12 @@ process.env.SAND_DATA_ROOT = dataRoot;
 const entry = path.join(stage, "entry.ts");
 writeFileSync(entry, [
   "client", "questions", "ledger", "judgment-1", "judgment-3", "turn-state", "turn-note", "chip",
-  "evidence", "outgoing", "mark-wrong",
+  "evidence", "outgoing", "mark-wrong", "sources",
 ].map((name) => `export * from ${JSON.stringify(path.join(repoRoot, `source/host/jev/${name}.js`))};`)
-  .concat([`export { isJevEnabled } from ${JSON.stringify(path.join(repoRoot, "source/host/sand-box-setting.js"))};`, ""])
+  .concat([`export { isJevEnabled } from ${JSON.stringify(path.join(repoRoot, "source/host/sand-box-setting.js"))};`,
+    // SOURCES-1: the road a fetch came down is left in web-tools and taken by the collector, so a
+    // test that cannot set one cannot tell "fetched" from "through TinyFish".
+    `export { noteWebFetchRoute, forgetWebFetchRoutes } from ${JSON.stringify(path.join(repoRoot, "source/host/extensions/inference/web-tools.js"))};`, ""])
   .join("\n"), "utf8");
 const built = await build({
   entryPoints: [entry], bundle: true, write: false, format: "cjs", platform: "node",
@@ -368,4 +371,153 @@ test("the question wording is the harness's wording, not a paraphrase", () => {
       assert.ok(harness.includes(criterion), `${id}.${name}: the criterion must be the harness's, word for word`);
     }
   }
+});
+
+// --------------------------------------------------------------------------- SOURCES-1: the record
+//
+// A tester read a reply and asked "not sure if it was their website or internet search". The turn
+// already knew; the answer only ever reached the judge. These pin the record that now reaches the
+// person, and the two things it must never become: a record that carries page text, and a line
+// under a reply that reached nothing.
+
+const aTurn = (agentId) => {
+  jev.forgetAllJevTurns();
+  jev.forgetWebFetchRoutes();
+  return jev.startJevTurn(agentId, "turn-1");
+};
+
+test("a search is recorded as its query and the tool that ran it, and a page as where it landed", () => {
+  const turn = aTurn("sources-1");
+  jev.noteJevSource(turn, "WebSearch", [{}, {}, { search_term: "1/4-20 bolt 25 pack" }, { toolCallId: "t1" }], { documents: [] });
+  jev.noteJevSource(turn, "WebFetch", [{}, {}, { url: "https://www.acehardware.com/x?q=1" }, { toolCallId: "t2" }], {
+    result: { case: "success", value: { url: "https://www.acehardware.com/x?q=1", markdown: "# Hex bolts at Ace\n\nA whole page of text nobody outside this host should ever see." } },
+  });
+  assert.deepEqual(turn.sources, [
+    { kind: "search", query: "1/4-20 bolt 25 pack", tool: "WebSearch" },
+    { kind: "page", domain: "acehardware.com", route: "fetch", title: "Hex bolts at Ace" },
+  ]);
+  // The half the judge reads is untouched by this: two lists, one collection point, no crossing.
+  assert.deepEqual(turn.evidence, [], "the sources collector never writes evidence");
+});
+
+test("the record carries a domain, a name and a road, and never a line of the page", () => {
+  const turn = aTurn("sources-2");
+  const secret = "the entire readable body of the page, which is what must not travel";
+  jev.noteJevSource(turn, "WebFetch", [{ url: "https://example.com/a" }, { toolCallId: "t" }], {
+    result: { case: "success", value: { markdown: `# A page\n\n${secret}` } },
+  });
+  const record = jev.describeJevSources(turn.sources);
+  const flat = JSON.stringify(record);
+  assert.ok(!flat.includes(secret), "no page text is in the record");
+  assert.ok(!flat.includes("https://"), "no full address is in the record either, only the domain");
+  assert.deepEqual(record.pages, [{ kind: "page", domain: "example.com", route: "fetch", title: "A page" }]);
+});
+
+test("a page the backup service fetched says it was reached through TinyFish", () => {
+  const turn = aTurn("sources-3");
+  // What web-tools leaves behind when the direct read failed and the fallback answered.
+  jev.noteWebFetchRoute("https://fastenal.com/p/1", "backup");
+  jev.noteJevSource(turn, "WebFetch", [{ url: "https://fastenal.com/p/1" }, { toolCallId: "t" }], { result: { case: "success", value: { markdown: "# Bolts" } } });
+  // And what it leaves behind when this machine read the page itself.
+  jev.noteWebFetchRoute("https://boltdepot.com/p/2", "direct");
+  jev.noteJevSource(turn, "WebFetch", [{ url: "https://boltdepot.com/p/2" }, { toolCallId: "t" }], { result: { case: "success", value: { markdown: "# More bolts" } } });
+  assert.deepEqual(turn.sources.map((s) => [s.domain, s.route]), [["fastenal.com", "tinyfish"], ["boltdepot.com", "fetch"]]);
+  // A note answers one caller. A second page at the same address, with no note of its own, is the
+  // ordinary road again -- never the road the previous fetch happened to take.
+  jev.noteJevSource(turn, "WebFetch", [{ url: "https://fastenal.com/p/1" }, { toolCallId: "t" }], { result: { case: "success", value: { markdown: "# Bolts" } } });
+  assert.equal(turn.sources.at(-1).route, "fetch", "a taken note is not read twice");
+});
+
+test("a page opened in the browser says so, and a click on it is not a second page", () => {
+  const turn = aTurn("sources-4");
+  jev.noteJevSource(turn, "browser_open", [{ url: "https://boltdepot.com/catalog" }, { toolCallId: "t" }], { title: "Bolt Depot catalog", url: "https://boltdepot.com/catalog" });
+  jev.noteJevSource(turn, "browser_click", [{ target: "Add to cart" }, { toolCallId: "t" }], { title: "Cart" });
+  assert.deepEqual(turn.sources, [{ kind: "page", domain: "boltdepot.com", route: "browser", title: "Bolt Depot catalog" }]);
+  assert.ok(!jev.isJevSourceToolName("browser_click"), "a click happens on a page already counted");
+  for (const name of ["WebSearch", "web_search", "WebFetch", "browser_open", "browser_navigate"]) {
+    assert.ok(jev.isJevSourceToolName(name), `${name} reaches the web and is recorded`);
+  }
+});
+
+test("the counts are the whole totals and the lists are capped, so forty pages says forty", () => {
+  const turn = aTurn("sources-5");
+  for (let i = 0; i < 40; i += 1) {
+    jev.noteJevSource(turn, "WebFetch", [{ url: `https://shop${i}.example/p` }, { toolCallId: "t" }], { result: { case: "success", value: { markdown: "# A shop" } } });
+  }
+  const record = jev.describeJevSources(turn.sources);
+  assert.equal(record.pageCount, 40, "the count is what the turn read");
+  assert.equal(record.pages.length, jev.JEV_SOURCES_LIST_MAX, "the list is capped");
+  assert.equal(record.searchCount, 0);
+});
+
+test("the same page read twice is one page, and the same query run twice is one search", () => {
+  const turn = aTurn("sources-6");
+  const page = () => jev.noteJevSource(turn, "WebFetch", [{ url: "https://example.com/a" }, { toolCallId: "t" }], { result: { case: "success", value: { markdown: "# A page" } } });
+  page(); page();
+  jev.noteJevSource(turn, "WebSearch", [{ search_term: "Bolts" }, { toolCallId: "t" }], {});
+  jev.noteJevSource(turn, "WebSearch", [{ search_term: "bolts" }, { toolCallId: "t" }], {});
+  const record = jev.describeJevSources(turn.sources);
+  assert.equal(record.pageCount, 1, "a person counting sources counts distinct ones");
+  assert.equal(record.searchCount, 1, "and the same query in different letters is the same query");
+  // The same page reached two ways is two rows: how it was reached is the question this answers.
+  jev.noteJevSource(turn, "browser_open", [{ url: "https://example.com/a" }, { toolCallId: "t" }], { title: "A page" });
+  assert.equal(jev.describeJevSources(turn.sources).pageCount, 2);
+});
+
+test("what cannot be read is left out rather than guessed at", () => {
+  const turn = aTurn("sources-7");
+  // Not a page on the web, no address at all, an empty query, and a tool this does not wrap.
+  jev.noteJevSource(turn, "WebFetch", [{ url: "file:///etc/passwd" }, { toolCallId: "t" }], {});
+  jev.noteJevSource(turn, "WebFetch", [{ toolCallId: "t" }], {});
+  jev.noteJevSource(turn, "WebSearch", [{ search_term: "   " }, { toolCallId: "t" }], {});
+  jev.noteJevSource(turn, "boxShell", [{ command: "ls" }, { toolCallId: "t" }], {});
+  assert.deepEqual(turn.sources, []);
+  assert.equal(jev.describeJevSources([]), undefined, "nothing collected is no record");
+  // A page whose only heading is the fetch tool's own caption has no name of its own.
+  jev.noteJevSource(turn, "WebFetch", [{ url: "https://example.com/a" }, { toolCallId: "t" }], {
+    result: { case: "success", value: { markdown: "# Content from https://example.com/a\n\nwords" } },
+  });
+  assert.deepEqual(turn.sources, [{ kind: "page", domain: "example.com", route: "fetch" }]);
+});
+
+test("the wrapper never changes the call and a result it cannot read costs the call nothing", async () => {
+  const turn = aTurn("sources-8");
+  const tool = { name: "WebFetch", execute: async () => ({ result: { case: "success", value: { markdown: "# A page" } } }) };
+  const wrapped = jev.collectJevSources(tool, turn);
+  assert.deepEqual(await wrapped.execute({ url: "https://example.com/a" }, { toolCallId: "t" }), await tool.execute());
+  assert.equal(turn.sources.length, 1);
+  const angry = jev.collectJevSources({ name: "WebFetch", execute: async () => { throw new Error("the site refused"); } }, turn);
+  await assert.rejects(() => angry.execute({ url: "https://example.com/b" }, { toolCallId: "t" }), /the site refused/);
+  assert.equal(turn.sources.length, 1, "a call that failed reached nothing");
+});
+
+test("only a text reply that reached something is stamped, and never stamped twice", () => {
+  const turn = aTurn("sources-9");
+  const reply = () => ({ kind: "send-message", message: { type: "text", content: "Two of three carry it." } });
+
+  // A turn that reached nothing -- the reply to "hi" -- carries no record at all.
+  assert.equal(jev.withJevSources("sources-9", reply()).sources, undefined);
+
+  jev.noteJevSource(turn, "WebSearch", [{ search_term: "bolts" }, { toolCallId: "t" }], {});
+  const stamped = jev.withJevSources("sources-9", reply());
+  assert.equal(stamped.sources.searchCount, 1);
+
+  // Not a reply, not text, and an entry that already carries one: each left exactly as it came.
+  assert.equal(jev.withJevSources("sources-9", { kind: "message", role: "user", content: "hi" }).sources, undefined);
+  assert.equal(jev.withJevSources("sources-9", { kind: "send-message", message: { type: "image" } }).sources, undefined);
+  const already = { kind: "send-message", message: { type: "text", content: "x" }, sources: { pageCount: 9, searchCount: 9, pages: [], searches: [] } };
+  assert.equal(jev.withJevSources("sources-9", already).sources.pageCount, 9);
+
+  // An agent with no turn in flight is not an agent whose reply gets someone else's sources.
+  assert.equal(jev.withJevSources("a-different-agent", reply()).sources, undefined);
+});
+
+test("a new turn does not inherit the last turn's sources", () => {
+  const turn = aTurn("sources-10");
+  jev.noteJevSource(turn, "WebSearch", [{ search_term: "bolts" }, { toolCallId: "t" }], {});
+  assert.equal(jev.adoptOrStartJevTurn("sources-10", "turn-2").sources.length, 0);
+  // And the same when the toolset got there first and the prompt assembly adopts what it left.
+  const provisional = jev.startJevTurn("sources-10", "turn-3", true);
+  jev.noteJevSource(provisional, "WebSearch", [{ search_term: "bolts" }, { toolCallId: "t" }], {});
+  assert.equal(jev.adoptOrStartJevTurn("sources-10", "turn-3").sources.length, 0);
 });

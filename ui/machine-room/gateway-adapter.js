@@ -699,6 +699,10 @@
           // JEV-2: what the judge decided about this reply, stamped by the host onto the entry the
           // same way the evidence verdict is, so it survives a reload and a wholesale repaint.
           ...(e.jev ? { jev: e.jev } : {}),
+          // SOURCES-1: where the answer came from, stamped by the host the same way, so a tester
+          // asking "was that their website or a search" reads it under the reply itself. The page
+          // text is never in here -- only the domain, the page's own name and how it was reached.
+          ...(e.sources ? { sources: e.sources } : {}),
           // VOICE-1: the row was said out loud, not typed. It rides the send's own clientNonce, which
           // the host round-trips verbatim onto the durable user entry, so the chip survives a reload
           // and a wholesale repaint -- which page-local state in voice.js could not.

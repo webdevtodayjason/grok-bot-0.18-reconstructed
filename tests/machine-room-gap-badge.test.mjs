@@ -90,6 +90,7 @@ async function realMessageMarkup() {
     const specialMessageMarkup = () => "";
     const evidenceChipMarkup = () => "";
     const jevChipMarkup = () => "";
+    const sourcesLineMarkup = () => "";
     ${grab("escapeHtml")}
     ${grab("messageMarkup")}
     return messageMarkup;
