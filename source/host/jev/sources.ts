@@ -94,10 +94,10 @@ export function domainOf(url: string): string | undefined {
 }
 
 /**
- * The arguments of a tool call, whichever position they are in. The signatures differ across the
- * tools this wraps -- a fetch takes `(context, handler, args, meta)`, a streaming tool takes an
- * async iterable in that slot -- so this looks for the object that carries a field one of these
- * tools actually takes rather than counting positions.
+ * The arguments of a tool call, whichever position they are in, when they arrive already parsed.
+ *
+ * Most of the tools here do NOT arrive that way, which is what the tee below exists for. This is
+ * the fallback for a caller that hands over a plain object, and for the tests.
  */
 export function readSourceArgs(args: readonly unknown[]): Record<string, unknown> | undefined {
   for (const candidate of args) {
@@ -108,6 +108,72 @@ export function readSourceArgs(args: readonly unknown[]): Record<string, unknown
       || typeof record.searchTerm === "string" || typeof record.query === "string") return record;
   }
   return undefined;
+}
+
+/**
+ * The arguments as the tool actually receives them, which is a STREAM.
+ *
+ * This is the whole reason the first build of this feature collected nothing on a live box while
+ * every unit test passed. `createZodAgentTool` (packages/agent/tools/common.ts) calls
+ * `execute(context, interactionHandler, argsStream, meta)` where `argsStream` is an
+ * `AsyncIterable<string>` of JSON chunks: there is no parsed arguments object anywhere in the call
+ * for a search or a fetch. The evidence collector beside this one never noticed, because it reads
+ * the RESULT; this one wants the query, and a query only exists in the arguments.
+ *
+ * So the stream is passed through a tee that yields exactly what it was given, in order, and keeps
+ * a copy. It never buffers ahead of the consumer, never re-yields, and forwards `return` and
+ * `throw`, so a tool that abandons the stream early abandons the real one the same way. If nothing
+ * consumes it, the copy is empty and the turn is one source short: the same failure mode as every
+ * other read here, and never a changed call.
+ */
+export interface TeedArgs {
+  readonly args: readonly unknown[];
+  /** The parsed arguments, once the tool has consumed the stream. */
+  read(): Record<string, unknown> | undefined;
+}
+
+export function teeSourceArgs(args: readonly unknown[]): TeedArgs {
+  const chunks: string[] = [];
+  let teed = false;
+  const out = args.map((candidate) => {
+    if (teed || typeof candidate !== "object" || candidate === null) return candidate;
+    if (!(Symbol.asyncIterator in candidate)) return candidate;
+    teed = true;
+    const source = candidate as AsyncIterable<unknown>;
+    return {
+      [Symbol.asyncIterator]() {
+        const inner = source[Symbol.asyncIterator]();
+        return {
+          async next(...rest: []) {
+            const step = await inner.next(...rest);
+            if (step.done !== true && typeof step.value === "string") chunks.push(step.value);
+            return step;
+          },
+          async return(value?: unknown) {
+            return inner.return === undefined ? { done: true as const, value } : inner.return(value);
+          },
+          async throw(error?: unknown) {
+            if (inner.throw === undefined) throw error;
+            return inner.throw(error);
+          },
+        };
+      },
+    };
+  });
+  return {
+    args: out,
+    read() {
+      if (chunks.length === 0) return undefined;
+      try {
+        const parsed: unknown = JSON.parse(chunks.join(""));
+        return typeof parsed === "object" && parsed !== null ? parsed as Record<string, unknown> : undefined;
+      } catch {
+        // A stream the tool abandoned mid-argument is not valid JSON, and a half-read query is
+        // worse than none.
+        return undefined;
+      }
+    },
+  };
 }
 
 /**
@@ -164,19 +230,31 @@ function headingOf(markdown: string | undefined): string | undefined {
  * read leaves the turn with one less source and nothing else, which is the same rule the evidence
  * collector beside it keeps.
  */
-export function noteJevSource(jev: JevTurn, toolName: string, args: readonly unknown[], result: unknown): void {
+export function noteJevSource(
+  jev: JevTurn,
+  toolName: string,
+  args: readonly unknown[] | Record<string, unknown> | undefined,
+  result: unknown,
+): void {
   const spec = SOURCE_TOOLS[toolName];
   if (spec === undefined) return;
-  const parsed = readSourceArgs(args);
-  if (parsed === undefined) return;
+  const parsed: Record<string, unknown> | undefined = Array.isArray(args)
+    ? readSourceArgs(args)
+    : args as Record<string, unknown> | undefined;
   if (spec.kind === "search") {
+    // A query exists nowhere but the arguments, so a search the tee could not read is not recorded.
+    if (parsed === undefined) return;
     const query = [parsed.search_term, parsed.searchTerm, parsed.query].find((value) => typeof value === "string");
     const text = String(query ?? "").trim();
     if (text.length === 0) return;
     jev.sources.push({ kind: "search", query: text, tool: toolName });
     return;
   }
-  const url = typeof parsed.url === "string" ? parsed.url : "";
+  // The address the RESULT reports wins over the one the request asked for: it is the address that
+  // was actually read, after credentials were stripped and a redirect was followed, and it is also
+  // the key the fetch service left its road under. The request's own address is the fallback for a
+  // tool whose result does not carry one.
+  const url = findStringField(result, "url") ?? (typeof parsed?.url === "string" ? parsed.url : "");
   const domain = domainOf(url);
   if (domain === undefined) return;
   // A fetch that fell through to the backup web service really was reached through TinyFish, and
@@ -196,8 +274,11 @@ export function collectJevSources<T extends WrappableTool>(tool: T, jev: JevTurn
   return {
     ...tool,
     async execute(...args: readonly unknown[]) {
-      const result = await tool.execute(...args);
-      try { noteJevSource(jev, tool.name, args, result); } catch {}
+      // Teed BEFORE the call and read AFTER it: the arguments arrive as a stream the tool has not
+      // consumed yet, so there is nothing to read until it has.
+      const teed = teeSourceArgs(args);
+      const result = await tool.execute(...teed.args);
+      try { noteJevSource(jev, tool.name, teed.read() ?? readSourceArgs(args), result); } catch {}
       return result;
     },
   };

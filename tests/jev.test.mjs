@@ -521,3 +521,84 @@ test("a new turn does not inherit the last turn's sources", () => {
   jev.noteJevSource(provisional, "WebSearch", [{ search_term: "bolts" }, { toolCallId: "t" }], {});
   assert.equal(jev.adoptOrStartJevTurn("sources-10", "turn-3").sources.length, 0);
 });
+
+// The arguments arrive as a STREAM, and this is the shape that made the first build of SOURCES-1
+// collect nothing on a live box while every test here passed. createZodAgentTool
+// (packages/agent/tools/common.ts) calls execute(context, interactionHandler, argsStream, meta)
+// where argsStream is an AsyncIterable of JSON chunks; there is no parsed arguments object in the
+// call at all. The evidence collector beside this one never noticed because it reads the RESULT.
+
+/** An arguments stream the way the real one arrives: JSON, in pieces. */
+function argsStream(value, pieces = 3) {
+  const json = JSON.stringify(value);
+  const size = Math.ceil(json.length / pieces);
+  const chunks = [];
+  for (let i = 0; i < json.length; i += size) chunks.push(json.slice(i, i + size));
+  return { async *[Symbol.asyncIterator]() { for (const chunk of chunks) yield chunk; } };
+}
+
+test("a search whose arguments arrive as a stream is still recorded, and the stream is untouched", async () => {
+  const turn = aTurn("stream-1");
+  const seen = [];
+  const tool = {
+    name: "WebSearch",
+    async execute(_ctx, _handler, stream, _meta) {
+      for await (const chunk of stream) seen.push(chunk);
+      return { documents: [] };
+    },
+  };
+  await jev.collectJevSources(tool, turn).execute({}, {}, argsStream({ search_term: "1/4-20 bolt 25 pack" }), { toolCallId: "t" });
+  // What the tool read is exactly what it was given, in pieces, in order.
+  assert.equal(seen.join(""), JSON.stringify({ search_term: "1/4-20 bolt 25 pack" }));
+  assert.ok(seen.length > 1, "the tool still sees a stream, not one lump");
+  assert.deepEqual(turn.sources, [{ kind: "search", query: "1/4-20 bolt 25 pack", tool: "WebSearch" }]);
+});
+
+test("a fetch is recorded from the address the result reports, not the one the request asked for", async () => {
+  const turn = aTurn("stream-2");
+  const tool = {
+    name: "WebFetch",
+    async execute(_ctx, _handler, stream, _meta) {
+      for await (const _chunk of stream) { /* the real tool parses these */ }
+      // Credentials stripped and a redirect followed: the result's address is the one that was read.
+      return { result: { case: "success", value: { url: "https://www.example.com/final", markdown: "# A page\n\nwords" } } };
+    },
+  };
+  await jev.collectJevSources(tool, turn).execute({}, {}, argsStream({ url: "https://user:pw@example.com/start" }), { toolCallId: "t" });
+  assert.deepEqual(turn.sources, [{ kind: "page", domain: "example.com", route: "fetch", title: "A page" }]);
+  // And the road is looked up under the address the fetch service was actually given.
+  const second = aTurn("stream-3");
+  jev.noteWebFetchRoute("https://www.example.com/final", "backup");
+  await jev.collectJevSources(tool, second).execute({}, {}, argsStream({ url: "https://example.com/start" }), { toolCallId: "t" });
+  assert.equal(second.sources[0].route, "tinyfish");
+});
+
+test("a tool that abandons its arguments mid-stream leaves no half-read query", async () => {
+  const turn = aTurn("stream-4");
+  const tool = {
+    name: "WebSearch",
+    async execute(_ctx, _handler, stream, _meta) {
+      for await (const _first of stream) break; // one chunk, then done
+      return {};
+    },
+  };
+  await jev.collectJevSources(tool, turn).execute({}, {}, argsStream({ search_term: "a query long enough to be cut" }, 4), { toolCallId: "t" });
+  assert.deepEqual(turn.sources, [], "a query read halfway is worse than none");
+});
+
+test("a tool that never reads its arguments costs the call nothing", async () => {
+  const turn = aTurn("stream-5");
+  const tool = { name: "WebSearch", async execute() { return { documents: [] }; } };
+  assert.deepEqual(await jev.collectJevSources(tool, turn).execute({}, {}, argsStream({ search_term: "x" }), { toolCallId: "t" }), { documents: [] });
+  assert.deepEqual(turn.sources, []);
+});
+
+test("a throw from the tool travels untouched through the tee", async () => {
+  const turn = aTurn("stream-6");
+  const tool = { name: "WebFetch", async execute(_c, _h, stream) { for await (const _x of stream) { /* read */ } throw new Error("the site refused"); } };
+  await assert.rejects(
+    () => jev.collectJevSources(tool, turn).execute({}, {}, argsStream({ url: "https://example.com/a" }), { toolCallId: "t" }),
+    /the site refused/,
+  );
+  assert.deepEqual(turn.sources, [], "a call that failed reached nothing");
+});
