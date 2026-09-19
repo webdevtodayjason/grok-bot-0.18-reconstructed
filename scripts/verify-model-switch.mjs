@@ -311,6 +311,42 @@ async function offeredPlans() {
   return seen.status === 200 && Array.isArray(seen.body.plans) ? seen.body.plans.map((one) => String(one.model)) : [];
 }
 
+/**
+ * The box's own wire trace for this workspace, which is the only place that says what a request
+ * CARRIED rather than what it cost. Read over ssh out of the host's stdout file; it exists only
+ * where SAND_TOOL_TRACE is on for that box, and a box without it answers so rather than failing.
+ */
+async function boxWire() {
+  // THIS WORKSPACE'S OWN CONTAINER, named by the control plane. Scanning every box for one whose
+  // trace mentions the pin read the wrong box on the first run: another workspace is pinned to the
+  // same plan, its lines matched, and the leg reported that box's history as this one's.
+  const row = (await admin("GET", "/v1/admin/clients")).body.clients?.find((one) => one.slug === SLUG) ?? null;
+  const name = String(row?.boxContainer ?? "");
+  if (name.length === 0) return { ok: false, why: `the control plane did not name ${SLUG}'s container`, lines: [], rerouted: 0 };
+  const raw = await ssh(`docker exec ${name} sh -lc 'grep -o "\\[sand\\]\\[wire\\] {[^}]*}" /tmp/sand-host.log 2>/dev/null | tail -60'`).catch(() => "");
+  if (raw.trim().length === 0) {
+    return { ok: false, why: `${name} has no wire trace (SAND_TOOL_TRACE may be off on that box)`, lines: [], rerouted: 0 };
+  }
+  const lines = [];
+  for (const one of raw.split("\n")) {
+    const at = one.indexOf("{");
+    if (at < 0) continue;
+    try {
+      const parsed = JSON.parse(one.slice(at));
+      lines.push({
+        model: String(parsed.model ?? ""),
+        imageParts: Number(parsed.imageParts ?? 0),
+        historyImageParts: Number(parsed.historyImageParts ?? 0),
+        imagesAllowed: parsed.imagesAllowed === true,
+      });
+    } catch { /* a truncated line is not a measurement */ }
+  }
+  // The reroute line is the host's own sentence, counted with its own grep so no quoting has to
+  // survive being both a shell string and a regex.
+  const said = await ssh(`docker exec ${name} sh -lc 'grep -c "so it goes to" /tmp/sand-host.log 2>/dev/null || true'`).catch(() => "0");
+  return { ok: true, lines, rerouted: Number(said.trim()) || 0, box: name, why: "" };
+}
+
 /** Wait for a bot to stop working, so the next prompt is a turn rather than a queue entry. */
 async function waitForIdle(agentId, maxMs) {
   const deadline = Date.now() + maxMs;
@@ -562,14 +598,46 @@ async function main() {
           : `${landed.why}; rows since: ${landed.rows.map((one) => one.group).join(", ") || "none"}`);
       // AND THE PIN STILL ANSWERS ITS OWN TEXT. A reroute that took every turn would be a customer
       // silently moved off the plan they chose.
-      // AFTER THE PICTURE TURN HAS FINISHED. A second prompt sent while the bot is still working
-      // queues behind it, and the window this leg waits in expires on a turn that never started.
-      await waitForIdle(throwaway, 180_000);
-      const textAt = new Date(Date.now() - 1000).toISOString();
-      await gw("sendPrompt", { agentId: throwaway, prompt: "Reply with the single word OK and nothing else." }).catch(() => {});
-      const text = await waitForSpend(VISION_PIN, textAt);
-      check(text.ok === true, `and a turn with no picture still goes to ${VISION_PIN}`,
-        text.ok ? `${text.row.group} · ${text.row.tokens} tokens` : text.why);
+      // A FRESH CONVERSATION FOR THE TEXT TURN, and this is the correction the first run of this
+      // leg earned. The rule is about what the REQUEST carries, not about what the person typed: a
+      // follow-up in the conversation above is an image-bearing request, because the screenshot is
+      // still in its history and is still sent. Asking that bot a text question and expecting the
+      // pin to answer measured the wrong thing. A second bot has no picture behind it at all.
+      const plain = await gw("createAgent", {
+        name: `verify-model-switch ${Math.random().toString(36).slice(2, 8)}`,
+        description: "Throwaway bot for the MODEL-1c text leg. Deleted when it finishes.",
+        origin: "user",
+        isKickstartRequested: false,
+      }).catch(() => null);
+      const plainId = plain?.id ?? plain?.agentId ?? plain?.agent?.id ?? null;
+      check(plainId != null, "a second bot, with no picture in its history", String(plainId ?? "(none)"));
+      if (plainId != null) {
+        const textAt = new Date(Date.now() - 1000).toISOString();
+        await gw("sendPrompt", { agentId: plainId, prompt: "Reply with the single word OK and nothing else." }).catch(() => {});
+        const text = await waitForSpend(VISION_PIN, textAt);
+        check(text.ok === true, `and a turn with no picture still goes to ${VISION_PIN}`,
+          text.ok ? `${text.row.group} · ${text.row.tokens} tokens` : text.why);
+        await gw("deleteAgent", { id: plainId }).catch(() => {});
+      }
+
+      // AND THE BOX'S OWN WIRE LOG, which is the half a spend row cannot show: that the request
+      // went out CARRYING the picture rather than having it replaced by a sentence first, and that
+      // nothing learned a refusal off it. imagesAllowed staying true is what keeps that picture in
+      // the history of every later call on that conversation -- an ordinary follow-up, a routine,
+      // or a background revival -- so each of those is rerouted for the same reason this one was.
+      const wire = await boxWire();
+      check(wire.ok === true, "the box's own wire log could be read", wire.ok ? `${wire.lines.length} line(s)` : String(wire.why));
+      if (wire.ok === true) {
+        const carried = wire.lines.filter((one) => one.model === VISION_PIN && one.imageParts > 0);
+        check(carried.length > 0, `a request on ${VISION_PIN} went out carrying the picture`,
+          carried.length > 0
+            ? `historyImageParts ${carried.at(-1).historyImageParts}, imageParts ${carried.at(-1).imageParts}`
+            : "no request on the pin carried an image part");
+        check(carried.every((one) => one.imagesAllowed === true),
+          "and nothing learned a refusal off it, so a later call still carries that picture",
+          carried.map((one) => String(one.imagesAllowed)).join(", ") || "(none)");
+        check(wire.rerouted > 0, "and the host said so on the wire, naming both plans", `${wire.rerouted} reroute line(s)`);
+      }
 
       // PUT THE ENTITLEMENT BACK BEFORE THE REFUSAL LEG. That leg proves this workspace cannot
       // reach a plan it is not entitled to, and this one just entitled it to exactly that plan:
